@@ -90,10 +90,10 @@ enum HelpTopic {
 
 /// The version identifier: the crate version, plus the git short hash (and a `-dirty`
 /// marker) captured at build time by `build.rs`. Just the crate version when built
-/// outside a git checkout. E.g. `0.1 (a1b2c3d-dirty)`.
+/// outside a git checkout. E.g. `1.0 (a1b2c3d-dirty)`.
 ///
-/// Cargo's manifest requires a full semver (`X.Y.Z`), so `Cargo.toml` says `0.1.0`;
-/// we display it as `0.1` (a zero patch is dropped — scsh is nowhere near 1.0).
+/// Cargo's manifest requires a full semver (`X.Y.Z`), so `Cargo.toml` says `1.0.0`;
+/// we display it as `1.0` (a trailing zero patch is dropped).
 fn version_id() -> String {
   let v = env!("CARGO_PKG_VERSION");
   let v = v.strip_suffix(".0").unwrap_or(v);
