@@ -8,6 +8,7 @@
 mod config;
 mod json;
 mod runtime;
+mod sha256;
 mod ui;
 
 use std::ffi::OsStr;
@@ -477,12 +478,13 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
   // 2. Run every skill in parallel: each gets its own clone and container — its own row on the
   //    board — and must produce its declared result file.
   let tag = tag.as_str();
+  let base_ref = base.as_deref();
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let handles: Vec<_> = skills
       .iter()
       .map(|&skill| {
         let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
-        scope.spawn(move || run_one_skill(skill, rt, tag, root, secs, p))
+        scope.spawn(move || run_one_skill(skill, rt, tag, root, secs, p, base_ref))
       })
       .collect();
     handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
@@ -516,11 +518,16 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
       if !skill.commits {
         continue;
       }
-      let clone = match &o.clone_dir {
-        Some(c) => c,
-        None => continue,
+      // A live clone integrates its commits directly; a commit-enabled cache HIT replays
+      // the commits journaled in the cache, so a hit reproduces the commit, not just the result.
+      let integration = if let Some(clone) = &o.clone_dir {
+        integrate_commits(root, clone, base, &skill.name, &stamp)
+      } else if let Some(patch) = &o.cached_commits {
+        apply_cached_commits(root, patch, &skill.name, &stamp)
+      } else {
+        continue;
       };
-      match integrate_commits(root, clone, base, &skill.name, &stamp) {
+      match integration {
         Ok(None) => {}
         Ok(Some(Integration::Applied { count })) => ok(&format!(
           "{}: brought in {count} commit{} (rebased onto {})",
@@ -561,8 +568,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
 
 /// The outcome of running one skill end to end (clone → harness → collect). The per-skill ✓/✗
 /// and its detail are shown by the live board (and its final summary); this is the structured
-/// residue the orchestrator still needs afterward — run-dir/log pointers and the clone to
-/// bring commits back from.
+/// residue the orchestrator still needs afterward — run-dir/log pointers and commit replay.
 struct SkillRun {
   ok: bool,
   /// The `/tmp` run dir, kept for inspection when the skill failed.
@@ -573,20 +579,32 @@ struct SkillRun {
   /// a commit-enabled skill's commits can be brought back afterward. `None` if no
   /// clone was made (e.g. a refused or pre-clone failure).
   clone_dir: Option<PathBuf>,
+  /// For a commit-enabled skill served from cache: the journaled commits as a git
+  /// `format-patch` mbox, replayed onto the caller's branch so a hit reproduces the
+  /// commit side effect (not just the result file). `None` otherwise.
+  cached_commits: Option<String>,
 }
 
 impl SkillRun {
   fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
-    SkillRun { ok: true, run_dir: None, log: Some(log), clone_dir }
+    SkillRun { ok: true, run_dir: None, log: Some(log), clone_dir, cached_commits: None }
   }
   fn failed(run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
-    SkillRun { ok: false, run_dir, log, clone_dir }
+    SkillRun { ok: false, run_dir, log, clone_dir, cached_commits: None }
+  }
+  /// A cache hit: the result was restored from the cache without running the skill (no
+  /// clone, no container). `cached_commits` carries any journaled commits to replay, so a
+  /// hit for a commit-enabled skill still reproduces the commit.
+  fn cached(cached_commits: Option<String>) -> SkillRun {
+    SkillRun { ok: true, run_dir: None, log: None, clone_dir: None, cached_commits }
   }
 }
 
 /// Run a single skill end to end in its own clone and container, driving `spinner`
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
-fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64, spinner: ui::screen::Proc) -> SkillRun {
+fn run_one_skill(
+  skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
+) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
   // Resolve forwarded env first: a missing required (${VAR:?…}) variable refuses
@@ -598,6 +616,25 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
       return SkillRun::failed(None, None, None);
     }
   };
+
+  // Content-addressed cache: if this exact repo content + skill + env was run before,
+  // restore the cached result and finish — no clone, no container, no commit. (The key
+  // is computed from the caller's committed state, which is what the clone would be.)
+  let key = cache_key(root, skill, &env);
+  if let Some(key) = &key {
+    if let Some(entry) = cache_lookup(root, key) {
+      if restore_cached_result(root, &skill.result, &entry.result).is_ok() {
+        let line = match json::message(&entry.result) {
+          Some(m) => format!("{}  (cached)", first_line(&m)),
+          None => "(cached)".to_string(),
+        };
+        spinner.finish_ok(Some(&line));
+        // Carry any journaled commits so they're replayed onto the caller's branch — a hit
+        // for a commit-enabled skill reproduces the commit, not just the result file.
+        return SkillRun::cached(entry.commits);
+      }
+    }
+  }
 
   // Own clone of the repo, so parallel skills never share a working tree.
   spinner.note("cloning…");
@@ -673,10 +710,17 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
   // The result file is required: missing → this skill (and the whole run) fails.
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
     Ok(dest) => {
-      // Show the skill's *message*, not just the file (its `result`/`message`/sole field —
-      // see json::message), falling back to the result path; a multi-line message shows
-      // its first line.
+      // Cache the result content under this run's key, so an identical future run
+      // (same repo content + skill + env) is a hit. Then show the skill's *message*,
+      // not just the file (its `result`/`message`/sole field — see json::message),
+      // falling back to the result path; a multi-line message shows its first line.
       let content = std::fs::read_to_string(&dest).ok();
+      if let (Some(key), Some(c)) = (&key, &content) {
+        // Journal a commit-enabled skill's new commits (base..clone-HEAD) as a patch
+        // alongside the result, so a future cache hit can replay them.
+        let commits = if skill.commits { base.and_then(|b| commit_patch(&run_dir, b)) } else { None };
+        cache_store(root, key, c, commits.as_deref());
+      }
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       spinner.finish_ok(Some(headline));
@@ -687,6 +731,16 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
       SkillRun::failed(Some(run_dir_str), Some(log), clone_dir)
     }
   }
+}
+
+/// Recreate a skill's result file from a cached `content` (creating parent dirs), so a
+/// cache hit leaves the same result on disk a real run would have collected.
+fn restore_cached_result(root: &Path, result_rel: &str, content: &str) -> std::io::Result<()> {
+  let dest = root.join(result_rel);
+  if let Some(parent) = dest.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
+  std::fs::write(dest, content)
 }
 
 /// The first line of a (possibly multi-line) message, for a one-line skill report.
@@ -1020,6 +1074,134 @@ fn integrate_commits(
 fn incoming_branch_name(skill: &str, stamp: &str, tip: &str) -> String {
   let short: String = tip.chars().take(7).collect();
   format!("scsh/incoming/{}-{}-utc-{}", runtime::sanitize_component(skill), stamp, short)
+}
+
+// ---------------------------------------------------------------------------
+// Result cache (content-addressed, under the repo's gitignored tmp/.sccache/)
+// ---------------------------------------------------------------------------
+
+/// Where cached results live: the repo's gitignored `tmp/.sccache/`.
+fn cache_dir(root: &Path) -> PathBuf {
+  root.join("tmp").join(".sccache")
+}
+
+/// The cache key for a skill run: a sha256 over a deterministic blob of the repo's
+/// committed content (the HEAD tree hash), the skill's own files (`SKILL.md` + scripts,
+/// each hashed, in sorted order), and the resolved env (sorted). So the **same commit +
+/// same skill + same env** map to the same key. `None` when the repo content can't be
+/// read (e.g. a repo with no commit yet) — then the run is simply not cached.
+fn cache_key(root: &Path, skill: &Skill, env: &[(String, String)]) -> Option<String> {
+  let tree = git_capture(root, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+  let mut blob = String::new();
+  blob.push_str("scsh-cache v1\n");
+  blob.push_str(&format!("repo-tree={tree}\n"));
+  blob.push_str(&format!("skill={}\n", skill.name));
+  blob.push_str("skill-files:\n");
+  for (rel, hash) in skill_file_hashes(root, &skill.name) {
+    blob.push_str(&format!("{rel} {hash}\n"));
+  }
+  blob.push_str("env:\n");
+  let mut pairs: Vec<&(String, String)> = env.iter().collect();
+  pairs.sort_by(|a, b| a.0.cmp(&b.0));
+  for (k, v) in pairs {
+    blob.push_str(&format!("{k}={v}\n"));
+  }
+  Some(sha256::sha256_hex(blob.as_bytes()))
+}
+
+/// `(repo-relative path, sha256-of-content)` for every file under `.skills/<name>/`,
+/// sorted by path — a deterministic fingerprint of the skill body and its scripts.
+fn skill_file_hashes(root: &Path, name: &str) -> Vec<(String, String)> {
+  let dir = root.join(".skills").join(name);
+  let mut found: Vec<(String, PathBuf)> = Vec::new();
+  collect_files(&dir, &dir, &mut found);
+  found.sort();
+  found.into_iter().map(|(rel, abs)| (rel, sha256::sha256_hex(&std::fs::read(&abs).unwrap_or_default()))).collect()
+}
+
+/// Recursively collect `(path-relative-to-base, absolute-path)` for every regular file
+/// under `dir`. Order is not guaranteed (the caller sorts).
+fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
+  let entries = match std::fs::read_dir(dir) {
+    Ok(e) => e,
+    Err(_) => return,
+  };
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.is_dir() {
+      collect_files(base, &path, out);
+    } else if path.is_file() {
+      if let Ok(rel) = path.strip_prefix(base) {
+        out.push((rel.to_string_lossy().replace('\\', "/"), path));
+      }
+    }
+  }
+}
+
+/// A cached run: the skill's result-file content, and (for a commit-enabled skill) the
+/// commits it made, journaled as a git `format-patch` mbox to replay on a hit.
+struct CacheEntry {
+  result: String,
+  commits: Option<String>,
+}
+
+/// Look up the cache entry for `key` (the result content, plus any journaled commits).
+fn cache_lookup(root: &Path, key: &str) -> Option<CacheEntry> {
+  let text = std::fs::read_to_string(cache_dir(root).join(format!("{key}.json"))).ok()?;
+  Some(CacheEntry { result: json::field(&text, "result")?, commits: json::field(&text, "commits") })
+}
+
+/// Store a skill's result-file `content` (and any commit `patch`) in the cache under `key`.
+/// Best-effort: a write failure just means the next identical run won't be a hit.
+fn cache_store(root: &Path, key: &str, content: &str, commits: Option<&str>) {
+  let dir = cache_dir(root);
+  if std::fs::create_dir_all(&dir).is_err() {
+    return;
+  }
+  let entry = match commits {
+    Some(patch) => format!("{{\"result\": {}, \"commits\": {}}}\n", json::quote(content), json::quote(patch)),
+    None => format!("{{\"result\": {}}}\n", json::quote(content)),
+  };
+  let _ = std::fs::write(dir.join(format!("{key}.json")), entry);
+}
+
+/// A commit-enabled skill's new commits in its clone (`base..HEAD`) as a git `format-patch`
+/// mbox, or `None` if it committed nothing. Stored in the cache so a hit can replay them.
+fn commit_patch(clone: &Path, base: &str) -> Option<String> {
+  let out = git_capture(clone, &["format-patch", &format!("{base}..HEAD"), "--stdout"])?;
+  if out.trim().is_empty() {
+    None
+  } else {
+    Some(out)
+  }
+}
+
+/// Replay commits journaled in the cache (a `format-patch` mbox) onto the caller's current
+/// branch via `git am`, so a cache hit reproduces the commit side effect. Returns `Applied`
+/// on a clean replay; if the patch doesn't apply, aborts and saves it under tmp/.sccache for
+/// the user to apply by hand (reported via the `Err` path), leaving the branch untouched.
+fn apply_cached_commits(root: &Path, patch: &str, skill: &str, stamp: &str) -> Result<Option<Integration>, String> {
+  let before = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let staged = std::env::temp_dir().join(format!("scsh-replay-{}-{stamp}.patch", std::process::id()));
+  std::fs::write(&staged, patch).map_err(|_| "could not stage the cached commits".to_string())?;
+  let applied = git_status_ok(root, &["am", "--keep-cr", &staged.to_string_lossy()]);
+  let _ = std::fs::remove_file(&staged);
+  if applied {
+    let count = before
+      .as_deref()
+      .and_then(|b| git_capture(root, &["rev-list", "--count", &format!("{b}..HEAD")]))
+      .and_then(|s| s.trim().parse::<usize>().ok())
+      .unwrap_or(1);
+    return Ok(Some(Integration::Applied { count }));
+  }
+  let _ = git_status_ok(root, &["am", "--abort"]);
+  let saved = cache_dir(root).join(format!("incoming-{}-{stamp}.patch", runtime::sanitize_component(skill)));
+  let _ = std::fs::create_dir_all(cache_dir(root));
+  let _ = std::fs::write(&saved, patch);
+  Err(format!(
+    "cached commits didn't apply cleanly — saved the patch to {} (apply with: git am <file>)",
+    saved.display()
+  ))
 }
 
 /// The host user's numeric UID/GID (via `id -u` / `id -g`), so the container's
