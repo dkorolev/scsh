@@ -325,7 +325,7 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 ## Building & repo conventions
 
 - **Build:** a Rust toolchain — `cargo build --release`. The crate is std-only; its only
-  dependencies are `indicatif` + `console` (the live UI) and `signal-hook` (signals).
+  dependencies are `crossterm` + `console` (the live UI) and `signal-hook` (signals).
 - **Formatting:** `rustfmt.toml` pins the house style — run `cargo fmt` before committing.
 - **`Cargo.lock` is committed** on purpose: `scsh` is a binary, so the lockfile pins exact
   dependency versions for reproducible builds.

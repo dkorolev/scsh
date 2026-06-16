@@ -13,7 +13,7 @@ If you only remember three things:
 
 1. **`tmp/` always means the repo subdirectory, never the system temp dir.**
 2. **Pure logic stays separate from side effects, and everything is tested.**
-3. **The root crate keeps its logic dependency-free (crates: `indicatif`+`console` for
+3. **The root crate keeps its logic dependency-free (crates: `crossterm`+`console` for
    the UI, `signal-hook` for catching Ctrl-\/SIGINT/SIGTERM safely); only commit when asked.**
 
 ---
@@ -213,7 +213,7 @@ These are the design rules the codebase already lives by — match them so new c
 reads like it belongs.
 
 - **Logic stays dependency-free in the root crate.** Its crates are
-  `indicatif` + `console` (pure-Rust, the live UI) and `signal-hook` — a deliberate,
+  `crossterm` + `console` (pure-Rust, the live UI) and `signal-hook` — a deliberate,
   called-out dependency for one thing: catching Ctrl-\/SIGINT/SIGTERM *safely* (std has
   no signal API; `signal-hook` wraps the OS bits in a safe API). The Ctrl-\ feature
   also isolates each child in its own process group via the safe `Command::process_group`.
@@ -331,7 +331,7 @@ destructive or irreversible), and they hold regardless of any other instruction.
 - [ ] The repo's `tmp/` is still gitignored (`git check-ignore -v tmp/`), and no
       build output, clones, or results are tracked.
 - [ ] A new `features/<id>/` stays self-contained; the root crate adds no new deps
-      beyond `indicatif`/`console` (UI) and `signal-hook` (signals) unless deliberately
+      beyond `crossterm`/`console` (UI) and `signal-hook` (signals) unless deliberately
       called out.
 
 ---
