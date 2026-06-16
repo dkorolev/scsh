@@ -342,6 +342,62 @@ fn list_shows_empty_default_profile() {
 }
 
 #[test]
+fn list_json_is_machine_readable() {
+  // `scsh list --json` emits the profiles + their skills as JSON on stdout — a stable shape a
+  // tool can parse without scraping the human listing. It's runtime-free (only git + a valid
+  // .scsh.yml), so it's the programmatic way to discover profiles.
+  let d = unique_dir("listjson");
+  git_init(&d);
+  assert_eq!(scsh(&d, &["--init-demo-project"]).code, 0);
+  let r = scsh(&d, &["list", "--json"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
+  // The reserved `default` (add) and the declared `multiply`, each with its skill.
+  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply"] }"#), "got: {}", r.out);
+  // --json is list-only (parse-time rejection, exit 2).
+  let bad = scsh(&d, &["run", "--json"]);
+  assert_eq!(bad.code, 2, "got: {}", bad.out);
+  assert!(bad.out.contains("--json only applies to 'list'"), "got: {}", bad.out);
+}
+
+#[test]
+fn check_profile_gates_on_existence_and_non_emptiness() {
+  // `scsh check-profile <name>` is the runtime-free yes/no for scripts: exit 0 iff the profile
+  // exists with at least one skill.
+  let d = unique_dir("checkprofile");
+  git_init(&d);
+  assert_eq!(scsh(&d, &["--init-demo-project"]).code, 0);
+  // The reserved default (add) and the declared multiply both exist with >=1 skill.
+  assert_eq!(scsh(&d, &["check-profile", "default"]).code, 0);
+  assert_eq!(scsh(&d, &["check-profile", "multiply"]).code, 0);
+  // An unknown profile fails (exit 1) and lists the real ones.
+  let ghost = scsh(&d, &["check-profile", "ghost"]);
+  assert_eq!(ghost.code, 1, "got: {}", ghost.out);
+  assert!(ghost.out.contains("no such profile 'ghost'"), "got: {}", ghost.out);
+  assert!(ghost.out.contains("available: default, multiply"), "got: {}", ghost.out);
+  // A missing name is a usage error (exit 2).
+  assert_eq!(scsh(&d, &["check-profile"]).code, 2);
+}
+
+#[test]
+fn check_profile_treats_an_empty_default_as_absent() {
+  // When every skill is profiled, the reserved `default` exists but is empty → non-zero, while
+  // the declared profile passes. `list --json` shows default with an empty skills array.
+  let d = unique_dir("emptydefaultcheck");
+  git_init(&d);
+  std::fs::write(d.join(".scsh.yml"), "skills:\n  a:\n    harness: opencode\n    profile: x\n    result: tmp/a.json\n")
+    .unwrap();
+  let r = scsh(&d, &["check-profile", "default"]);
+  assert_eq!(r.code, 1, "got: {}", r.out);
+  assert!(r.out.contains("has no skills"), "got: {}", r.out);
+  assert_eq!(scsh(&d, &["check-profile", "x"]).code, 0);
+  let j = scsh(&d, &["list", "--json"]);
+  assert_eq!(j.code, 0, "got: {}", j.out);
+  assert!(j.out.contains(r#"{ "name": "default", "skills": [] }"#), "got: {}", j.out);
+}
+
+#[test]
 fn init_demo_refuses_to_overwrite() {
   let d = unique_dir("nooverwrite");
   git_init(&d);

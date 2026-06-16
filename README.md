@@ -60,6 +60,14 @@ scsh list                  # list every skill by profile (add --verbose for the 
 scsh run                   # build the image, run every default skill in parallel
 ```
 
+Need to discover or gate on profiles from another tool? Two **runtime-free** commands
+(just git + a valid `.scsh.yml`, no container runtime) make it scriptable:
+
+```sh
+scsh list --json           # {"profiles":[{"name":"default","skills":["add"]}, …]}  → pipe to jq
+scsh check-profile multiply  # exit 0 iff that profile exists with ≥1 skill (else non-zero)
+```
+
 > **First time?** [`DEMO.md`](DEMO.md) is a guided, English walkthrough that builds a
 > tiny `scsh` project from an empty directory and runs it — follow it yourself, or hand
 > it to your AI assistant.

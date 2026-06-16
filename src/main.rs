@@ -46,7 +46,16 @@ fn run(args: &[String]) -> i32 {
     Mode::InitDemo => init_demo(),
     Mode::InstallSkills => install_skills(false, cli.source.as_deref()),
     Mode::UpdateSkills => install_skills(true, cli.source.as_deref()),
-    Mode::List => preflight_then(Action::List, profile, cli.verbose),
+    Mode::List => {
+      // `--json` is a runtime-free, machine-readable listing (just git + a valid .scsh.yml);
+      // the human listing goes through the full preflight like a run does.
+      if cli.json {
+        list_profiles_json()
+      } else {
+        preflight_then(Action::List, profile, cli.verbose)
+      }
+    }
+    Mode::CheckProfile => check_profile_cmd(profile),
     Mode::Run => preflight_then(Action::Run, profile, cli.verbose),
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
@@ -63,6 +72,7 @@ enum Mode {
   InstallSkills,
   UpdateSkills,
   List,
+  CheckProfile,
   Run,
   UiDemo { frames: bool },
 }
@@ -100,14 +110,16 @@ enum Action {
   Run,
 }
 
-/// A parsed command line: one command, plus the profiles that select which skills run (only
-/// valid for `run` — given as bare positional names, `--profile`, or both) and an optional
-/// source (a git URL/path for `installskills` / `updateskills`).
+/// A parsed command line: one command, plus the profiles that select which skills run (bare
+/// positional names and/or `--profile` for `run`; the one profile name for `check-profile`),
+/// an optional source (a git URL/path for `installskills` / `updateskills`), and the `list`
+/// output flags (`--verbose`, `--json`).
 struct Cli {
   mode: Mode,
   profile: Option<String>,
   source: Option<String>,
   verbose: bool,
+  json: bool,
 }
 
 /// Parse cargo-style subcommands. The default (no command) is `help`, so a bare
@@ -119,6 +131,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut profiles: Vec<String> = Vec::new();
   let mut source: Option<String> = None;
   let mut verbose = false;
+  let mut json = false;
   let mut frames = false;
   let mut i = 0;
   while i < args.len() {
@@ -150,6 +163,17 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "version" | "-V" | "--version" => Some(Mode::Version),
       "run" => Some(Mode::Run),
       "list" | "ls" => Some(Mode::List),
+      // `check-profile <name>`: a runtime-free existence check for scripts — the next token is
+      // the profile name to test (exit 0 iff it exists with >=1 skill).
+      "check-profile" => {
+        i += 1;
+        let name = args.get(i).ok_or("check-profile needs a profile name, e.g. scsh check-profile multiply")?;
+        if name.trim().is_empty() {
+          return Err("check-profile name must not be empty".into());
+        }
+        profiles.push(name.clone());
+        Some(Mode::CheckProfile)
+      }
       // Hidden dev command: demo the live board with no container/model (see `ui::demo`).
       "__ui-demo" => Some(Mode::UiDemo { frames: false }),
       "--frames" => {
@@ -180,6 +204,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         verbose = true;
         None
       }
+      "--json" => {
+        json = true;
+        None
+      }
       // After `run`, a bare token is a profile name: `scsh run a b` == `scsh run --profile a,b`.
       // (A `-`-prefixed token is still an unknown flag, and bare tokens before a command — or
       // after any non-`run` command — remain errors.)
@@ -205,7 +233,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   // (requested_profiles splits on `,`/`;`), so `run a b`, `run --profile a,b`, and
   // `run --profile a b` are all equivalent.
   let profile = if profiles.is_empty() { None } else { Some(profiles.join(",")) };
-  if profile.is_some() && !matches!(mode, Mode::Run) {
+  // `check-profile` carries its single profile name in the same field, so it's allowed here too.
+  if profile.is_some() && !matches!(mode, Mode::Run | Mode::CheckProfile) {
     return Err(
       "profiles only apply to 'run' (e.g. `scsh run code-review` or `scsh run --profile code-review`)".into(),
     );
@@ -216,7 +245,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  Ok(Cli { mode, profile, source, verbose })
+  if json && !matches!(mode, Mode::List) {
+    return Err("--json only applies to 'list' (e.g. `scsh list --json`)".into());
+  }
+  Ok(Cli { mode, profile, source, verbose, json })
 }
 
 /// Consume the next arg as an `installskills`/`updateskills` source (a git URL or path) if
@@ -583,6 +615,124 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
   }
   println!();
   0
+}
+
+// ---------------------------------------------------------------------------
+// Programmatic profile inspection (runtime-free): `list --json` + `check-profile`
+//
+// These let another tool discover and gate on profiles without scraping the human
+// listing and without a container runtime — they only need git, a repo, and a
+// schema-valid .scsh.yml. Errors go to stderr (✗/→) so stdout stays machine-clean.
+// ---------------------------------------------------------------------------
+
+/// Load and schema-validate the repo's `.scsh.yml` for the read-only inspection commands —
+/// the same git → repo → present → valid chain as a run's preflight, but WITHOUT the
+/// container-runtime/engine checks, so profiles can be queried on any machine. On failure it
+/// reports the problem and returns the process exit code; stdout is left untouched.
+fn load_config_for_inspection() -> Result<config::Config, i32> {
+  if runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH");
+    hint(install_git_hint());
+    return Err(1);
+  }
+  let root = match git_root() {
+    Ok(r) => r,
+    Err(_) => {
+      fail("not inside a git repository");
+      hint(&format!("create one here with: {}", bold("git init .")));
+      return Err(1);
+    }
+  };
+  let cfg_path = root.join(".scsh.yml");
+  if !cfg_path.is_file() {
+    fail(".scsh.yml not found — this repository isn't set up for scsh yet");
+    hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
+    return Err(1);
+  }
+  let src = match std::fs::read_to_string(&cfg_path) {
+    Ok(s) => s,
+    Err(e) => {
+      fail(&format!("could not read .scsh.yml: {e}"));
+      return Err(1);
+    }
+  };
+  match config::validate(&src) {
+    Ok(cfg) => Ok(cfg),
+    Err(errs) => {
+      let n = errs.len();
+      fail(&format!(".scsh.yml does not match the schema ({n} problem{})", if n == 1 { "" } else { "s" }));
+      for e in &errs {
+        hint(e);
+      }
+      Err(1)
+    }
+  }
+}
+
+/// The config's profiles as `(name, skill-names)`: the reserved `default` profile (the
+/// no-`profile:` skills) first, then each declared profile in first-seen order.
+fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<&str>)> {
+  let mut groups: Vec<(String, Vec<&str>)> =
+    vec![("default".to_string(), cfg.skills.iter().filter(|s| s.profile.is_none()).map(|s| s.name.as_str()).collect())];
+  for p in declared_profiles(cfg) {
+    let members = cfg.skills.iter().filter(|s| s.profile.as_deref() == Some(p)).map(|s| s.name.as_str()).collect();
+    groups.push((p.to_string(), members));
+  }
+  groups
+}
+
+/// `scsh list --json` — every profile and its skills as machine-readable JSON on stdout, so
+/// another tool can discover them without scraping the human listing (or needing a runtime).
+/// The reserved `default` profile is always present (possibly empty); every other profile
+/// listed has at least one skill. Stable shape:
+/// `{"profiles":[{"name":"default","skills":["add"]}, …]}`.
+fn list_profiles_json() -> i32 {
+  let cfg = match load_config_for_inspection() {
+    Ok(c) => c,
+    Err(code) => return code,
+  };
+  let groups = profile_groups(&cfg);
+  let mut out = String::from("{\n  \"profiles\": [\n");
+  for (i, (name, skills)) in groups.iter().enumerate() {
+    let names = skills.iter().map(|s| json::quote(s)).collect::<Vec<_>>().join(", ");
+    out.push_str(&format!("    {{ \"name\": {}, \"skills\": [{}] }}", json::quote(name), names));
+    out.push_str(if i + 1 < groups.len() { ",\n" } else { "\n" });
+  }
+  out.push_str("  ]\n}");
+  println!("{out}");
+  0
+}
+
+/// `scsh check-profile <name>` — a runtime-free existence check for scripts. Exit 0 iff the
+/// profile exists AND has at least one skill (so a caller can gate on it directly); non-zero
+/// otherwise. The reserved `default` profile "exists" only when some skill has no `profile:`.
+/// Prints a one-line ✓/✗ — the exit code is the contract, so redirect it when scripting.
+fn check_profile_cmd(profile: Option<&str>) -> i32 {
+  let name = match profile {
+    Some(p) => p,
+    None => {
+      fail("check-profile needs a profile name, e.g. scsh check-profile multiply");
+      return 2;
+    }
+  };
+  let cfg = match load_config_for_inspection() {
+    Ok(c) => c,
+    Err(code) => return code,
+  };
+  let count = select_skills(&cfg, Some(name)).len();
+  if count > 0 {
+    ok(&format!("profile '{name}' has {count} skill{}", plural(count)));
+    return 0;
+  }
+  if name == "default" || declared_profiles(&cfg).iter().any(|p| *p == name) {
+    fail(&format!("profile '{name}' exists but has no skills"));
+  } else {
+    fail(&format!("no such profile '{name}'"));
+    let mut avail = vec!["default".to_string()];
+    avail.extend(declared_profiles(&cfg).iter().map(|s| s.to_string()));
+    hint(&format!("available: {}", avail.join(", ")));
+  }
+  1
 }
 
 fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32 {
@@ -2095,7 +2245,11 @@ fn print_help_overview() {
   println!();
   println!("{}", h_head("Commands:"));
   help_row("run [profile…]", "Build the image and run the skills in parallel (bare names select profiles).");
-  help_row("list   (alias: ls)", "List every skill by profile — result, commits, env (--verbose: + internals).");
+  help_row(
+    "list   (alias: ls)",
+    "List every skill by profile — result, commits, env (--verbose: + internals; --json: machine-readable).",
+  );
+  help_row("check-profile <name>", "Exit 0 if a profile exists with at least one skill (runtime-free; for scripts).");
   help_row("init-demo-project", "Scaffold + commit a ready-to-run demo project.");
   help_row("installskills [url]", "Install skills — bundled, or a repo's (merging its .scsh.yml).");
   help_row("updateskills [url]", "Reinstall skills, overwriting files — bundled or a repo's.");
@@ -2110,6 +2264,7 @@ fn print_help_overview() {
   println!("{}", h_head("Options:"));
   help_row("[profile…] / --profile <names>", "run only these profiles — bare after `run` (`run a b`) or a comma/semicolon list (`default` = the no-profile skills).");
   help_row("--verbose", "with list, also print the image Dockerfile and exact commands.");
+  help_row("--json", "with list, print the profiles and their skills as JSON (runtime-free).");
   println!();
   println!("{}", h_dim("`run` bakes a dev toolchain into the image (python3/uv, Go, Rust, gh, aws, gcloud,"));
   println!("{}", h_dim("kubectl, psql, protoc, \u{2026}; no Java) and builds it with this machine's timezone."));
@@ -2158,6 +2313,8 @@ fn print_help_config() {
   println!("{}", h_dim("  No `profile:` = the reserved `default` profile (runs on a bare `scsh run`). A skill"));
   println!("{}", h_dim("  with `profile: X` runs only under `--profile X`; pass a list (`--profile a,b`) to run"));
   println!("{}", h_dim("  several. If every skill is profiled, `scsh run` is a no-op that lists the profiles."));
+  println!("{}", h_dim("  Discover them programmatically (runtime-free): `scsh list --json`, or gate a script on"));
+  println!("{}", h_dim("  `scsh check-profile <name>` (exit 0 iff that profile exists with at least one skill)."));
   println!();
   println!("{}", h_head("Sharing skills (install sources)"));
   println!("{}", h_dim("  When another repo runs `scsh installskills <this-repo>`, scsh installs every skill in"));
