@@ -160,11 +160,11 @@ $SCSH list --verbose   # the same, plus the image Dockerfile and the exact build
 
 ## 6. Commits come back — and stack up (the important part)
 
-`add` is marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its sum to `add_log.txt` and commits inside its own clone; after the run, `scsh` **rebases that commit onto your current branch**. By now you've already run `add` three times (steps 2, 3, 4), so your branch already carries three `add: …` commits:
+`add` is marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its sum to `add_log.txt` and commits inside its own clone; after the run, `scsh` **rebases that commit onto your current branch**. By now you've already run `add` twice (steps 2 and 3 — step 4 ran only `multiply`), so your branch already carries two `add: …` commits:
 
 ```sh
-git log --oneline             # three "add: …" commits on top of the scaffold
-cat add_log.txt               # 2 + 3 = 5 / 10 + 20 = 30 / 2 + 3 = 5
+git log --oneline             # two "add: …" commits on top of the scaffold
+cat add_log.txt               # 2 + 3 = 5 / 10 + 20 = 30
 git log -1 --format='%an <%ae>'   # author: dkorolev-neon-elon-bot <dmitry.korolev+elon-presley@gmail.com>
 ```
 
