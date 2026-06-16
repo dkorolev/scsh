@@ -441,6 +441,10 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
       hint(&format!("swept {swept} stale run dir{} from /tmp", plural(swept)));
     }
   }
+  // The caller's HEAD before any skill runs — the base against which a commit-enabled
+  // skill's new commits are measured (`base..clone-HEAD`). `None` for a repo with no
+  // commits yet (nothing to rebase onto), in which case commit integration is skipped.
+  let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
 
   // Whether the host's opencode login will be forwarded into each run. Printed BEFORE the live
   // board takes over the screen, so it stays in the normal scrollback above the final summary.
@@ -481,7 +485,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
         scope.spawn(move || run_one_skill(skill, rt, tag, root, secs, p))
       })
       .collect();
-    handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None))).collect()
+    handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
   });
 
   // The run is over: restore the terminal and print the persistent ✓/✗ summary (attended; off a
@@ -501,9 +505,50 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
     }
   }
 
-  // A failed skill's clone is kept for inspection (its path is printed above); successful
-  // clones and any older leftovers are reclaimed by the next run's stale-clone sweep. (Per-run
-  // cleanup of a successful clone arrives with commit integration, which holds onto each clone.)
+  // 4. Bring back commits from commit-enabled skills. This runs SEQUENTIALLY, after
+  //    the parallel work: each skill's commits are rebased onto the caller's
+  //    now-current branch (which earlier skills may have advanced), so order doesn't
+  //    matter and a plain fast-forward isn't assumed. Commits that don't apply cleanly
+  //    are saved to a distinct branch instead of touching the caller's branch.
+  if let Some(base) = &base {
+    let stamp = runtime::format_utc_timestamp(secs);
+    for (skill, o) in skills.iter().zip(outcomes.iter()) {
+      if !skill.commits {
+        continue;
+      }
+      let clone = match &o.clone_dir {
+        Some(c) => c,
+        None => continue,
+      };
+      match integrate_commits(root, clone, base, &skill.name, &stamp) {
+        Ok(None) => {}
+        Ok(Some(Integration::Applied { count })) => ok(&format!(
+          "{}: brought in {count} commit{} (rebased onto {})",
+          skill.name,
+          plural(count),
+          current_branch(root)
+        )),
+        Ok(Some(Integration::Saved { branch, count })) => warn(&format!(
+          "{}: {count} commit{} didn't rebase cleanly — saved to branch {branch} (inspect, then merge/cherry-pick)",
+          skill.name,
+          plural(count)
+        )),
+        Err(e) => warn(&format!("{}: could not bring in commits — {e}", skill.name)),
+      }
+    }
+  }
+
+  // 5. Tidy up. A successful skill's clone has served its purpose — the result was
+  //    collected and any commits integrated — so remove it (the container was already
+  //    `--rm`; this is the host-side scratch). A FAILED skill's clone is kept for
+  //    inspection (its path was printed above). Opt out entirely with SCSH_KEEP_RUNS=1.
+  if !keep_run_dirs() {
+    for o in outcomes.iter().filter(|o| o.ok) {
+      if let Some(clone) = &o.clone_dir {
+        let _ = std::fs::remove_dir_all(clone);
+      }
+    }
+  }
 
   if failed == 0 {
     ok(&format!("all {n} skill{} completed successfully", plural(n)));
@@ -516,21 +561,26 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
 
 /// The outcome of running one skill end to end (clone → harness → collect). The per-skill ✓/✗
 /// and its detail are shown by the live board (and its final summary); this is the structured
-/// residue the orchestrator still needs afterward — the run-dir/log pointers.
+/// residue the orchestrator still needs afterward — run-dir/log pointers and the clone to
+/// bring commits back from.
 struct SkillRun {
   ok: bool,
   /// The `/tmp` run dir, kept for inspection when the skill failed.
   run_dir: Option<String>,
   /// Host path to the skill's output log, when its container actually ran.
   log: Option<String>,
+  /// The skill's clone, set whenever the clone succeeded (whatever the outcome), so
+  /// a commit-enabled skill's commits can be brought back afterward. `None` if no
+  /// clone was made (e.g. a refused or pre-clone failure).
+  clone_dir: Option<PathBuf>,
 }
 
 impl SkillRun {
-  fn ok(log: String) -> SkillRun {
-    SkillRun { ok: true, run_dir: None, log: Some(log) }
+  fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
+    SkillRun { ok: true, run_dir: None, log: Some(log), clone_dir }
   }
-  fn failed(run_dir: Option<String>, log: Option<String>) -> SkillRun {
-    SkillRun { ok: false, run_dir, log }
+  fn failed(run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
+    SkillRun { ok: false, run_dir, log, clone_dir }
   }
 }
 
@@ -545,7 +595,7 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
     Ok(e) => e,
     Err(message) => {
       spinner.finish_fail(Some(&message));
-      return SkillRun::failed(None, None);
+      return SkillRun::failed(None, None, None);
     }
   };
 
@@ -555,14 +605,17 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
     Ok(d) => d,
     Err(e) => {
       spinner.finish_fail(Some(&e));
-      return SkillRun::failed(None, None);
+      return SkillRun::failed(None, None, None);
     }
   };
   let run_dir_str = run_dir.to_string_lossy().into_owned();
   if let Err(e) = clone_into(root, &run_dir, &spinner) {
     spinner.finish_fail(Some(&e));
-    return SkillRun::failed(Some(run_dir_str), None);
+    return SkillRun::failed(Some(run_dir_str), None, None);
   }
+  // From here the clone exists — carry it so a commit-enabled skill's commits can be
+  // brought back even if a later step fails.
+  let clone_dir = Some(run_dir.clone());
 
   // Ensure the result's parent dir exists in the clone so the skill can write it
   // even if the harness's tool does not `mkdir -p`.
@@ -600,7 +653,7 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
       kill_container(&rt.name, &name);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), Some(log));
+      return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
     }
     Ok((false, false, last)) => {
       let why = match last {
@@ -608,12 +661,12 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
         _ => "harness exited non-zero".into(),
       };
       spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), Some(log));
+      return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
     }
     Err(e) => {
       let why = format!("could not run container: {e}");
       spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), None);
+      return SkillRun::failed(Some(run_dir_str), None, clone_dir);
     }
   }
 
@@ -627,11 +680,11 @@ fn run_one_skill(skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64,
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       spinner.finish_ok(Some(headline));
-      SkillRun::ok(log)
+      SkillRun::ok(log, clone_dir)
     }
     Err(e) => {
       spinner.finish_fail(Some(&e));
-      SkillRun::failed(Some(run_dir_str), Some(log))
+      SkillRun::failed(Some(run_dir_str), Some(log), clone_dir)
     }
   }
 }
@@ -723,7 +776,26 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
     });
   }
   materialize_branches(run_dir);
+  set_clone_identity(run_dir);
   Ok(())
+}
+
+/// The deliberately unmistakable identity scsh stamps on commits a skill makes in its
+/// clone — a "neon cyberpunk" bot that is never a real contributor. These commits are
+/// LOCAL-ONLY by design (scsh rebases them onto your branch, it never pushes), so if this
+/// author ever shows up in a code review or a pushed commit list, you pushed something
+/// you shouldn't have. See `scsh help cache`.
+const SCSH_COMMIT_NAME: &str = "dkorolev-neon-elon-bot";
+const SCSH_COMMIT_EMAIL: &str = "dmitry.korolev+elon-presley@gmail.com";
+
+/// Give the clone a *local* commit identity so a commit-enabled skill can `git commit`
+/// inside the container — the mounted `.git/config` carries it, and the container's base
+/// image has no global git identity. It is the deliberately recognizable [`SCSH_COMMIT_NAME`]
+/// bot (see its docs). Best-effort; failures never abort the run. (Cherry-picking these
+/// commits back preserves this author; your own identity becomes the committer.)
+fn set_clone_identity(run_dir: &Path) {
+  let _ = git_capture(run_dir, &["config", "user.email", SCSH_COMMIT_EMAIL]);
+  let _ = git_capture(run_dir, &["config", "user.name", SCSH_COMMIT_NAME]);
 }
 
 /// Best-effort: create a local branch for each `origin/*` branch the clone
@@ -874,6 +946,82 @@ fn git_capture(dir: &std::path::Path, args: &[&str]) -> Option<String> {
   out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Run `git -C <dir> <args>` for its exit status only, swallowing its output (so a
+/// cherry-pick conflict doesn't spill onto the terminal). `true` on success.
+fn git_status_ok(dir: &std::path::Path, args: &[&str]) -> bool {
+  Command::new("git").arg("-C").arg(dir).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+}
+
+/// The caller repo's current branch name (for the "rebased onto <branch>" line);
+/// falls back to "HEAD" when detached or unreadable.
+fn current_branch(root: &Path) -> String {
+  git_capture(root, &["rev-parse", "--abbrev-ref", "HEAD"])
+    .map(|s| s.trim().to_string())
+    .unwrap_or_else(|| "HEAD".into())
+}
+
+/// What happened when bringing a commit-enabled skill's commits back.
+enum Integration {
+  /// The commits were rebased (cherry-picked) onto the caller's current branch.
+  Applied { count: usize },
+  /// They didn't apply cleanly, so they were saved to a distinct branch instead;
+  /// the caller's branch was left untouched.
+  Saved { branch: String, count: usize },
+}
+
+/// Bring a commit-enabled skill's new commits — the ones it added to its clone, i.e.
+/// `base..clone-HEAD` — into the caller repo at `root`. Tries to rebase them onto the
+/// caller's CURRENT branch via cherry-pick (so multiple skills compose regardless of
+/// order, and an out-of-order fast-forward is never assumed); if they don't apply
+/// cleanly, saves them to a distinct `scsh/incoming/<skill>-<stamp>-<short>` branch and
+/// leaves the caller's branch alone. Returns `None` when the skill added no commits.
+///
+/// Bringing commits in is a real side effect: each run that commits adds its commits
+/// again (so running twice yields two commits — there is no dedup).
+fn integrate_commits(
+  root: &Path, clone: &Path, base: &str, skill: &str, stamp: &str,
+) -> Result<Option<Integration>, String> {
+  // The clone's branch tip — what the skill left after (maybe) committing.
+  let tip = match git_capture(clone, &["rev-parse", "HEAD"]) {
+    Some(t) => t.trim().to_string(),
+    None => return Err("could not read the clone's HEAD".into()),
+  };
+  if tip == base {
+    return Ok(None); // the skill added nothing
+  }
+  // Make the clone's new objects available in the caller repo (fetch its branch tip).
+  if !git_status_ok(root, &["fetch", "--no-tags", "--quiet", &clone.to_string_lossy(), "HEAD"]) {
+    return Err("could not fetch the skill's commits from its clone".into());
+  }
+  let range = format!("{base}..{tip}");
+  let count =
+    git_capture(root, &["rev-list", "--count", &range]).and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(0);
+  if count == 0 {
+    return Ok(None);
+  }
+  // Try to rebase the range onto the caller's current branch. --keep-redundant-commits
+  // preserves the side effect even if a commit's changes are already present (so the
+  // "run twice = two commits" guarantee holds rather than collapsing to a no-op).
+  if git_status_ok(root, &["cherry-pick", "--keep-redundant-commits", &range]) {
+    Ok(Some(Integration::Applied { count }))
+  } else {
+    let _ = git_status_ok(root, &["cherry-pick", "--abort"]);
+    let branch = incoming_branch_name(skill, stamp, &tip);
+    if !git_status_ok(root, &["branch", "--force", &branch, &tip]) {
+      return Err(format!("commits didn't rebase cleanly and the fallback branch '{branch}' could not be created"));
+    }
+    Ok(Some(Integration::Saved { branch, count }))
+  }
+}
+
+/// A distinct branch name for commits that couldn't be rebased cleanly:
+/// `scsh/incoming/<skill>-<stamp>-<short>` — the UTC stamp plus the tip's short hash,
+/// so the user can see exactly what the branch carries.
+fn incoming_branch_name(skill: &str, stamp: &str, tip: &str) -> String {
+  let short: String = tip.chars().take(7).collect();
+  format!("scsh/incoming/{}-{}-utc-{}", runtime::sanitize_component(skill), stamp, short)
+}
+
 /// The host user's numeric UID/GID (via `id -u` / `id -g`), so the container's
 /// `agent` user can own the files it writes into the mount. Falls back to
 /// 1000:1000 if `id` is unavailable.
@@ -960,6 +1108,12 @@ fn fail(msg: &str) {
 
 fn hint(msg: &str) {
   eprintln!("  {} {msg}", console::style("\u{2192}").cyan().for_stderr());
+}
+
+/// A warning that isn't a hard failure — e.g. a skill's commits were saved to a branch
+/// because they couldn't be rebased cleanly. Yellow `⚠`, so it stands apart from ✓/✗.
+fn warn(msg: &str) {
+  eprintln!("{} {msg}", console::style("\u{26a0}").yellow().bold().for_stderr());
 }
 
 /// A literal command rendered **bold** for an actionable hint, so the thing to type
