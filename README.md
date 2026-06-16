@@ -83,7 +83,7 @@ for you.
 You describe your project and its skills; you never write a container command.
 
 The whole file is just your skills — no `version`/`project`/`image` boilerplate. scsh
-builds them on a built-in base image (`alpine:3.19`, with opencode added for you).
+builds them on a built-in base image (`debian:bookworm-slim`, with opencode added for you).
 
 ```yaml
 skills:                          # the only top-level key — one or more, keyed by skill name
