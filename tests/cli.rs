@@ -55,7 +55,7 @@ fn scsh(dir: &Path, args: &[&str]) -> Run {
 }
 
 /// The version scsh displays: the crate version with a trailing `.0` patch dropped
-/// (so `0.1.0` → `0.1`), mirroring `version_id` in the binary.
+/// (so `1.0.0` → `1.0`), mirroring `version_id` in the binary.
 fn shown_version() -> &'static str {
   let v = env!("CARGO_PKG_VERSION");
   v.strip_suffix(".0").unwrap_or(v)
@@ -350,7 +350,7 @@ fn init_demo_then_list() {
   let init = scsh(&d, &["--init-demo-project"]);
   assert_eq!(init.code, 0, "got: {}", init.out);
   let cfg = std::fs::read_to_string(d.join(".scsh.yml")).expect(".scsh.yml written");
-  // The v0.1 config is just the skills — no version/project/image boilerplate.
+  // The v1.0 config is just the skills — no version/project/image boilerplate.
   assert!(cfg.contains("skills:") && cfg.contains("add:") && cfg.contains("multiply:"), "got: {cfg}");
   assert!(!cfg.contains("version:") && !cfg.contains("project:") && !cfg.contains("image:"), "got: {cfg}");
 

@@ -9,7 +9,7 @@
 
 use std::collections::BTreeMap;
 
-/// A parsed-and-validated `.scsh.yml`. For v0.1 the file is just its skills — there is no
+/// A parsed-and-validated `.scsh.yml`. For v1.0 the file is just its skills — there is no
 /// `version`/`project`/`image` boilerplate; the base image (a glibc Debian dev/CLI toolchain)
 /// is fixed and owned by the generated [`crate::runtime::dockerfile`] (`src/Dockerfile`).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -259,7 +259,7 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
 
   let mut errors = Vec::new();
 
-  // Index the top-level keys, flagging duplicates. For v0.1 the only key is `skills`.
+  // Index the top-level keys, flagging duplicates. For v1.0 the only key is `skills`.
   let mut top: BTreeMap<&str, &Node> = BTreeMap::new();
   for (k, v) in &entries {
     if top.insert(k.as_str(), v).is_some() {
