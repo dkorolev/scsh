@@ -207,8 +207,8 @@ On a terminal, `scsh run` shows an **interactive live board**: the image build a
 are **collapsible rows**, each a `▶`/`▼` triangle, a status glyph (spinner → `✓`/`✗`), the label,
 a smart elapsed clock, and the latest output line.
 
-- **Press a row's `Ctrl+N`** — each row is labelled `[Ctrl+1]`, `[Ctrl+2]`, … on the left; press
-  it to **expand/collapse** that row. This is the reliable path when the mouse isn't forwarded:
+- **Press `Ctrl+1` … `Ctrl+9`** — each row is labelled `[Ctrl+1]`, `[Ctrl+2]`, … on the left; press
+  a row's number to **expand/collapse** it. This is the reliable path when the mouse isn't forwarded:
   scsh turns on the terminal's keyboard-enhancement protocol so `Ctrl+1`…`Ctrl+9` all work (on a
   terminal without it, the plain digit toggles instead). You can also **click the row** if your
   terminal forwards the mouse.
