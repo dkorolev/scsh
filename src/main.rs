@@ -44,8 +44,8 @@ fn run(args: &[String]) -> i32 {
       0
     }
     Mode::InitDemo => init_demo(),
-    Mode::InstallSkills => install_skills(false, cli.source.as_deref()),
-    Mode::UpdateSkills => install_skills(true, cli.source.as_deref()),
+    Mode::InstallSkills => install_skills(false, &cli.sources),
+    Mode::UpdateSkills => install_skills(true, &cli.sources),
     Mode::List => {
       // `--json` is a runtime-free, machine-readable listing (just git + a valid .scsh.yml);
       // the human listing goes through the full preflight like a run does.
@@ -112,12 +112,12 @@ enum Action {
 
 /// A parsed command line: one command, plus the profiles that select which skills run (bare
 /// positional names and/or `--profile` for `run`; the one profile name for `check-profile`),
-/// an optional source (a git URL/path for `installskills` / `updateskills`), and the `list`
-/// output flags (`--verbose`, `--json`).
+/// the source repos (git URLs/paths for `installskills` / `updateskills` — one or more,
+/// installed in order), and the `list` output flags (`--verbose`, `--json`).
 struct Cli {
   mode: Mode,
   profile: Option<String>,
-  source: Option<String>,
+  sources: Vec<String>,
   verbose: bool,
   json: bool,
 }
@@ -129,7 +129,7 @@ struct Cli {
 fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut mode: Option<Mode> = None;
   let mut profiles: Vec<String> = Vec::new();
-  let mut source: Option<String> = None;
+  let mut sources: Vec<String> = Vec::new();
   let mut verbose = false;
   let mut json = false;
   let mut frames = false;
@@ -181,16 +181,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         None
       }
       "init-demo-project" | "init" | "--init-demo-project" => Some(Mode::InitDemo),
-      // `installskills [<git-url>]` / `updateskills [<git-url>]`: an optional positional
-      // source installs skills from that repo instead of scsh's bundled ones.
-      "installskills" => {
-        source = take_source(args, &mut i);
-        Some(Mode::InstallSkills)
-      }
-      "updateskills" => {
-        source = take_source(args, &mut i);
-        Some(Mode::UpdateSkills)
-      }
+      // `installskills [<git-url>…]` / `updateskills [<git-url>…]`: positional source repos
+      // (one or more) install skills from those repos, in order, instead of scsh's bundled one.
+      "installskills" => Some(Mode::InstallSkills),
+      "updateskills" => Some(Mode::UpdateSkills),
       "--profile" | "--profiles" => {
         i += 1;
         let name = args.get(i).ok_or("--profile needs a name, e.g. --profile code-review (or default,code-review)")?;
@@ -213,6 +207,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // after any non-`run` command — remain errors.)
       other if matches!(mode, Some(Mode::Run)) && !other.starts_with('-') => {
         profiles.push(other.to_string());
+        None
+      }
+      // After `installskills`/`updateskills`, each bare token is a source repo — they're
+      // installed in order, as if the command were run once per repo.
+      other if matches!(mode, Some(Mode::InstallSkills | Mode::UpdateSkills)) && !other.starts_with('-') => {
+        sources.push(other.to_string());
         None
       }
       other => return Err(format!("unknown command or option '{other}' (try 'scsh help')")),
@@ -239,7 +239,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "profiles only apply to 'run' (e.g. `scsh run code-review` or `scsh run --profile code-review`)".into(),
     );
   }
-  if source.is_some() && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
+  if !sources.is_empty() && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
     return Err("a skills source (git URL) only applies to 'installskills' or 'updateskills'".into());
   }
   if verbose && !matches!(mode, Mode::List) {
@@ -248,19 +248,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if json && !matches!(mode, Mode::List) {
     return Err("--json only applies to 'list' (e.g. `scsh list --json`)".into());
   }
-  Ok(Cli { mode, profile, source, verbose, json })
-}
-
-/// Consume the next arg as an `installskills`/`updateskills` source (a git URL or path) if
-/// it's present and not a flag, advancing `i` past it. `None` otherwise (use bundled skills).
-fn take_source(args: &[String], i: &mut usize) -> Option<String> {
-  match args.get(*i + 1) {
-    Some(v) if !v.starts_with('-') => {
-      *i += 1;
-      Some(v.clone())
-    }
-    _ => None,
-  }
+  Ok(Cli { mode, profile, sources, verbose, json })
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -1729,12 +1717,26 @@ struct InstallCounts {
   differing: Vec<String>,
 }
 
+impl InstallCounts {
+  /// Fold another install's tallies into this one — so installing several source repos in one
+  /// command reports a single combined summary.
+  fn merge(&mut self, other: InstallCounts) {
+    self.installed += other.installed;
+    self.updated += other.updated;
+    self.already += other.already;
+    self.differing.extend(other.differing);
+  }
+}
+
 /// Install skills into the current repo's `.skills/` plus the harness discovery symlinks.
-/// With no `source`, installs scsh's own bundled skills (see [`config::bundled_skills`]);
-/// with a `source` (a git URL or local path), clones it and installs the `.skills/<name>/`
-/// skills it ships. `overwrite` (the `updateskills` command) replaces existing files;
-/// otherwise an identical file is "already installed", and a differing one is kept untouched.
-fn install_skills(overwrite: bool, source: Option<&str>) -> i32 {
+/// With no `sources`, installs scsh's own bundled skill (see [`config::bundled_skills`]); with
+/// one or more `sources` (git URLs or local paths), clones each and installs the
+/// `.skills/<name>/` skills it ships, in order — as if the command were run once per repo.
+/// `overwrite` (the `updateskills` command) replaces existing files; otherwise an identical
+/// file is "already installed", and a differing one is kept untouched. Like a real run, this
+/// requires a clean working tree (so the install is a reviewable diff) and ensures `/tmp` is
+/// gitignored before writing anything.
+fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
   if runtime::which("git").is_none() {
     fail("git is not installed or not on PATH");
     hint(install_git_hint());
@@ -1749,13 +1751,45 @@ fn install_skills(overwrite: bool, source: Option<&str>) -> i32 {
     }
   };
 
-  let counts = match source {
-    None => install_bundled(&root, overwrite),
-    Some(url) => match install_from_repo(&root, overwrite, url) {
-      Ok(c) => c,
-      Err(code) => return code,
-    },
-  };
+  // Install into a clean tree (like a real run), so the install lands as ONE reviewable diff —
+  // never silently mixed into unrelated uncommitted work. With several source repos this is
+  // checked once, up front, before any of them are installed.
+  let dirty = uncommitted_changes(&root);
+  if !dirty.is_empty() {
+    fail(
+      "working tree has uncommitted changes — commit or stash them so the install lands as a clean, reviewable diff",
+    );
+    let shown = dirty.len().min(10);
+    for p in &dirty[..shown] {
+      hint(&format!("uncommitted: {p}"));
+    }
+    if dirty.len() > shown {
+      hint(&format!("\u{2026}and {} more", dirty.len() - shown));
+    }
+    hint(&format!("commit or stash them first, then re-run:  {}", bold("git add -A && git commit -m \"wip\"")));
+    return 1;
+  }
+  // Make the repo run-ready: installed skills write their result + cache under the repo's tmp/,
+  // so ensure it's gitignored (append-only, exactly as init-demo-project does).
+  match ensure_tmp_gitignored(&root) {
+    Ok(true) => ok("added '/tmp' to .gitignore (keeps skill results + cache untracked)"),
+    Ok(false) => {}
+    Err(e) => hint(&format!("could not update .gitignore automatically ({e}); add a '/tmp' line yourself")),
+  }
+
+  // No source → scsh's bundled skill; otherwise install each source repo in order, accumulating
+  // the per-file tallies so the final summary covers the whole command.
+  let mut counts = InstallCounts::default();
+  if sources.is_empty() {
+    counts.merge(install_bundled(&root, overwrite));
+  } else {
+    for url in sources {
+      match install_from_repo(&root, overwrite, url) {
+        Ok(c) => counts.merge(c),
+        Err(code) => return code,
+      }
+    }
+  }
 
   let InstallCounts { installed, updated, already, differing } = counts;
   if installed > 0 {
@@ -1771,9 +1805,10 @@ fn install_skills(overwrite: bool, source: Option<&str>) -> i32 {
     hint(&format!("kept your modified {rel} (it differs from the source)"));
   }
   if !differing.is_empty() {
-    let cmd = match source {
-      Some(url) => format!("scsh updateskills {url}"),
-      None => "scsh updateskills".to_string(),
+    let cmd = if sources.is_empty() {
+      "scsh updateskills".to_string()
+    } else {
+      format!("scsh updateskills {}", sources.join(" "))
     };
     hint(&format!("to replace them with the source's version, run: {}", bold(&cmd)));
   }
@@ -1789,7 +1824,7 @@ fn install_skills(overwrite: bool, source: Option<&str>) -> i32 {
   }
   // With no URL, all you get is scsh's bundled demo/self-test skill — point users at a real
   // skills repo for anything else.
-  if source.is_none() {
+  if sources.is_empty() {
     hint("that's scsh's bundled demo/self-test — run /scsh-harness-demo-and-selftest to exercise scsh end to end");
     hint(&format!(
       "for real skills, point me at a repo, e.g. {}",
@@ -1859,6 +1894,7 @@ fn install_from_repo(root: &Path, overwrite: bool, url: &str) -> Result<InstallC
 fn install_all_skill_dirs(root: &Path, overwrite: bool, url: &str, clone: &Path) -> Result<InstallCounts, i32> {
   let mut c = InstallCounts::default();
   let mut names: Vec<String> = Vec::new();
+  let mut skipped: Vec<String> = Vec::new();
   if let Ok(entries) = std::fs::read_dir(clone.join(".skills")) {
     // A skill is a `.skills/<name>/` directory containing a SKILL.md.
     let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.join("SKILL.md").is_file()).collect();
@@ -1866,7 +1902,8 @@ fn install_all_skill_dirs(root: &Path, overwrite: bool, url: &str, clone: &Path)
     for dir in dirs {
       let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
       if name.starts_with(INTERNAL_PREFIX) {
-        continue; // authoring-only by the `internal-` naming convention
+        skipped.push(name); // authoring-only by the `internal-` naming convention
+        continue;
       }
       copy_skill_dir(root, &dir, &name, overwrite, &mut c);
       names.push(name);
@@ -1877,6 +1914,9 @@ fn install_all_skill_dirs(root: &Path, overwrite: bool, url: &str, clone: &Path)
     return Err(1);
   }
   ok(&format!("from {url}: {} skill{} — {}", names.len(), plural(names.len()), names.join(", ")));
+  if !skipped.is_empty() {
+    ok(&format!("skipped {} authoring-only (internal-*): {}", skipped.len(), skipped.join(", ")));
+  }
   Ok(c)
 }
 
@@ -2251,8 +2291,11 @@ fn print_help_overview() {
   );
   help_row("check-profile <name>", "Exit 0 if a profile exists with at least one skill (runtime-free; for scripts).");
   help_row("init-demo-project", "Scaffold + commit a ready-to-run demo project.");
-  help_row("installskills [url]", "Install skills — bundled, or a repo's (merging its .scsh.yml).");
-  help_row("updateskills [url]", "Reinstall skills, overwriting files — bundled or a repo's.");
+  help_row(
+    "installskills [url…]",
+    "Install skills — bundled, or one+ repos' (merging each .scsh.yml); needs a clean tree.",
+  );
+  help_row("updateskills [url…]", "Reinstall skills, overwriting files — bundled or repos'.");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -2297,6 +2340,8 @@ fn print_help_config() {
                           #       branch (rebased; or saved to scsh/incoming/<skill>-…
                           #       if they don't apply cleanly). A real, repeatable side
                           #       effect — run twice and you get the commit twice.
+      autoinstall: false  #     optional; default true. false = authoring-only: `installskills`
+                          #       won't copy it into a consumer repo (an `internal-` name does the same)
       result: tmp/x.json  #     required; the repo-relative file the skill must write
 "#
   );

@@ -162,13 +162,19 @@ scsh version               Show the version (with the build's git short hash, +`
 
 **Installing skills.** With no arguments, `scsh installskills` drops scsh's one bundled skill —
 `scsh-harness-demo-and-selftest`, a demo-and-self-test you run with `/scsh-harness-demo-and-selftest`
-— into your repo's `.skills/`, and points you at a real skills repo for anything else. Give it a
-**git URL** to install the skills another repo ships:
+— into your repo's `.skills/`, and points you at a real skills repo for anything else. Give it one
+or more **git URLs** to install the skills those repos ship (installed in order, as if you ran the
+command once per repo):
 
 ```sh
 scsh installskills https://github.com/dkorolev/beautiful-skills
-scsh installskills https://github.com/dimacurrentai/code-review-skills
+# several at once — installed in order, landing as one reviewable diff:
+scsh installskills https://github.com/dkorolev/beautiful-skills https://github.com/dimacurrentai/code-review-skills
 ```
+
+Like a real run, `installskills`/`updateskills` insist on a **clean working tree** (so the install
+is a reviewable diff, not mixed into unrelated work) and make sure **`/tmp` is gitignored** before
+writing, so the repo is run-ready afterward.
 
 **If the source repo has its own `.scsh.yml`, that manifest drives the install.** `scsh`
 validates it first (and stops if it's malformed), then for every skill it lists — except

@@ -189,14 +189,20 @@ fn installskills_is_idempotent_and_updateskills_overwrites() {
   let d = unique_dir("install2");
   git_init(&d);
   assert_eq!(scsh(&d, &["installskills"]).code, 0);
+  // installskills now requires a clean tree, so commit the install before doing more.
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-qm", "install bundled skill"]);
   // Re-running with the same content is fine — already installed, not an error.
   let again = scsh(&d, &["installskills"]);
   assert_eq!(again.code, 0, "got: {}", again.out);
   assert!(again.out.contains("already installed"), "got: {}", again.out);
 
-  // A locally-modified skill must NOT be overwritten by installskills; it suggests updateskills.
+  // A locally-modified (and committed) skill must NOT be overwritten by installskills; it
+  // suggests updateskills instead.
   let p = d.join(".skills/scsh-harness-demo-and-selftest/SKILL.md");
   std::fs::write(&p, "name: scsh-harness-demo-and-selftest\nMINE — do not touch\n").unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-qm", "customize the skill"]);
   let kept = scsh(&d, &["installskills"]);
   assert_eq!(kept.code, 0, "got: {}", kept.out);
   assert!(kept.out.contains("updateskills"), "installskills should suggest updateskills; got: {}", kept.out);
@@ -235,10 +241,86 @@ fn installskills_from_a_git_repo() {
   assert!(link.symlink_metadata().expect("symlink meta").file_type().is_symlink());
   assert!(link.join("foo/SKILL.md").is_file(), "symlink should resolve to the skill");
 
+  // installskills requires a clean tree, so commit the install before re-running.
+  git(&dst, &["add", "-A"]);
+  git(&dst, &["commit", "-qm", "install foo"]);
   // Re-running is idempotent: identical files are "already installed", not clobbered.
   let again = scsh(&dst, &["installskills", &src.to_string_lossy()]);
   assert_eq!(again.code, 0, "got: {}", again.out);
   assert!(again.out.contains("already installed"), "got: {}", again.out);
+}
+
+#[test]
+fn installskills_refuses_a_dirty_tree() {
+  // Like a real run, install insists on a clean tree so the install is a reviewable diff.
+  let d = unique_dir("installdirty");
+  git_init(&d);
+  std::fs::write(d.join("WIP.txt"), "uncommitted work\n").unwrap();
+  let r = scsh(&d, &["installskills"]);
+  assert_eq!(r.code, 1, "should refuse on a dirty tree; got: {}", r.out);
+  assert!(r.out.contains("uncommitted changes"), "got: {}", r.out);
+  // Nothing was written on refusal — not the skills, not .gitignore.
+  assert!(!d.join(".skills").exists(), "no skills on refusal; got: {}", r.out);
+  assert!(!d.join(".gitignore").exists(), ".gitignore untouched on refusal; got: {}", r.out);
+}
+
+#[test]
+fn installskills_makes_the_repo_run_ready() {
+  // A clean install also ensures /tmp is gitignored, so the repo is run-ready afterward.
+  let d = unique_dir("installtmp");
+  git_init(&d);
+  let r = scsh(&d, &["installskills"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("/tmp"), "should report adding /tmp to .gitignore; got: {}", r.out);
+  let gi = std::fs::read_to_string(d.join(".gitignore")).expect(".gitignore written");
+  assert!(gi.lines().any(|l| l.trim() == "/tmp"), "/tmp should be ignored; got: {}", gi);
+}
+
+#[test]
+fn installskills_accepts_multiple_repos() {
+  // Two source repos, each shipping one skill; installing both in one command installs each.
+  let mk = |tag: &str, skill: &str| {
+    let s = unique_dir(tag);
+    git_init(&s);
+    std::fs::create_dir_all(s.join(format!(".skills/{skill}"))).unwrap();
+    std::fs::write(s.join(format!(".skills/{skill}/SKILL.md")), format!("name: {skill}\nthe {skill} skill\n")).unwrap();
+    git(&s, &["add", "-A"]);
+    git(&s, &["commit", "-qm", "ship"]);
+    s
+  };
+  let s1 = mk("multi1", "alpha");
+  let s2 = mk("multi2", "beta");
+  let d = unique_dir("multidst");
+  git_init(&d);
+  let r = scsh(&d, &["installskills", &s1.to_string_lossy(), &s2.to_string_lossy()]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(d.join(".skills/alpha/SKILL.md").is_file(), "first repo's skill; got: {}", r.out);
+  assert!(d.join(".skills/beta/SKILL.md").is_file(), "second repo's skill; got: {}", r.out);
+  assert!(r.out.contains("alpha") && r.out.contains("beta"), "both named; got: {}", r.out);
+}
+
+#[test]
+fn installskills_skips_and_reports_internal_skills() {
+  // A source with no manifest: a normal skill installs; an `internal-` one is skipped AND named.
+  let src = unique_dir("intsrc");
+  git_init(&src);
+  for name in ["normal", "internal-secret"] {
+    std::fs::create_dir_all(src.join(format!(".skills/{name}"))).unwrap();
+    std::fs::write(src.join(format!(".skills/{name}/SKILL.md")), format!("name: {name}\n")).unwrap();
+  }
+  git(&src, &["add", "-A"]);
+  git(&src, &["commit", "-qm", "ship"]);
+  let d = unique_dir("intdst");
+  git_init(&d);
+  let r = scsh(&d, &["installskills", &src.to_string_lossy()]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(d.join(".skills/normal/SKILL.md").is_file(), "normal skill installed; got: {}", r.out);
+  assert!(!d.join(".skills/internal-secret").exists(), "internal-* not installed; got: {}", r.out);
+  assert!(
+    r.out.contains("internal-secret") && r.out.contains("authoring-only"),
+    "the skip should be reported; got: {}",
+    r.out
+  );
 }
 
 #[test]
