@@ -236,7 +236,7 @@ a smart elapsed clock, and the latest output line.
   to when that process started** (`+1.2s`). Open shows it all; closed tucks it away.
 - **Scroll** with the **mouse wheel**, **↑/↓**, **PgUp/PgDn**, or **Home/End**. It follows the tail
   until you scroll up, and resumes following at the bottom. **`e`/`c`** expand/collapse every row.
-- **`Ctrl-C`** aborts the run (and tears the containers down).
+- **`Ctrl-C`** aborts the run — SIGTERM on every child and container, then SIGKILL after one second.
 
 The board is drawn **inline** in the normal terminal buffer — **not** a full-screen takeover — so
 your terminal's own scrollback keeps working during the run. When the run finishes, `scsh` **wipes

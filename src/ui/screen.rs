@@ -37,7 +37,7 @@ use crossterm::{cursor, queue, style::Print, terminal};
 
 use super::clock::{clean_line, format_elapsed};
 use super::live::{Model, Row, Status, Sty};
-use super::signals::{isolate_child, register_child, terminate_children, unregister_child};
+use super::signals::{isolate_child, register_child, terminate_all, unregister_child};
 use super::TICK;
 
 /// True while raw mode / mouse reporting is active, so [`restore_terminal`] is idempotent and a
@@ -435,7 +435,7 @@ fn handle_event(ev: Event, model: &Arc<Mutex<Model>>, last_rows: &[Row], board_t
         KeyCode::Char('c') if ctrl => {
           // Raw mode swallows SIGINT, so Ctrl-C arrives as a key: restore, kill children, exit.
           restore_terminal();
-          terminate_children();
+          terminate_all();
           std::process::exit(130);
         }
         KeyCode::Up => model.lock().unwrap().scroll_by(-1, width, page),

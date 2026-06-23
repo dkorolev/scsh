@@ -853,13 +853,19 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
   }
 
   let base_ref = base.as_deref();
+  // Declare every skill row up front (Queued, in .scsh.yml order) so the live board order
+  // matches the manifest even while skills run in parallel.
+  let mut skill_procs = Vec::with_capacity(skills.len());
+  for skill in skills {
+    let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
+    p.note("starting…");
+    skill_procs.push(p);
+  }
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let handles: Vec<_> = skills
       .iter()
-      .map(|&skill| {
-        let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
-        scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref))
-      })
+      .zip(skill_procs)
+      .map(|(&skill, p)| scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref)))
       .collect();
     handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
   });
@@ -1082,6 +1088,7 @@ fn run_one_skill(
   }
   let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd);
   let timeout = skill.timeout.map(Duration::from_secs);
+  let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
@@ -1093,7 +1100,7 @@ fn run_one_skill(
     Ok((true, _, _)) => {}
     Ok((false, true, _)) => {
       // Timed out: the client was killed; stop the container too (best effort).
-      kill_container(&rt.name, &name);
+      ui::signals::stop_container(&rt.name, &name);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       spinner.finish_fail(Some(&why));
       return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
@@ -1288,17 +1295,6 @@ fn materialize_branches(run_dir: &std::path::Path) {
       .stderr(std::process::Stdio::null())
       .status();
   }
-}
-
-/// Best-effort: stop a named container, used when a skill's run times out (the
-/// `--rm` on the run then removes it). Killing the client process alone leaves a
-/// daemon-backed container — e.g. docker — running, so this asks the runtime too.
-fn kill_container(runtime: &str, name: &str) {
-  let _ = Command::new(runtime)
-    .args(["kill", name])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status();
 }
 
 // ---------------------------------------------------------------------------
