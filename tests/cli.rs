@@ -739,9 +739,9 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
   // Finished procs show ✓/✗ with their detail.
   assert!(r.out.contains("✓ using podman"), "a ✓ header; got: {}", r.out);
   assert!(r.out.contains("✗ opencode: multiply") && r.out.contains("X is required"), "a ✗ header; got: {}", r.out);
-  // Scrolling: the window shows a slice with the head scrolled off (tail-following).
+  // Scrolling: expand opens at the proc header; the first window shows the head of the output.
   assert!(
-    r.out.contains("scrolled off the top") && r.out.contains("scanning file 12"),
+    r.out.contains("scanning file 1") && r.out.contains("scroll down for the rest"),
     "scroll window; got: {}",
     r.out
   );
