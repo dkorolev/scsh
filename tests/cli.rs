@@ -725,11 +725,11 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
   let d = unique_dir("uidemo"); // needs no git repo — the demo runs nothing real
   let r = scsh(&d, &["__ui-demo", "--frames"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
-  // Collapsed: a closed triangle heads each proc row, with a [Ctrl+N] keyboard-toggle hint.
+  // Collapsed: a closed triangle heads each proc row, with a [N] keyboard-toggle hint.
   assert!(r.out.contains("▶ "), "a collapsed ▶ triangle should be present; got: {}", r.out);
   assert!(
-    r.out.contains("[Ctrl+1]") && r.out.contains("[Ctrl+2]"),
-    "rows carry their Ctrl+N toggle hint; got: {}",
+    r.out.contains("[0]") && r.out.contains("[1]"),
+    "rows carry their shortcut hint; got: {}",
     r.out
   );
   // Expanded: an open triangle, plus output lines each stamped relative to the proc's start.

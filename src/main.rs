@@ -849,16 +849,29 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
 
   let df = runtime::dockerfile();
   let tz = runtime::host_timezone();
-  let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
+  // Harness build order: first time each harness appears in the manifest (not enum sort).
+  let mut harness_list = Vec::new();
+  let mut seen_harness = std::collections::BTreeSet::new();
   for s in skills {
-    harnesses.insert(s.harness);
+    if seen_harness.insert(s.harness) {
+      harness_list.push(s.harness);
+    }
   }
-  let harness_list: Vec<config::Harness> = harnesses.into_iter().collect();
   let rt_name = rt.name.clone();
+
+  // Image builds first (runtime setup), then skills in manifest order.
   let mut build_procs = Vec::with_capacity(harness_list.len());
   for &h in &harness_list {
     build_procs.push(ui.proc(format!("using {} · build {}", backend_name(&rt.name), h.as_str()), true));
   }
+  let mut skill_procs = Vec::with_capacity(skills.len());
+  for skill in skills {
+    let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
+    p.note("waiting for image build…");
+    skill_procs.push(p);
+  }
+  ui.pin_board_to_top();
+
   let build_failed: Option<(String, i32)> = std::thread::scope(|scope| {
     harness_list
       .into_iter()
@@ -903,13 +916,14 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   }
 
   let base_ref = base.as_deref();
+  for p in &skill_procs {
+    p.note("starting…");
+  }
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let handles: Vec<_> = skills
       .iter()
-      .map(|&skill| {
-        let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
-        scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref))
-      })
+      .zip(skill_procs)
+      .map(|(&skill, p)| scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref)))
       .collect();
     handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
   });
@@ -1132,6 +1146,7 @@ fn run_one_skill(
   }
   let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd);
   let timeout = skill.timeout.map(Duration::from_secs);
+  let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
@@ -1143,7 +1158,7 @@ fn run_one_skill(
     Ok((true, _, _)) => {}
     Ok((false, true, _)) => {
       // Timed out: the client was killed; stop the container too (best effort).
-      kill_container(&rt.name, &name);
+      ui::signals::stop_container(&rt.name, &name);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       spinner.finish_fail(Some(&why));
       return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
@@ -1338,17 +1353,6 @@ fn materialize_branches(run_dir: &std::path::Path) {
       .stderr(std::process::Stdio::null())
       .status();
   }
-}
-
-/// Best-effort: stop a named container, used when a skill's run times out (the
-/// `--rm` on the run then removes it). Killing the client process alone leaves a
-/// daemon-backed container — e.g. docker — running, so this asks the runtime too.
-fn kill_container(runtime: &str, name: &str) {
-  let _ = Command::new(runtime)
-    .args(["kill", name])
-    .stdout(std::process::Stdio::null())
-    .stderr(std::process::Stdio::null())
-    .status();
 }
 
 // ---------------------------------------------------------------------------
@@ -2703,8 +2707,8 @@ fn print_help_internals() {
 
   The live board: on a terminal the build and every skill are drawn as collapsible rows,
   inline in the normal buffer (no alternate screen, so your scrollback keeps working). Each row
-  carries a [Ctrl+N] label on the left: PRESS Ctrl+1 … Ctrl+9 to expand/collapse it (scsh turns
-  on the terminal's keyboard-enhancement protocol so every Ctrl+digit works; without it, the
+  carries a [0]..[9], [A]..[Z] label on the left: press that digit or letter to expand/collapse the row
+  (scsh turns on the terminal's keyboard-enhancement protocol so Ctrl+digit works too; without it, the
   plain digit toggles — or click the row if the mouse is forwarded). Expanding shows the proc's
   output, each line stamped with its time relative to that proc's start. SCROLL with the wheel,
   ↑↓, PgUp/PgDn or Home/End (e/c expand/collapse all; Ctrl-C aborts). On finish scsh wipes the

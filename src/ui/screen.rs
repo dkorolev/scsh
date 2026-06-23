@@ -37,7 +37,7 @@ use crossterm::{cursor, queue, style::Print, terminal};
 
 use super::clock::{clean_line, format_elapsed};
 use super::live::{Model, Row, Status, Sty};
-use super::signals::{isolate_child, register_child, terminate_children, unregister_child};
+use super::signals::{isolate_child, register_child, terminate_all, unregister_child};
 use super::TICK;
 
 /// True while raw mode / mouse reporting is active, so [`restore_terminal`] is idempotent and a
@@ -109,6 +109,12 @@ impl LiveUi {
     };
     self.starts.lock().unwrap().push(None);
     Proc { i, label, attended: self.attended, tail, model: Arc::clone(&self.model), starts: Arc::clone(&self.starts) }
+  }
+
+  /// Pin the board viewport to the top (manifest-first row order). Called once all procs are
+  /// declared so [0] lines up with the first skill row.
+  pub fn pin_board_to_top(&self) {
+    self.model.lock().unwrap().scroll_to_top();
   }
 
   /// End the run: stop the render loop, then (when we ran the board) wipe the live region and
@@ -435,7 +441,7 @@ fn handle_event(ev: Event, model: &Arc<Mutex<Model>>, last_rows: &[Row], board_t
         KeyCode::Char('c') if ctrl => {
           // Raw mode swallows SIGINT, so Ctrl-C arrives as a key: restore, kill children, exit.
           restore_terminal();
-          terminate_children();
+          terminate_all();
           std::process::exit(130);
         }
         KeyCode::Up => model.lock().unwrap().scroll_by(-1, width, page),
@@ -444,12 +450,16 @@ fn handle_event(ev: Event, model: &Arc<Mutex<Model>>, last_rows: &[Row], board_t
         KeyCode::PageDown => model.lock().unwrap().scroll_by(page as isize, width, page),
         KeyCode::Home => model.lock().unwrap().scroll_to_top(),
         KeyCode::End => model.lock().unwrap().scroll_to_bottom(),
-        // Toggle a proc by its number (the [Ctrl+N] label on each row). With the
-        // keyboard-enhancement protocol on (see enter_tui), Ctrl+1..Ctrl+9 arrive here as the
-        // digit + Ctrl; the modifier is ignored, so a plain digit toggles it too.
-        KeyCode::Char(d) if d.is_ascii_digit() && d != '0' => {
-          let idx = (d as u8 - b'1') as usize;
-          model.lock().unwrap().toggle(idx);
+        // Toggle a proc by its shortcut label ([0]..[9], then [A]..[Z]).
+        // With keyboard-enhancement on, Ctrl+digit and Ctrl+letter arrive as the char + Ctrl;
+        // the modifier is ignored, so a plain digit or letter toggles too.
+        KeyCode::Char(d) if d.is_ascii_digit() || d.is_ascii_alphabetic() => {
+          if let Some(idx) = super::live::proc_index_from_key(d) {
+            let mut m = model.lock().unwrap();
+            if idx < m.procs.len() {
+              m.toggle(idx);
+            }
+          }
         }
         KeyCode::Char('e') => model.lock().unwrap().set_all_expanded(true),
         KeyCode::Char('c') => model.lock().unwrap().set_all_expanded(false),

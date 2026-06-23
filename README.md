@@ -228,9 +228,9 @@ On a terminal, `scsh run` shows an **interactive live board**: the image build a
 are **collapsible rows**, each a `▶`/`▼` triangle, a status glyph (spinner → `✓`/`✗`), the label,
 a smart elapsed clock, and the latest output line.
 
-- **Press `Ctrl+1` … `Ctrl+9`** — each row is labelled `[Ctrl+1]`, `[Ctrl+2]`, … on the left; press
-  a row's number to **expand/collapse** it. This is the reliable path when the mouse isn't forwarded:
-  scsh turns on the terminal's keyboard-enhancement protocol so `Ctrl+1`…`Ctrl+9` all work (on a
+- **Press `0` … `9`, then `A` … `Z`** — image builds appear first, then skill rows in manifest order; each labelled on the left (`[0]`, `[1]`, …). Press
+  the row's shortcut to **expand/collapse** it. This is the reliable path when the mouse isn't forwarded:
+  scsh turns on the terminal's keyboard-enhancement protocol so Ctrl+digit works too (on a
   terminal without it, the plain digit toggles instead). You can also **click the row** if your
   terminal forwards the mouse.
 - Expanding shows that process's full output beneath it, **every line stamped with its time relative

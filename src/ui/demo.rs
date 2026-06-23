@@ -49,7 +49,7 @@ fn frames_demo() -> i32 {
   m.set_status(mul, Status::Fail);
   m.set_detail(mul, Some("X is required".into()));
 
-  println!("=== FRAME 1 — collapsed (one row per proc; press Ctrl+1/Ctrl+2/… — or click — to open) ===");
+  println!("=== FRAME 1 — collapsed (one row per proc; press 0/1/… — or click — to open) ===");
   print_rows(&m.layout(width, 0));
 
   println!();

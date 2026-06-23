@@ -221,6 +221,28 @@ impl Model {
   }
 }
 
+/// Keyboard shortcut shown on proc row `i`: `[0]`..`[9]`, then `[A]`..`[Z]`.
+pub fn shortcut_label(proc_index: usize) -> String {
+  if proc_index <= 9 {
+    format!("[{}] ", proc_index)
+  } else if proc_index <= 35 {
+    format!("[{}] ", char::from(b'A' + (proc_index - 10) as u8))
+  } else {
+    String::new()
+  }
+}
+
+/// Map a shortcut key to a proc index (`0`→0, …, `9`→9, `A`→10, …, `Z`→35).
+pub fn proc_index_from_key(c: char) -> Option<usize> {
+  if c.is_ascii_digit() {
+    Some((c as u8 - b'0') as usize)
+  } else if c.is_ascii_alphabetic() {
+    Some(10 + (c.to_ascii_uppercase() as u8 - b'A') as usize)
+  } else {
+    None
+  }
+}
+
 /// The status glyph (and its colour) for a proc: an animated spinner while running, else ✓/✗/·.
 fn glyph(status: Status, frame: u64) -> Seg {
   match status {
@@ -235,9 +257,9 @@ fn glyph(status: Status, frame: u64) -> Seg {
 /// spinner glyph at `frame`. Full-width; [`fit_row`] clips it to the terminal in [`Model::layout`].
 fn header_row_framed(i: usize, p: &Proc, frame: u64) -> Row {
   let triangle = if p.expanded { "▼ " } else { "▶ " };
-  // A keyboard-shortcut hint: press Ctrl+<n> (or just the digit) to toggle this row. Only the
-  // first nine rows get a single-key shortcut; the rest are still clickable.
-  let key = if i < 9 { format!("[Ctrl+{}] ", i + 1) } else { String::new() };
+  // A keyboard-shortcut hint: press the labelled digit or letter to toggle this row.
+  // Rows 0–9 show [0]..[9]; rows 10–35 show [A]..[Z]. Rows beyond that are still clickable.
+  let key = shortcut_label(i);
   let mut segs = vec![
     Seg::new(triangle, Sty::Dim),
     Seg::new(key, Sty::Dim),
@@ -338,7 +360,7 @@ mod tests {
     assert_eq!(rows[0].proc, Some(0));
     assert_eq!(rows[1].proc, Some(1));
     // The collapsed header carries the triangle, glyph, label and clock.
-    assert!(rows[0].plain().starts_with("▶ [Ctrl+1] "), "collapsed triangle + shortcut: {:?}", rows[0].plain());
+    assert!(rows[0].plain().starts_with("▶ [0] "), "collapsed triangle + shortcut: {:?}", rows[0].plain());
     assert!(rows[0].plain().contains("build"));
     assert!(rows[0].plain().contains("4s"));
   }
@@ -350,7 +372,7 @@ mod tests {
     let rows = m.layout(80, 0);
     // header + 2 output lines + the second proc's header.
     assert_eq!(rows.len(), 4);
-    assert!(rows[0].plain().starts_with("▼ [Ctrl+1] "), "expanded triangle + shortcut");
+    assert!(rows[0].plain().starts_with("▼ [0] "), "expanded triangle + shortcut");
     assert_eq!(rows[1].proc, None, "output line is not a click target");
     assert!(rows[1].plain().contains("+0.5s") && rows[1].plain().contains("STEP 1/3"), "{:?}", rows[1].plain());
     assert!(rows[2].plain().contains("+3s") && rows[2].plain().contains("done"), "{:?}", rows[2].plain());
@@ -369,7 +391,7 @@ mod tests {
   #[test]
   fn running_glyph_animates_with_the_frame() {
     let m = demo_model();
-    // segs: [0] = triangle, [1] = the [Ctrl+N] shortcut, [2] = the animated status glyph.
+    // segs: [0] = triangle, [1] = the [N] shortcut, [2] = the animated status glyph.
     let g0 = m.layout(80, 0)[1].segs[2].text.clone();
     let g1 = m.layout(80, 1)[1].segs[2].text.clone();
     assert_ne!(g0, g1, "the running spinner glyph should advance with the frame");
@@ -442,6 +464,18 @@ mod tests {
     assert_eq!(m.view(80, 5, 0).1, 0);
     m.scroll_to_bottom();
     assert_eq!(m.view(80, 5, 0).1, m.total_rows(80) - 5);
+  }
+
+  #[test]
+  fn shortcut_labels_cover_many_procs() {
+    assert_eq!(shortcut_label(0), "[0] ");
+    assert_eq!(shortcut_label(9), "[9] ");
+    assert_eq!(shortcut_label(10), "[A] ");
+    assert_eq!(shortcut_label(15), "[F] ");
+    assert_eq!(proc_index_from_key('0'), Some(0));
+    assert_eq!(proc_index_from_key('5'), Some(5));
+    assert_eq!(proc_index_from_key('a'), Some(10));
+    assert_eq!(proc_index_from_key('F'), Some(15));
   }
 
   #[test]
