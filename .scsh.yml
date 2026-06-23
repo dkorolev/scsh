@@ -10,9 +10,9 @@ skills:
       opencode-gpt-5.5:
         harness: opencode
         model: openai/gpt-5.5
-      claude-opus-4-6:
+      claude-opus-4-8:
         harness: claude
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       opencode-glm-5.2:
         harness: opencode
         model: nebius-glm/zai-org/GLM-5.2
@@ -24,9 +24,9 @@ skills:
       opencode-gpt-5.5:
         harness: opencode
         model: openai/gpt-5.5
-      claude-opus-4-6:
+      claude-opus-4-8:
         harness: claude
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       opencode-glm-5.2:
         harness: opencode
         model: nebius-glm/zai-org/GLM-5.2
@@ -38,9 +38,9 @@ skills:
       opencode-gpt-5.5:
         harness: opencode
         model: openai/gpt-5.5
-      claude-opus-4-6:
+      claude-opus-4-8:
         harness: claude
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       opencode-glm-5.2:
         harness: opencode
         model: nebius-glm/zai-org/GLM-5.2
@@ -52,9 +52,9 @@ skills:
       opencode-gpt-5.5:
         harness: opencode
         model: openai/gpt-5.5
-      claude-opus-4-6:
+      claude-opus-4-8:
         harness: claude
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       opencode-glm-5.2:
         harness: opencode
         model: nebius-glm/zai-org/GLM-5.2
@@ -66,9 +66,9 @@ skills:
       opencode-gpt-5.5:
         harness: opencode
         model: openai/gpt-5.5
-      claude-opus-4-6:
+      claude-opus-4-8:
         harness: claude
-        model: claude-opus-4-6
+        model: claude-opus-4-8
       opencode-glm-5.2:
         harness: opencode
         model: nebius-glm/zai-org/GLM-5.2
