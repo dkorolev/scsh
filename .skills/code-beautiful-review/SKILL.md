@@ -41,6 +41,8 @@ The contract:
 
 ## 2. Pin the review base — the freshest upstream main, or an explicit branch
 
+**Host-only git network; push IN, pull OUT.** Every `git fetch`, `git pull`, and `git clone` in this skill runs **on the host** while you prepare the repo (steps 1–2). scsh then **pushes** a complete local clone into each container (bind-mount). Reviewers inside containers MUST NOT fetch or pull — they use only refs already in that clone. After containers exit, scsh **pulls OUT** on the host: result JSON always; commits only for `commits: true` skills that actually committed (reviewers do neither). Your job is to bake the correct `origin/main` into what scsh clones *before* `scsh run`.
+
 Each reviewer diffs `origin/main..HEAD` inside its own clone, and scsh builds that clone from *this* repo — so whatever this repo's local `main` points at is the baseline the whole fleet reviews against. If local `main` lags or has diverged from the real remote's main, every reviewer diffs an oversized, wrong range: the run is slow and expensive and its findings are noise. This is the failure to prevent. So fix the base deliberately before running anything. There are two modes — pick by whether the user named a branch.
 
 - **Default — the freshest real upstream main.** Find the upstream remote exactly as `fast-beautiful-forward` does: prefer a remote named `upstream`, else `origin`; its URL MUST be a real remote (`https://`, `git@`, `ssh://`, or `git://`) — a local filesystem path or a `file://` URL does **not** qualify and must be rejected. If none qualifies, stop and ask for the repository's `org/name` (offer to add it via `gh` if `gh auth status` succeeds), then continue. Call it `<remote>`. Then `git fetch <remote>` (a fetch is a read — do it freely) and resolve its default branch — usually `main`, falling back to `master` — via `git rev-parse --abbrev-ref <remote>/HEAD` or `git remote show <remote>`. That freshest tip, `<remote>/<main>`, is the base.
@@ -55,6 +57,8 @@ Each reviewer diffs `origin/main..HEAD` inside its own clone, and scsh builds th
 
 - Run in the directory you settled on in step 2 — this repo if local `main` already was the base, otherwise the prepared clone. Everything below happens there.
 
+- **Containers never fetch.** `scsh run code-review` bind-mounts a host-prepared clone into each container. The reviewer agents must not `git fetch`, `git pull`, or `git clone` — if a reviewer tries, that violates the skill contract. Missing refs are a host prep bug (step 2), not something to fix inside the container.
+
 - Record the starting point first: `git rev-parse HEAD` (so you can spot anything the run adds), and note the wall-clock start.
 
 - Run the reviewers and wait for completion, keeping the per-skill run dirs so you can time each one, and teeing the output to your own scratch dir: `SCSH_KEEP_RUNS=1 scsh run code-review 2>&1 | tee tmp/code-beautiful-review-<YYYYMMDD>-<HHMMSS>-<rand>/run.out`. scsh runs every configured invocation in parallel (up to fifteen), each in its own ephemeral container on a clean clone of the branch, diffed against the base you pinned in step 2. Unavailable harnesses or models print `⚠ skipping …` and are not run.
@@ -65,7 +69,7 @@ Each reviewer diffs `origin/main..HEAD` inside its own clone, and scsh builds th
 
 ## 4. Collect the output
 
-- The authoritative output is each reviewer's **result JSON**, which scsh copies back into the run directory on success (any prior file moved aside to `*.bak.<utc>`). Get the full invocation list and each declared `result` path from `scsh list` (or `.scsh.yml`) for the `code-review` profile — by convention `tmp/code-review-<invocation>.json` (for example `tmp/code-review-conventions-reviewer-opencode-gpt.json`, `tmp/code-review-sanity-reviewer-claude-opus.json`, …), relative to wherever the fleet ran (this repo, or the prepared clone). Each file has the shape `{ result: { grade, issues_found }, issues: [ { commit, file, line, description, suggestion } ] }`, where `grade` is one of `excellent | good | average | poor` and `issues_found` equals `issues.length`.
+- The authoritative output is each reviewer's **result JSON**, which scsh copies back into the run directory on success (any prior file moved aside to `*.bak.<utc>`). Get the full invocation list and each declared `result` path from `scsh list` (or `.scsh.yml`) for the `code-review` profile — by convention `tmp/code-review-<invocation>.json` (for example `tmp/code-review-conventions-reviewer-opencode-gpt-5.5.json`, `tmp/code-review-sanity-reviewer-claude-opus-4-8.json`, …), relative to wherever the fleet ran (this repo, or the prepared clone). Each file has the shape `{ result: { grade, issues_found }, issues: [ { commit, file, line, description, suggestion } ] }`, where `grade` is one of `excellent | good | average | poor` and `issues_found` equals `issues.length`.
 
 - If the reviewers are configured for commit delivery (`commits: true` in `.scsh.yml`), the same findings also land as new commits authored by the dedicated review account — but only on the branch in whichever directory the fleet ran. When the fleet ran in place that is your branch (`git log <starting-HEAD>..HEAD` by that author); when it ran in the prepared clone those commits stay in the throwaway clone and never reach your branch, so rely on the JSON. Treat the JSON as the source of truth either way.
 
@@ -77,9 +81,9 @@ Print a table with exactly these columns, one row per skill invocation in the `c
 
 | Reviewer | Model route | Duration | Rating | Issues |
 
-- **Reviewer** — the base reviewer (`conventions-reviewer`, `justification-reviewer`, …), parsed from the invocation name before the `-opencode-gpt`, `-claude-opus`, or `-opencode-glm-5.2` suffix.
+- **Reviewer** — the base reviewer (`conventions-reviewer`, `justification-reviewer`, …), parsed from the invocation name before the `-opencode-gpt-5.5`, `-claude-opus-4-8`, or `-opencode-glm-5.2` suffix.
 
-- **Model route** — `GPT` (`…-opencode-gpt`), `Opus` (`…-claude-opus`), or `GLM-5.2` (`…-opencode-glm-5.2`).
+- **Model route** — `GPT-5.5` (`…-opencode-gpt-5.5`), `Opus-4.8` (`…-claude-opus-4-8`), or `GLM-5.2` (`…-opencode-glm-5.2`).
 
 - **Duration** — its wall-clock from step 4.
 

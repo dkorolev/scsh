@@ -321,6 +321,10 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 ## Safety & guarantees
 
 - **Your working tree is never touched.** Containers only ever see a throwaway clone
+  bind-mounted from the host (**push IN**). Skills must not `git fetch`, `git pull`, or
+  `git clone` inside the container. After each skill, scsh **pulls OUT** on the host: the
+  `result` file always; new commits only when `commits: true` and the skill committed
+  (local fetch from the run clone — not GitHub). scsh never pushes to any remote.
   in the system temp dir; the only thing written back is each skill's `result`, into
   the gitignored `tmp/` (existing files backed up, never clobbered).
 - **A real run refuses unless the repo is clean and `/tmp` is gitignored**, so scratch
