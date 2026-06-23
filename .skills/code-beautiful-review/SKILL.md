@@ -15,6 +15,11 @@ The contract:
 
 - **The `code-review` profile exists and is non-empty:** run `scsh check-profile code-review` (exit 0 means the profile is present with at least one skill; this is runtime-free). If it is non-zero, tell the user to install the reviewers with `scsh installskills https://github.com/dimacurrentai/code-review-skills`, then stop.
 
+- **This repo's `origin` is GitHub and local `main` is up to date.** These checks apply to the repository the user is in when they invoke this skill (not to a prepared clone built in step 2). The reviewer fleet diffs `origin/main..HEAD`; step 2 may repoint `main` in a scratch clone, but this checkout must already be a normal GitHub project with a fetched, current `main`:
+  - **`origin` points at GitHub.** `git remote get-url origin` must be `https://github.com/…`, `git@github.com:…`, or `ssh://git@github.com/…`. Local filesystem paths and `file://` URLs fail — stop and tell the user to fix `origin` or re-clone from GitHub.
+  - **Local `main` exists.** `git show-ref --verify --quiet refs/heads/main` must succeed. If missing — stop; tell the user to fetch/create `main` from the remote (for example `git fetch origin main:main`).
+  - **`main` matches `origin/main`.** Run `git fetch origin` (read-only), then `git rev-parse main` must equal `git rev-parse origin/main`. If they differ — stop and tell the user to update local `main` (`git checkout main && git pull --ff-only origin main`, then return to their feature branch) before running the review.
+
 - **At least one review model route is available.** Before spending time on base-pinning or a fleet run, probe the three routes the profile is built for (same idea as `DEMO.md` step 1 in scsh, but for review models):
 
   ```sh
