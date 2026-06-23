@@ -140,8 +140,13 @@ pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
 /// the host login rather than a built-in model route.
 pub const OPENCODE_AUTH_MOUNT: &str = "/home/agent/repo/tmp/.xdg-data/opencode/auth.json";
 
+/// Run-dir-relative tree where scsh copies forwarded opencode auth/config before a run.
+pub const OPENCODE_FORWARD_REL: &str = "tmp/.opencode-forward";
+
 /// In-container paths for forwarded opencode config (`$XDG_CONFIG_HOME/opencode/` on the host).
 /// Custom providers (e.g. Nebius GLM) are declared here; auth.json alone is not enough.
+/// scsh copies these from the host into each run clone (parallel runs cannot safely share one
+/// host bind-mount on Apple Containers).
 pub const OPENCODE_CONFIG_JSON_MOUNT: &str = "/home/agent/.config/opencode/opencode.json";
 pub const OPENCODE_CONFIG_JSONC_MOUNT: &str = "/home/agent/.config/opencode/opencode.jsonc";
 
@@ -401,7 +406,7 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
   }
 }
 
-/// Host opencode paths for `scsh list --verbose`.
+/// Host opencode paths for `scsh list --verbose` (real runs copy into the run clone first).
 pub fn opencode_host_mounts() -> Vec<(String, String)> {
   opencode_host_mounts_from(
     std::env::var_os("XDG_DATA_HOME").as_deref(),
@@ -428,13 +433,22 @@ pub fn opencode_host_mounts_from(
   out
 }
 
-/// Bind-mount the host opencode `auth.json` into the container when present on the host.
-pub fn opencode_auth_mounts(host_auth: &Path) -> Vec<(String, String)> {
-  if host_auth.is_file() {
-    vec![(host_auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string())]
-  } else {
-    Vec::new()
+/// Bind-mount opencode auth/config copied into a run clone.
+pub fn opencode_forward_mounts(forward_root: &Path) -> Vec<(String, String)> {
+  let mut out = Vec::new();
+  let auth = forward_root.join("xdg/opencode/auth.json");
+  if auth.is_file() {
+    out.push((auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string()));
   }
+  let json = forward_root.join("config/opencode/opencode.json");
+  if json.is_file() {
+    out.push((json.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSON_MOUNT.to_string()));
+  }
+  let jsonc = forward_root.join("config/opencode/opencode.jsonc");
+  if jsonc.is_file() {
+    out.push((jsonc.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSONC_MOUNT.to_string()));
+  }
+  out
 }
 
 /// Volume mounts for forwarded Claude auth copied into `auth_root` (under a run dir).
@@ -961,15 +975,18 @@ mod tests {
   }
 
   #[test]
-  fn opencode_auth_mounts_only_when_host_file_exists() {
-    assert!(opencode_auth_mounts(Path::new("/no/such/auth.json")).is_empty());
-    let tmp = std::env::temp_dir().join(format!("scsh-opencode-auth-{}", std::process::id()));
-    std::fs::write(&tmp, "{}").unwrap();
-    let mounts = opencode_auth_mounts(&tmp);
-    assert_eq!(mounts.len(), 1);
-    assert_eq!(mounts[0].0, tmp.to_string_lossy());
+  fn opencode_forward_mounts_maps_copied_tree() {
+    let base = std::env::temp_dir().join(format!("scsh-opencode-forward-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(base.join("xdg/opencode")).unwrap();
+    std::fs::create_dir_all(base.join("config/opencode")).unwrap();
+    std::fs::write(base.join("xdg/opencode/auth.json"), "{}").unwrap();
+    std::fs::write(base.join("config/opencode/opencode.json"), "{}").unwrap();
+    let mounts = opencode_forward_mounts(&base);
+    assert_eq!(mounts.len(), 2);
     assert_eq!(mounts[0].1, OPENCODE_AUTH_MOUNT);
-    let _ = std::fs::remove_file(&tmp);
+    assert_eq!(mounts[1].1, OPENCODE_CONFIG_JSON_MOUNT);
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   #[test]

@@ -11,7 +11,6 @@ mod runtime;
 mod sha256;
 mod ui;
 
-use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -821,7 +820,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
   let needs_opencode = skills.iter().any(|s| s.harness == config::Harness::Opencode);
   let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
   if needs_opencode && opencode_auth_enabled() && runtime::opencode_auth_ready() {
-    ok("opencode creds found (bind-mounted into opencode skills)");
+    ok("opencode creds found (auth.json and opencode config bind-mounted when present)");
   }
   if needs_claude && runtime::claude_container_auth_ready() {
     let via = if runtime::claude_oauth_token().is_some() {
@@ -1051,14 +1050,14 @@ fn run_one_skill(
     let _ = std::fs::create_dir_all(parent);
   }
   let log = log_path.to_string_lossy().into_owned();
-  // Bind-mount host harness credentials into the container when present.
-  let opencode_auth = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
-    host_opencode_auth()
+  // Copy host opencode auth/config into the run clone and bind-mount from there.
+  let opencode_forward = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
+    forward_opencode(&run_dir)
   } else {
     None
   };
-  if opencode_auth.is_some() {
-    prepare_opencode_auth_mount_dir(&run_dir);
+  if opencode_forward.is_some() {
+    prepare_opencode_mount_dirs(&run_dir);
   }
   let claude_auth = if skill.harness == config::Harness::Claude && claude_auth_enabled() {
     forward_claude_auth(&run_dir)
@@ -1069,8 +1068,8 @@ fn run_one_skill(
   let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
   let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
     runtime::claude_auth_mounts(auth_root)
-  } else if let Some(ref host) = opencode_auth {
-    runtime::opencode_auth_mounts(host)
+  } else if let Some(ref forward) = opencode_forward {
+    runtime::opencode_forward_mounts(forward)
   } else {
     runtime::harness_volumes(skill.harness)
   };
@@ -1085,6 +1084,9 @@ fn run_one_skill(
   let timeout = skill.timeout.map(Duration::from_secs);
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
   if let Some(p) = &claude_auth {
+    let _ = std::fs::remove_dir_all(p);
+  }
+  if let Some(p) = &opencode_forward {
     let _ = std::fs::remove_dir_all(p);
   }
   match result {
@@ -1288,14 +1290,14 @@ fn kill_container(runtime: &str, name: &str) {
 }
 
 // ---------------------------------------------------------------------------
-// opencode credentials
+// opencode credentials and config
 //
 // opencode in the container needs the host's login to talk to a model — especially
 // custom/third-party providers configured in opencode (e.g. Nebius GLM). The image
-// sets `XDG_DATA_HOME` to `repo/tmp/.xdg-data`, so scsh bind-mounts the host's
-// `~/.local/share/opencode/auth.json` (or `$XDG_DATA_HOME/opencode/auth.json`) into
-// that path when the file exists, after ensuring the parent dir exists in the run clone.
-// Opt out with `SCSH_NO_OPENCODE_AUTH=1`.
+// sets `XDG_DATA_HOME` to `repo/tmp/.xdg-data`. scsh copies the host's auth.json and opencode
+// config (`~/.config/opencode/opencode.json`, optional `opencode.jsonc`) into each run clone
+// under `tmp/.opencode-forward/` and bind-mounts from there — parallel runs cannot safely share
+// one host bind-mount on Apple Containers. Opt out with `SCSH_NO_OPENCODE_AUTH=1`.
 //
 // Claude Code reads OAuth from `CLAUDE_CODE_OAUTH_TOKEN` (preferred — from `claude setup-token`)
 // or `~/.claude/.credentials.json` (plus optional `~/.claude.json` / `~/.claude` config).
@@ -1322,22 +1324,32 @@ fn keep_run_dirs() -> bool {
   matches!(std::env::var("SCSH_KEEP_RUNS").ok().as_deref(), Some("1") | Some("true"))
 }
 
-/// The opencode `auth.json` path for the given `XDG_DATA_HOME` / `HOME` (pure, so
-/// it can be unit-tested). XDG wins when set and non-empty, else `HOME/.local/share`.
-fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-  runtime::opencode_auth_in(xdg_data_home, home)
+/// Copy the host's opencode auth and config into `run_dir` for the upcoming run.
+fn forward_opencode(run_dir: &Path) -> Option<PathBuf> {
+  let home = std::env::var_os("HOME").map(PathBuf::from)?;
+  let xdg_data = std::env::var_os("XDG_DATA_HOME");
+  let xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+  let auth_src = runtime::opencode_auth_in(xdg_data.as_deref(), Some(home.as_os_str())).filter(|p| p.is_file())?;
+
+  let root = run_dir.join(runtime::OPENCODE_FORWARD_REL);
+  let xdg_dir = root.join("xdg/opencode");
+  let cfg_dir = root.join("config/opencode");
+  std::fs::create_dir_all(&xdg_dir).ok()?;
+  std::fs::create_dir_all(&cfg_dir).ok()?;
+  std::fs::copy(&auth_src, xdg_dir.join("auth.json")).ok()?;
+
+  if let Some(cfg) = runtime::opencode_config_json_in(xdg_config.as_deref(), Some(home.as_os_str())) {
+    std::fs::copy(&cfg, cfg_dir.join("opencode.json")).ok()?;
+  }
+  if let Some(cfg) = runtime::opencode_config_jsonc_in(xdg_config.as_deref(), Some(home.as_os_str())) {
+    std::fs::copy(&cfg, cfg_dir.join("opencode.jsonc")).ok()?;
+  }
+  Some(root)
 }
 
-/// The host's opencode `auth.json`, if it exists.
-fn host_opencode_auth() -> Option<PathBuf> {
-  let path = opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())?;
-  path.is_file().then_some(path)
-}
-
-/// Ensure the run clone has the opencode data-dir parent so a file bind-mount target exists.
-fn prepare_opencode_auth_mount_dir(run_dir: &Path) {
-  let dir = run_dir.join(runtime::AGENT_XDG_DATA_REL).join("opencode");
-  let _ = std::fs::create_dir_all(&dir);
+/// Ensure mount-point parents exist in the run clone for forwarded opencode files.
+fn prepare_opencode_mount_dirs(run_dir: &Path) {
+  let _ = std::fs::create_dir_all(run_dir.join(runtime::AGENT_XDG_DATA_REL).join("opencode"));
 }
 
 /// Copy the host's Claude config into `run_dir` for the upcoming run, returning the auth root
@@ -2588,8 +2600,10 @@ fn print_help_internals() {
   <name>.bak.YYYYMMDD-HHMMSS-utc. All skills run regardless, so one run reports
   every skill's outcome.
 
-  Auth: opencode skills bind-mount the host ~/.local/share/opencode/auth.json when present
-  (needed for custom opencode providers such as Nebius GLM; opt out: SCSH_NO_OPENCODE_AUTH=1).
+  Auth: opencode skills copy the host ~/.local/share/opencode/auth.json and
+  ~/.config/opencode/opencode.json (plus optional opencode.jsonc) into each run clone,
+  then bind-mount from there (needed for custom providers such as Nebius GLM;
+  opt out: SCSH_NO_OPENCODE_AUTH=1).
   Claude skills use host CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and/or
   ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container
   (opt out: SCSH_NO_CLAUDE_AUTH=1).
@@ -2702,17 +2716,17 @@ mod tests {
   fn opencode_auth_path_prefers_xdg_then_home() {
     let xdg = OsString::from("/data");
     let home = OsString::from("/home/u");
-    assert_eq!(opencode_auth_in(Some(&xdg), Some(&home)), Some(PathBuf::from("/data/opencode/auth.json")));
+    assert_eq!(runtime::opencode_auth_in(Some(&xdg), Some(&home)), Some(PathBuf::from("/data/opencode/auth.json")));
     // No XDG → HOME/.local/share.
-    assert_eq!(opencode_auth_in(None, Some(&home)), Some(PathBuf::from("/home/u/.local/share/opencode/auth.json")));
+    assert_eq!(runtime::opencode_auth_in(None, Some(&home)), Some(PathBuf::from("/home/u/.local/share/opencode/auth.json")));
     // Empty XDG falls back to HOME too.
     let empty = OsString::from("");
     assert_eq!(
-      opencode_auth_in(Some(&empty), Some(&home)),
+      runtime::opencode_auth_in(Some(&empty), Some(&home)),
       Some(PathBuf::from("/home/u/.local/share/opencode/auth.json"))
     );
     // Nothing to go on → None.
-    assert_eq!(opencode_auth_in(None, None), None);
+    assert_eq!(runtime::opencode_auth_in(None, None), None);
   }
 
   #[test]
@@ -2780,10 +2794,10 @@ mod tests {
   }
 
   #[test]
-  fn prepare_opencode_auth_mount_dir_creates_xdg_parent() {
+  fn prepare_opencode_mount_dirs_creates_xdg_parent() {
     let run = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
     std::fs::create_dir_all(&run).unwrap();
-    prepare_opencode_auth_mount_dir(&run);
+    prepare_opencode_mount_dirs(&run);
     assert!(run.join("tmp/.xdg-data/opencode").is_dir());
     let _ = std::fs::remove_dir_all(&run);
   }
