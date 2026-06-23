@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
-"""The `multiply` skill's worker: product of X and Y (both required), write the result file.
-The SKILL.md just runs this script. scsh already refuses the skill if X or Y is unset, but
-the script checks too so it is correct when run on its own."""
+"""The multiply skill worker: product of X and Y (both required), write JSON under tmp/."""
 import json
 import os
 import pathlib
@@ -28,5 +26,8 @@ y = integer("Y")
 line = f"{x} * {y} = {x * y}"
 
 (ROOT / "tmp").mkdir(exist_ok=True)
-(ROOT / "tmp" / "multiply_result.json").write_text(json.dumps({"result": line}))
+result_rel = os.environ.get("SCSH_RESULT", "tmp/multiply_result.json")
+result_path = ROOT / result_rel
+result_path.parent.mkdir(parents=True, exist_ok=True)
+result_path.write_text(json.dumps({"result": line}))
 print(line)
