@@ -54,11 +54,9 @@ fn scsh(dir: &Path, args: &[&str]) -> Run {
   Run { code: output.status.code().unwrap_or(-1), out }
 }
 
-/// The version scsh displays: the crate version with a trailing `.0` patch dropped
-/// (so `1.0.0` → `1.0`), mirroring `version_id` in the binary.
+/// The version scsh displays (crate semver from `CARGO_PKG_VERSION`).
 fn shown_version() -> &'static str {
-  let v = env!("CARGO_PKG_VERSION");
-  v.strip_suffix(".0").unwrap_or(v)
+  env!("CARGO_PKG_VERSION")
 }
 
 #[test]
@@ -153,10 +151,14 @@ fn subcommands_and_flag_aliases_agree() {
 #[test]
 fn version_reports_optional_git_describe() {
   // `scsh version` is `scsh <semver>` optionally followed by ` (<7 hex>[-dirty])` from
-  // the build's git stamp. We can't assert the exact hash, but we can check the shape.
+  // the build's git stamp. When this test crate was built from git, the hash must appear.
   let d = unique_dir("ver");
   let line = scsh(&d, &["version"]).out.lines().next().unwrap_or("").to_string();
   assert!(line.starts_with(&format!("scsh {}", shown_version())), "got: {line}");
+  let embedded = option_env!("SCSH_GIT_DESCRIBE").filter(|s| !s.is_empty());
+  if embedded.is_some() {
+    assert!(line.contains(" ("), "expected git commit in version line; got: {line}");
+  }
   if let Some(i) = line.find(" (") {
     let inner = line[i + 2..].trim_end_matches(')');
     let hex = inner.trim_end_matches("-dirty");
@@ -351,15 +353,15 @@ fn init_demo_then_list() {
   assert_eq!(init.code, 0, "got: {}", init.out);
   let cfg = std::fs::read_to_string(d.join(".scsh.yml")).expect(".scsh.yml written");
   // The v1.0 config is just the skills — no version/project/image boilerplate.
-  assert!(cfg.contains("skills:") && cfg.contains("add:") && cfg.contains("multiply:"), "got: {cfg}");
+  assert!(cfg.contains("skills:") && cfg.contains("add-opencode-gpt:") && cfg.contains("multiply-opencode-gpt:"), "got: {cfg}");
   assert!(!cfg.contains("version:") && !cfg.contains("project:") && !cfg.contains("image:"), "got: {cfg}");
 
   // `scsh list`: every skill grouped by profile — `add` under `default`, `multiply` under
   // its profile, each with its result file. No container internals (those need --verbose).
   let list = scsh(&d, &["list"]);
   assert_eq!(list.code, 0, "got: {}", list.out);
-  assert!(list.out.contains("add") && list.out.contains("tmp/add_result.json"), "got: {}", list.out);
-  assert!(list.out.contains("multiply") && list.out.contains("tmp/multiply_result.json"), "got: {}", list.out);
+  assert!(list.out.contains("add-opencode-gpt") && list.out.contains("tmp/add_opencode_gpt_result.json"), "got: {}", list.out);
+  assert!(list.out.contains("multiply-opencode-gpt") && list.out.contains("tmp/multiply_opencode_gpt_result.json"), "got: {}", list.out);
   assert!(!list.out.contains("FROM debian"), "internals must be hidden without --verbose; got: {}", list.out);
   assert!(!list.out.contains("git clone"), "internals must be hidden without --verbose; got: {}", list.out);
 
@@ -370,11 +372,11 @@ fn init_demo_then_list() {
   assert!(!v.out.contains("CMD ["), "image should bake no CMD; got: {}", v.out);
   assert!(v.out.contains("USER agent") && v.out.contains("AGENT_UID="), "got: {}", v.out);
   assert!(
-    v.out.contains("scsh:latest") && v.out.contains("git clone") && v.out.contains(":/home/agent"),
+    v.out.contains("scsh-opencode:latest") && v.out.contains("git clone") && v.out.contains(":/home/agent"),
     "got: {}",
     v.out
   );
-  assert!(v.out.contains("run skill add") && v.out.contains("-utc-run-add"), "got: {}", v.out);
+  assert!(v.out.contains("run skill add") && v.out.contains("-utc-run-add-opencode-gpt"), "got: {}", v.out);
 }
 
 #[test]
@@ -389,7 +391,7 @@ fn list_groups_skills_by_profile() {
   assert_eq!(list.code, 0, "got: {}", list.out);
   // Both skills appear with their result files, and the profile groups are shown.
   assert!(
-    list.out.contains("tmp/add_result.json") && list.out.contains("tmp/multiply_result.json"),
+    list.out.contains("tmp/add_opencode_gpt_result.json") && list.out.contains("tmp/multiply_opencode_gpt_result.json"),
     "got: {}",
     list.out
   );
@@ -412,11 +414,7 @@ fn list_shows_empty_default_profile() {
   // (a bare `scsh run` is a no-op) alongside the populated profiles, with counts.
   let d = unique_dir("emptydefault");
   git_init(&d);
-  std::fs::write(
-    d.join(".scsh.yml"),
-    "skills:\n  a:\n    harness: opencode\n    profile: x\n    result: tmp/a.json\n  b:\n    harness: opencode\n    profile: y\n    result: tmp/b.json\n",
-  )
-  .unwrap();
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/two-profile.scsh.yml")).unwrap();
   let r = scsh(&d, &["list"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("default (0)"), "got: {}", r.out);
@@ -435,8 +433,8 @@ fn list_json_is_machine_readable() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
   // The reserved `default` (add) and the declared `multiply`, each with its skill.
-  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add"] }"#), "got: {}", r.out);
-  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt", "add-claude-sonnet", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt", "multiply-claude-sonnet"] }"#), "got: {}", r.out);
   // --json is list-only (parse-time rejection, exit 2).
   let bad = scsh(&d, &["run", "--json"]);
   assert_eq!(bad.code, 2, "got: {}", bad.out);
@@ -468,8 +466,7 @@ fn check_profile_treats_an_empty_default_as_absent() {
   // the declared profile passes. `list --json` shows default with an empty skills array.
   let d = unique_dir("emptydefaultcheck");
   git_init(&d);
-  std::fs::write(d.join(".scsh.yml"), "skills:\n  a:\n    harness: opencode\n    profile: x\n    result: tmp/a.json\n")
-    .unwrap();
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/single-profile-a.scsh.yml")).unwrap();
   let r = scsh(&d, &["check-profile", "default"]);
   assert_eq!(r.code, 1, "got: {}", r.out);
   assert!(r.out.contains("has no skills"), "got: {}", r.out);
@@ -510,7 +507,7 @@ fn real_run_requires_tmp_gitignored() {
   // .gitignore deliberately omits /tmp.
   let d = unique_dir("notmp");
   git_init(&d);
-  std::fs::write(d.join(".scsh.yml"), "skills:\n  s:\n    harness: opencode\n    result: tmp/s.json\n").unwrap();
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/minimal-opencode.scsh.yml")).unwrap();
   git(&d, &["add", "-A"]);
   git(&d, &["commit", "-qm", "config"]);
   let r = scsh(&d, &["run"]);
@@ -672,4 +669,118 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
     "scroll window; got: {}",
     r.out
   );
+}
+
+fn claude_container_auth_ready() -> bool {
+  std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
+    .map(|s| !s.is_empty())
+    .unwrap_or(false)
+    || std::env::var_os("HOME")
+      .map(PathBuf::from)
+      .is_some_and(|home| home.join(".claude").join(".credentials.json").is_file())
+}
+
+fn claude_integration_ready() -> bool {
+  claude_container_auth_ready()
+}
+
+fn opencode_auth_ready() -> bool {
+  std::env::var_os("HOME")
+    .map(PathBuf::from)
+    .is_some_and(|home| {
+      let xdg = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share"));
+      xdg.join("opencode").join("auth.json").is_file()
+    })
+}
+
+#[test]
+fn run_skips_claude_skills_when_claude_unavailable() {
+  if claude_container_auth_ready() {
+    eprintln!("N/A: run_skips_claude_skills_when_claude_unavailable — claude credentials configured on this host");
+    return;
+  }
+  if !opencode_auth_ready() {
+    eprintln!("N/A: run_skips_claude_skills_when_claude_unavailable — need opencode auth on this host");
+    return;
+  }
+  let d = unique_dir("noclaude");
+  git_init(&d);
+  std::fs::create_dir_all(d.join(".skills/add/scripts")).unwrap();
+  std::fs::write(d.join(".skills/add/SKILL.md"), include_str!("../.skills/add/SKILL.md")).unwrap();
+  std::fs::write(d.join(".skills/add/scripts/add.py"), include_str!("../.skills/add/scripts/add.py")).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(d.join(".skills/add/scripts/add.py")).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(d.join(".skills/add/scripts/add.py"), perms).unwrap();
+  }
+  std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/two-route-demo.scsh.yml")).unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-m", "two-route demo"]);
+  let r = scsh(&d, &["run"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(
+    r.out.contains("skipping 'add-claude-sonnet'"),
+    "got: {}",
+    r.out
+  );
+  assert!(r.out.contains("add-opencode-gpt") && r.out.contains("2 + 3 = 5"), "got: {}", r.out);
+}
+
+#[test]
+fn run_fails_when_every_selected_harness_unavailable() {
+  if claude_container_auth_ready() {
+    eprintln!("N/A: run_fails_when_every_selected_harness_unavailable — claude credentials configured on this host");
+    return;
+  }
+  let d = unique_dir("noharness");
+  git_init(&d);
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/claude-only.scsh.yml")).unwrap();
+  std::fs::create_dir_all(d.join(".skills/add")).unwrap();
+  std::fs::write(d.join(".skills/add/SKILL.md"), "x").unwrap();
+  std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-m", "claude only"]);
+  let r = scsh(&d, &["run"]);
+  assert_ne!(r.code, 0, "got: {}", r.out);
+  assert!(
+    r.out.contains("no skills to run") || r.out.contains("every selected harness is unavailable"),
+    "got: {}",
+    r.out
+  );
+}
+
+#[test]
+fn claude_add_skill_runs_when_configured() {
+  if !claude_integration_ready() {
+    eprintln!(
+      "N/A: claude_add_skill_runs_when_configured — need CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json for container runs"
+    );
+    return;
+  }
+  let d = unique_dir("clauderun");
+  git_init(&d);
+  std::fs::create_dir_all(d.join(".skills/add/scripts")).unwrap();
+  std::fs::write(d.join(".skills/add/SKILL.md"), include_str!("../.skills/add/SKILL.md")).unwrap();
+  std::fs::write(d.join(".skills/add/scripts/add.py"), include_str!("../.skills/add/scripts/add.py")).unwrap();
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let mut perms = std::fs::metadata(d.join(".skills/add/scripts/add.py")).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(d.join(".skills/add/scripts/add.py"), perms).unwrap();
+  }
+  std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+  std::fs::write(d.join(".scsh.yml"), include_str!("fixtures/claude-add.scsh.yml")).unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-m", "claude-only demo"]);
+  let r = scsh(&d, &["run"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(d.join("tmp/add_claude_sonnet_result.json").is_file(), "claude skill should write result");
+  let body = std::fs::read_to_string(d.join("tmp/add_claude_sonnet_result.json")).unwrap();
+  assert!(body.contains("2 + 3 = 5") || body.contains("result"), "got: {body}");
 }
