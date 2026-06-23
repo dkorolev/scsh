@@ -2766,6 +2766,20 @@ mod tests {
   }
 
   #[test]
+  fn opencode_config_path_prefers_xdg_then_home() {
+    let xdg = OsString::from("/cfg");
+    let home = OsString::from("/home/u");
+    assert_eq!(
+      runtime::opencode_config_dir(Some(&xdg), Some(&home)),
+      Some(PathBuf::from("/cfg/opencode"))
+    );
+    assert_eq!(
+      runtime::opencode_config_dir(None, Some(&home)),
+      Some(PathBuf::from("/home/u/.config/opencode"))
+    );
+  }
+
+  #[test]
   fn prepare_opencode_auth_mount_dir_creates_xdg_parent() {
     let run = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
     std::fs::create_dir_all(&run).unwrap();
