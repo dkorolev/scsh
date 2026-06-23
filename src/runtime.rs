@@ -109,12 +109,39 @@ fn is_executable(p: &Path) -> bool {
   std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
 }
 
-/// The tag of the generic image scsh builds. It is the same for every project: the
-/// image is fully generic (the base, plus opencode + git + the non-root agent user),
-/// so one cached image is reused across runs and repos.
-pub fn image_tag() -> String {
-  "scsh:latest".to_string()
+/// The tag of the harness-specific image scsh builds.
+pub fn image_tag(harness: Harness) -> String {
+  match harness {
+    Harness::Opencode => "scsh-opencode:latest".to_string(),
+    Harness::Claude => "scsh-claude:latest".to_string(),
+  }
 }
+
+/// The Dockerfile build `--target` for a harness image.
+pub fn image_target(harness: Harness) -> &'static str {
+  match harness {
+    Harness::Opencode => "scsh-opencode",
+    Harness::Claude => "scsh-claude",
+  }
+}
+
+/// In-container path where the host's Claude Code config dir is bind-mounted.
+pub const CLAUDE_CONFIG_MOUNT: &str = "/home/agent/.claude";
+
+/// In-container path for the forwarded `~/.claude.json`.
+pub const CLAUDE_JSON_MOUNT: &str = "/home/agent/.claude.json";
+
+/// Run-dir-relative path where scsh copies forwarded Claude auth before a run (gitignored `tmp/`).
+pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
+
+/// In-container path where opencode reads `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` in the
+/// image). scsh bind-mounts the host's `~/.local/share/opencode/auth.json` here when that file
+/// exists — required for third-party opencode providers (e.g. Nebius GLM) that authenticate via
+/// the host login rather than a built-in model route.
+pub const OPENCODE_AUTH_MOUNT: &str = "/home/agent/repo/tmp/.xdg-data/opencode/auth.json";
+
+/// Host env var for long-lived Claude OAuth (`claude setup-token`).
+pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
 /// Absolute path the repo clone is bind-mounted at, and the image's WORKDIR (where the harness
 /// starts). Deliberately a *subdirectory* of the agent user's home (`/home/agent`), not the
@@ -177,14 +204,8 @@ pub fn host_timezone() -> String {
   "UTC".to_string()
 }
 
-/// The shell command a harness runs *inside the container* for one skill, built
-/// from the skill's harness, optional model, and name — the user never writes it.
-/// For the `opencode` harness:
-///
-/// ```text
-/// opencode [-m <model>] run "run skill <name>"
-/// ```
-pub fn harness_command(harness: Harness, model: Option<&str>, skill: &str) -> String {
+/// The shell command a harness runs *inside the container* for one skill.
+pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str, result: &str) -> String {
   match harness {
     Harness::Opencode => {
       let mut cmd = String::from("opencode");
@@ -194,9 +215,21 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill: &str) -> St
         cmd.push_str(&shell_quote(m));
       }
       cmd.push_str(" run ");
-      cmd.push_str(&shell_quote(&format!("run skill {skill}")));
-      // Tee every line (stdout+stderr) to the per-run log so it can be examined on
-      // the host afterward. RUN_LOG_VAR is set in the generated image.
+      cmd.push_str(&shell_quote(&format!("run skill {skill_source}")));
+      format!("{cmd} 2>&1 | tee \"${RUN_LOG_VAR}\"")
+    }
+    Harness::Claude => {
+      let prompt = format!(
+        "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable)."
+      );
+      let mut cmd = String::from("claude -p ");
+      cmd.push_str(&shell_quote(&prompt));
+      cmd.push_str(" --permission-mode bypassPermissions --no-session-persistence");
+      if let Some(m) = model {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_quote(m));
+      }
       format!("{cmd} 2>&1 | tee \"${RUN_LOG_VAR}\"")
     }
   }
@@ -241,16 +274,17 @@ fn build_args(uid: u32, gid: u32, tz: &str) -> Vec<String> {
 }
 
 /// Build argv for the stdin method: the Dockerfile is sent on stdin (`-`).
-pub fn build_command_stdin(runtime: &str, tag: &str, uid: u32, gid: u32, tz: &str) -> Vec<String> {
-  let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into()];
+pub fn build_command_stdin(runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str) -> Vec<String> {
+  let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
   v.extend(build_args(uid, gid, tz));
   v.push("-".into());
   v
 }
 
-/// Build argv for the context-dir method: the context dir holds a `Dockerfile`.
-pub fn build_command_context(runtime: &str, tag: &str, context_dir: &str, uid: u32, gid: u32, tz: &str) -> Vec<String> {
-  let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into()];
+pub fn build_command_context(
+  runtime: &str, tag: &str, target: &str, context_dir: &str, uid: u32, gid: u32, tz: &str,
+) -> Vec<String> {
+  let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
   v.extend(build_args(uid, gid, tz));
   v.push(context_dir.into());
   v
@@ -262,27 +296,134 @@ pub fn build_command_context(runtime: &str, tag: &str, context_dir: &str, uid: u
 /// the `agent` user can read/write the mount; docker (and Apple `container`) map
 /// the UID directly and need no such flag.
 pub fn run_command(
-  runtime: &str, tag: &str, clone_dir: &str, name: &str, env: &[(String, String)], command: &str,
+  runtime: &str,
+  tag: &str,
+  clone_dir: &str,
+  name: &str,
+  env: &[(String, String)],
+  volumes: &[(&str, &str)],
+  command: &str,
 ) -> Vec<String> {
-  // The container is named so a timed-out run can `<runtime> kill <name>` it.
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
   if runtime == "podman" {
     v.push("--userns=keep-id".into());
   }
-  // Forwarded host variables, resolved from the skill's `env:` block.
   for (key, value) in env {
     v.push("-e".into());
     v.push(format!("{key}={value}"));
   }
+  for (host, mount) in volumes {
+    v.push("-v".into());
+    v.push(format!("{host}:{mount}"));
+  }
   v.push("-v".into());
   v.push(format!("{clone_dir}:{AGENT_REPO}"));
   v.push(tag.into());
-  // The image carries no CMD, so each run supplies the harness command, executed
-  // via /bin/sh -c inside the container.
   v.push("/bin/sh".into());
   v.push("-c".into());
   v.push(command.into());
   v
+}
+
+pub fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+  let base = match xdg_data_home {
+    Some(x) if !x.is_empty() => PathBuf::from(x),
+    _ => PathBuf::from(home?).join(".local").join("share"),
+  };
+  Some(base.join("opencode").join("auth.json"))
+}
+
+pub fn opencode_auth_ready() -> bool {
+  opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())
+    .is_some_and(|p| p.is_file())
+}
+
+pub fn claude_oauth_token() -> Option<String> {
+  std::env::var(CLAUDE_OAUTH_TOKEN_ENV).ok().filter(|s| !s.is_empty())
+}
+
+fn claude_credentials_file_on_host() -> Option<PathBuf> {
+  let home = std::env::var_os("HOME")?;
+  let path = PathBuf::from(home).join(".claude").join(".credentials.json");
+  path.is_file().then_some(path)
+}
+
+/// Whether the host has credentials containers can use: `CLAUDE_CODE_OAUTH_TOKEN` or
+/// `~/.claude/.credentials.json`.
+pub fn claude_container_auth_ready() -> bool {
+  claude_oauth_token().is_some() || claude_credentials_file_on_host().is_some()
+}
+
+pub fn check_harness_host(harness: Harness) -> Result<(), String> {
+  match harness {
+    Harness::Opencode => {
+      if opencode_auth_ready() {
+        Ok(())
+      } else {
+        Err("opencode auth not found (~/.local/share/opencode/auth.json) — run `opencode auth login`".into())
+      }
+    }
+    Harness::Claude => {
+      if claude_container_auth_ready() {
+        Ok(())
+      } else {
+        Err(
+          "CLAUDE_CODE_OAUTH_TOKEN is not set and ~/.claude/.credentials.json was not found \
+           — run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN in your shell"
+            .into(),
+        )
+      }
+    }
+  }
+}
+
+/// Bind-mount the host opencode `auth.json` into the container when present on the host.
+pub fn opencode_auth_mounts(host_auth: &Path) -> Vec<(String, String)> {
+  if host_auth.is_file() {
+    vec![(host_auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string())]
+  } else {
+    Vec::new()
+  }
+}
+
+/// Volume mounts for forwarded Claude auth copied into `auth_root` (under a run dir).
+pub fn claude_auth_mounts(auth_root: &Path) -> Vec<(String, String)> {
+  let mut out = Vec::new();
+  let claude_dir = auth_root.join(".claude");
+  if claude_dir.is_dir() {
+    out.push((claude_dir.to_string_lossy().into_owned(), CLAUDE_CONFIG_MOUNT.to_string()));
+  }
+  let claude_json = auth_root.join(".claude.json");
+  if claude_json.is_file() {
+    out.push((claude_json.to_string_lossy().into_owned(), CLAUDE_JSON_MOUNT.to_string()));
+  }
+  out
+}
+
+/// Volume mounts shown by `scsh list --verbose` (host paths; real runs use the same bind-mounts).
+pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
+  match harness {
+    Harness::Opencode => opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())
+      .filter(|p| p.is_file())
+      .map(|p| opencode_auth_mounts(&p))
+      .unwrap_or_default(),
+    Harness::Claude => {
+      let Some(home) = std::env::var_os("HOME") else {
+        return Vec::new();
+      };
+      let home = PathBuf::from(home);
+      let mut out = Vec::new();
+      let claude_dir = home.join(".claude");
+      if claude_dir.is_dir() {
+        out.push((claude_dir.to_string_lossy().into_owned(), CLAUDE_CONFIG_MOUNT.to_string()));
+      }
+      let claude_json = home.join(".claude.json");
+      if claude_json.is_file() {
+        out.push((claude_json.to_string_lossy().into_owned(), CLAUDE_JSON_MOUNT.to_string()));
+      }
+      out
+    }
+  }
 }
 
 /// Render an argv as a copy-pasteable shell command (for `scsh list --verbose`).
@@ -507,47 +648,34 @@ mod tests {
   }
 
   #[test]
-  fn image_tag_is_the_generic_tag() {
-    // The image is generic, so the tag is a single constant (not per-project).
-    assert_eq!(image_tag(), "scsh:latest");
+  fn image_tags_are_per_harness() {
+    assert_eq!(image_tag(Harness::Opencode), "scsh-opencode:latest");
+    assert_eq!(image_tag(Harness::Claude), "scsh-claude:latest");
   }
 
   #[test]
-  fn dockerfile_is_generic_with_no_baked_command() {
+  fn dockerfile_has_shared_base_and_two_harness_targets() {
     let df = dockerfile();
-    assert!(df.contains("FROM debian:bookworm-slim")); // the built-in default base image
-                                                       // The image is generic: no per-skill label and no baked CMD — every skill's
-                                                       // container supplies its own harness command at run time.
-    assert!(!df.contains("scsh.skill"));
+    assert!(df.contains("FROM debian:bookworm-slim AS scsh-base"));
+    assert!(df.contains("FROM scsh-base AS scsh-opencode"));
+    assert!(df.contains("FROM scsh-base AS scsh-claude"));
+    assert!(df.contains("npm install -g opencode-ai"));
+    assert!(df.contains("npm install -g @anthropic-ai/claude-code"));
     assert!(!df.contains("CMD ["));
-    // It does set the per-run log path the harness tees its output to (under the gitignored tmp/).
     assert!(df.contains("ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log"));
-    assert!(df.contains("ENV SCSH=1"), "skills should see SCSH=1 so they know they run under scsh");
+    assert!(df.contains("ENV SCSH=1"));
   }
 
   #[test]
-  fn dockerfile_installs_and_verifies_opencode() {
+  fn dockerfile_opencode_stage_has_unattended_env() {
     let df = dockerfile();
-    // opencode is installed in its own RUN layer.
-    assert!(df.contains("RUN set -eux;"));
-    // opencode is installed from the npm registry (more reliable than the curl installer).
-    assert!(df.contains("npm install -g opencode-ai"), "opencode should install via npm");
-    assert!(df.contains("nodejs") && df.contains("npm"), "the image must install node + npm");
-    // The base image carries git (for commit-enabled skills) and ripgrep (opencode's
-    // search backend — runs fail without `rg`).
-    assert!(df.contains("ripgrep"), "the image must install ripgrep");
-    assert!(df.contains(" git "), "the image must install git");
-    // opencode runs unattended (no permission prompts).
     assert!(df.contains("ENV OPENCODE_YOLO=true"));
-    assert!(df.contains("ENV OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS=true"));
-    // The global modules are made world-readable so the non-root agent can run opencode.
-    assert!(df.contains("npm root -g"));
-    // The build self-verifies by running the tool inside the image.
     assert!(df.contains("opencode --version"));
-    // opencode is installed before the image switches to the non-root agent user.
-    let run_at = df.find("RUN ").expect("a RUN layer");
-    let user_at = df.find("\nUSER agent\n").expect("a USER layer");
-    assert!(run_at < user_at, "opencode must be installed before USER agent");
+  }
+
+  #[test]
+  fn dockerfile_claude_stage_verifies_cli() {
+    assert!(dockerfile().contains("claude --version"));
   }
 
   #[test]
@@ -665,16 +793,22 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    // The command tees its combined output to the per-run log ($SCSH_RUN_LOG).
     assert_eq!(
-      harness_command(Harness::Opencode, Some("openai/gpt-5.5"), "add"),
+      harness_command(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json"),
       "opencode -m openai/gpt-5.5 run 'run skill add' 2>&1 | tee \"$SCSH_RUN_LOG\""
     );
-    // No model → no -m flag.
     assert_eq!(
-      harness_command(Harness::Opencode, None, "multiply"),
+      harness_command(Harness::Opencode, None, "multiply", "tmp/mul.json"),
       "opencode run 'run skill multiply' 2>&1 | tee \"$SCSH_RUN_LOG\""
     );
+  }
+
+  #[test]
+  fn harness_command_builds_claude_invocation() {
+    let cmd = harness_command(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_result.json");
+    assert!(cmd.contains(".skills/add/SKILL.md"));
+    assert!(cmd.contains("--model sonnet"));
+    assert!(cmd.contains("tee \"$SCSH_RUN_LOG\""));
   }
 
   #[test]
@@ -687,12 +821,14 @@ mod tests {
   #[test]
   fn commands_have_expected_shape() {
     assert_eq!(
-      build_command_stdin("docker", "scsh-demo:latest", 1006, 1007, "Europe/Berlin"),
+      build_command_stdin("docker", "scsh-opencode:latest", "scsh-opencode", 1006, 1007, "Europe/Berlin"),
       vec![
         "docker",
         "build",
         "-t",
-        "scsh-demo:latest",
+        "scsh-opencode:latest",
+        "--target",
+        "scsh-opencode",
         "--build-arg",
         "AGENT_UID=1006",
         "--build-arg",
@@ -703,25 +839,7 @@ mod tests {
       ]
     );
     assert_eq!(
-      build_command_context("container", "scsh-demo:latest", "/tmp/ctx", 1000, 1000, "UTC"),
-      vec![
-        "container",
-        "build",
-        "-t",
-        "scsh-demo:latest",
-        "--build-arg",
-        "AGENT_UID=1000",
-        "--build-arg",
-        "AGENT_GID=1000",
-        "--build-arg",
-        "TZ=UTC",
-        "/tmp/ctx"
-      ]
-    );
-    // docker maps the UID directly: a plain mount, no userns flag; the named
-    // container runs the harness command via /bin/sh -c (no forwarded env here).
-    assert_eq!(
-      run_command("docker", "scsh-demo:latest", "/tmp/clone", "run-s", &[], "opencode run 'run skill s'"),
+      run_command("docker", "scsh-opencode:latest", "/tmp/clone", "run-s", &[], &[], "opencode run 'run skill s'"),
       vec![
         "docker",
         "run",
@@ -730,15 +848,22 @@ mod tests {
         "run-s",
         "-v",
         "/tmp/clone:/home/agent/repo",
-        "scsh-demo:latest",
+        "scsh-opencode:latest",
         "/bin/sh",
         "-c",
         "opencode run 'run skill s'"
       ]
     );
-    // podman (rootless) needs keep-id so the agent UID maps to the host UID.
     assert_eq!(
-      run_command("podman", "scsh-demo:latest", "/tmp/clone", "run-s", &[], "opencode run 'run skill s'"),
+      run_command(
+        "podman",
+        "scsh-claude:latest",
+        "/tmp/clone",
+        "run-s",
+        &[],
+        &[("/home/u/.claude", "/home/agent/.claude:ro")],
+        "claude -p hi"
+      ),
       vec![
         "podman",
         "run",
@@ -747,8 +872,39 @@ mod tests {
         "run-s",
         "--userns=keep-id",
         "-v",
+        "/home/u/.claude:/home/agent/.claude:ro",
+        "-v",
         "/tmp/clone:/home/agent/repo",
-        "scsh-demo:latest",
+        "scsh-claude:latest",
+        "/bin/sh",
+        "-c",
+        "claude -p hi"
+      ]
+    );
+    assert_eq!(
+      run_command(
+        "docker",
+        "scsh-opencode:latest",
+        "/tmp/clone",
+        "run-s",
+        &[],
+        &[(
+          "/home/u/.local/share/opencode/auth.json",
+          OPENCODE_AUTH_MOUNT
+        )],
+        "opencode run 'run skill s'"
+      ),
+      vec![
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        "run-s",
+        "-v",
+        "/home/u/.local/share/opencode/auth.json:/home/agent/repo/tmp/.xdg-data/opencode/auth.json",
+        "-v",
+        "/tmp/clone:/home/agent/repo",
+        "scsh-opencode:latest",
         "/bin/sh",
         "-c",
         "opencode run 'run skill s'"
@@ -757,10 +913,22 @@ mod tests {
   }
 
   #[test]
+  fn opencode_auth_mounts_only_when_host_file_exists() {
+    assert!(opencode_auth_mounts(Path::new("/no/such/auth.json")).is_empty());
+    let tmp = std::env::temp_dir().join(format!("scsh-opencode-auth-{}", std::process::id()));
+    std::fs::write(&tmp, "{}").unwrap();
+    let mounts = opencode_auth_mounts(&tmp);
+    assert_eq!(mounts.len(), 1);
+    assert_eq!(mounts[0].0, tmp.to_string_lossy());
+    assert_eq!(mounts[0].1, OPENCODE_AUTH_MOUNT);
+    let _ = std::fs::remove_file(&tmp);
+  }
+
+  #[test]
   fn run_command_forwards_env_as_e_flags() {
     let env = vec![("A".to_string(), "20".to_string()), ("B".to_string(), "22".to_string())];
     assert_eq!(
-      run_command("docker", "scsh-demo:latest", "/tmp/clone", "run-s", &env, "opencode run 'run skill s'"),
+      run_command("docker", "scsh-opencode:latest", "/tmp/clone", "run-s", &env, &[], "opencode run 'run skill s'"),
       vec![
         "docker",
         "run",
@@ -773,7 +941,7 @@ mod tests {
         "B=22",
         "-v",
         "/tmp/clone:/home/agent/repo",
-        "scsh-demo:latest",
+        "scsh-opencode:latest",
         "/bin/sh",
         "-c",
         "opencode run 'run skill s'"
@@ -784,6 +952,32 @@ mod tests {
   #[test]
   fn clone_command_is_a_full_local_clone() {
     assert_eq!(clone_command("/repo", "/tmp/dst"), vec!["git", "clone", "/repo", "/tmp/dst"]);
+  }
+
+  #[test]
+  fn claude_container_auth_accepts_oauth_token_env() {
+    let key = CLAUDE_OAUTH_TOKEN_ENV;
+    let prev = std::env::var_os(key);
+    std::env::set_var(key, "test-token");
+    assert!(claude_container_auth_ready());
+    match prev {
+      Some(v) => std::env::set_var(key, v),
+      None => std::env::remove_var(key),
+    }
+  }
+
+  #[test]
+  fn check_claude_harness_errors_without_token_or_credentials_file() {
+    let key = CLAUDE_OAUTH_TOKEN_ENV;
+    let prev = std::env::var_os(key);
+    std::env::remove_var(key);
+    let err = check_harness_host(Harness::Claude).unwrap_err();
+    assert!(err.contains("CLAUDE_CODE_OAUTH_TOKEN"));
+    assert!(err.contains("setup-token"));
+    match prev {
+      Some(v) => std::env::set_var(key, v),
+      None => std::env::remove_var(key),
+    }
   }
 
   #[test]
