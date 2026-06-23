@@ -1,6 +1,6 @@
 ---
 name: multiply
-description: Multiply environment variables X and Y and report the product under the repository's gitignored tmp/. Unlike add there are NO defaults - if X or Y is unset, complain and exit with an error. Use when the user invokes multiply, /multiply, or asks to run skill multiply (with X=... and Y=... set in the environment).
+description: "Multiply environment variables X and Y and report the product under the repository's gitignored tmp/. Unlike add there are NO defaults - if X or Y is unset, complain and exit with an error. Use when the user invokes multiply, /multiply, or asks to run skill multiply (with X=... and Y=... set in the environment)."
 ---
 
 # multiply

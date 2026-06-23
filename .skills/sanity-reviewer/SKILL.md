@@ -1,6 +1,6 @@
 ---
 name: sanity-reviewer
-description: A deliberately shallow safety net for obvious performance, basic-security, and resource-leak problems only — an accidental O(n^2) over user input, a hardcoded secret, an unparameterized query, a Docker container or volume left running. Stays silent unless something is glaringly wrong. This is a sanity check, NOT a deep audit. Use this whenever a quick "any obvious red flags?" pass over a branch is wanted, especially to confirm nothing leaks resources.
+description: "A deliberately shallow safety net for obvious performance, basic-security, and resource-leak problems only — an accidental O(n^2) over user input, a hardcoded secret, an unparameterized query, a Docker container or volume left running. Stays silent unless something is glaringly wrong. This is a sanity check, NOT a deep audit. Use this whenever a quick \"any obvious red flags?\" pass over a branch is wanted, especially to confirm nothing leaks resources."
 ---
 
 # Sanity Reviewer

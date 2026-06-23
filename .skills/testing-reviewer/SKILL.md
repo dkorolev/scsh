@@ -1,6 +1,6 @@
 ---
 name: testing-reviewer
-description: Reviews whether changed behavior is covered by either unit tests or a human-followable manual-test document, and whether the PR description tells the reviewer how to run the manual tests (check out the branch, have the agent follow steps in a named directory). Also checks that any test tooling tears itself down and does not leak resources. Does NOT require unit tests for everything. Use this whenever assessing test coverage, test instructions, or test cleanup for a branch, even if the user just says "is this tested?"
+description: "Reviews whether changed behavior is covered by either unit tests or a human-followable manual-test document, and whether the PR description tells the reviewer how to run the manual tests (check out the branch, have the agent follow steps in a named directory). Also checks that any test tooling tears itself down and does not leak resources. Does NOT require unit tests for everything. Use this whenever assessing test coverage, test instructions, or test cleanup for a branch, even if the user just says \"is this tested?\""
 ---
 
 # Testing Reviewer

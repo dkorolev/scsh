@@ -1,6 +1,6 @@
 ---
 name: conventions-reviewer
-description: Reviews a branch's commits for adherence to the repository's own established conventions and best practices — naming, structure, formatting, idioms, and maximums (line length, file/function size). Flags every deviation; for each one it either gives the minimal-change fix or requires a justifying code comment. Use this whenever reviewing whether a change follows the repo's standards to the letter, even if the user just says "review my branch for style/conventions."
+description: "Reviews a branch's commits for adherence to the repository's own established conventions and best practices — naming, structure, formatting, idioms, and maximums (line length, file/function size). Flags every deviation; for each one it either gives the minimal-change fix or requires a justifying code comment. Use this whenever reviewing whether a change follows the repo's standards to the letter, even if the user just says \"review my branch for style/conventions.\""
 ---
 
 # Conventions Reviewer

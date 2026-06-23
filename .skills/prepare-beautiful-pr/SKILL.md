@@ -1,6 +1,6 @@
 ---
 name: prepare-beautiful-pr
-description: Run after a feature is built (for example with big-beautiful-build) to get the branch PR-ready. Confirms you are on a clean, non-default branch whose commits sit on top of main (and tells you to run /fast-beautiful-forward first if they do not), thoroughly analyzes the commit structure and OFFERS to factor oversized or mixed commits into several focused ones while keeping the final tree byte-identical, then writes PR-DESCRIPTION.md (big picture first, then details) and commits it as the special PR-notes author Elon Presley. It never pushes and never opens the PR. Use when the user invokes prepare-beautiful-pr, /prepare-beautiful-pr, or asks to shape a branch and write its PR description.
+description: "Run after a feature is built (for example with big-beautiful-build) to get the branch PR-ready. Confirms you are on a clean, non-default branch whose commits sit on top of main (and tells you to run /fast-beautiful-forward first if they do not), thoroughly analyzes the commit structure and OFFERS to factor oversized or mixed commits into several focused ones while keeping the final tree byte-identical, then writes PR-DESCRIPTION.md (big picture first, then details) and commits it as the special PR-notes author Elon Presley. It never pushes and never opens the PR. Use when the user invokes prepare-beautiful-pr, /prepare-beautiful-pr, or asks to shape a branch and write its PR description."
 ---
 
 # prepare-beautiful-pr — shape the commits, then write the PR description
