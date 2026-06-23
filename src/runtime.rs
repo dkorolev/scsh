@@ -140,6 +140,11 @@ pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
 /// the host login rather than a built-in model route.
 pub const OPENCODE_AUTH_MOUNT: &str = "/home/agent/repo/tmp/.xdg-data/opencode/auth.json";
 
+/// In-container paths for forwarded opencode config (`$XDG_CONFIG_HOME/opencode/` on the host).
+/// Custom providers (e.g. Nebius GLM) are declared here; auth.json alone is not enough.
+pub const OPENCODE_CONFIG_JSON_MOUNT: &str = "/home/agent/.config/opencode/opencode.json";
+pub const OPENCODE_CONFIG_JSONC_MOUNT: &str = "/home/agent/.config/opencode/opencode.jsonc";
+
 /// Host env var for long-lived Claude OAuth (`claude setup-token`).
 pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
 
@@ -333,6 +338,25 @@ pub fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> 
   Some(base.join("opencode").join("auth.json"))
 }
 
+/// Host opencode config dir (`$XDG_CONFIG_HOME/opencode` or `~/.config/opencode`).
+pub fn opencode_config_dir(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+  let base = match xdg_config_home {
+    Some(x) if !x.is_empty() => PathBuf::from(x),
+    _ => PathBuf::from(home?).join(".config"),
+  };
+  Some(base.join("opencode"))
+}
+
+pub fn opencode_config_json_in(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+  let path = opencode_config_dir(xdg_config_home, home)?.join("opencode.json");
+  path.is_file().then_some(path)
+}
+
+pub fn opencode_config_jsonc_in(xdg_config_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
+  let path = opencode_config_dir(xdg_config_home, home)?.join("opencode.jsonc");
+  path.is_file().then_some(path)
+}
+
 pub fn opencode_auth_ready() -> bool {
   opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())
     .is_some_and(|p| p.is_file())
@@ -377,6 +401,33 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
   }
 }
 
+/// Host opencode paths for `scsh list --verbose`.
+pub fn opencode_host_mounts() -> Vec<(String, String)> {
+  opencode_host_mounts_from(
+    std::env::var_os("XDG_DATA_HOME").as_deref(),
+    std::env::var_os("XDG_CONFIG_HOME").as_deref(),
+    std::env::var_os("HOME").as_deref(),
+  )
+}
+
+pub fn opencode_host_mounts_from(
+  xdg_data_home: Option<&OsStr>,
+  xdg_config_home: Option<&OsStr>,
+  home: Option<&OsStr>,
+) -> Vec<(String, String)> {
+  let mut out = Vec::new();
+  if let Some(auth) = opencode_auth_in(xdg_data_home, home).filter(|p| p.is_file()) {
+    out.push((auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string()));
+  }
+  if let Some(cfg) = opencode_config_json_in(xdg_config_home, home) {
+    out.push((cfg.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSON_MOUNT.to_string()));
+  }
+  if let Some(cfg) = opencode_config_jsonc_in(xdg_config_home, home) {
+    out.push((cfg.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSONC_MOUNT.to_string()));
+  }
+  out
+}
+
 /// Bind-mount the host opencode `auth.json` into the container when present on the host.
 pub fn opencode_auth_mounts(host_auth: &Path) -> Vec<(String, String)> {
   if host_auth.is_file() {
@@ -403,10 +454,7 @@ pub fn claude_auth_mounts(auth_root: &Path) -> Vec<(String, String)> {
 /// Volume mounts shown by `scsh list --verbose` (host paths; real runs use the same bind-mounts).
 pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
   match harness {
-    Harness::Opencode => opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())
-      .filter(|p| p.is_file())
-      .map(|p| opencode_auth_mounts(&p))
-      .unwrap_or_default(),
+    Harness::Opencode => opencode_host_mounts(),
     Harness::Claude => {
       let Some(home) = std::env::var_os("HOME") else {
         return Vec::new();
@@ -922,6 +970,11 @@ mod tests {
     assert_eq!(mounts[0].0, tmp.to_string_lossy());
     assert_eq!(mounts[0].1, OPENCODE_AUTH_MOUNT);
     let _ = std::fs::remove_file(&tmp);
+  }
+
+  #[test]
+  fn opencode_host_mounts_empty_when_nothing_on_host() {
+    assert!(opencode_host_mounts_from(None, None, None).is_empty());
   }
 
   #[test]
