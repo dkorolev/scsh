@@ -214,8 +214,21 @@ pub fn host_timezone() -> String {
   "UTC".to_string()
 }
 
+/// Whether harness commands include verbose/progress flags. On by default for scsh
+/// runs (headless — the live board and `tmp/scsh-run.log` need turn-by-turn output).
+/// Opt out with `SCSH_QUIET=1`.
+pub fn harness_verbose_enabled() -> bool {
+  !matches!(std::env::var("SCSH_QUIET").ok().as_deref(), Some("1") | Some("true"))
+}
+
 /// The shell command a harness runs *inside the container* for one skill.
 pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str, result: &str) -> String {
+  harness_command_verbose(harness, model, skill_source, result, harness_verbose_enabled())
+}
+
+fn harness_command_verbose(
+  harness: Harness, model: Option<&str>, skill_source: &str, result: &str, verbose: bool,
+) -> String {
   match harness {
     Harness::Opencode => {
       let instruction = format!(
@@ -228,6 +241,9 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str
         cmd.push(' ');
         cmd.push_str("-m ");
         cmd.push_str(&shell_quote(m));
+      }
+      if verbose {
+        cmd.push_str(" --print-logs --log-level INFO");
       }
       cmd.push_str(" run ");
       cmd.push_str(&shell_quote(&instruction));
@@ -242,6 +258,9 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str
       let mut cmd = String::from("claude -p ");
       cmd.push_str(&shell_quote(&prompt));
       cmd.push_str(" --permission-mode bypassPermissions --no-session-persistence");
+      if verbose {
+        cmd.push_str(" --verbose");
+      }
       if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(&shell_quote(m));
@@ -996,24 +1015,42 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    let cmd = harness_command(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json");
-    assert!(cmd.starts_with("opencode -m openai/gpt-5.5 run "));
+    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json", true);
+    assert!(cmd.starts_with("opencode -m openai/gpt-5.5"));
+    assert!(cmd.contains(" --print-logs --log-level INFO run "));
     assert!(cmd.contains("run skill add"));
     assert!(cmd.contains("tmp/add.json"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.contains("preloaded"));
     assert!(cmd.ends_with("2>&1 | tee \"$SCSH_RUN_LOG\""));
-    let cmd = harness_command(Harness::Opencode, None, "multiply", "tmp/mul.json");
-    assert!(cmd.starts_with("opencode run "));
+    let cmd = harness_command_verbose(Harness::Opencode, None, "multiply", "tmp/mul.json", true);
+    assert!(cmd.starts_with("opencode --print-logs --log-level INFO run "));
     assert!(cmd.contains("tmp/mul.json"));
+    let quiet = harness_command_verbose(Harness::Opencode, None, "multiply", "tmp/mul.json", false);
+    assert!(quiet.starts_with("opencode run "));
+    assert!(!quiet.contains("--print-logs"));
   }
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json");
+    let cmd = harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json", true);
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    assert!(cmd.contains("--model sonnet"));
+    assert!(cmd.contains(" --verbose --model sonnet"));
     assert!(cmd.contains("tee \"$SCSH_RUN_LOG\""));
+    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add.json", false);
+    assert!(!quiet.contains(" --verbose"));
+  }
+
+  #[test]
+  fn harness_verbose_disabled_when_scsh_quiet() {
+    let key = "SCSH_QUIET";
+    let prev = std::env::var_os(key);
+    std::env::set_var(key, "1");
+    assert!(!harness_verbose_enabled());
+    match prev {
+      Some(v) => std::env::set_var(key, v),
+      None => std::env::remove_var(key),
+    }
   }
 
   #[test]

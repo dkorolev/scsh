@@ -2723,6 +2723,8 @@ fn print_help_internals() {
   Claude skills use host CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and/or
   ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container
   (opt out: SCSH_NO_CLAUDE_AUTH=1).
+  Harness runs pass `--verbose` (Claude) or `--print-logs --log-level INFO` (OpenCode) so
+  the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
   Unavailable harnesses are skipped; a run fails only when every selected skill is skipped.
   Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
