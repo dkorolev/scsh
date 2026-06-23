@@ -1,6 +1,5 @@
 skills:
-  add-claude-sonnet-4-6:
-    skill: add
+  add:
     harness: claude
     model: sonnet
     timeout: 600

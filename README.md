@@ -86,47 +86,45 @@ The whole file is just your skills — no `version`/`project`/`image` boilerplat
 builds them on built-in harness images (`scsh-opencode`, `scsh-claude`) from a shared Debian base.
 
 ```yaml
-skills:                          # invocation names — one container each
-  add-opencode-gpt:
-    skill: add                    #   optional — .skills/add/ (default: key name)
-    harness: opencode             #   required — opencode or claude
-    model: openai/gpt-5.4-mini-fast
+skills:                          # each key == .skills/<name>/ folder
+  add:                           # direct run OR invocations: matrix (below)
     timeout: 600
-    commits: true
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_opencode_gpt_result.json
-  add-claude-sonnet-4-6:
-    skill: add
-    harness: claude
-    model: sonnet
-    env:
-      - A: ${A:-2}
-      - B: ${B:-3}
-    result: tmp/add_claude_sonnet_4_6_result.json
-  add-opencode-glm-5.2:
-    skill: add
-    harness: opencode
-    model: nebius-glm/zai-org/GLM-5.2
-    env:
-      - A: ${A:-2}
-      - B: ${B:-3}
-    result: tmp/add_opencode_glm_5_2_result.json
-  multiply-opencode-gpt:
-    skill: multiply
-    harness: opencode
+    result: tmp/add_{name}_result.json   # {name} required when invocations: is set
+    invocations:
+      opencode-gpt-5.4-mini-fast:
+        harness: opencode
+        model: openai/gpt-5.4-mini-fast
+        commits: true
+      claude-sonnet-4-6:
+        harness: claude
+        model: sonnet
+      opencode-glm-5.2:
+        harness: opencode
+        model: nebius-glm/zai-org/GLM-5.2
+  multiply:
     profile: multiply
     env:
       - X: ${X}
       - Y: ${Y}
-    result: tmp/multiply_opencode_gpt_result.json
+    result: tmp/multiply_{name}_result.json
+    invocations:
+      opencode-gpt-5.4-mini-fast:
+        harness: opencode
+        model: openai/gpt-5.4-mini-fast
+      claude-sonnet-4-6:
+        harness: claude
+        model: sonnet
 ```
+
+At run time, each `invocations:` route expands to an invocation named `{skill}-{route}` (for example `add-opencode-gpt-5.4-mini-fast`). A skill with direct `harness:` / `model:` fields runs as a single invocation named after its key.
 
 ### A skill's fields
 
-- **`skill`** *(optional)* — the `.skills/<name>/` folder to run. Defaults to the YAML key.
-- **`harness`** *(required)* — **`opencode`** or **`claude`**. Each harness has its own container image.
+- **`harness`** *(required for direct run)* — **`opencode`** or **`claude`**. Omit at the skill level when using `invocations:`; each route supplies its own.
+- **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
   OpenCode runs `opencode -m <model> run "run skill <source>"`. Claude runs headless via
   `claude -p` with the skill's `SKILL.md` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
   `~/.claude/.credentials.json`, plus optional `~/.claude` / `~/.claude.json` mounted into the container).
@@ -200,8 +198,11 @@ writing, so the repo is run-ready afterward.
 validates it first (and stops if it's malformed), then for every skill it lists — except
 the **authoring-only** ones (marked **`autoinstall: false`**, *or* named with the
 **`internal-`** prefix, e.g. a repo's own self-check skill) — it copies the skill folder
-*and* merges that skill's entry into **your** `.scsh.yml`. The skills are then runnable immediately: a default skill on `scsh run`, a
-profiled one on `scsh run --profile <name>`. Skills the manifest doesn't list are skipped
+*and* merges that skill's YAML block verbatim into **your** `.scsh.yml** (same schema,
+including `invocations:` matrix skills). Existing skill keys in the consumer are left
+untouched — scsh warns when a key would conflict. The skills are then runnable
+immediately: a default skill on `scsh run`, a profiled one on `scsh run --profile
+<name>`. Matrix skills expand to `{skill}-{route}` invocations at run time. Skills the manifest doesn't list are skipped
 (the manifest is the shipping list), and skills already in your `.scsh.yml` are left
 untouched. Without a source `.scsh.yml`, `scsh` simply installs every `.skills/<name>/`
 folder it finds (no manifest merge).
@@ -236,7 +237,7 @@ a smart elapsed clock, and the latest output line.
   to when that process started** (`+1.2s`). Open shows it all; closed tucks it away.
 - **Scroll** with the **mouse wheel**, **↑/↓**, **PgUp/PgDn**, or **Home/End**. It follows the tail
   until you scroll up, and resumes following at the bottom. **`e`/`c`** expand/collapse every row.
-- **`Ctrl-C`** aborts the run (and tears the containers down).
+- **`Ctrl-C`** aborts the run — SIGTERM on every child and container, then SIGKILL after one second.
 
 The board is drawn **inline** in the normal terminal buffer — **not** a full-screen takeover — so
 your terminal's own scrollback keeps working during the run. When the run finishes, `scsh` **wipes

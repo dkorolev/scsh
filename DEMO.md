@@ -10,7 +10,7 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 - `scsh init-demo-project` scaffolds a two-skill project and **commits** it.
 
-- **`add`** (A + B) runs by default on **three routes** — `add-opencode-gpt`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2` — with the built-in defaults, and with values you pass.
+- **`add`** (A + B) runs by default on **three routes** — `add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2` — with the built-in defaults, and with values you pass.
 
 - **`add` is commit-enabled**: it records each sum as a git commit, and `scsh` **rebases that commit onto your branch**. The commit is journaled in the cache too, so even a **cached** re-run replays it — the commit side effect is never lost to a cache hit.
 
@@ -60,11 +60,11 @@ claude_route_ok() {
 }
 
 if opencode_auth_ok && opencode_model_ok "openai/gpt-5.4-mini-fast"; then
-  echo "route gpt-5.4-mini-fast (add-opencode-gpt): ok"
+  echo "route gpt-5.4-mini-fast (add-opencode-gpt-5.4-mini-fast): ok"
   DEMO_ROUTE_GPT=ok
   DEMO_ROUTES_AVAILABLE=$((DEMO_ROUTES_AVAILABLE + 1))
 else
-  echo "route gpt-5.4-mini-fast (add-opencode-gpt): N/A"
+  echo "route gpt-5.4-mini-fast (add-opencode-gpt-5.4-mini-fast): N/A"
 fi
 
 if claude_route_ok; then
@@ -147,7 +147,7 @@ $SCSH init-demo-project
 BASE=$(git rev-parse HEAD)   # remember the scaffold commit — the cache demo (step 11) returns here
 ```
 
-**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with five invocations (`add-opencode-gpt`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2`, `multiply-opencode-gpt`, `multiply-claude-sonnet-4-6`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
+**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with five invocations (`add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2`, `multiply-opencode-gpt-5.4-mini-fast`, `multiply-claude-sonnet-4-6`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
 
 `$BASE` is the **scaffold commit** — the repo state the first `add` run (step 6) caches its result against. We return to it in step 11 to get a cache hit; capturing it now (not later) matters, because each `add` run commits and moves `HEAD`.
 
@@ -164,14 +164,14 @@ $SCSH run
 **Confirm** a success line for **each route that probed ok** in step 1 (skip lines you don't expect):
 
 ```
-✓ opencode: add-opencode-gpt       …s   2 + 3 = 5      # gpt-5.4-mini-fast
+✓ opencode: add-opencode-gpt-5.4-mini-fast       …s   2 + 3 = 5      # gpt-5.4-mini-fast
 ✓ claude: add-claude-sonnet-4-6        …s   2 + 3 = 5      # sonnet-4-6
 ✓ opencode: add-opencode-glm-5.2   …s   2 + 3 = 5      # glm-5.2
 ```
 
 Unavailable harnesses print `⚠ skipping '…' — … harness unavailable` and are not run.
 
-Result files land in `tmp/add_opencode_gpt_result.json`, `tmp/add_claude_sonnet_4_6_result.json`, and/or `tmp/add_opencode_glm_5_2_result.json`. Only **`add-opencode-gpt`** is commit-enabled — if it ran, confirm the git commit:
+Result files land in `tmp/add_opencode_gpt_5_4_mini_fast_result.json`, `tmp/add_claude_sonnet_4_6_result.json`, and/or `tmp/add_opencode_glm_5_2_result.json`. Only **`add-opencode-gpt-5.4-mini-fast`** is commit-enabled — if it ran, confirm the git commit:
 
 ```sh
 git log --oneline -2
@@ -330,11 +330,11 @@ Re-print which routes were available at the start and which produced `2 + 3 = 5`
 
 ```sh
 echo "=== Demo harness report ==="
-echo "  gpt-5.4-mini-fast  (add-opencode-gpt):       probed $DEMO_ROUTE_GPT"
+echo "  gpt-5.4-mini-fast  (add-opencode-gpt-5.4-mini-fast):       probed $DEMO_ROUTE_GPT"
 echo "  sonnet-4-6         (add-claude-sonnet-4-6):      probed $DEMO_ROUTE_SONNET"
 echo "  glm-5.2            (add-opencode-glm-5.2): probed $DEMO_ROUTE_GLM_5_2"
 echo "  routes available at start: $DEMO_ROUTES_AVAILABLE / 3"
-test -f tmp/add_opencode_gpt_result.json       && echo "  add-opencode-gpt ran → tmp/add_opencode_gpt_result.json" || true
+test -f tmp/add_opencode_gpt_5_4_mini_fast_result.json       && echo "  add-opencode-gpt-5.4-mini-fast ran → tmp/add_opencode_gpt_5_4_mini_fast_result.json" || true
 test -f tmp/add_claude_sonnet_4_6_result.json      && echo "  add-claude-sonnet-4-6 ran → tmp/add_claude_sonnet_4_6_result.json" || true
 test -f tmp/add_opencode_glm_5_2_result.json   && echo "  add-opencode-glm-5.2 ran → tmp/add_opencode_glm_5_2_result.json" || true
 ```

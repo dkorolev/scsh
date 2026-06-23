@@ -26,7 +26,7 @@ root) — which takes a directory from empty to a working, committed `scsh` proj
 Follow **`DEMO.md` steps 1–13** in order (step 14 is optional cleanup). The setup block is steps 1–4; the demo body is steps 5–13.
 
 1. **Probe the environment and three demo routes** — git, `scsh`, container runtime, and whether each route is available:
-   - **`add-opencode-gpt`** — opencode + `openai/gpt-5.4-mini-fast`
+   - **`add-opencode-gpt-5.4-mini-fast`** — opencode + `openai/gpt-5.4-mini-fast`
    - **`add-claude-sonnet-4-6`** — claude + `sonnet` (sonnet-4-6; needs `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` or `~/.claude/.credentials.json`)
    - **`add-opencode-glm-5.2`** — opencode + `nebius-glm/zai-org/GLM-5.2`
    **FAIL immediately** if `demo routes available: 0 / 3`.

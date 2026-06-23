@@ -15,7 +15,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use config::Skill;
+use config::ResolvedInvocation;
 use runtime::Runtime;
 
 fn main() {
@@ -303,22 +303,23 @@ fn requested_profiles(spec: Option<&str>) -> std::collections::BTreeSet<String> 
   }
 }
 
-/// The skills selected for a run: those whose profile is in the requested set, where a skill
-/// with no `profile:` belongs to the reserved `default` profile. So `None` (no `--profile`)
-/// selects only `default`; `--profile X` selects only X's skills; `--profile default,X` both.
-fn select_skills<'a>(cfg: &'a config::Config, profile: Option<&str>) -> Vec<&'a Skill> {
+/// Invocations selected for a run after expanding matrix skills. Those whose profile is in
+/// the requested set run; a skill with no `profile:` belongs to the reserved `default` profile.
+fn select_invocations(cfg: &config::Config, profile: Option<&str>) -> Vec<ResolvedInvocation> {
   let want = requested_profiles(profile);
-  cfg.skills.iter().filter(|s| want.contains(s.profile.as_deref().unwrap_or("default"))).collect()
+  config::expand_invocations(cfg)
+    .into_iter()
+    .filter(|s| want.contains(s.profile.as_deref().unwrap_or("default")))
+    .collect()
 }
 
-/// The distinct profile names declared across a config's skills, in first-seen order.
-fn declared_profiles(cfg: &config::Config) -> Vec<&str> {
-  let mut out: Vec<&str> = Vec::new();
-  for s in &cfg.skills {
-    if let Some(p) = s.profile.as_deref() {
-      if !out.contains(&p) {
-        out.push(p);
-      }
+/// The distinct profile names across expanded invocations, in first-seen order.
+fn declared_profiles(cfg: &config::Config) -> Vec<String> {
+  let mut out = Vec::new();
+  for inv in config::expand_invocations(cfg) {
+    let p = inv.profile.as_deref().unwrap_or("default").to_string();
+    if !out.contains(&p) {
+      out.push(p);
     }
   }
   out
@@ -457,7 +458,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
         let declared = declared_profiles(&cfg);
         let unknown: Vec<String> = requested_profiles(profile)
           .into_iter()
-          .filter(|p| p != "default" && !declared.contains(&p.as_str()))
+          .filter(|p| p != "default" && !declared.contains(p))
           .collect();
         if !unknown.is_empty() {
           fail(&format!("unknown profile{}: {}", plural(unknown.len()), unknown.join(", ")));
@@ -467,7 +468,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
           return 1;
         }
       }
-      let selected = select_skills(&cfg, profile);
+      let selected = select_invocations(&cfg, profile);
       if selected.is_empty() {
         let scope = profile.unwrap_or("default");
         fail(&format!("nothing to run \u{2014} the '{scope}' profile is empty"));
@@ -479,7 +480,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       let prof = profile.map(|p| format!(" · profile {p}")).unwrap_or_default();
       ok(&format!("git · repo {} · clean · /tmp ignored{prof}", display_path(&root)));
       // Skip skills whose harness is unavailable on the host; fail only when none remain.
-      let mut runnable: Vec<&config::Skill> = Vec::new();
+      let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
       for skill in &selected {
         if let Err(msg) = runtime::check_harness_host(skill.harness) {
           warn(&format!(
@@ -501,7 +502,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       }
       if runnable.is_empty() {
         fail("no skills to run — every selected harness is unavailable on this host");
-        hint("see DEMO.md step 1 — probe add-opencode-gpt, add-claude-sonnet-4-6, and add-opencode-glm-5.2");
+        hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast, add-claude-sonnet-4-6, and add-opencode-glm-5.2");
         return 1;
       }
       build_and_run(&rt, &root, &runnable)
@@ -588,21 +589,24 @@ fn tmp_is_gitignored(root: &std::path::Path) -> bool {
 /// flag, and the env it needs. `--verbose` additionally prints the generated Dockerfile and
 /// the exact per-skill build/run commands.
 fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbose: bool) -> i32 {
+  let expanded = config::expand_invocations(cfg);
   println!();
   println!(
     "{} {}",
     h_head("Profiles & skills"),
     h_dim(&format!(
-      "\u{2014} {} skill{} · run one with `scsh run --profile <name>`",
-      cfg.skills.len(),
-      plural(cfg.skills.len())
+      "\u{2014} {} invocation{} · run one with `scsh run --profile <name>`",
+      expanded.len(),
+      plural(expanded.len())
     ))
   );
-  // Group by profile: the reserved `default` (no-profile skills) first, then each declared.
-  let mut groups: Vec<(String, Vec<&Skill>)> =
-    vec![("default".to_string(), cfg.skills.iter().filter(|s| s.profile.is_none()).collect())];
+  let mut groups: Vec<(String, Vec<&ResolvedInvocation>)> =
+    vec![("default".to_string(), expanded.iter().filter(|s| s.profile.is_none()).collect())];
   for p in declared_profiles(cfg) {
-    groups.push((p.to_string(), cfg.skills.iter().filter(|s| s.profile.as_deref() == Some(p)).collect()));
+    if p == "default" {
+      continue;
+    }
+    groups.push((p.clone(), expanded.iter().filter(|s| s.profile.as_deref() == Some(p.as_str())).collect()));
   }
   for (name, members) in &groups {
     if members.is_empty() {
@@ -626,30 +630,31 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
   }
 
   if verbose {
-    let skills: Vec<&Skill> = cfg.skills.iter().collect();
-    let skills = &skills[..];
+    let skills = &expanded[..];
     let (uid, gid) = host_ids();
     let df = runtime::dockerfile();
     let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
-    for s in skills {
+    for s in skills.iter() {
       harnesses.insert(s.harness);
     }
     println!("\n{}", h_head("Images"));
     println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
     print!("{df}");
+    let host_tz = runtime::host_timezone();
     for h in harnesses {
       let tag = runtime::image_tag(h);
       let target = runtime::image_target(h);
+      let fingerprint = runtime::image_build_fingerprint(&df, target, uid, gid, &host_tz);
       match runtime::build_method(&rt.name) {
         runtime::BuildMethod::Stdin => {
-          let build = runtime::build_command_stdin(&rt.name, &tag, target, uid, gid, &runtime::host_timezone());
+          let build = runtime::build_command_stdin(&rt.name, &tag, target, uid, gid, &host_tz, &fingerprint);
           println!("--- build {target} (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---");
           println!("{}", runtime::shell_join(&build));
         }
         runtime::BuildMethod::ContextDir => {
           let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
           let build = runtime::build_command_context(
-            &rt.name, &tag, target, &ctx.to_string_lossy(), uid, gid, &runtime::host_timezone(),
+            &rt.name, &tag, target, &ctx.to_string_lossy(), uid, gid, &host_tz, &fingerprint,
           );
           println!("--- build {target} (in-memory Dockerfile written to an ephemeral context dir) ---");
           println!("{}", runtime::shell_join(&build));
@@ -657,7 +662,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       }
     }
     println!("\n{}", h_head("Per-skill commands"));
-    for &skill in skills {
+    for skill in skills {
       let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
@@ -741,12 +746,19 @@ fn load_config_for_inspection() -> Result<config::Config, i32> {
 
 /// The config's profiles as `(name, skill-names)`: the reserved `default` profile (the
 /// no-`profile:` skills) first, then each declared profile in first-seen order.
-fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<&str>)> {
-  let mut groups: Vec<(String, Vec<&str>)> =
-    vec![("default".to_string(), cfg.skills.iter().filter(|s| s.profile.is_none()).map(|s| s.name.as_str()).collect())];
+fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<String>)> {
+  let expanded = config::expand_invocations(cfg);
+  let mut groups: Vec<(String, Vec<String>)> = vec![(
+    "default".to_string(),
+    expanded.iter().filter(|s| s.profile.is_none()).map(|s| s.name.clone()).collect(),
+  )];
   for p in declared_profiles(cfg) {
-    let members = cfg.skills.iter().filter(|s| s.profile.as_deref() == Some(p)).map(|s| s.name.as_str()).collect();
-    groups.push((p.to_string(), members));
+    if p == "default" {
+      continue;
+    }
+    let members =
+      expanded.iter().filter(|s| s.profile.as_deref() == Some(p.as_str())).map(|s| s.name.clone()).collect();
+    groups.push((p, members));
   }
   groups
 }
@@ -789,23 +801,25 @@ fn check_profile_cmd(profile: Option<&str>) -> i32 {
     Ok(c) => c,
     Err(code) => return code,
   };
-  let count = select_skills(&cfg, Some(name)).len();
+  let count = select_invocations(&cfg, Some(name)).len();
   if count > 0 {
     ok(&format!("profile '{name}' has {count} skill{}", plural(count)));
     return 0;
   }
-  if name == "default" || declared_profiles(&cfg).iter().any(|p| *p == name) {
+  if name == "default" || declared_profiles(&cfg).iter().any(|p| p == name) {
     fail(&format!("profile '{name}' exists but has no skills"));
   } else {
     fail(&format!("no such profile '{name}'"));
-    let mut avail = vec!["default".to_string()];
-    avail.extend(declared_profiles(&cfg).iter().map(|s| s.to_string()));
+    let mut avail = declared_profiles(&cfg);
+    if !avail.iter().any(|p| p == "default") {
+      avail.insert(0, "default".to_string());
+    }
     hint(&format!("available: {}", avail.join(", ")));
   }
   1
 }
 
-fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32 {
+fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation]) -> i32 {
   ui::signals::install();
   let (uid, gid) = host_ids();
   let secs = now_secs();
@@ -834,22 +848,58 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr());
 
   let df = runtime::dockerfile();
+  let tz = runtime::host_timezone();
   let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
   for s in skills {
     harnesses.insert(s.harness);
   }
-  for h in harnesses {
-    let tag = runtime::image_tag(h);
-    let target = runtime::image_target(h);
-    let build = ui.proc(format!("using {} · build {}", backend_name(&rt.name), h.as_str()), true);
-    build.start();
-    if let Err((msg, code)) = run_build(&build, &rt.name, &tag, target, &df, uid, gid) {
-      build.finish_fail(Some(&msg));
-      ui.finish();
-      fail(&msg);
-      return code;
-    }
-    build.finish_ok(None);
+  let harness_list: Vec<config::Harness> = harnesses.into_iter().collect();
+  let rt_name = rt.name.clone();
+  let mut build_procs = Vec::with_capacity(harness_list.len());
+  for &h in &harness_list {
+    build_procs.push(ui.proc(format!("using {} · build {}", backend_name(&rt.name), h.as_str()), true));
+  }
+  let build_failed: Option<(String, i32)> = std::thread::scope(|scope| {
+    harness_list
+      .into_iter()
+      .zip(build_procs)
+      .map(|(h, build)| {
+        let rt_name = rt_name.clone();
+        let df = df.clone();
+        let tz = tz.clone();
+        scope.spawn(move || {
+          let tag = runtime::image_tag(h);
+          let target = runtime::image_target(h);
+          let fingerprint = runtime::image_build_fingerprint(&df, target, uid, gid, &tz);
+          build.start();
+          if runtime::image_is_up_to_date(&rt_name, &tag, &fingerprint) {
+            build.finish_ok(Some("up to date"));
+            return Ok(());
+          }
+          match run_build(&build, &rt_name, &tag, target, &df, uid, gid, &fingerprint) {
+            Ok(()) => {
+              build.finish_ok(None);
+              Ok(())
+            }
+            Err(e) => {
+              build.finish_fail(Some(&e.0));
+              Err(e)
+            }
+          }
+        })
+      })
+      .collect::<Vec<_>>()
+      .into_iter()
+      .find_map(|h| {
+        h.join()
+          .unwrap_or_else(|_| Err(("harness image build thread panicked".into(), 1)))
+          .err()
+      })
+  });
+  if let Some((msg, code)) = build_failed {
+    ui.finish();
+    fail(&msg);
+    return code;
   }
 
   let base_ref = base.as_deref();
@@ -977,7 +1027,7 @@ impl SkillRun {
 /// Run a single skill end to end in its own clone and container, driving `spinner`
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
 fn run_one_skill(
-  skill: &Skill, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
+  skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -1579,7 +1629,7 @@ fn cache_dir(root: &Path) -> PathBuf {
 /// each hashed, in sorted order), and the resolved env (sorted). So the **same commit +
 /// same skill + same env** map to the same key. `None` when the repo content can't be
 /// read (e.g. a repo with no commit yet) — then the run is simply not cached.
-fn cache_key(root: &Path, skill: &Skill, env: &[(String, String)]) -> Option<String> {
+fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) -> Option<String> {
   let tree = git_capture(root, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
   let mut blob = String::new();
   blob.push_str("scsh-cache v1\n");
@@ -1718,12 +1768,13 @@ fn now_secs() -> u64 {
 /// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
 fn run_build(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
+  fingerprint: &str,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
   let (ok, last) = match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
-      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz);
+      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint);
       build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started)?
     }
     runtime::BuildMethod::ContextDir => {
@@ -1733,7 +1784,9 @@ fn run_build(
         let _ = std::fs::remove_dir_all(&dir);
         return Err((format!("could not write Dockerfile to build context: {e}"), 1));
       }
-      let cmd = runtime::build_command_context(runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz);
+      let cmd = runtime::build_command_context(
+        runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz, fingerprint,
+      );
       let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
       let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
       out?
@@ -2152,6 +2205,7 @@ fn install_from_manifest(
   let mut installed: Vec<String> = Vec::new();
   let mut skipped: Vec<String> = Vec::new();
   let mut added: Vec<String> = Vec::new();
+  let mut conflicts: Vec<String> = Vec::new();
   let mut append = String::new();
   for skill in &cfg.skills {
     // Authoring-only skills are not installed: either marked `autoinstall: false`, or named
@@ -2160,21 +2214,25 @@ fn install_from_manifest(
       skipped.push(skill.name.clone());
       continue;
     }
-    let dir = clone.join(".skills").join(&skill.skill_source);
+    let dir = clone.join(".skills").join(&skill.name);
     if !dir.join("SKILL.md").is_file() {
       hint(&format!(
         "{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped",
-        skill.name, skill.skill_source
+        skill.name, skill.name
       ));
       continue;
     }
-    copy_skill_dir(root, &dir, &skill.skill_source, overwrite, &mut c);
-    installed.push(skill.skill_source.clone());
-    if !existing.contains(&skill.name) {
-      if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
-        append.push_str(&block);
-        added.push(skill.name.clone());
-      }
+    copy_skill_dir(root, &dir, &skill.name, overwrite, &mut c);
+    if !installed.contains(&skill.name) {
+      installed.push(skill.name.clone());
+    }
+    if existing.contains(&skill.name) {
+      conflicts.push(skill.name.clone());
+      continue;
+    }
+    if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
+      append.push_str(&block);
+      added.push(skill.name.clone());
     }
   }
 
@@ -2186,11 +2244,18 @@ fn install_from_manifest(
   if !skipped.is_empty() {
     ok(&format!("skipped {} authoring-only (autoinstall: false or internal-*): {}", skipped.len(), skipped.join(", ")));
   }
+  if !conflicts.is_empty() {
+    for name in &conflicts {
+      hint(&format!("kept your existing '{name}' entry in .scsh.yml (conflicts with source manifest)"));
+    }
+  }
 
   // Merge the new entries into the consumer's .scsh.yml (append-only — existing entries
   // are left untouched), but only if the result still validates.
   if append.is_empty() {
-    ok("the installed skills were already declared in .scsh.yml");
+    if conflicts.is_empty() {
+      ok("the installed skills were already declared in .scsh.yml");
+    }
   } else {
     let merged = if local_text.trim().is_empty() {
       format!("{CONSUMER_MANIFEST_HEADER}{append}")
@@ -2524,10 +2589,9 @@ fn print_help_config() {
   println!();
   print!(
     "{}",
-    r#"  skills:                 # the only top-level key: one or more run invocations
-    add-opencode-gpt:       #   invocation name (container label, cache key)
-      skill: add            #   optional; .skills/<name>/ folder (default: the key)
-      harness: opencode     #     required; `opencode` or `claude`
+    r#"  skills:                 # the only top-level key: one entry per .skills/<name>/ folder
+    add:                    #   key must match the skill directory name
+      harness: opencode     #     direct run — OR use invocations: for a matrix (below)
       model: openai/...     #     optional; the model the harness passes to the tool
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       env:                #     optional; host vars to forward (-e) into the container
@@ -2541,7 +2605,11 @@ fn print_help_config() {
                           #       effect — run twice and you get the commit twice.
       autoinstall: false  #     optional; default true. false = authoring-only: `installskills`
                           #       won't copy it into a consumer repo (an `internal-` name does the same)
-      result: tmp/x.json  #     required; the repo-relative file the skill must write
+      invocations:        #     optional matrix — each route expands to `{skill}-{route}`
+        opencode-gpt:       #       at run and install time; per-route profile/commits override
+          harness: opencode
+          model: openai/...
+      result: tmp/x.json  #     required; use {name} in the path when `invocations:` is set
 "#
   );
   println!();
@@ -2563,7 +2631,8 @@ fn print_help_config() {
   println!("{}", h_head("Sharing skills (install sources)"));
   println!("{}", h_dim("  When another repo runs `scsh installskills <this-repo>`, scsh installs every skill in"));
   println!("{}", h_dim("  this manifest EXCEPT those marked `autoinstall: false` or named `internal-*` (both"));
-  println!("{}", h_dim("  authoring-only), merging the rest into that repo's own .scsh.yml."));
+  println!("{}", h_dim("  authoring-only), merging the rest verbatim into that repo's own .scsh.yml."));
+  println!("{}", h_dim("  Existing skill keys in the consumer are left untouched — scsh warns on conflicts."));
   println!();
   println!("{}", h_dim("Harness commands (inside the container):"));
   println!("{}", h_dim("  opencode: opencode -m <model> run \"run skill <source>\""));
@@ -2595,7 +2664,8 @@ fn print_help_internals() {
   println!("{}", h_head("How a run works"));
   print!(
     r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`) from a shared
-  base, version-checking each CLI during the build. Then, for EVERY selected skill in
+  base in parallel (skipping any whose tag already matches the embedded Dockerfile fingerprint),
+  version-checking each CLI during the build. Then, for EVERY selected skill in
   parallel, it makes a fresh full clone of this repo into a /tmp run dir
   (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman, or scsh-<nonce>-run-<invocation>
   on Apple container — ≤ 64 chars, middle-truncated with .. when needed — all branches) and runs the skill's harness
@@ -2971,8 +3041,8 @@ mod tests {
 
   // --- result cache ---------------------------------------------------------
 
-  fn mk_skill(name: &str) -> config::Skill {
-    config::Skill {
+  fn mk_inv(name: &str) -> config::ResolvedInvocation {
+    config::ResolvedInvocation {
       name: name.into(),
       skill_source: name.into(),
       harness: config::Harness::Opencode,
@@ -2981,7 +3051,6 @@ mod tests {
       env: Vec::new(),
       profile: None,
       commits: false,
-      autoinstall: true,
       result: "tmp/r.json".into(),
     }
   }
@@ -2993,7 +3062,7 @@ mod tests {
     std::fs::write(caller.join(".skills/add/SKILL.md"), "name: add\nbody\n").unwrap();
     g(&caller, &["add", "-A"]);
     g(&caller, &["commit", "-qm", "skill"]);
-    let s = mk_skill("add");
+    let s = mk_inv("add");
     let env = vec![("A".to_string(), "2".to_string()), ("B".to_string(), "3".to_string())];
 
     let k1 = cache_key(&caller, &s, &env).unwrap();

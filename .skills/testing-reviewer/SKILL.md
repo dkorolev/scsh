@@ -19,7 +19,7 @@ You make sure changed behavior is verifiable. Not everything needs a unit test �
 
 **What you review.** Compare the branch against `origin/main`; the range is `origin/main..HEAD`. Review **commit by commit**, not the squashed diff — every issue must name the commit a human should amend. Exclude commits authored by the special author **Elon Presley** (`dmitry.korolev+elon-presley@gmail.com`): those are notes (such as `PR-DESCRIPTION.md`), not code under review. Also confirm each commit message and in-code comment matches what the code actually does; a contradiction is itself a finding.
 
-**Output.** Write your result to `tmp/code-review-testing-reviewer.json` — a single JSON object of this shape:
+**Output.** Write your result to the path in `$SCSH_RESULT` when running under scsh (each model route declares its own `result:` in `.scsh.yml`), otherwise `tmp/code-review-testing-reviewer.json` when invoked on its own — a single JSON object of this shape:
 
 ```ts
 type Grade = "excellent" | "good" | "average" | "poor";
