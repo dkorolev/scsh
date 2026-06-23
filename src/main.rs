@@ -1319,6 +1319,15 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
   }
   materialize_branches(run_dir);
   set_clone_identity(run_dir);
+  spinner.note("checking clone integrity…");
+  let fsck = runtime::fsck_command(&run_dir.to_string_lossy());
+  let (ok, last) = spinner.run(&fsck[0], &fsck[1..]).map_err(|e| format!("failed to run git fsck: {e}"))?;
+  if !ok {
+    return Err(match last {
+      Some(l) if !l.is_empty() => format!("git fsck failed on run clone: {l}"),
+      _ => "git fsck failed on run clone".to_string(),
+    });
+  }
   Ok(())
 }
 
@@ -2686,7 +2695,7 @@ fn print_help_internals() {
   serve multiple invocations with different result files.
 
   Repo sync — push IN, pull OUT (never GitHub from inside the container):
-  scsh git-clones on the HOST into /tmp/scsh-*-run-* and bind-mounts at /home/agent/repo
+  scsh git-clones on the HOST into /tmp/scsh-*-run-* and runs `git fsck` on each clone
   (push into the container). Skills must not git fetch, pull, push, or clone inside.
   After the container exits, scsh on the HOST pulls OUT: (1) the result file — always;
   (2) new commits from the run clone — only when commits: true AND the skill committed —

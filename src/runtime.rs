@@ -717,6 +717,11 @@ pub fn clone_command(src: &str, dst: &str) -> Vec<String> {
   vec!["git".into(), "clone".into(), src.into(), dst.into()]
 }
 
+/// `git fsck` argv: verify a host-side run clone before bind-mounting it into a container.
+pub fn fsck_command(repo: &str) -> Vec<String> {
+  vec!["git".into(), "-C".into(), repo.into(), "fsck".into(), "--no-progress".into()]
+}
+
 /// Given the lines of `git for-each-ref --format='%(refname:short)'
 /// refs/remotes/origin` and the clone's current branch, return the local branch
 /// names to create so every remote branch becomes a local one. `origin/HEAD`
@@ -1182,6 +1187,14 @@ mod tests {
   #[test]
   fn clone_command_is_a_full_local_clone() {
     assert_eq!(clone_command("/repo", "/tmp/dst"), vec!["git", "clone", "/repo", "/tmp/dst"]);
+  }
+
+  #[test]
+  fn fsck_command_checks_clone_integrity() {
+    assert_eq!(
+      fsck_command("/tmp/dst"),
+      vec!["git", "-C", "/tmp/dst", "fsck", "--no-progress"]
+    );
   }
 
   #[test]
