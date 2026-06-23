@@ -376,7 +376,7 @@ fn init_demo_then_list() {
     "got: {}",
     v.out
   );
-  assert!(v.out.contains("run skill add") && v.out.contains("-utc-run-add-opencode-gpt"), "got: {}", v.out);
+  assert!(v.out.contains("run skill add") && v.out.contains("-run-add-opencode-gpt"), "got: {}", v.out);
 }
 
 #[test]

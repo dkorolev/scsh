@@ -533,10 +533,86 @@ pub fn format_utc_timestamp(epoch_secs: u64) -> String {
   format!("{y:04}{m:02}{d:02}-{h:02}{mi:02}{s:02}")
 }
 
-/// Name of the per-run scratch directory created under `/tmp`, in scsh's
-/// `scsh-YYYYMMDD-HHMMSS-utc-run-<skill>` format.
-pub fn run_dir_name(epoch_secs: u64, skill: &str) -> String {
-  format!("scsh-{}-utc-run-{}", format_utc_timestamp(epoch_secs), sanitize_component(skill))
+/// Apple Containers (and Docker's normative pattern) cap container IDs at 64 characters.
+pub const CONTAINER_ID_MAX_LEN: usize = 64;
+
+/// Six lowercase `[a-z]` letters — the Apple-container run-dir stamp in place of UTC time.
+pub fn random_nonce_6() -> String {
+  let mut buf = [0u8; 6];
+  let filled = std::fs::File::open("/dev/urandom")
+    .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
+    .is_ok();
+  if !filled {
+    let nanos = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map(|d| d.as_nanos())
+      .unwrap_or(0) as u64;
+    let seed = nanos ^ ((std::process::id() as u64) << 32);
+    for (i, b) in buf.iter_mut().enumerate() {
+      *b = ((seed.wrapping_mul(1_103_515_245).wrapping_add(i as u64)) % 26) as u8;
+    }
+  }
+  buf.iter().map(|b| (b'a' + (b % 26)) as char).collect()
+}
+
+/// Shorten `s` to at most `max_len` by keeping the start and end with `..` in the middle.
+pub fn truncate_middle(s: &str, max_len: usize) -> String {
+  if max_len == 0 {
+    return String::new();
+  }
+  if s.len() <= max_len {
+    return s.to_string();
+  }
+  if max_len <= 2 {
+    return s.chars().take(max_len).collect();
+  }
+  let keep = max_len - 2;
+  let first_k = keep.div_ceil(2);
+  let last_n = keep / 2;
+  let bytes = s.as_bytes();
+  let first = &s[..first_k];
+  let last = std::str::from_utf8(&bytes[bytes.len() - last_n..]).unwrap_or("");
+  format!("{first}..{last}")
+}
+
+fn apple_container_run_dir_name_with_nonce(skill: &str, nonce: &str) -> String {
+  let prefix = format!("scsh-{nonce}-run-");
+  let budget = CONTAINER_ID_MAX_LEN.saturating_sub(prefix.len());
+  let skill_part = truncate_middle(skill, budget);
+  format!("{prefix}{skill_part}")
+}
+
+/// Whether `name` looks like a per-run scratch dir under `/tmp` (UTC stamp or Apple nonce).
+pub fn is_scsh_run_dir_name(name: &str) -> bool {
+  if !name.starts_with("scsh-") {
+    return false;
+  }
+  if name.contains("-utc-run-") {
+    return true;
+  }
+  let rest = match name.strip_prefix("scsh-") {
+    Some(r) => r,
+    None => return false,
+  };
+  let (nonce, _) = match rest.split_once("-run-") {
+    Some(pair) => pair,
+    None => return false,
+  };
+  nonce.len() == 6 && nonce.chars().all(|c| c.is_ascii_lowercase())
+}
+
+/// Name of the per-run scratch directory created under `/tmp`.
+///
+/// Docker/podman: `scsh-YYYYMMDD-HHMMSS-utc-run-<skill>`.
+/// Apple `container`: `scsh-<nonce>-run-<skill>` (≤ [`CONTAINER_ID_MAX_LEN`] chars; the skill
+/// segment is middle-truncated with `..` when needed).
+pub fn run_dir_name(epoch_secs: u64, skill: &str, runtime: &str) -> String {
+  let skill = sanitize_component(skill);
+  if runtime == "container" {
+    apple_container_run_dir_name_with_nonce(&skill, &random_nonce_6())
+  } else {
+    format!("scsh-{}-utc-run-{}", format_utc_timestamp(epoch_secs), skill)
+  }
 }
 
 /// Name an existing file is moved to before scsh overwrites it with a fresh
@@ -1058,10 +1134,44 @@ mod tests {
 
   #[test]
   fn run_dir_and_backup_names() {
-    assert_eq!(run_dir_name(1_700_000_000, "add"), "scsh-20231114-221320-utc-run-add");
+    assert_eq!(run_dir_name(1_700_000_000, "add", "docker"), "scsh-20231114-221320-utc-run-add");
     // skill names are sanitized for the filesystem.
-    assert_eq!(run_dir_name(0, "My Skill!"), "scsh-19700101-000000-utc-run-my-skill");
+    assert_eq!(run_dir_name(0, "My Skill!", "docker"), "scsh-19700101-000000-utc-run-my-skill");
     assert_eq!(backup_name("add_result.json", 1_700_000_000), "add_result.json.bak.20231114-221320-utc");
+  }
+
+  #[test]
+  fn truncate_middle_keeps_ends() {
+    assert_eq!(truncate_middle("abcdef", 6), "abcdef");
+    assert_eq!(truncate_middle("abcdefgh", 6), "ab..gh");
+    assert_eq!(truncate_middle("abcdefgh", 5), "ab..h");
+  }
+
+  #[test]
+  fn apple_container_run_dir_fits_long_reviewer_names() {
+    let skill = "reviewability-reviewer-opencode-glm-5.2";
+    let name = apple_container_run_dir_name_with_nonce(skill, "abcdef");
+    assert_eq!(name, "scsh-abcdef-run-reviewability-reviewer-opencode-glm-5.2");
+    assert!(name.len() <= CONTAINER_ID_MAX_LEN);
+    assert!(is_scsh_run_dir_name(&name));
+  }
+
+  #[test]
+  fn apple_container_run_dir_middle_truncates_when_needed() {
+    let skill = "a".repeat(80);
+    let name = apple_container_run_dir_name_with_nonce(&skill, "abcdef");
+    assert!(name.len() <= CONTAINER_ID_MAX_LEN);
+    assert!(name.contains(".."));
+    assert!(name.starts_with("scsh-abcdef-run-"));
+    assert!(is_scsh_run_dir_name(&name));
+  }
+
+  #[test]
+  fn is_scsh_run_dir_name_recognizes_both_formats() {
+    assert!(is_scsh_run_dir_name("scsh-20231114-221320-utc-run-add"));
+    assert!(is_scsh_run_dir_name("scsh-abcdef-run-add"));
+    assert!(!is_scsh_run_dir_name("scsh-installskills-1-2"));
+    assert!(!is_scsh_run_dir_name("scsh-abcdefg-run-add"));
   }
 
   #[test]

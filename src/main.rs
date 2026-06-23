@@ -658,7 +658,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
     }
     println!("\n{}", h_head("Per-skill commands"));
     for &skill in skills {
-      let name = runtime::run_dir_name(now_secs(), &skill.name);
+      let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
       let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
@@ -1015,7 +1015,7 @@ fn run_one_skill(
 
   // Own clone of the repo, so parallel skills never share a working tree.
   spinner.note("cloning…");
-  let run_dir = match prepare_run_dir(secs, &skill.name) {
+  let run_dir = match prepare_run_dir(secs, &skill.name, &rt.name) {
     Ok(d) => d,
     Err(e) => {
       spinner.finish_fail(Some(&e));
@@ -1163,14 +1163,14 @@ fn plural(n: usize) -> &'static str {
   }
 }
 
-/// Age (seconds) past which a leftover `/tmp/scsh-*-utc-run-*` clone is treated as stale and
+/// Age (seconds) past which a leftover `/tmp/scsh-*-run-*` clone is treated as stale and
 /// swept at the next run's startup. A full day — comfortably longer than any skill run (skill
 /// timeouts are in minutes) — so a concurrently-running scsh's fresh clone is never removed.
 const STALE_RUN_DIR_SECS: u64 = 24 * 60 * 60;
 
 /// Best-effort sweep of stale per-run clones left under `/tmp` by earlier runs — a failed
 /// skill's kept clone, or a clone orphaned by a crash before cleanup. Only entries matching
-/// the run-dir name (`scsh-*-utc-run-*`) AND older than [`STALE_RUN_DIR_SECS`] are removed,
+/// [`runtime::is_scsh_run_dir_name`] AND older than [`STALE_RUN_DIR_SECS`] are removed,
 /// so an in-progress concurrent run is never disturbed. Returns how many were removed.
 fn sweep_stale_run_dirs(now: u64) -> usize {
   sweep_stale_run_dirs_in(Path::new("/tmp"), now, STALE_RUN_DIR_SECS)
@@ -1187,7 +1187,7 @@ fn sweep_stale_run_dirs_in(dir: &Path, now: u64, max_age: u64) -> usize {
   for entry in entries.flatten() {
     let name = entry.file_name();
     let name = name.to_string_lossy();
-    if !(name.starts_with("scsh-") && name.contains("-utc-run-")) {
+    if !runtime::is_scsh_run_dir_name(&name) {
       continue;
     }
     let path = entry.path();
@@ -1207,11 +1207,23 @@ fn sweep_stale_run_dirs_in(dir: &Path, now: u64, max_age: u64) -> usize {
   removed
 }
 
-/// Create the per-run scratch dir under `/tmp` using scsh's
-/// `scsh-YYYYMMDD-HHMMSS-utc-run-<skill>` name, suffixing `-2`, `-3`, … in the
-/// unlikely event a same-second run of the same skill already took the name.
-fn prepare_run_dir(secs: u64, skill: &str) -> Result<PathBuf, String> {
-  let base = runtime::run_dir_name(secs, skill);
+/// Create the per-run scratch dir under `/tmp`. Docker/podman use a UTC-stamped name with
+/// `-2`, `-3`, … suffixes on collision; Apple `container` uses a random nonce and retries
+/// with a fresh nonce when the dir already exists (container IDs must stay ≤ 64 chars).
+fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, String> {
+  if runtime == "container" {
+    for _ in 1..=100 {
+      let base = runtime::run_dir_name(secs, skill, runtime);
+      let dir = PathBuf::from("/tmp").join(&base);
+      match std::fs::create_dir(&dir) {
+        Ok(()) => return Ok(dir),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+        Err(e) => return Err(format!("could not create run dir {}: {e}", dir.display())),
+      }
+    }
+    return Err("could not create a unique run dir under /tmp".into());
+  }
+  let base = runtime::run_dir_name(secs, skill, runtime);
   for n in 1..=100 {
     let dir = PathBuf::from("/tmp").join(if n == 1 { base.clone() } else { format!("{base}-{n}") });
     match std::fs::create_dir(&dir) {
@@ -2585,7 +2597,8 @@ fn print_help_internals() {
     r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`) from a shared
   base, version-checking each CLI during the build. Then, for EVERY selected skill in
   parallel, it makes a fresh full clone of this repo into a /tmp run dir
-  (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation>, all branches) and runs the skill's harness
+  (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman, or scsh-<nonce>-run-<invocation>
+  on Apple container — ≤ 64 chars, middle-truncated with .. when needed — all branches) and runs the skill's harness
   in its own container with that clone bind-mounted at /home/agent/repo (the WORKDIR).
   The clone is mounted UNDER the agent's home, not as it, so the harness's home-dir
   scratch (~/.cache, ~/.config, ~/.npm) stays out of the cloned tree. Files the skill
@@ -2735,10 +2748,12 @@ mod tests {
     std::fs::create_dir_all(&base).unwrap();
     // A matching run-dir, a non-matching scsh dir, an unrelated dir, and a matching *file*.
     let run = base.join("scsh-20231114-221320-utc-run-add");
+    let run_apple = base.join("scsh-abcdef-run-add");
     let install = base.join("scsh-installskills-1-2");
     let other = base.join("some-other-dir");
     let run_file = base.join("scsh-19700101-000000-utc-run-x"); // a file, not a dir
     std::fs::create_dir(&run).unwrap();
+    std::fs::create_dir(&run_apple).unwrap();
     std::fs::create_dir(&install).unwrap();
     std::fs::create_dir(&other).unwrap();
     std::fs::write(&run_file, b"").unwrap();
@@ -2748,10 +2763,11 @@ mod tests {
     assert_eq!(sweep_stale_run_dirs_in(&base, now, u64::MAX), 0);
     assert!(run.is_dir());
 
-    // A zero threshold makes every just-created entry "stale" — but only the matching
-    // DIRECTORY is removed; a non run-dir, an unrelated dir, and a matching file are left.
-    assert_eq!(sweep_stale_run_dirs_in(&base, now, 0), 1);
-    assert!(!run.exists(), "the matching run dir is removed");
+    // A zero threshold makes every just-created entry "stale" — but only matching
+    // DIRECTORIES are removed; a non run-dir, an unrelated dir, and a matching file are left.
+    assert_eq!(sweep_stale_run_dirs_in(&base, now, 0), 2);
+    assert!(!run.exists(), "the UTC-stamped run dir is removed");
+    assert!(!run_apple.exists(), "the Apple-container run dir is removed");
     assert!(install.is_dir(), "a non run-dir scsh dir is left alone");
     assert!(other.is_dir(), "an unrelated dir is left alone");
     assert!(run_file.is_file(), "a matching *file* (not a dir) is left alone");
