@@ -179,6 +179,16 @@ impl Proc {
     }
   }
 
+  /// Append a timestamped line to this proc's captured output (and echo it off-TTY).
+  pub fn emit(&self, msg: &str) {
+    let at = self.start_instant().elapsed().as_secs_f64();
+    if self.attended {
+      self.model.lock().unwrap().push_line(self.i, at, msg.to_string());
+    } else {
+      eprintln!("  {}", style(msg).dim());
+    }
+  }
+
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
