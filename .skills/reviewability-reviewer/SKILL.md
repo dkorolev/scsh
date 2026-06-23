@@ -15,7 +15,7 @@ You read the change the way a human reviewer will, and ask one question: can thi
 
 - The current branch is **not** the default branch (assume `main`). On `main`, do not run.
 
-- The working tree is clean; if it is dirty, do not run.
+- The working tree must be clean **unless** `SCSH=1` (running under scsh). On the host (no `SCSH`), refuse to run on a dirty repo — a dirty repo is a non-starter. Under scsh, the per-run clone is expectedly dirty (sandbox scratch, unrelated to the code under review), so a dirty tree is fine; either way the review covers committed history (`origin/main..HEAD`) only.
 
 **What you review.** Compare the branch against `origin/main`; the range is `origin/main..HEAD`. Review **commit by commit**, not the squashed diff — every issue must name the commit a human should amend. Exclude commits authored by the special author **Elon Presley** (`dmitry.korolev+elon-presley@gmail.com`): those are notes (such as `PR-DESCRIPTION.md`), not code under review. Also confirm each commit message and in-code comment matches what the code actually does; a contradiction is itself a finding.
 
