@@ -6,8 +6,9 @@
 //! row: a ▶/▼ triangle, a status glyph, the label, a smart elapsed clock, and a dim note.
 //! Click a row (the driver maps the mouse to a proc) to [`Model::toggle`] it; expanding shows
 //! that proc's captured output, every line stamped with `+<elapsed>` **relative to when that
-//! proc started**. The view scrolls (the model owns the scroll offset and a "follow the tail"
-//! flag); rows never wrap — each is clipped to the width the driver passes in.
+//! proc started**. The view scrolls (the model owns the scroll offset and follow flags); rows
+//! never wrap — each is clipped to the width the driver passes in. Expanding a proc pins the
+//! viewport to that proc's latest output; End resumes following the whole board.
 
 use super::clock::format_elapsed;
 use super::FRAMES;
@@ -85,20 +86,23 @@ impl Row {
   }
 }
 
-/// The whole live board: the procs, the scroll offset, and whether to keep following the tail.
+/// The whole live board: the procs, the scroll offset, and follow flags.
 #[derive(Debug, Default)]
 pub struct Model {
   pub procs: Vec<Proc>,
   /// Index of the first laid-out row shown at the top of the viewport.
   scroll: usize,
-  /// While true, the viewport sticks to the bottom as new rows arrive (like `tail -f`). The user
-  /// turns it off by scrolling up, and back on by scrolling to the bottom.
+  /// While true, the viewport sticks to the bottom of the whole board (like `tail -f`). The user
+  /// turns it off by scrolling up, and back on with End / scroll-to-bottom.
   follow: bool,
+  /// When set, the viewport sticks to the latest output line of this expanded proc instead of
+  /// the global board tail — so expanding a run in the middle of a fleet still shows its tail.
+  follow_proc: Option<usize>,
 }
 
 impl Model {
   pub fn new() -> Model {
-    Model { procs: Vec::new(), scroll: 0, follow: true }
+    Model { procs: Vec::new(), scroll: 0, follow: true, follow_proc: None }
   }
 
   /// Add a proc, returning its index (the handle the driver/worker uses to update it).
@@ -146,17 +150,28 @@ impl Model {
     }
   }
 
-  /// Toggle a proc's expanded state (what a mouse click on its header does).
+  /// Toggle a proc's expanded state (what a mouse click on its header does). Expanding pins the
+  /// viewport to that proc's latest output; collapsing clears the pin.
   pub fn toggle(&mut self, i: usize) {
     if let Some(p) = self.procs.get_mut(i) {
       p.expanded = !p.expanded;
+      if p.expanded {
+        self.follow_proc = Some(i);
+        self.follow = false;
+      } else if self.follow_proc == Some(i) {
+        self.follow_proc = None;
+      }
     }
   }
 
-  /// Expand or collapse every proc at once (the `e` / `c` keys).
+  /// Expand or collapse every proc at once (the `e` / `c` keys). Resumes global tail-follow.
   pub fn set_all_expanded(&mut self, expanded: bool) {
     for p in &mut self.procs {
       p.expanded = expanded;
+    }
+    self.follow_proc = None;
+    if expanded {
+      self.follow = true;
     }
   }
 
@@ -193,31 +208,69 @@ impl Model {
     let all = self.layout(width, frame);
     let height = height.max(1);
     let max_off = all.len().saturating_sub(height);
-    let off = if self.follow { max_off } else { self.scroll.min(max_off) };
+    let off = self.viewport_offset(height, max_off);
     let end = (off + height).min(all.len());
     (all[off..end].to_vec(), off)
   }
 
   /// Scroll by `delta` rows (negative = up/back, positive = down/forward) within a `height`-tall
-  /// viewport. Scrolling up drops "follow"; reaching the bottom restores it.
+  /// viewport. Scrolling up drops follow (global and per-proc); reaching the bottom restores global follow.
   pub fn scroll_by(&mut self, delta: isize, width: usize, height: usize) {
     let total = self.total_rows(width);
     let height = height.max(1);
     let max_off = total.saturating_sub(height);
-    // Resolve the current offset (following pins to the bottom) before nudging it.
-    let cur = if self.follow { max_off } else { self.scroll.min(max_off) };
+    let cur = self.viewport_offset(height, max_off);
+    self.follow_proc = None;
     let next = cur.saturating_add_signed(delta).min(max_off);
     self.scroll = next;
-    self.follow = next >= max_off; // back at the bottom ⇒ resume following
+    self.follow = next >= max_off;
   }
 
-  /// Jump to the top (stops following) or the bottom (resumes following).
+  /// Jump to the top (stops following) or the bottom (resumes global following).
   pub fn scroll_to_top(&mut self) {
     self.scroll = 0;
     self.follow = false;
+    self.follow_proc = None;
   }
   pub fn scroll_to_bottom(&mut self) {
     self.follow = true;
+    self.follow_proc = None;
+  }
+
+  /// Laid-out row index of this proc's last row (header, or last expanded output line).
+  fn proc_last_row_index(&self, proc_index: usize) -> usize {
+    let mut row = 0usize;
+    for (i, p) in self.procs.iter().enumerate() {
+      let rows = rows_for_proc(p);
+      if i == proc_index {
+        return row + rows - 1;
+      }
+      row += rows;
+    }
+    row.saturating_sub(1)
+  }
+
+  /// First visible row offset for the current follow mode.
+  fn viewport_offset(&self, height: usize, max_off: usize) -> usize {
+    if let Some(i) = self.follow_proc {
+      if self.procs.get(i).is_some_and(|p| p.expanded) {
+        return self.proc_last_row_index(i).saturating_sub(height - 1).min(max_off);
+      }
+    }
+    if self.follow {
+      max_off
+    } else {
+      self.scroll.min(max_off)
+    }
+  }
+}
+
+/// Layout row count for one proc: one header, plus expanded output (or a placeholder).
+fn rows_for_proc(p: &Proc) -> usize {
+  1 + if p.expanded {
+    if p.lines.is_empty() { 1 } else { p.lines.len() }
+  } else {
+    0
   }
 }
 
@@ -436,10 +489,10 @@ mod tests {
     let total = m.total_rows(80);
     assert_eq!(total, 21, "1 header + 20 lines");
 
-    // Following: the viewport sticks to the bottom.
+    // Per-proc follow (set by toggle): the viewport sticks to this proc's latest line.
     let (vis, off) = m.view(80, 5, 0);
     assert_eq!(vis.len(), 5);
-    assert_eq!(off, total - 5, "follow pins to the bottom");
+    assert_eq!(off, total - 5, "follow pins to the proc tail");
     assert!(vis.last().unwrap().plain().contains("line 19"));
 
     // Scroll up: follow turns off, the offset moves back.
@@ -447,9 +500,47 @@ mod tests {
     let (_, off2) = m.view(80, 5, 0);
     assert_eq!(off2, total - 5 - 3);
 
-    // Scrolling back to the bottom resumes following.
+    // Scrolling back to the bottom resumes global following.
     m.scroll_by(100, 80, 5);
     assert_eq!(m.view(80, 5, 0).1, total - 5);
+  }
+
+  #[test]
+  fn expanded_proc_follows_its_own_tail_not_the_global_board() {
+    let mut m = Model::new();
+    let a = m.add("skill-a");
+    let _b = m.add("skill-b");
+    m.toggle(a);
+    for n in 0..20 {
+      m.push_line(a, n as f64, format!("a-{n}"));
+    }
+    // skill-b adds rows below skill-a in the layout; global tail would hide a's output.
+    let total = m.total_rows(80);
+    assert_eq!(total, 22, "a: header+20 lines, b: header");
+
+    let (vis, off) = m.view(80, 5, 0);
+    let last = vis.last().unwrap().plain();
+    assert!(last.contains("a-19"), "pinned proc tail: {last:?}");
+    assert_eq!(off, 21 - 5, "offset pins to skill-a's last line");
+  }
+
+  #[test]
+  fn new_lines_on_followed_proc_stay_in_view() {
+    let mut m = Model::new();
+    let a = m.add("skill-a");
+    let _b = m.add("skill-b");
+    m.toggle(a);
+    for n in 0..10 {
+      m.push_line(a, n as f64, format!("a-{n}"));
+    }
+    let (vis, _) = m.view(80, 5, 0);
+    assert!(vis.last().unwrap().plain().contains("a-9"));
+
+    m.push_line(a, 11.0, "a-10");
+    m.push_line(a, 12.0, "a-11");
+    let (vis2, _) = m.view(80, 5, 0);
+    assert!(vis2.last().unwrap().plain().contains("a-11"));
+    assert!(!vis2.iter().any(|r| r.plain().contains("a-0")), "head scrolled off");
   }
 
   #[test]
