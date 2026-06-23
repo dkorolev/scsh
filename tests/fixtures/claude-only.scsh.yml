@@ -1,0 +1,6 @@
+skills:
+  add-claude-sonnet:
+    skill: add
+    harness: claude
+    model: sonnet
+    result: tmp/add_claude_sonnet_result.json

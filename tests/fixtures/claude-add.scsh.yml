@@ -1,0 +1,10 @@
+skills:
+  add-claude-sonnet:
+    skill: add
+    harness: claude
+    model: sonnet
+    timeout: 600
+    env:
+      - A: ${A:-2}
+      - B: ${B:-3}
+    result: tmp/add_claude_sonnet_result.json
