@@ -805,7 +805,7 @@ mod tests {
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_result.json");
+    let cmd = harness_command(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("--model sonnet"));
     assert!(cmd.contains("tee \"$SCSH_RUN_LOG\""));

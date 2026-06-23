@@ -27,7 +27,7 @@ Follow **`DEMO.md` steps 1–13** in order (step 14 is optional cleanup). The se
 
 1. **Probe the environment and three demo routes** — git, `scsh`, container runtime, and whether each route is available:
    - **`add-opencode-gpt`** — opencode + `openai/gpt-5.4-mini-fast`
-   - **`add-claude-sonnet`** — claude + `sonnet` (sonnet-4-6; needs `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` or `~/.claude/.credentials.json`)
+   - **`add-claude-sonnet-4-6`** — claude + `sonnet` (sonnet-4-6; needs `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token` or `~/.claude/.credentials.json`)
    - **`add-opencode-glm-5.2`** — opencode + `nebius-glm/zai-org/GLM-5.2`
    **FAIL immediately** if `demo routes available: 0 / 3`.
 2. **Pick where the demo repo goes.** The normal case is **any directory that is not yet a git repository** — create the UTC-stamped demo dir there. If you happen to be inside the `scsh` repo, create it under the gitignored `tmp/` instead, so you never dirty the checkout.

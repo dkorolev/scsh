@@ -433,8 +433,8 @@ fn list_json_is_machine_readable() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
   // The reserved `default` (add) and the declared `multiply`, each with its skill.
-  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt", "add-claude-sonnet", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
-  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt", "multiply-claude-sonnet"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt", "add-claude-sonnet-4-6", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt", "multiply-claude-sonnet-4-6"] }"#), "got: {}", r.out);
   // --json is list-only (parse-time rejection, exit 2).
   let bad = scsh(&d, &["run", "--json"]);
   assert_eq!(bad.code, 2, "got: {}", bad.out);
@@ -724,7 +724,7 @@ fn run_skips_claude_skills_when_claude_unavailable() {
   let r = scsh(&d, &["run"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(
-    r.out.contains("skipping 'add-claude-sonnet'"),
+    r.out.contains("skipping 'add-claude-sonnet-4-6'"),
     "got: {}",
     r.out
   );
@@ -780,7 +780,7 @@ fn claude_add_skill_runs_when_configured() {
   git(&d, &["commit", "-m", "claude-only demo"]);
   let r = scsh(&d, &["run"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
-  assert!(d.join("tmp/add_claude_sonnet_result.json").is_file(), "claude skill should write result");
-  let body = std::fs::read_to_string(d.join("tmp/add_claude_sonnet_result.json")).unwrap();
+  assert!(d.join("tmp/add_claude_sonnet_4_6_result.json").is_file(), "claude skill should write result");
+  let body = std::fs::read_to_string(d.join("tmp/add_claude_sonnet_4_6_result.json")).unwrap();
   assert!(body.contains("2 + 3 = 5") || body.contains("result"), "got: {body}");
 }

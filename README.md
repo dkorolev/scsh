@@ -97,14 +97,14 @@ skills:                          # invocation names — one container each
       - A: ${A:-2}
       - B: ${B:-3}
     result: tmp/add_opencode_gpt_result.json
-  add-claude-sonnet:
+  add-claude-sonnet-4-6:
     skill: add
     harness: claude
     model: sonnet
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_claude_sonnet_result.json
+    result: tmp/add_claude_sonnet_4_6_result.json
   add-opencode-glm-5.2:
     skill: add
     harness: opencode

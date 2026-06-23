@@ -6,7 +6,7 @@ Review these before merging or extending.
 ## Schema
 
 - **Optional `skill:` field** — YAML key is the *invocation name*; `skill:` points at `.skills/<name>/` (default: key). Backward compatible when key == folder name.
-- **Demo config** ships five invocations: `add-opencode-gpt`, `add-claude-sonnet`, `add-opencode-glm-5.2`, `multiply-opencode-gpt`, `multiply-claude-sonnet`. Models: **`openai/gpt-5.4-mini-fast`** (gpt-5.4-mini-fast), **`sonnet`** (sonnet-4-6), **`nebius-glm/zai-org/GLM-5.2`** (glm-5.2).
+- **Demo config** ships five invocations: `add-opencode-gpt`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2`, `multiply-opencode-gpt`, `multiply-claude-sonnet-4-6`. Models: **`openai/gpt-5.4-mini-fast`** (gpt-5.4-mini-fast), **`sonnet`** (sonnet-4-6), **`nebius-glm/zai-org/GLM-5.2`** (glm-5.2).
 - **`commits: true` only on `add-opencode-gpt`** — avoids duplicate git commits when several add routes run in parallel.
 
 ## Invocation

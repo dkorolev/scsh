@@ -502,7 +502,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       }
       if runnable.is_empty() {
         fail("no skills to run — every selected harness is unavailable on this host");
-        hint("see DEMO.md step 1 — probe add-opencode-gpt, add-claude-sonnet, and add-opencode-glm-5.2");
+        hint("see DEMO.md step 1 — probe add-opencode-gpt, add-claude-sonnet-4-6, and add-opencode-glm-5.2");
         return 1;
       }
       build_and_run(&rt, &root, &runnable)

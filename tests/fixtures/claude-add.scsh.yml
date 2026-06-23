@@ -1,5 +1,5 @@
 skills:
-  add-claude-sonnet:
+  add-claude-sonnet-4-6:
     skill: add
     harness: claude
     model: sonnet
@@ -7,4 +7,4 @@ skills:
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_claude_sonnet_result.json
+    result: tmp/add_claude_sonnet_4_6_result.json
