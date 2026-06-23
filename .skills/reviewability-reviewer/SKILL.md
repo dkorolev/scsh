@@ -1,6 +1,6 @@
 ---
 name: reviewability-reviewer
-description: Reviews how readable and reviewable a change is for a human — PR description clarity and ordering, commit-history coherence, and whether the change should be re-sliced into cleaner commits or split into multiple pull requests. Anchors findings to commits and the PR, not to code lines. Use this whenever assessing presentation, commit hygiene, or reviewer ergonomics, even if the user only says "is this PR easy to review?"
+description: "Reviews how readable and reviewable a change is for a human — PR description clarity and ordering, commit-history coherence, and whether the change should be re-sliced into cleaner commits or split into multiple pull requests. Anchors findings to commits and the PR, not to code lines. Use this whenever assessing presentation, commit hygiene, or reviewer ergonomics, even if the user only says \"is this PR easy to review?\""
 ---
 
 # Reviewability Reviewer

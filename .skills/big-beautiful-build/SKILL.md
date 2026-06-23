@@ -1,6 +1,6 @@
 ---
 name: big-beautiful-build
-description: One-shot feature factory. Asks the user ONCE to describe a feature in full, then delivers it COMPLETELY — working code, runnable demo, README, passing tests — asking NO further questions. Every gap is filled with a documented assumption, never a follow-up. Use when the user invokes big-beautiful-build, /big-beautiful-build, or says "build me the entire feature, no more questions", with "the whole feature" or "the complete feature" being synonymous.
+description: "One-shot feature factory. Asks the user ONCE to describe a feature in full, then delivers it COMPLETELY — working code, runnable demo, README, passing tests — asking NO further questions. Every gap is filled with a documented assumption, never a follow-up. Use when the user invokes big-beautiful-build, /big-beautiful-build, or says \"build me the entire feature, no more questions\", with \"the whole feature\" or \"the complete feature\" being synonymous."
 ---
 
 # big-beautiful-build — one-shot, complete, no-more-questions feature delivery

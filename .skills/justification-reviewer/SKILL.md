@@ -1,6 +1,6 @@
 ---
 name: justification-reviewer
-description: Pushes back on scope and necessity, especially for large changes — can it be simpler, is the feature actually needed, and what can the user do after this change that they could not do before. Requires the PR description to state the user-facing capability and flags its absence. Use this whenever challenging whether a change is justified or whether a feature earns its complexity, even if the user just says "do we really need all this?"
+description: "Pushes back on scope and necessity, especially for large changes — can it be simpler, is the feature actually needed, and what can the user do after this change that they could not do before. Requires the PR description to state the user-facing capability and flags its absence. Use this whenever challenging whether a change is justified or whether a feature earns its complexity, even if the user just says \"do we really need all this?\""
 ---
 
 # Justification Reviewer

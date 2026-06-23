@@ -1,6 +1,6 @@
 ---
 name: fast-beautiful-forward
-description: Replays the current branch's local commits on top of the freshest main of a real REMOTE upstream (GitHub or another proper remote — never a local directory), so that a pull request opened LATER would be a clean fast-forward. Auto-resolves only conflicts it is certain about; for any genuine conflict it stops and asks the user one question at a time. Never pushes and never opens the PR. Use when the user invokes fast-beautiful-forward, /fast-beautiful-forward, or asks to fast-forward / rebase their branch onto upstream main so a future PR fast-forwards.
+description: "Replays the current branch's local commits on top of the freshest main of a real REMOTE upstream (GitHub or another proper remote — never a local directory), so that a pull request opened LATER would be a clean fast-forward. Auto-resolves only conflicts it is certain about; for any genuine conflict it stops and asks the user one question at a time. Never pushes and never opens the PR. Use when the user invokes fast-beautiful-forward, /fast-beautiful-forward, or asks to fast-forward / rebase their branch onto upstream main so a future PR fast-forwards."
 ---
 
 # fast-beautiful-forward — make the branch fast-forward onto upstream main
