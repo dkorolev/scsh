@@ -1,0 +1,4 @@
+skills:
+  s:
+    harness: opencode
+    result: tmp/s.json

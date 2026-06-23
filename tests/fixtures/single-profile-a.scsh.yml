@@ -1,0 +1,5 @@
+skills:
+  a:
+    harness: opencode
+    profile: x
+    result: tmp/a.json
