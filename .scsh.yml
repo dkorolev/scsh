@@ -2,6 +2,7 @@
 # The whole file is just your skills; scsh builds them on a built-in base image.
 # Run `scsh help .scsh.yml` for the schema, or `scsh help` for commands.
 skills:
+  # code-review reviewers: GPT-5.5 + Opus-4.8 only. GLM-5.2 routes were a test — removed.
   conventions-reviewer:
     profile: code-review
     timeout: 1200
@@ -13,9 +14,6 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   justification-reviewer:
     profile: code-review
     timeout: 1200
@@ -27,9 +25,6 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   reviewability-reviewer:
     profile: code-review
     timeout: 1200
@@ -41,9 +36,6 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   sanity-reviewer:
     profile: code-review
     timeout: 1200
@@ -55,9 +47,6 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   testing-reviewer:
     profile: code-review
     timeout: 1200
@@ -69,9 +58,6 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   big-beautiful-build:
     harness: opencode
     model: openai/gpt-5.5
