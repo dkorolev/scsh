@@ -2,7 +2,6 @@
 # The whole file is just your skills; scsh builds them on a built-in base image.
 # Run `scsh help .scsh.yml` for the schema, or `scsh help` for commands.
 skills:
-  # code-review reviewers: GPT-5.5 + Opus-4.8 only. GLM-5.2 routes were a test — removed.
   conventions-reviewer:
     profile: code-review
     timeout: 1200
