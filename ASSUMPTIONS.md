@@ -40,7 +40,7 @@ scsh moves git state **only between the host and the run clone** on local disk. 
 **Before the container (host pushes IN):**
 
 1. scsh **`git clone`s on the host** into `/tmp/scsh-*-run-*` from the caller's committed state.
-2. scsh materializes `origin/*` as local branches in that clone.
+2. scsh materializes `origin/*` as local branches in that clone and runs **`git fsck`** on it — a corrupt clone fails before any container starts.
 3. scsh **bind-mounts** the clone at `/home/agent/repo` — that is the push into the container. The skill sees a complete snapshot; it must not `git fetch`, `git pull`, `git push`, or `git clone` to "refresh" it.
 
 **After the container exits (host pulls OUT — externally, on the host):**
