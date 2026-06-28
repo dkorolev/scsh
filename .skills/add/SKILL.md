@@ -1,6 +1,6 @@
 ---
 name: add
-description: Add environment variables A and B (defaulting A=2, B=3), report the sum under the repository's gitignored tmp/, append the result line to add_log.txt, and commit that file. Use when the user invokes add, /add, or asks to run skill add (optionally with A=... and B=... set in the environment).
+description: "Add environment variables A and B (defaulting A=2, B=3), report the sum under the repository's gitignored tmp/, append the result line to add_log.txt, and commit that file. Use when the user invokes add, /add, or asks to run skill add (optionally with A=... and B=... set in the environment)."
 ---
 
 # add

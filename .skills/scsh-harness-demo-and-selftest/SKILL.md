@@ -1,13 +1,6 @@
 ---
 name: scsh-harness-demo-and-selftest
-description: >-
-  Demo AND self-test `scsh` end to end: follow DEMO.md to take an empty directory to a working,
-  committed `scsh` project and run it — init-demo-project scaffolds add/multiply, `add` runs by
-  default on three routes (opencode+GPT, claude+Sonnet, opencode+GLM) with probing first, `multiply`
-  runs under its profile with X/Y, `scsh` refuses multiply when they're unset, and a re-run is
-  served from cache. Report PASS/FAIL for each predicted outcome. Use when the user invokes
-  scsh-harness-demo-and-selftest, /scsh-harness-demo-and-selftest, asks to "run the `scsh` demo",
-  or wants to verify `scsh` works.
+description: "Demo AND self-test `scsh` end to end: follow DEMO.md to take an empty directory to a working, committed `scsh` project and run it — init-demo-project scaffolds add/multiply, `add` runs by default on three routes (opencode+GPT, claude+Sonnet, opencode+GLM) with probing first, `multiply` runs under its profile with X/Y, `scsh` refuses multiply when they're unset, and a re-run is served from cache. Report PASS/FAIL for each predicted outcome. Use when the user invokes scsh-harness-demo-and-selftest, /scsh-harness-demo-and-selftest, asks to \"run the `scsh` demo\", or wants to verify `scsh` works."
 ---
 
 # scsh-harness-demo-and-selftest — demo and self-test `scsh` via DEMO.md
