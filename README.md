@@ -83,33 +83,53 @@ for you.
 You describe your project and its skills; you never write a container command.
 
 The whole file is just your skills — no `version`/`project`/`image` boilerplate. scsh
-builds them on a built-in base image (`debian:bookworm-slim`, with opencode added for you).
+builds them on built-in harness images (`scsh-opencode`, `scsh-claude`) from a shared Debian base.
 
 ```yaml
-skills:                          # the only top-level key — one or more, keyed by skill name
-  add:                           #   matches a .skills/add/ in your repo
-    harness: opencode            #   required — the engine that runs the skill
-    model: openai/gpt-5.4-mini-fast  #   optional — the model the harness passes through
-    timeout: 600                 #   optional — seconds; kill & fail if exceeded
-    commits: true                #   optional — rebase commits the skill makes onto your branch
-    env:                         #   optional — host vars to forward (scsh resolves these)
-      - A: ${A:-2}               #     forward A if set, else inject the default 2
-      - B: ${B:-3}
-    result: tmp/add_result.json  #   required — the repo-relative file the skill must write
-  multiply:                      #   only runs under: scsh run --profile multiply
-    harness: opencode
-    profile: multiply            #   keeps a var-requiring skill out of the default run
+skills:                          # invocation names — one container each
+  add-opencode-gpt:
+    skill: add                    #   optional — .skills/add/ (default: key name)
+    harness: opencode             #   required — opencode or claude
+    model: openai/gpt-5.4-mini-fast
+    timeout: 600
+    commits: true
     env:
-      - X: ${X}                  #     ${X}: required — scsh refuses the skill if X is unset
+      - A: ${A:-2}
+      - B: ${B:-3}
+    result: tmp/add_opencode_gpt_result.json
+  add-claude-sonnet:
+    skill: add
+    harness: claude
+    model: sonnet
+    env:
+      - A: ${A:-2}
+      - B: ${B:-3}
+    result: tmp/add_claude_sonnet_result.json
+  add-opencode-glm-5.2:
+    skill: add
+    harness: opencode
+    model: nebius-glm/zai-org/GLM-5.2
+    env:
+      - A: ${A:-2}
+      - B: ${B:-3}
+    result: tmp/add_opencode_glm_5_2_result.json
+  multiply-opencode-gpt:
+    skill: multiply
+    harness: opencode
+    profile: multiply
+    env:
+      - X: ${X}
       - Y: ${Y}
-    result: tmp/multiply_result.json
+    result: tmp/multiply_opencode_gpt_result.json
 ```
 
 ### A skill's fields
 
-- **`harness`** *(required)* — the engine that runs the skill inside the container.
-  Today there's one: **`opencode`** (runs `opencode -m <model> run "run skill
-  <name>"`). The harness is the extension point.
+- **`skill`** *(optional)* — the `.skills/<name>/` folder to run. Defaults to the YAML key.
+- **`harness`** *(required)* — **`opencode`** or **`claude`**. Each harness has its own container image.
+  OpenCode runs `opencode -m <model> run "run skill <source>"`. Claude runs headless via
+  `claude -p` with the skill's `SKILL.md` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
+  `~/.claude/.credentials.json`, plus optional `~/.claude` / `~/.claude.json` mounted into the container).
 - **`model`** *(optional)* — the model the harness passes to its tool.
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,

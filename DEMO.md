@@ -4,13 +4,13 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 > **The one-line pitch:** clone `scsh`, build it, then from an empty directory tell your agent: *"follow the steps in DEMO.md."* That's the whole demo.
 
-> **If you are the agent following this:** run each command, in order, **exactly as written** — every step is a single copy-pasteable command. Don't substitute your own directory names, wrap the demo in a fixed parent dir, or `rm`/delete anything to "start from a clean slate": the steps already choose safe, unique, re-runnable paths (see step 0.2), so reach for `rm` only in the optional step 9. You should **never need to write a script of your own** to follow this demo; if you feel the urge to, something is off — stop and ask the user first. (Skills ship their *own* scripts; *following this walkthrough* needs none.)
+> **If you are the agent following this:** run each command, in order, **exactly as written** — every step is a single copy-pasteable command. Don't substitute your own directory names, wrap the demo in a fixed parent dir, or `rm`/delete anything to "start from a clean slate": the steps already choose safe, unique, re-runnable paths (see step 2), so reach for `rm` only in the optional step 14. You should **never need to write a script of your own** to follow this demo; if you feel the urge to, something is off — stop and ask the user first. (Skills ship their *own* scripts; *following this walkthrough* needs none.)
 
 ## What you'll see
 
 - `scsh init-demo-project` scaffolds a two-skill project and **commits** it.
 
-- **`add`** (A + B) runs by default — with the built-in defaults, and with values you pass — and `scsh` prints the result it computed.
+- **`add`** (A + B) runs by default on **three routes** — `add-opencode-gpt`, `add-claude-sonnet`, `add-opencode-glm-5.2` — with the built-in defaults, and with values you pass.
 
 - **`add` is commit-enabled**: it records each sum as a git commit, and `scsh` **rebases that commit onto your branch**. The commit is journaled in the cache too, so even a **cached** re-run replays it — the commit side effect is never lost to a cache hit.
 
@@ -22,28 +22,83 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 - **The normal way: from any directory that is NOT inside a git repository** (an empty scratch dir is perfect). The demo repo is created there, in a UTC-stamped subdir, and left for you to inspect.
 
-- **If you happen to be inside the `scsh` repo**, don't pollute it — put the demo under the gitignored `tmp/` instead. (Step 0.2 below detects this and does it for you.)
+- **If you happen to be inside the `scsh` repo**, don't pollute it — put the demo under the gitignored `tmp/` instead. (Step 2 below detects this and does it for you.)
 
-The happy path (`add`, and `multiply` with values) does a **real run**: it builds a small container image and calls a model, so it needs a container runtime (Docker/Podman/Apple `container`) and opencode configured with a model. The instructive failure (`multiply` without X/Y) is decided by `scsh` itself and needs neither — so even with no runtime you still see the scaffold, the plan, and the refusal.
+The happy path runs **three `add` routes** by default — **gpt-5.4-mini-fast**, **sonnet-4-6**, and **glm-5.2** — plus **`multiply-*`** under `--profile multiply`. Step 1 **probes** each route first; `scsh run` **skips** routes whose harness is unavailable on the host and runs the rest in parallel. If **none** of the three `add` routes probe ok, the demo **fails** immediately.
 
 ---
 
-## 0. Set up
+## 1. Probe the environment and the three demo routes
 
-**0.1 — Check everything is in place first.** Run this and read the four lines — they decide which steps fully run:
+Run this and read every line — it decides which steps fully run. **Stop here with a failure** if `demo routes available: 0 / 3`.
 
 ```sh
+# Load shell exports (e.g. CLAUDE_CODE_OAUTH_TOKEN from `claude setup-token`).
+[ -f ~/.zshrc ] && . ~/.zshrc 2>/dev/null || true
+
 command -v git  >/dev/null && echo "git: ok"  || echo "git: MISSING (required)"
 command -v scsh >/dev/null && echo "scsh: on PATH" || echo "scsh: build it (cargo build --release), or put it on PATH"
 { command -v docker || command -v podman || command -v container; } >/dev/null 2>&1 \
   && echo "container runtime: ok" || echo "container runtime: none — real runs will be skipped"
-test -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json" \
-  && echo "opencode model auth: ok" || echo "opencode model auth: none — skills can't reach a model"
+
+DEMO_ROUTES_AVAILABLE=0
+DEMO_ROUTE_GPT=N/A
+DEMO_ROUTE_SONNET=N/A
+DEMO_ROUTE_GLM_5_2=N/A
+
+opencode_auth_ok() {
+  test -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"
+}
+opencode_model_ok() {
+  command -v opencode >/dev/null 2>&1 && opencode models 2>/dev/null | grep -qxF "$1"
+}
+claude_route_ok() {
+  if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+    return 0
+  fi
+  test -f "$HOME/.claude/.credentials.json"
+}
+
+if opencode_auth_ok && opencode_model_ok "openai/gpt-5.4-mini-fast"; then
+  echo "route gpt-5.4-mini-fast (add-opencode-gpt): ok"
+  DEMO_ROUTE_GPT=ok
+  DEMO_ROUTES_AVAILABLE=$((DEMO_ROUTES_AVAILABLE + 1))
+else
+  echo "route gpt-5.4-mini-fast (add-opencode-gpt): N/A"
+fi
+
+if claude_route_ok; then
+  echo "route sonnet-4-6 (add-claude-sonnet): ok"
+  DEMO_ROUTE_SONNET=ok
+  DEMO_ROUTES_AVAILABLE=$((DEMO_ROUTES_AVAILABLE + 1))
+else
+  echo "route sonnet-4-6 (add-claude-sonnet): N/A — run \`claude setup-token\` and export CLAUDE_CODE_OAUTH_TOKEN"
+fi
+
+if opencode_auth_ok && opencode_model_ok "nebius-glm/zai-org/GLM-5.2"; then
+  echo "route glm-5.2 (add-opencode-glm-5.2): ok"
+  DEMO_ROUTE_GLM_5_2=ok
+  DEMO_ROUTES_AVAILABLE=$((DEMO_ROUTES_AVAILABLE + 1))
+else
+  echo "route glm-5.2 (add-opencode-glm-5.2): N/A"
+fi
+
+echo "demo routes available: $DEMO_ROUTES_AVAILABLE / 3"
+export DEMO_ROUTES_AVAILABLE DEMO_ROUTE_GPT DEMO_ROUTE_SONNET DEMO_ROUTE_GLM_5_2
+
+if [ "$DEMO_ROUTES_AVAILABLE" -eq 0 ]; then
+  echo "FAIL: no demo routes available — need at least one of gpt-5.4-mini-fast, sonnet-4-6, or glm-5.2"
+  exit 1
+fi
 ```
 
-**git** and **`scsh`** (on `PATH`, or buildable with a Rust toolchain) are required for *every* step. A **container runtime** *and* **opencode model auth** are needed for the steps that actually compute (2–4, and the cache *miss* in 7). If either is missing, you still get the network-free parts — scaffold, `scsh list`, the `multiply` refusal, and a cache *hit* — so keep going; each step notes when it needs a model.
+**git** and **`scsh`** are required for *every* step. A **container runtime** is needed for steps that actually call a model. Routes marked **N/A** are skipped by `scsh run` (you'll see `⚠ skipping …`); routes marked **ok** should produce `2 + 3 = 5` in step 6. Network-free parts (scaffold, `scsh list`, the `multiply` refusal, cache hits) still run when every route is N/A — but **step 1 already fails** in that case, as it should.
 
-**0.2 — Pick where the demo repo goes**, UTC-stamped (`demo-YYYYMMDD-HHMMSS-utc`). If you are inside the `scsh` repo, put it under the gitignored `tmp/`; otherwise create it right here:
+---
+
+## 2. Pick where the demo repo goes
+
+UTC-stamped (`demo-YYYYMMDD-HHMMSS-utc`). If you are inside the `scsh` repo, put it under the gitignored `tmp/`; otherwise create it right here:
 
 ```sh
 STAMP="demo-$(date -u +%Y%m%d-%H%M%S)-utc"
@@ -51,9 +106,13 @@ if grep -qs '^name = "scsh"' Cargo.toml; then mkdir -p tmp; DEMO="tmp/$STAMP"; e
 mkdir "$DEMO"
 ```
 
-> The UTC stamp makes this directory **unique to this run**, which is the whole point: the demo is meant to be run **as many times as you like**, each run creating its own fresh `demo-…-utc` dir alongside any earlier ones. So just `mkdir` the stamped dir and work in it — **do not** hard-code a fixed directory name, reuse a previous run's dir, or `rm -rf` anything first to "reset". There is nothing to clean up before a run; optional teardown is step 9.
+> The UTC stamp makes this directory **unique to this run**, which is the whole point: the demo is meant to be run **as many times as you like**, each run creating its own fresh `demo-…-utc` dir alongside any earlier ones. So just `mkdir` the stamped dir and work in it — **do not** hard-code a fixed directory name, reuse a previous run's dir, or `rm -rf` anything first to "reset". There is nothing to clean up before a run; optional teardown is step 14.
 
-**0.3 — Get an `scsh` binary.** Use it from your `PATH`, or build it once from your `scsh` checkout. Set `$SCSH` to whatever you'll invoke:
+---
+
+## 3. Get an `scsh` binary
+
+Use it from your `PATH`, or build it once from your `scsh` checkout. Set `$SCSH` to whatever you'll invoke:
 
 ```sh
 if command -v scsh >/dev/null 2>&1; then
@@ -66,7 +125,11 @@ fi
 
 > No binary on `PATH`? You may substitute every `$SCSH` below with `cargo run --release --quiet --` run from your `scsh` checkout — but a built binary is the smoother experience.
 
-**0.4 — Enter the demo repo and make it a git repo.** A real run clones *committed* state, so it must be a clean git repo:
+---
+
+## 4. Enter the demo repo and make it a git repo
+
+A real run clones *committed* state, so it must be a clean git repo:
 
 ```sh
 cd "$DEMO"
@@ -77,44 +140,50 @@ git config user.name  "scsh demo"
 
 ---
 
-## 1. Scaffold the demo project
+## 5. Scaffold the demo project
 
 ```sh
 $SCSH init-demo-project
-BASE=$(git rev-parse HEAD)   # remember the scaffold commit — the cache demo (step 7) returns here
+BASE=$(git rev-parse HEAD)   # remember the scaffold commit — the cache demo (step 11) returns here
 ```
 
-**Confirm** the output reports `✓ committed the scaffold` and prints usage examples for the two skills. It has written and committed: a `.scsh.yml` with **`add`** (runs by default) and **`multiply`** (in the `multiply` profile); `.skills/add/SKILL.md` and `.skills/multiply/SKILL.md`; the harness discovery symlinks (`.claude/skills`, …); and a `/tmp` gitignore. The working tree is clean and ready to run.
+**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with five invocations (`add-opencode-gpt`, `add-claude-sonnet`, `add-opencode-glm-5.2`, `multiply-opencode-gpt`, `multiply-claude-sonnet`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
 
-`$BASE` is the **scaffold commit** — the repo state the first `add` run (step 2) caches its result against. We return to it in step 7 to get a cache hit; capturing it now (not later) matters, because each `add` run commits and moves `HEAD`.
+`$BASE` is the **scaffold commit** — the repo state the first `add` run (step 6) caches its result against. We return to it in step 11 to get a cache hit; capturing it now (not later) matters, because each `add` run commits and moves `HEAD`.
 
 ---
 
-## 2. Run `add` — works with defaults
+## 6. Run `add` — all available routes
+
+Run the default profile. `scsh` tries **every** `add` invocation in parallel, **skipping** routes whose harness was N/A in step 1:
 
 ```sh
 $SCSH run
 ```
 
-**Confirm** `scsh` builds the image once, then runs **only `add`** (multiply is profiled). `add` reads the defaults `scsh` injected (`A=2`, `B=3`), computes the sum, and `scsh` prints the message the skill produced — ending in **`2 + 3 = 5`**:
+**Confirm** a success line for **each route that probed ok** in step 1 (skip lines you don't expect):
 
 ```
-✓ opencode: add   …s   2 + 3 = 5
-✓ add: brought in 1 commit (rebased onto main)
-✓ all 1 skill completed successfully
+✓ opencode: add-opencode-gpt       …s   2 + 3 = 5      # gpt-5.4-mini-fast
+✓ claude: add-claude-sonnet        …s   2 + 3 = 5      # sonnet-4-6
+✓ opencode: add-opencode-glm-5.2   …s   2 + 3 = 5      # glm-5.2
 ```
 
-The result file is collected to `tmp/add_result.json`, **and** — because `add` is `commits: true` — `scsh` brought back the commit the skill made and rebased it onto your branch. Confirm it landed:
+Unavailable harnesses print `⚠ skipping '…' — … harness unavailable` and are not run.
+
+Result files land in `tmp/add_opencode_gpt_result.json`, `tmp/add_claude_sonnet_result.json`, and/or `tmp/add_opencode_glm_5_2_result.json`. Only **`add-opencode-gpt`** is commit-enabled — if it ran, confirm the git commit:
 
 ```sh
-git log --oneline -2          # top commit: "add: 2 + 3 = 5"
-cat add_log.txt               # one line: 2 + 3 = 5
-git status --porcelain        # empty — the tree is clean again
+git log --oneline -2
+cat add_log.txt
+git status --porcelain
 ```
+
+If a route was **N/A** in step 1, expect `scsh run` to skip it — not fail the whole run.
 
 ---
 
-## 3. Run `add` with your own values
+## 7. Run `add` with your own values
 
 ```sh
 A=10 B=20 $SCSH run
@@ -124,7 +193,7 @@ A=10 B=20 $SCSH run
 
 ---
 
-## 4. Run `multiply` (the profile) with its required inputs
+## 8. Run `multiply` (the profile) with its required inputs
 
 ```sh
 X=6 Y=7 $SCSH run --profile multiply
@@ -134,7 +203,7 @@ X=6 Y=7 $SCSH run --profile multiply
 
 ---
 
-## 5. Run `multiply` **without** its inputs — `scsh` refuses it
+## 9. Run `multiply` **without** its inputs — `scsh` refuses it
 
 ```sh
 $SCSH run --profile multiply
@@ -158,9 +227,9 @@ $SCSH list --verbose   # the same, plus the image Dockerfile and the exact build
 
 ---
 
-## 6. Commits come back — and stack up (the important part)
+## 10. Commits come back — and stack up (the important part)
 
-`add` is marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its sum to `add_log.txt` and commits inside its own clone; after the run, `scsh` **rebases that commit onto your current branch**. By now you've already run `add` twice (steps 2 and 3 — step 4 ran only `multiply`), so your branch already carries two `add: …` commits:
+`add` is marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its sum to `add_log.txt` and commits inside its own clone; after the run, `scsh` **rebases that commit onto your current branch**. By now you've already run `add` twice (steps 6 and 7 — step 8 ran only `multiply`), so your branch already carries two `add: …` commits:
 
 ```sh
 git log --oneline             # two "add: …" commits on top of the scaffold
@@ -177,7 +246,7 @@ $SCSH run                     # add again → "✓ add: brought in 1 commit (reb
 git log --oneline | head -1   # a NEW "add: 2 + 3 = 5" commit, even though the inputs repeat
 ```
 
-Running again **adds another commit** — because the repo changed (a new `add_log.txt` line was committed), the next run sees a different state, so it's a fresh run. (Reset to the *same* state and re-run and you'll get a cache **hit** — instant, no model — that **still replays the commit**, so a cached re-run reproduces the side effect too. That's §7.)
+Running again **adds another commit** — because the repo changed (a new `add_log.txt` line was committed), the next run sees a different state, so it's a fresh run. (Reset to the *same* state and re-run and you'll get a cache **hit** — instant, no model — that **still replays the commit**, so a cached re-run reproduces the side effect too. That's step 11.)
 
 **Why a rebase, not a fast-forward?** Each skill commits on a clone taken from your branch *before* the run, so several commit-enabled skills would all branch from the same point. `scsh` replays each skill's commits onto your branch in turn (the second skill rebases onto the branch the first one advanced), so order doesn't matter.
 
@@ -191,18 +260,18 @@ You can then `git log scsh/incoming/…` to see exactly what it added and merge 
 
 ---
 
-## 7. Results are cached (run it again — instantly)
+## 11. Results are cached (run it again — instantly)
 
 `scsh` caches each skill's result, keyed on a SHA-256 of **the repo's committed content + the skill's files + the resolved env**. If all three match a previous run, `scsh` returns the cached result instantly — no clone, no container, no model call — and prints **`(cached)`**.
 
-`add` already ran (and cached its result) in step 2 — but it also *committed*, which moved `HEAD`, so the repo is no longer at that input state. **Return to `$BASE`** — the scaffold commit you captured in step 1, the exact state step 2 cached against — then run again:
+`add` already ran (and cached its result) in step 6 — but it also *committed*, which moved `HEAD`, so the repo is no longer at that input state. **Return to `$BASE`** — the scaffold commit you captured in step 5, the exact state step 6 cached against — then run again:
 
 ```sh
-git reset --hard "$BASE"      # back to the exact state add was first run from (step 1's commit)
-$SCSH run                     # SAME content + skill + env (defaults A=2 B=3) as step 2
+git reset --hard "$BASE"      # back to the exact state add was first run from (step 5's commit)
+$SCSH run                     # SAME content + skill + env (defaults A=2 B=3) as step 6
 ```
 
-> Capture `$BASE` at step 1, **not here** — by now `HEAD` has moved forward with each `add` commit, so `BASE=$(git rev-parse HEAD)` at this point would reset to *nowhere* (a no-op) and you'd get a cache miss. It must be the scaffold commit.
+> Capture `$BASE` at step 5, **not here** — by now `HEAD` has moved forward with each `add` commit, so `BASE=$(git rev-parse HEAD)` at this point would reset to *nowhere* (a no-op) and you'd get a cache miss. It must be the scaffold commit.
 
 **Confirm** the `add` line ends with **`(cached)`** and finishes in ~0s (no clone, no container, no model) — **and** that `scsh` still **replays the journaled commit**, so `git log` shows a fresh `add: 2 + 3 = 5` on top:
 
@@ -228,7 +297,7 @@ A=2 B=3 $SCSH run             # back to the first env → cache HIT → 2 + 3 = 
 
 ---
 
-## 8. Install more skills from another repo (the manifest merge) — optional, needs network
+## 12. Install more skills from another repo (the manifest merge) — optional, needs network
 
 `scsh` can pull skills from any git repo that ships them. When that repo has its **own** `.scsh.yml`, the manifest drives the install: `scsh` validates it, installs each skill it lists — **except** the authoring-only ones (marked `autoinstall: false`, or named with the `internal-` prefix) — and **merges those skills' entries into your `.scsh.yml`**, so they are runnable immediately.
 
@@ -255,7 +324,26 @@ Skills the manifest doesn't list are skipped (the manifest is the shipping list)
 
 ---
 
-## 9. Clean up (optional)
+## 13. Demo harness report (required)
+
+Re-print which routes were available at the start and which produced `2 + 3 = 5` in step 6. **FAIL the demo** if `DEMO_ROUTES_AVAILABLE` was `0` (step 1 should have stopped you).
+
+```sh
+echo "=== Demo harness report ==="
+echo "  gpt-5.4-mini-fast  (add-opencode-gpt):       probed $DEMO_ROUTE_GPT"
+echo "  sonnet-4-6         (add-claude-sonnet):      probed $DEMO_ROUTE_SONNET"
+echo "  glm-5.2            (add-opencode-glm-5.2): probed $DEMO_ROUTE_GLM_5_2"
+echo "  routes available at start: $DEMO_ROUTES_AVAILABLE / 3"
+test -f tmp/add_opencode_gpt_result.json       && echo "  add-opencode-gpt ran → tmp/add_opencode_gpt_result.json" || true
+test -f tmp/add_claude_sonnet_result.json      && echo "  add-claude-sonnet ran → tmp/add_claude_sonnet_result.json" || true
+test -f tmp/add_opencode_glm_5_2_result.json   && echo "  add-opencode-glm-5.2 ran → tmp/add_opencode_glm_5_2_result.json" || true
+```
+
+Agents following this demo should end with an explicit **PASS** only if `DEMO_ROUTES_AVAILABLE ≥ 1` and every route that probed **ok** also reported `2 + 3 = 5` in step 6.
+
+---
+
+## 14. Clean up (optional)
 
 The demo repo is yours to poke at. When you're done:
 
@@ -280,7 +368,7 @@ rm -rf "$STAMP"          # inside the scsh repo it was created as tmp/$STAMP —
 
 - **Skills install from other repos, manifest-aware**: a source repo's own `.scsh.yml` decides what ships — `scsh installskills` validates it, merges its skills into yours (append-only), and keeps authoring-only skills out of consumers (marked `autoinstall: false`, or named `internal-*`, like `internal-self-check-reviewers`).
 
-> Don't have a container runtime or a configured model? You'll still see step 1 scaffold and commit, `scsh list` show the skills, step 5's refusal, and a **cache hit** in step 7 (a hit needs no container) — all with no network. Only the actual sums, products, and commit-backs in steps 2–4 and 6 need the runtime and a model.
+> Don't have a container runtime? You'll still see step 5 scaffold and commit, `scsh list`, step 9's refusal, and a **cache hit** in step 11 — all with no network — **but step 1 fails** if none of the three `add` routes probe ok, and that is intentional.
 
 ### env syntax, for reference
 
