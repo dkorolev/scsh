@@ -101,9 +101,6 @@ skills:                          # each key == .skills/<name>/ folder
       claude-sonnet-4-6:
         harness: claude
         model: sonnet
-      opencode-glm-5.2:
-        harness: opencode
-        model: nebius-glm/zai-org/GLM-5.2
   multiply:
     profile: multiply
     env:
@@ -176,7 +173,12 @@ scsh installskills [url]   Install skills — bundled, or a git repo's (merges i
 scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's.
 scsh help                  Show help (includes the schema).
 scsh version               Show the version (with the build's git short hash, +`-dirty`).
+scsh daemon start|stop|restart|status
+                           Session browser on http://127.0.0.1:7274 (override with SCSH_DAEMON_PORT).
+                           scsh run auto-starts an ephemeral daemon and prints a session URL.
 ```
+
+See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 
 **Installing skills.** With no arguments, `scsh installskills` drops scsh's one bundled skill —
 `scsh-harness-demo-and-selftest`, a demo-and-self-test you run with `/scsh-harness-demo-and-selftest`
@@ -244,6 +246,9 @@ your terminal's own scrollback keeps working during the run. When the run finish
 the live region and leaves a compact `✓`/`✗` summary** in its place: one line per process, nothing
 more. Off a TTY (a pipe, a file, CI) there's no board — each step prints a plain `▶` then `✓`/`✗`
 line, so logs stay readable.
+
+When the session browser daemon is running, the same events also appear in a browser at a
+permanent `http://127.0.0.1:7274/session/abcdef` URL printed at the end of `scsh run`.
 
 > **See it without a container or a model:** `scsh __ui-demo` runs the real board over a few
 > scripted subprocesses (click the rows, scroll), and `scsh __ui-demo --frames` prints a few static
