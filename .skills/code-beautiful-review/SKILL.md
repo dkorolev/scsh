@@ -1,19 +1,36 @@
 ---
 name: code-beautiful-review
-description: Runs the scsh `code-review` profile (the reviewer fleet) over the current branch, but first pins the diff base to the freshest real upstream main — so a stale or diverged local main never makes the fleet review the wrong, oversized range — unless the user names an explicit branch to diff against, which is honored verbatim. Then reads every reviewer's result, prints a one-row-per-reviewer summary table (reviewer, duration, rating, issue count), and clusters the pooled findings into labeled groups A/B/C/D with a two-sentence description each, asking which to go deeper on. Read-only: it never edits code, pushes, or opens a PR. Use when the user invokes code-beautiful-review, /code-beautiful-review, or asks to run the code review and group/cluster the comments.
+description: Runs the scsh `code-review` profile (the reviewer fleet — up to fifteen invocations across GPT, Opus, and GLM-5.2) over the current branch, but first pins the diff base to the freshest real upstream main — so a stale or diverged local main never makes the fleet review the wrong, oversized range — unless the user names an explicit branch to diff against, which is honored verbatim. Probes three model routes first and proceeds when at least one is available. Then reads every reviewer's result, prints a one-row-per-invocation summary table (reviewer, model route, duration, rating, issue count), and clusters the pooled findings into labeled groups A/B/C/D with a two-sentence description each, asking which to go deeper on. Read-only: it never edits code, pushes, or opens a PR. Use when the user invokes code-beautiful-review, /code-beautiful-review, or asks to run the code review and group/cluster the comments.
 ---
 
 # code-beautiful-review — run the review fleet, then cluster the findings
 
 The contract:
 
-> **Pin the review base to the freshest upstream main (or to the branch the user names), run the `code-review` reviewer fleet through scsh against it, wait for it, then turn its scattered findings into one summary table and a handful of labeled clusters — and stop there, asking the user which cluster to open. Report only; change nothing.**
+> **Probe three model routes (GPT, Opus, GLM-5.2) and stop only when none are available; pin the review base to the freshest upstream main (or to the branch the user names); run the `code-review` fleet through scsh against it; wait for it; then turn its scattered findings into one summary table and a handful of labeled clusters — and stop there, asking the user which cluster to open. Report only; change nothing.**
 
 ## 1. Preconditions — check FIRST; if any fails, stop and say exactly how to fix it
 
 - **scsh is installed:** `command -v scsh`. If it is missing, tell the user to install scsh (see https://github.com/dkorolev/scsh for details) and stop — do not improvise a review by hand.
 
-- **The `code-review` profile exists and is non-empty:** run `scsh check-profile code-review` (exit 0 means the profile is present with at least one skill; this is runtime-free). If it is non-zero, tell the user to install the reviewers with `scsh installskills https://github.com/dkorolev/code-review-skills`, then stop.
+- **The `code-review` profile exists and is non-empty:** run `scsh check-profile code-review` (exit 0 means the profile is present with at least one skill; this is runtime-free). If it is non-zero, tell the user to install the reviewers with `scsh installskills https://github.com/dimacurrentai/code-review-skills`, then stop.
+
+- **At least one review model route is available.** Before spending time on base-pinning or a fleet run, probe the three routes the profile is built for (same idea as `DEMO.md` step 1 in scsh, but for review models):
+
+  ```sh
+  [ -f ~/.zshrc ] && . ~/.zshrc 2>/dev/null || true
+  REVIEW_ROUTES_AVAILABLE=0
+  opencode_auth_ok() { test -f "${XDG_DATA_HOME:-$HOME/.local/share}/opencode/auth.json"; }
+  opencode_model_ok() { command -v opencode >/dev/null 2>&1 && opencode models 2>/dev/null | grep -qxF "$1"; }
+  claude_route_ok() { [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || test -f "$HOME/.claude/.credentials.json"; }
+
+  if opencode_auth_ok && opencode_model_ok "openai/gpt-5.5"; then REVIEW_ROUTES_AVAILABLE=$((REVIEW_ROUTES_AVAILABLE + 1)); fi
+  if claude_route_ok; then REVIEW_ROUTES_AVAILABLE=$((REVIEW_ROUTES_AVAILABLE + 1)); fi
+  if opencode_auth_ok && opencode_model_ok "nebius-glm/zai-org/GLM-5.2"; then REVIEW_ROUTES_AVAILABLE=$((REVIEW_ROUTES_AVAILABLE + 1)); fi
+  echo "review routes available: $REVIEW_ROUTES_AVAILABLE / 3"
+  ```
+
+  **Stop here** if `REVIEW_ROUTES_AVAILABLE` is `0` — no GPT, Opus, or GLM route is usable on this host. Otherwise continue; scsh will skip N/A invocations and run the rest in parallel (up to fifteen when all three routes probe ok: five reviewers × three models).
 
 - **Let scsh enforce the rest.** Its own `run` preflight checks git, that the tree is clean, that `.scsh.yml` is valid, that `tmp/` is gitignored, and that a container runtime is up — each failure names the one fix. If `scsh run` fails preflight, surface that message verbatim and stop.
 
@@ -35,25 +52,29 @@ Each reviewer diffs `origin/main..HEAD` inside its own clone, and scsh builds th
 
 - Record the starting point first: `git rev-parse HEAD` (so you can spot anything the run adds), and note the wall-clock start.
 
-- Run the reviewers and wait for completion, keeping the per-skill run dirs so you can time each one, and teeing the output to your own scratch dir: `SCSH_KEEP_RUNS=1 scsh run code-review 2>&1 | tee tmp/code-beautiful-review-<YYYYMMDD>-<HHMMSS>-<rand>/run.out`. scsh runs every reviewer in parallel, each in its own ephemeral container on a clean clone of the branch, diffed against the base you pinned in step 2.
+- Run the reviewers and wait for completion, keeping the per-skill run dirs so you can time each one, and teeing the output to your own scratch dir: `SCSH_KEEP_RUNS=1 scsh run code-review 2>&1 | tee tmp/code-beautiful-review-<YYYYMMDD>-<HHMMSS>-<rand>/run.out`. scsh runs every configured invocation in parallel (up to fifteen), each in its own ephemeral container on a clean clone of the branch, diffed against the base you pinned in step 2. Unavailable harnesses or models print `⚠ skipping …` and are not run.
 
-- Do **not** abort if `scsh run` exits non-zero. Every skill runs regardless; a non-zero exit means at least one reviewer failed to produce its result, but the others' results are still there. Collect what exists and mark the rest FAILED in the table.
+- Do **not** abort if `scsh run` exits non-zero. Every configured invocation is attempted; a non-zero exit means at least one reviewer failed to produce its result, but the others' results are still there. Collect what exists and mark the rest `FAILED` or `SKIPPED` in the table.
+
+- **Success for this skill:** you probed at least one model route in step 1, and after the run at least one reviewer invocation produced its result JSON. That is enough — you do not need all fifteen. If every invocation was skipped or failed, say so plainly and stop before clustering.
 
 ## 4. Collect the output
 
-- The authoritative output is each reviewer's **result JSON**, which scsh copies back into the run directory on success (any prior file moved aside to `*.bak.<utc>`). Get the reviewer list and each declared `result` path from `scsh list` (or `.scsh.yml`) for the `code-review` profile — by convention `tmp/code-review-<skill>.json`, relative to wherever the fleet ran (this repo, or the prepared clone). Each file has the shape `{ result: { grade, issues_found }, issues: [ { commit, file, line, description, suggestion } ] }`, where `grade` is one of `excellent | good | average | poor` and `issues_found` equals `issues.length`.
+- The authoritative output is each reviewer's **result JSON**, which scsh copies back into the run directory on success (any prior file moved aside to `*.bak.<utc>`). Get the full invocation list and each declared `result` path from `scsh list` (or `.scsh.yml`) for the `code-review` profile — by convention `tmp/code-review-<invocation>.json` (for example `tmp/code-review-conventions-reviewer-opencode-gpt.json`, `tmp/code-review-sanity-reviewer-claude-opus.json`, …), relative to wherever the fleet ran (this repo, or the prepared clone). Each file has the shape `{ result: { grade, issues_found }, issues: [ { commit, file, line, description, suggestion } ] }`, where `grade` is one of `excellent | good | average | poor` and `issues_found` equals `issues.length`.
 
 - If the reviewers are configured for commit delivery (`commits: true` in `.scsh.yml`), the same findings also land as new commits authored by the dedicated review account — but only on the branch in whichever directory the fleet ran. When the fleet ran in place that is your branch (`git log <starting-HEAD>..HEAD` by that author); when it ran in the prepared clone those commits stay in the throwaway clone and never reach your branch, so rely on the JSON. Treat the JSON as the source of truth either way.
 
 - **Per-reviewer duration:** from the kept run dirs (`SCSH_KEEP_RUNS=1` left them in the system temp dir as `scsh-*-run-<skill>/`), read each `tmp/scsh-run.log` and take its first-to-last timestamp. If a log is unavailable, report the overall wall-clock for the run and mark that reviewer's cell `n/a (parallel)`. Remove the kept run dirs once you have read them, and delete the prepared clone (if you made one) once you have collected its results.
 
-## 5. The summary table — one row per reviewer
+## 5. The summary table — one row per invocation
 
-Print a table with exactly these columns, one row per skill in the `code-review` profile:
+Print a table with exactly these columns, one row per skill invocation in the `code-review` profile (up to fifteen when all three model routes are available):
 
-| Reviewer | Duration | Rating | Issues |
+| Reviewer | Model route | Duration | Rating | Issues |
 
-- **Reviewer** — the skill name.
+- **Reviewer** — the base reviewer (`conventions-reviewer`, `justification-reviewer`, …), parsed from the invocation name before the `-opencode-gpt`, `-claude-opus`, or `-opencode-glm-5.2` suffix.
+
+- **Model route** — `GPT` (`…-opencode-gpt`), `Opus` (`…-claude-opus`), or `GLM-5.2` (`…-opencode-glm-5.2`).
 
 - **Duration** — its wall-clock from step 4.
 
@@ -61,15 +82,17 @@ Print a table with exactly these columns, one row per skill in the `code-review`
 
 - **Issues** — `result.issues_found` from its JSON.
 
-A reviewer whose result file is absent is `FAILED` — say so in its row rather than guessing.
+A row whose harness was skipped by scsh is `SKIPPED` — say so rather than guessing. A row that ran but whose result file is absent is `FAILED`.
 
-Write the full summary — this table plus the lettered clusters from the next step — to `tmp/code-beautiful-review.md` in **this** repo (not the prepared clone, which is about to be deleted), so the run leaves a persistent report where the user will look for it. State at the top of the report which base the review used: the `<remote>/<main>` tip and its SHA, or the explicit branch the user named.
+After the full table, print a short **per-reviewer rollup** for the five base reviewers: for each, list how many model routes ran, the issue counts per route, and the strictest grade seen across routes.
+
+Write the full summary — the route probe line from step 1, this table, the per-reviewer rollup, and the lettered clusters from the next step — to `tmp/code-beautiful-review.md` in **this** repo (not the prepared clone, which is about to be deleted), so the run leaves a persistent report where the user will look for it. State at the top of the report which base the review used: the `<remote>/<main>` tip and its SHA, or the explicit branch the user named.
 
 ## 6. Cluster the findings
 
-- Pool every issue from every reviewer into one list. Group similar ones into clusters — by shared file and line region, by shared root cause or theme, and by the same problem raised by more than one reviewer (overlap is expected here; collapse those duplicates into a single cluster rather than listing each). Label the clusters `A`, `B`, `C`, `D`, and so on.
+- Pool every issue from every successful invocation into one list. When tagging an issue for clustering, record which **invocation** raised it (reviewer + model route). Group similar ones into clusters — by shared file and line region, by shared root cause or theme, and by the same problem raised by more than one reviewer or model route (overlap across GPT, Opus, and GLM is expected; collapse those into a single cluster rather than listing each). Label the clusters `A`, `B`, `C`, `D`, and so on.
 
-- For each cluster, give **exactly two sentences**: the first says what the cluster is, the second says where and how it shows up (which files, which reviewers raised it). Then ask the user which cluster they want to go deeper on — and stop. You do not fix, stage, or resolve anything; this skill reports, and a human decides.
+- For each cluster, give **exactly two sentences**: the first says what the cluster is, the second says where and how it shows up (which files, which reviewers and model routes raised it). Then ask the user which cluster they want to go deeper on — and stop. You do not fix, stage, or resolve anything; this skill reports, and a human decides.
 
 ## Safety and scope
 

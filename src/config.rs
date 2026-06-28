@@ -18,47 +18,92 @@ pub struct Config {
   pub skills: Vec<Skill>,
 }
 
-/// A scoped skill: a run invocation (the `.scsh.yml` key), the `.skills/<source>/`
-/// folder it executes, the harness that runs it, an optional model the harness
-/// passes to its tool, and the `result` file the skill must produce (a
-/// repo-relative path). scsh fails the skill's run — and the whole invocation —
-/// if the result is missing, and otherwise copies it back into the host repo.
-/// The user never writes the container command: the harness builds it from the
-/// skill source and model.
+/// One manifest row in `.scsh.yml`. The key must match the `.skills/<name>/` folder.
+/// Either declare direct run fields (`harness`, optional `model`, …) for a single
+/// invocation, or an `invocations:` matrix — each route expands to `{name}-{route}` at
+/// run time and on install (same schema in source and consumer repos).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Skill {
-  /// The `.scsh.yml` key — the run invocation name (container label, cache id).
+  /// The `.scsh.yml` key — must match `.skills/<name>/`.
   pub name: String,
-  /// The `.skills/<source>/` folder this invocation runs. Defaults to [`name`]
-  /// when `skill:` is omitted in `.scsh.yml`.
+  /// Direct-run harness. Required when `invocations` is empty; must be omitted when
+  /// `invocations` is set.
+  pub harness: Option<Harness>,
+  pub model: Option<String>,
+  pub timeout: Option<u64>,
+  pub env: Vec<EnvVar>,
+  /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
+  pub profile: Option<String>,
+  pub commits: bool,
+  /// Consulted only by `installskills`/`updateskills`.
+  pub autoinstall: bool,
+  /// Matrix routes. Each expands to a [`ResolvedInvocation`] named `{name}-{route}`.
+  pub invocations: Vec<InvocationRoute>,
+  /// Output path. With `invocations`, must contain `{name}` (substituted per route).
+  pub result: String,
+}
+
+/// One row under a skill's `invocations:` block.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InvocationRoute {
+  pub name: String,
+  pub harness: Harness,
+  pub model: Option<String>,
+  /// When set, overrides the skill-level `profile:` for this route only.
+  pub profile: Option<String>,
+  /// When set, overrides the skill-level `commits:` for this route only.
+  pub commits: Option<bool>,
+}
+
+/// A concrete run invocation after expanding matrix skills — what `scsh run` executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedInvocation {
+  pub name: String,
   pub skill_source: String,
   pub harness: Harness,
   pub model: Option<String>,
-  /// Wall-clock limit for the skill's harness run, in seconds. `None` = no limit;
-  /// when set, scsh kills the container and fails the skill once it is exceeded.
   pub timeout: Option<u64>,
-  /// Host environment variables to forward into the skill's container, in file
-  /// order (see [`EnvVar`]). Empty when the skill declares no `env:`.
   pub env: Vec<EnvVar>,
-  /// Optional profile this skill belongs to. A skill with no `profile` runs by
-  /// default; one with `profile: <name>` runs only when `scsh run --profile <name>` is
-  /// given (so skills needing variables that may be absent stay out of the default
-  /// run). `None` when the skill declares no `profile:`.
   pub profile: Option<String>,
-  /// Whether scsh takes commits this skill makes in its clone back into the caller's
-  /// repo. When `true`, after the run scsh looks for commits the skill added to its
-  /// clone branch (`base..clone-HEAD`) and rebases them onto the caller's current
-  /// branch — or, if they don't apply cleanly, saves them to a distinct
-  /// `scsh/incoming/<skill>-…` branch for the user to inspect. `false` (the default)
-  /// means scsh only collects the `result` file and ignores any commits. Bringing in
-  /// commits is a real, non-idempotent side effect: running again adds them again.
   pub commits: bool,
-  /// Whether `scsh installskills`/`updateskills` ship this skill when this repo is used
-  /// as an install source. `true` (the default) installs it and adds it to the consumer's
-  /// `.scsh.yml`; `false` keeps it authoring-only (e.g. a meta/self-check skill) so scsh
-  /// skips it entirely. Consulted only during install — it has no effect on a normal run.
-  pub autoinstall: bool,
   pub result: String,
+}
+
+/// Expand every manifest skill into the invocation(s) `scsh run` would execute, in file order.
+pub fn expand_invocations(cfg: &Config) -> Vec<ResolvedInvocation> {
+  cfg.skills.iter().flat_map(expand_skill).collect()
+}
+
+fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
+  if skill.invocations.is_empty() {
+    let harness = skill.harness.expect("validated skills always have harness or invocations");
+    return vec![ResolvedInvocation {
+      name: skill.name.clone(),
+      skill_source: skill.name.clone(),
+      harness,
+      model: skill.model.clone(),
+      timeout: skill.timeout,
+      env: skill.env.clone(),
+      profile: skill.profile.clone(),
+      commits: skill.commits,
+      result: skill.result.clone(),
+    }];
+  }
+  skill
+    .invocations
+    .iter()
+    .map(|route| ResolvedInvocation {
+      name: format!("{}-{}", skill.name, route.name),
+      skill_source: skill.name.clone(),
+      harness: route.harness,
+      model: route.model.clone(),
+      timeout: skill.timeout,
+      env: skill.env.clone(),
+      profile: route.profile.clone().or_else(|| skill.profile.clone()),
+      commits: route.commits.unwrap_or(skill.commits),
+      result: skill.result.replace("{name}", &route.name),
+    })
+    .collect()
 }
 
 /// One `env:` entry: a variable to set inside the container, and the rule for
@@ -169,11 +214,9 @@ pub fn demo_skills() -> [(&'static str, &'static str, bool); 4] {
   ]
 }
 
-/// Extract a skill's raw `.scsh.yml` block from `yaml` — the `  <name>:` header line and
-/// its indented field lines — with any `autoinstall:` field line removed (that flag is a
-/// source-side directive, not part of a consumer's config). Returns `None` if the skill
-/// isn't present. `installskills` uses this to copy a source skill's entry verbatim into
-/// the consumer's `.scsh.yml`, so its exact fields and env specs survive the merge.
+/// Extract a skill's raw `.scsh.yml` block — the `  <name>:` header and indented fields —
+/// with `autoinstall:` removed (source-only). Used by `installskills` to merge the block
+/// verbatim into the consumer's `.scsh.yml`.
 pub fn extract_skill_block(yaml: &str, name: &str) -> Option<String> {
   let want = format!("{name}:");
   let lines: Vec<&str> = yaml.lines().collect();
@@ -186,10 +229,10 @@ pub fn extract_skill_block(yaml: &str, name: &str) -> Option<String> {
     if !l.trim().is_empty() {
       let indent = l.len() - l.trim_start().len();
       if indent < 4 {
-        break; // the next skill (indent 2) or a top-level key (indent 0)
+        break;
       }
-      if l.trim_start().starts_with("autoinstall:") {
-        continue; // drop the source-only directive
+      if indent == 4 && l.trim_start().starts_with("autoinstall:") {
+        continue;
       }
     }
     out.push_str(l);
@@ -256,6 +299,22 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
   }
 
   if errors.is_empty() {
+    let cfg = Config { skills: skills.clone() };
+    let mut by_result: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for inv in expand_invocations(&cfg) {
+      by_result.entry(inv.result.clone()).or_default().push(inv.name.clone());
+    }
+    for (path, names) in by_result {
+      if names.len() > 1 {
+        errors.push(format!(
+          "duplicate result path '{path}' shared by invocations: {}",
+          names.join(", ")
+        ));
+      }
+    }
+  }
+
+  if errors.is_empty() {
     Ok(Config { skills })
   } else {
     Err(errors)
@@ -272,39 +331,25 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
       errors.push(format!("duplicate key 'skills.{name}.{k}'"));
     }
   }
-  const SK: &[&str] = &["skill", "harness", "model", "timeout", "env", "profile", "commits", "autoinstall", "result"];
+  const SK: &[&str] = &[
+    "harness", "model", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result",
+  ];
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: skill, harness, model, timeout, env, profile, commits, autoinstall, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, timeout, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
+  if fm.contains_key("skill") {
+    errors.push(format!(
+      "'skills.{name}.skill' is not allowed — the skill key must match the .skills/<name>/ folder"
+    ));
+  }
 
-  // skill: optional string — the .skills/<name>/ folder (default: the invocation key).
-  let skill_source = match fm.get("skill").copied() {
-    None => name.to_string(),
-    Some(Node::Map(_)) => {
-      errors.push(format!("'skills.{name}.skill' must be a string, not a mapping"));
-      name.to_string()
-    }
-    Some(Node::Scalar(s)) => {
-      let s = s.trim();
-      if s.is_empty() {
-        errors.push(format!("'skills.{name}.skill' must not be empty (omit the key to use the invocation name)"));
-        name.to_string()
-      } else {
-        s.to_string()
-      }
-    }
-  };
-
-  // harness: required, must name a known harness.
+  // harness: required for direct runs; forbidden when `invocations:` is set.
   let harness = match fm.get("harness").copied() {
-    None => {
-      errors.push(format!("skill '{name}' is missing required key 'harness'"));
-      None
-    }
+    None => None,
     Some(Node::Map(_)) => {
       errors.push(format!("'skills.{name}.harness' must be a string, not a mapping"));
       None
@@ -322,7 +367,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     },
   };
 
-  // model: optional string.
+  // model: optional string (direct runs only).
   let model = match fm.get("model").copied() {
     None => None,
     Some(Node::Map(_)) => {
@@ -339,6 +384,22 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
       }
     }
   };
+
+  // invocations: optional matrix — expands to `{name}-{route}` at run and install time.
+  let invocations = match fm.get("invocations").copied() {
+    None => Vec::new(),
+    Some(node) => validate_invocations(name, node, errors),
+  };
+  if !invocations.is_empty() {
+    if harness.is_some() {
+      errors.push(format!("'skills.{name}' must declare either 'harness:' or 'invocations:', not both"));
+    }
+    if model.is_some() {
+      errors.push(format!("'skills.{name}.model' must not be set when 'invocations:' is used (set model per route)"));
+    }
+  } else if harness.is_none() {
+    errors.push(format!("skill '{name}' is missing required key 'harness' (or declare 'invocations:')"));
+  }
 
   // result: required, repo-relative safe path.
   let result = match fm.get("result").copied() {
@@ -451,20 +512,167 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     },
   };
 
-  match (harness, result) {
-    (Some(harness), Some(result)) => Some(Skill {
-      name: name.to_string(),
-      skill_source,
-      harness,
-      model,
-      timeout,
-      env,
-      profile,
-      commits,
-      autoinstall,
-      result,
-    }),
+  match result {
+    Some(result) => {
+      if !invocations.is_empty() && !result.contains("{name}") {
+        errors.push(format!(
+          "'skills.{name}.result' must contain '{{name}}' when 'invocations:' is set (each route substitutes its name)"
+        ));
+      }
+      Some(Skill {
+        name: name.to_string(),
+        harness,
+        model,
+        timeout,
+        env,
+        profile,
+        commits,
+        autoinstall,
+        invocations,
+        result,
+      })
+    }
     _ => None,
+  }
+}
+
+/// Validate a skill's `invocations:` block.
+fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> Vec<InvocationRoute> {
+  let entries = match node {
+    Node::Map(m) => m,
+    Node::Scalar(_) => {
+      errors.push(format!("'skills.{skill}.invocations' must list one or more named routes"));
+      return Vec::new();
+    }
+  };
+  if entries.is_empty() {
+    errors.push(format!("'skills.{skill}.invocations' must list at least one route"));
+    return Vec::new();
+  }
+  let mut out = Vec::new();
+  let mut seen: BTreeMap<String, ()> = BTreeMap::new();
+  for (raw_key, child) in entries {
+    let default_name = raw_key.strip_prefix("- ").unwrap_or(raw_key.as_str()).trim().to_string();
+    if default_name.is_empty() {
+      errors.push(format!("'skills.{skill}.invocations' entry must have a route name"));
+      continue;
+    }
+    let fields = match child {
+      Node::Map(f) => f,
+      Node::Scalar(_) => {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}' must be a mapping with 'harness'"));
+        continue;
+      }
+    };
+    let mut fm: BTreeMap<&str, &Node> = BTreeMap::new();
+    for (k, v) in fields {
+      if fm.insert(k.as_str(), v).is_some() {
+        errors.push(format!("duplicate key 'skills.{skill}.invocations.{default_name}.{k}'"));
+      }
+    }
+    const IK: &[&str] = &["name", "harness", "model", "profile", "commits"];
+    for (k, _) in fields {
+      if !IK.contains(&k.as_str()) {
+        errors.push(format!(
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, profile, commits)"
+        ));
+      }
+    }
+    let route_name = match fm.get("name").copied() {
+      None => default_name.clone(),
+      Some(Node::Map(_)) => {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}.name' must be a string, not a mapping"));
+        default_name.clone()
+      }
+      Some(Node::Scalar(s)) => {
+        let s = s.trim();
+        if s.is_empty() {
+          errors.push(format!("'skills.{skill}.invocations.{default_name}.name' must not be empty"));
+          default_name.clone()
+        } else {
+          s.to_string()
+        }
+      }
+    };
+    if seen.insert(route_name.clone(), ()).is_some() {
+      errors.push(format!("'skills.{skill}.invocations' has duplicate route '{route_name}'"));
+      continue;
+    }
+    let harness = match fm.get("harness").copied() {
+      None => {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}' is missing required key 'harness'"));
+        None
+      }
+      Some(Node::Map(_)) => {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}.harness' must be a string, not a mapping"));
+        None
+      }
+      Some(Node::Scalar(s)) => match Harness::parse(s.trim()) {
+        Some(h) => Some(h),
+        None => {
+          errors.push(format!(
+            "'skills.{skill}.invocations.{default_name}.harness' is '{}', not a known harness (known: {})",
+            s.trim(),
+            Harness::known().join(", ")
+          ));
+          None
+        }
+      },
+    };
+    let model = parse_optional_string_field(
+      skill,
+      &format!("invocations.{default_name}.model"),
+      fm.get("model").copied(),
+      errors,
+      "omit the key for the harness default",
+    );
+    let profile = parse_optional_string_field(
+      skill,
+      &format!("invocations.{default_name}.profile"),
+      fm.get("profile").copied(),
+      errors,
+      "omit the key to inherit the skill-level profile",
+    );
+    let commits = match fm.get("commits").copied() {
+      None => None,
+      Some(Node::Map(_)) => {
+        errors.push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false, not a mapping"));
+        None
+      }
+      Some(Node::Scalar(s)) => match s.trim() {
+        "true" => Some(true),
+        "false" => Some(false),
+        other => {
+          errors.push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false (got '{other}')"));
+          None
+        }
+      },
+    };
+    if let Some(harness) = harness {
+      out.push(InvocationRoute { name: route_name, harness, model, profile, commits });
+    }
+  }
+  out
+}
+
+fn parse_optional_string_field(
+  skill: &str, field: &str, node: Option<&Node>, errors: &mut Vec<String>, empty_hint: &str,
+) -> Option<String> {
+  match node {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'skills.{skill}.{field}' must be a string, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => {
+      let s = s.trim();
+      if s.is_empty() {
+        errors.push(format!("'skills.{skill}.{field}' must not be empty ({empty_hint})"));
+        None
+      } else {
+        Some(s.to_string())
+      }
+    }
   }
 }
 
@@ -739,16 +947,14 @@ mod tests {
   }
 
   #[test]
-  fn skill_field_points_at_source_folder() {
+  fn skill_key_must_match_folder_skill_field_rejected() {
     let yaml = r#"skills:
   add-gpt:
     skill: add
     harness: opencode
     result: tmp/x.json
 "#;
-    let cfg = validate(yaml).unwrap();
-    assert_eq!(cfg.skills[0].name, "add-gpt");
-    assert_eq!(cfg.skills[0].skill_source, "add");
+    assert!(validate(yaml).unwrap_err().iter().any(|e| e.contains("'skills.add-gpt.skill' is not allowed")));
   }
 
   #[test]
@@ -758,40 +964,27 @@ mod tests {
     harness: claude
     result: tmp/x.json
 "#;
-    assert_eq!(validate(yaml).unwrap().skills[0].harness, Harness::Claude);
+    assert_eq!(validate(yaml).unwrap().skills[0].harness, Some(Harness::Claude));
   }
 
   #[test]
   fn demo_config_is_valid() {
     let cfg = validate(demo_yaml()).expect("demo config should validate");
-    assert_eq!(cfg.skills.len(), 5);
-    let add_oc = cfg.skills.iter().find(|s| s.name == "add-opencode-gpt").expect("add-opencode-gpt present");
+    assert_eq!(cfg.skills.len(), 2);
+    let add = cfg.skills.iter().find(|s| s.name == "add").expect("add present");
+    assert_eq!(add.invocations.len(), 3);
+    let expanded = expand_invocations(&cfg);
+    assert_eq!(expanded.len(), 5);
+    let add_oc = expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
     assert_eq!(add_oc.skill_source, "add");
     assert_eq!(add_oc.harness, Harness::Opencode);
     assert_eq!(add_oc.model.as_deref(), Some("openai/gpt-5.4-mini-fast"));
-    assert_eq!(add_oc.timeout, Some(600));
-    assert_eq!(add_oc.result, "tmp/add_opencode_gpt_result.json");
-    assert_eq!(add_oc.profile, None);
-    assert!(add_oc.commits, "add-opencode-gpt is commit-enabled");
-    let add_cl = cfg.skills.iter().find(|s| s.name == "add-claude-sonnet-4-6").expect("add-claude-sonnet-4-6 present");
-    assert_eq!(add_cl.skill_source, "add");
-    assert_eq!(add_cl.harness, Harness::Claude);
-    assert_eq!(add_cl.result, "tmp/add_claude_sonnet_4_6_result.json");
-    assert!(!add_cl.commits, "add-claude-sonnet-4-6 does not contribute commits");
-    assert_eq!(add_cl.model.as_deref(), Some("sonnet"));
-    let add_glm = cfg.skills.iter().find(|s| s.name == "add-opencode-glm-5.2").expect("add-opencode-glm-5.2 present");
-    assert_eq!(add_glm.harness, Harness::Opencode);
-    assert_eq!(add_glm.model.as_deref(), Some("nebius-glm/zai-org/GLM-5.2"));
-    assert_eq!(add_glm.result, "tmp/add_opencode_glm_5_2_result.json");
-    assert!(!add_glm.commits, "add-opencode-glm-5.2 does not contribute commits");
-    let mul_oc = cfg.skills.iter().find(|s| s.name == "multiply-opencode-gpt").expect("multiply-opencode-gpt present");
-    assert_eq!(mul_oc.skill_source, "multiply");
+    assert_eq!(add_oc.result, "tmp/add_opencode-gpt-5.4-mini-fast_result.json");
+    assert!(add_oc.commits, "add-opencode-gpt-5.4-mini-fast is commit-enabled");
+    let add_cl = expanded.iter().find(|s| s.name == "add-claude-sonnet-4-6").expect("add-claude-sonnet-4-6");
+    assert!(!add_cl.commits);
+    let mul_oc = expanded.iter().find(|s| s.name == "multiply-opencode-gpt-5.4-mini-fast").expect("multiply-opencode-gpt");
     assert_eq!(mul_oc.profile.as_deref(), Some("multiply"));
-    assert_eq!(mul_oc.result, "tmp/multiply_opencode_gpt_result.json");
-    let mul_cl = cfg.skills.iter().find(|s| s.name == "multiply-claude-sonnet-4-6").expect("multiply-claude-sonnet-4-6 present");
-    assert_eq!(mul_cl.skill_source, "multiply");
-    assert_eq!(mul_cl.harness, Harness::Claude);
-    assert_eq!(mul_cl.result, "tmp/multiply_claude_sonnet_4_6_result.json");
   }
 
   #[test]
@@ -891,6 +1084,93 @@ mod tests {
     assert_eq!(cfg.skills[0].name, "alpha");
     assert!(cfg.skills[0].autoinstall, "the merged consumer entry has no autoinstall → defaults true");
     assert!(extract_skill_block(yaml, "missing").is_none());
+  }
+
+  #[test]
+  fn invocations_expand_for_run() {
+    let yaml = r#"skills:
+  reviewer:
+    profile: code-review
+    timeout: 1200
+    result: tmp/review-{name}.json
+    invocations:
+      opencode-gpt-5.5:
+        harness: opencode
+        model: openai/gpt-5.5
+      claude-opus-4-6:
+        harness: claude
+        model: claude-opus-4-6
+"#;
+    let cfg = validate(yaml).unwrap();
+    let expanded = expand_invocations(&cfg);
+    assert_eq!(expanded.len(), 2);
+    assert_eq!(expanded[0].name, "reviewer-opencode-gpt-5.5");
+    assert_eq!(expanded[0].result, "tmp/review-opencode-gpt-5.5.json");
+    assert_eq!(expanded[0].profile.as_deref(), Some("code-review"));
+  }
+
+  #[test]
+  fn invocations_require_name_placeholder_in_result() {
+    let yaml = one_skill(
+      r#"    result: tmp/x.json
+    invocations:
+      gpt:
+        harness: opencode
+"#,
+    );
+    assert!(validate(&yaml).unwrap_err().iter().any(|e| e.contains("{name}")));
+  }
+
+  #[test]
+  fn duplicate_expanded_result_paths_are_rejected() {
+    let yaml = r#"skills:
+  add:
+    result: tmp/{name}.json
+    invocations:
+      route-a:
+        harness: opencode
+  multiply:
+    result: tmp/{name}.json
+    invocations:
+      route-a:
+        harness: opencode
+"#;
+    let errs = validate(yaml).unwrap_err();
+    assert!(
+      errs.iter().any(|e| e.contains("duplicate result path 'tmp/route-a.json'")),
+      "got {errs:?}"
+    );
+  }
+
+  #[test]
+  fn invocations_profile_override() {
+    let yaml = r#"skills:
+  reviewer:
+    profile: code-review
+    result: tmp/review-{name}.json
+    invocations:
+      special:
+        harness: opencode
+        profile: special-profile
+"#;
+    let expanded = expand_invocations(&validate(yaml).unwrap());
+    assert_eq!(expanded[0].profile.as_deref(), Some("special-profile"));
+  }
+
+  #[test]
+  fn extract_skill_block_keeps_invocations() {
+    let yaml = r#"skills:
+  reviewer:
+    profile: code-review
+    result: tmp/review-{name}.json
+    invocations:
+      gpt:
+        harness: opencode
+        model: openai/gpt-5.5
+"#;
+    let block = extract_skill_block(yaml, "reviewer").expect("reviewer present");
+    assert!(block.contains("invocations:"));
+    assert!(block.contains("gpt:"));
   }
 
   #[test]

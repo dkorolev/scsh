@@ -218,6 +218,10 @@ pub fn host_timezone() -> String {
 pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str, result: &str) -> String {
   match harness {
     Harness::Opencode => {
+      let instruction = format!(
+        "run skill {skill_source}. Follow .skills/{skill_source}/SKILL.md exactly. \
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable)."
+      );
       let mut cmd = String::from("opencode");
       if let Some(m) = model {
         cmd.push(' ');
@@ -225,7 +229,7 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str
         cmd.push_str(&shell_quote(m));
       }
       cmd.push_str(" run ");
-      cmd.push_str(&shell_quote(&format!("run skill {skill_source}")));
+      cmd.push_str(&shell_quote(&instruction));
       format!("{cmd} 2>&1 | tee \"${RUN_LOG_VAR}\"")
     }
     Harness::Claude => {
@@ -271,6 +275,10 @@ pub fn build_method(runtime: &str) -> BuildMethod {
   }
 }
 
+/// OCI label scsh stamps on every harness image at build time. Compared on later runs
+/// to skip rebuilding when the embedded Dockerfile and build args are unchanged.
+pub const BUILD_FINGERPRINT_LABEL: &str = "scsh.build.fingerprint";
+
 /// The `--build-arg` pair that pins the agent's UID/GID to the host user's.
 fn build_args(uid: u32, gid: u32, tz: &str) -> Vec<String> {
   vec![
@@ -283,19 +291,68 @@ fn build_args(uid: u32, gid: u32, tz: &str) -> Vec<String> {
   ]
 }
 
+fn build_labels(fingerprint: &str) -> Vec<String> {
+  vec!["--label".into(), format!("{BUILD_FINGERPRINT_LABEL}={fingerprint}")]
+}
+
+/// Deterministic sha256 over the Dockerfile, `--target`, and the build args that affect the image.
+pub fn image_build_fingerprint(dockerfile: &str, target: &str, uid: u32, gid: u32, tz: &str) -> String {
+  let blob = format!("target={target}\nuid={uid}\ngid={gid}\ntz={tz}\n---\n{dockerfile}");
+  crate::sha256::sha256_hex(blob.as_bytes())
+}
+
+/// Read the fingerprint label from an existing harness image, if present.
+pub fn image_inspect_fingerprint(runtime: &str, tag: &str) -> Option<String> {
+  use std::process::Command;
+  let out = if runtime == "container" {
+    Command::new("container").args(["image", "inspect", tag]).output().ok()?
+  } else {
+    let format = format!(r#"{{{{index .Config.Labels "{BUILD_FINGERPRINT_LABEL}"}}}}"#);
+    Command::new(runtime).args(["image", "inspect", tag, "--format", &format]).output().ok()?
+  };
+  if !out.status.success() {
+    return None;
+  }
+  let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+  if runtime == "container" {
+    parse_label_from_container_inspect(&s, BUILD_FINGERPRINT_LABEL)
+  } else if s.is_empty() {
+    None
+  } else {
+    Some(s)
+  }
+}
+
+/// True when `tag` exists and carries the expected build fingerprint (skip rebuild).
+pub fn image_is_up_to_date(runtime: &str, tag: &str, fingerprint: &str) -> bool {
+  image_inspect_fingerprint(runtime, tag).as_deref() == Some(fingerprint)
+}
+
+fn parse_label_from_container_inspect(json: &str, key: &str) -> Option<String> {
+  let needle = format!(r#""{key}":""#);
+  let start = json.find(&needle)? + needle.len();
+  let rest = &json[start..];
+  let end = rest.find('"')?;
+  Some(rest[..end].to_string())
+}
+
 /// Build argv for the stdin method: the Dockerfile is sent on stdin (`-`).
-pub fn build_command_stdin(runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str) -> Vec<String> {
+pub fn build_command_stdin(
+  runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
+) -> Vec<String> {
   let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
   v.extend(build_args(uid, gid, tz));
+  v.extend(build_labels(fingerprint));
   v.push("-".into());
   v
 }
 
 pub fn build_command_context(
-  runtime: &str, tag: &str, target: &str, context_dir: &str, uid: u32, gid: u32, tz: &str,
+  runtime: &str, tag: &str, target: &str, context_dir: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
   v.extend(build_args(uid, gid, tz));
+  v.extend(build_labels(fingerprint));
   v.push(context_dir.into());
   v
 }
@@ -931,14 +988,15 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    assert_eq!(
-      harness_command(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json"),
-      "opencode -m openai/gpt-5.5 run 'run skill add' 2>&1 | tee \"$SCSH_RUN_LOG\""
-    );
-    assert_eq!(
-      harness_command(Harness::Opencode, None, "multiply", "tmp/mul.json"),
-      "opencode run 'run skill multiply' 2>&1 | tee \"$SCSH_RUN_LOG\""
-    );
+    let cmd = harness_command(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json");
+    assert!(cmd.starts_with("opencode -m openai/gpt-5.5 run "));
+    assert!(cmd.contains("run skill add"));
+    assert!(cmd.contains("tmp/add.json"));
+    assert!(cmd.contains("SCSH_RESULT"));
+    assert!(cmd.ends_with("2>&1 | tee \"$SCSH_RUN_LOG\""));
+    let cmd = harness_command(Harness::Opencode, None, "multiply", "tmp/mul.json");
+    assert!(cmd.starts_with("opencode run "));
+    assert!(cmd.contains("tmp/mul.json"));
   }
 
   #[test]
@@ -957,23 +1015,45 @@ mod tests {
   }
 
   #[test]
+  fn image_build_fingerprint_is_stable_and_target_specific() {
+    let df = dockerfile();
+    let a = image_build_fingerprint(&df, "scsh-opencode", 501, 20, "UTC");
+    let b = image_build_fingerprint(&df, "scsh-opencode", 501, 20, "UTC");
+    let c = image_build_fingerprint(&df, "scsh-claude", 501, 20, "UTC");
+    assert_eq!(a, b);
+    assert_ne!(a, c);
+    assert_eq!(a.len(), 64);
+  }
+
+  #[test]
+  fn parse_label_from_container_inspect_json() {
+    let json = r#"{"variants":[{"config":{"config":{"Labels":{"scsh.generated":"true","scsh.build.fingerprint":"abc123"}}}}}]"#;
+    assert_eq!(parse_label_from_container_inspect(json, BUILD_FINGERPRINT_LABEL).as_deref(), Some("abc123"));
+    assert!(parse_label_from_container_inspect(json, "missing").is_none());
+  }
+
+  #[test]
   fn commands_have_expected_shape() {
+    let fp = image_build_fingerprint("FROM scratch", "scsh-opencode", 1006, 1007, "Europe/Berlin");
+    let label = format!("{BUILD_FINGERPRINT_LABEL}={fp}");
     assert_eq!(
-      build_command_stdin("docker", "scsh-opencode:latest", "scsh-opencode", 1006, 1007, "Europe/Berlin"),
+      build_command_stdin("docker", "scsh-opencode:latest", "scsh-opencode", 1006, 1007, "Europe/Berlin", &fp),
       vec![
-        "docker",
-        "build",
-        "-t",
-        "scsh-opencode:latest",
-        "--target",
-        "scsh-opencode",
-        "--build-arg",
-        "AGENT_UID=1006",
-        "--build-arg",
-        "AGENT_GID=1007",
-        "--build-arg",
-        "TZ=Europe/Berlin",
-        "-"
+        "docker".into(),
+        "build".into(),
+        "-t".into(),
+        "scsh-opencode:latest".into(),
+        "--target".into(),
+        "scsh-opencode".into(),
+        "--build-arg".into(),
+        "AGENT_UID=1006".into(),
+        "--build-arg".into(),
+        "AGENT_GID=1007".into(),
+        "--build-arg".into(),
+        "TZ=Europe/Berlin".into(),
+        "--label".into(),
+        label,
+        "-".into(),
       ]
     );
     assert_eq!(

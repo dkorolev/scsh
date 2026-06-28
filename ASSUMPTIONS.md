@@ -5,9 +5,11 @@ Review these before merging or extending.
 
 ## Schema
 
-- **Optional `skill:` field** — YAML key is the *invocation name*; `skill:` points at `.skills/<name>/` (default: key). Backward compatible when key == folder name.
-- **Demo config** ships five invocations: `add-opencode-gpt`, `add-claude-sonnet-4-6`, `add-opencode-glm-5.2`, `multiply-opencode-gpt`, `multiply-claude-sonnet-4-6`. Models: **`openai/gpt-5.4-mini-fast`** (gpt-5.4-mini-fast), **`sonnet`** (sonnet-4-6), **`nebius-glm/zai-org/GLM-5.2`** (glm-5.2).
-- **`commits: true` only on `add-opencode-gpt`** — avoids duplicate git commits when several add routes run in parallel.
+- **Skill key == folder name** — each `.scsh.yml` key must match `.skills/<name>/`. The legacy `skill:` pointer is rejected.
+- **Direct run or matrix** — declare `harness` (+ optional `model`, …) for a single invocation named after the key, *or* an `invocations:` map where each route expands to `{skill}-{route}` at run time.
+- **Demo config** ships two matrix skills (`add`, `multiply`) with three and two routes respectively. Models: **`openai/gpt-5.4-mini-fast`**, **`sonnet`**, **`nebius-glm/zai-org/GLM-5.2`**.
+- **`commits: true` only on the `add` → `opencode-gpt-5.4-mini-fast` route** — avoids duplicate git commits when several add routes run in parallel.
+- **`profile:`** can be set per skill; each `invocations:` row may override it.
 
 ## Invocation
 
@@ -17,7 +19,7 @@ Review these before merging or extending.
 ## Images
 
 - **Two final images, one Dockerfile:** shared `scsh-base`, then `scsh-opencode` and `scsh-claude` targets. Harness CLI installed last in each stage.
-- Tags: `scsh-opencode:latest`, `scsh-claude:latest`. scsh builds only images needed by the selected skills.
+- Tags: `scsh-opencode:latest`, `scsh-claude:latest`. scsh builds only images needed by the selected skills, **in parallel**, and **skips** a build when the tag already carries a matching `scsh.build.fingerprint` label (sha256 of the embedded Dockerfile + target + uid/gid/tz).
 
 ## Auth
 
@@ -42,4 +44,4 @@ Review these before merging or extending.
 
 ## Install path
 
-- `installskills` copies into `.skills/<skill_source>/` when the manifest entry uses `skill:`.
+- `installskills` copies `.skills/<name>/` and merges each skill's YAML block **verbatim** (including `invocations:`). Existing consumer keys are left untouched — scsh warns on conflict.

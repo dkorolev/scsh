@@ -1,19 +1,14 @@
 skills:
-  add-opencode-gpt:
-    skill: add
-    harness: opencode
-    model: openai/gpt-5.4-mini-fast
+  add:
     timeout: 600
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_opencode_gpt_result.json
-  add-claude-sonnet-4-6:
-    skill: add
-    harness: claude
-    model: sonnet
-    timeout: 600
-    env:
-      - A: ${A:-2}
-      - B: ${B:-3}
-    result: tmp/add_claude_sonnet_4_6_result.json
+    result: tmp/add_{name}_result.json
+    invocations:
+      opencode-gpt-5.4-mini-fast:
+        harness: opencode
+        model: openai/gpt-5.4-mini-fast
+      claude-sonnet-4-6:
+        harness: claude
+        model: sonnet

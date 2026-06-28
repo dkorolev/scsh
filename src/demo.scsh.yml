@@ -3,85 +3,38 @@
 # The whole file is just your skills — scsh builds them on a built-in base image
 # (Debian, with opencode + a dev toolchain added). Run `scsh help .scsh.yml` for fields.
 
-# One or more scoped skill invocations. The YAML key is the invocation name;
-# optional `skill:` points at a .skills/<name>/ folder (default: the key).
-# scsh builds the harness image(s) needed, then runs EVERY selected skill in
-# parallel — each in its own container with a fresh clone of this repo mounted.
-#   skill:   optional; the .skills/<name>/ folder to run (default: the key).
-#   harness: `opencode` or `claude` — picks the container image and CLI.
-#   model:   optional model the harness passes to the tool (omit for its default).
-#   timeout: optional wall-clock limit (seconds); scsh kills the container and
-#            fails the skill if its harness run exceeds it.
-#   env:     optional host variables to forward into the container, each a
-#            `KEY: <spec>`. ${VAR} (or $VAR) requires VAR — scsh refuses the
-#            skill if it is unset; ${VAR:-default} forwards VAR or injects
-#            `default` when unset (${VAR:-} = empty); ${VAR:?message} requires
-#            VAR, refusing with your message. A bare literal sets that literal.
-#   profile: optional; a skill in a profile runs ONLY under `scsh run --profile <name>`,
-#            not by default — use it for skills that need variables which may be unset.
-#   commits: optional true/false (default false). When true, scsh brings commits the
-#            skill makes in its clone back onto your branch (rebased; or saved to a
-#            distinct scsh/incoming/<skill>-… branch if they don't apply cleanly).
-#            It's a real side effect: running again adds the commit(s) again.
-#   result:  a repo-relative path the skill MUST create. scsh fails that skill's
-#            run — and the whole invocation — if it is missing; otherwise it
-#            copies the file back into your repo (backing up any existing one).
-#            Keep it under the gitignored tmp/.
+# Each skill key matches its `.skills/<name>/` folder. Declare either direct run
+# fields (`harness`, optional `model`, …) or an `invocations:` matrix — each route
+# expands to `{skill}-{route}` at run time.
 skills:
-  # add forwards A and B with injected defaults (${A:-2}): scsh resolves the
-  # value, so the skill always sees A and B and reports their sum. Runs by
-  # default — try `scsh run` or `A=10 B=20 scsh run`. It is commit-enabled:
-  # it appends the sum to add_log.txt and commits it, and scsh rebases that
-  # commit onto your branch (run it twice and you get two commits).
-  add-opencode-gpt:               # gpt-5.4-mini-fast
-    skill: add
-    harness: opencode
-    model: openai/gpt-5.4-mini-fast
-    timeout: 600
-    commits: true
-    env:
-      - A: ${A:-2}
-      - B: ${B:-3}
-    result: tmp/add_opencode_gpt_result.json
-  add-claude-sonnet-4-6:          # sonnet-4-6 (harness model: sonnet)
-    skill: add
-    harness: claude
-    model: sonnet
+  add:
     timeout: 600
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_claude_sonnet_4_6_result.json
-  add-opencode-glm-5.2:           # glm-5.2
-    skill: add
-    harness: opencode
-    model: nebius-glm/zai-org/GLM-5.2
-    timeout: 600
-    env:
-      - A: ${A:-2}
-      - B: ${B:-3}
-    result: tmp/add_opencode_glm_5_2_result.json
-  # multiply needs X and Y (no defaults), so it lives in the `multiply`
-  # profile and declares them required (${X}/${Y}). A bare `scsh run` skips
-  # it; `X=6 Y=7 scsh run --profile multiply` runs it; without X/Y, scsh
-  # itself refuses it before the container starts.
-  multiply-opencode-gpt:
-    skill: multiply
-    harness: opencode
-    model: openai/gpt-5.4-mini-fast
-    timeout: 600
+    result: tmp/add_{name}_result.json
+    invocations:
+      opencode-gpt-5.4-mini-fast:
+        harness: opencode
+        model: openai/gpt-5.4-mini-fast
+        commits: true
+      claude-sonnet-4-6:
+        harness: claude
+        model: sonnet
+      opencode-glm-5.2:
+        harness: opencode
+        model: nebius-glm/zai-org/GLM-5.2
+  multiply:
     profile: multiply
+    timeout: 600
     env:
       - X: ${X}
       - Y: ${Y}
-    result: tmp/multiply_opencode_gpt_result.json
-  multiply-claude-sonnet-4-6:
-    skill: multiply
-    harness: claude
-    model: sonnet
-    timeout: 600
-    profile: multiply
-    env:
-      - X: ${X}
-      - Y: ${Y}
-    result: tmp/multiply_claude_sonnet_4_6_result.json
+    result: tmp/multiply_{name}_result.json
+    invocations:
+      opencode-gpt-5.4-mini-fast:
+        harness: opencode
+        model: openai/gpt-5.4-mini-fast
+      claude-sonnet-4-6:
+        harness: claude
+        model: sonnet

@@ -253,6 +253,82 @@ fn installskills_from_a_git_repo() {
 }
 
 #[test]
+fn installskills_copies_invocations_manifest_verbatim() {
+  let src = unique_dir("fleetsrc");
+  git_init(&src);
+  std::fs::create_dir_all(src.join(".skills/reviewer")).unwrap();
+  std::fs::write(src.join(".skills/reviewer/SKILL.md"), "name: reviewer\n").unwrap();
+  std::fs::write(
+    src.join(".scsh.yml"),
+    r#"skills:
+  reviewer:
+    profile: code-review
+    timeout: 600
+    result: tmp/review-{name}.json
+    invocations:
+      opencode-gpt:
+        harness: opencode
+        model: openai/gpt-5.5
+      claude-opus:
+        harness: claude
+        model: claude-opus-4-6
+"#,
+  )
+  .unwrap();
+  git(&src, &["add", "-A"]);
+  git(&src, &["commit", "-qm", "ship fleet"]);
+
+  let dst = unique_dir("fleetdst");
+  git_init(&dst);
+  let r = scsh(&dst, &["installskills", &src.to_string_lossy()]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(dst.join(".skills/reviewer/SKILL.md").is_file(), "skill folder copied; got: {}", r.out);
+  assert!(r.out.contains("1 skill"), "one skill folder; got: {}", r.out);
+  let cfg = std::fs::read_to_string(dst.join(".scsh.yml")).expect(".scsh.yml merged");
+  assert!(cfg.contains("  reviewer:") && cfg.contains("invocations:"), "verbatim matrix block; got: {cfg}");
+  assert!(cfg.contains("opencode-gpt:") && cfg.contains("claude-opus:"), "got: {cfg}");
+}
+
+#[test]
+fn installskills_warns_on_manifest_key_conflict() {
+  let src = unique_dir("conflictsrc");
+  git_init(&src);
+  std::fs::create_dir_all(src.join(".skills/foo")).unwrap();
+  std::fs::write(src.join(".skills/foo/SKILL.md"), "name: foo\n").unwrap();
+  std::fs::write(
+    src.join(".scsh.yml"),
+    r#"skills:
+  foo:
+    harness: opencode
+    result: tmp/foo.json
+"#,
+  )
+  .unwrap();
+  git(&src, &["add", "-A"]);
+  git(&src, &["commit", "-qm", "ship"]);
+
+  let dst = unique_dir("conflictdst");
+  git_init(&dst);
+  std::fs::write(
+    dst.join(".scsh.yml"),
+    r#"skills:
+  foo:
+    harness: claude
+    result: tmp/existing.json
+"#,
+  )
+  .unwrap();
+  git(&dst, &["add", "-A"]);
+  git(&dst, &["commit", "-qm", "existing"]);
+
+  let r = scsh(&dst, &["installskills", &src.to_string_lossy()]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("conflicts"), "got: {}", r.out);
+  let cfg = std::fs::read_to_string(dst.join(".scsh.yml")).expect(".scsh.yml");
+  assert!(cfg.contains("tmp/existing.json"), "consumer entry unchanged; got: {cfg}");
+}
+
+#[test]
 fn installskills_refuses_a_dirty_tree() {
   // Like a real run, install insists on a clean tree so the install is a reviewable diff.
   let d = unique_dir("installdirty");
@@ -353,15 +429,15 @@ fn init_demo_then_list() {
   assert_eq!(init.code, 0, "got: {}", init.out);
   let cfg = std::fs::read_to_string(d.join(".scsh.yml")).expect(".scsh.yml written");
   // The v1.0 config is just the skills — no version/project/image boilerplate.
-  assert!(cfg.contains("skills:") && cfg.contains("add-opencode-gpt:") && cfg.contains("multiply-opencode-gpt:"), "got: {cfg}");
+  assert!(cfg.contains("skills:") && cfg.contains("  add:") && cfg.contains("invocations:") && cfg.contains("  multiply:"), "got: {cfg}");
   assert!(!cfg.contains("version:") && !cfg.contains("project:") && !cfg.contains("image:"), "got: {cfg}");
 
   // `scsh list`: every skill grouped by profile — `add` under `default`, `multiply` under
   // its profile, each with its result file. No container internals (those need --verbose).
   let list = scsh(&d, &["list"]);
   assert_eq!(list.code, 0, "got: {}", list.out);
-  assert!(list.out.contains("add-opencode-gpt") && list.out.contains("tmp/add_opencode_gpt_result.json"), "got: {}", list.out);
-  assert!(list.out.contains("multiply-opencode-gpt") && list.out.contains("tmp/multiply_opencode_gpt_result.json"), "got: {}", list.out);
+  assert!(list.out.contains("add-opencode-gpt-5.4-mini-fast") && list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json"), "got: {}", list.out);
+  assert!(list.out.contains("multiply-opencode-gpt-5.4-mini-fast") && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"), "got: {}", list.out);
   assert!(!list.out.contains("FROM debian"), "internals must be hidden without --verbose; got: {}", list.out);
   assert!(!list.out.contains("git clone"), "internals must be hidden without --verbose; got: {}", list.out);
 
@@ -376,7 +452,7 @@ fn init_demo_then_list() {
     "got: {}",
     v.out
   );
-  assert!(v.out.contains("run skill add") && v.out.contains("-run-add-opencode-gpt"), "got: {}", v.out);
+  assert!(v.out.contains("run skill add") && v.out.contains("-run-add-opencode-gpt-5.4-mini-fast"), "got: {}", v.out);
 }
 
 #[test]
@@ -391,7 +467,7 @@ fn list_groups_skills_by_profile() {
   assert_eq!(list.code, 0, "got: {}", list.out);
   // Both skills appear with their result files, and the profile groups are shown.
   assert!(
-    list.out.contains("tmp/add_opencode_gpt_result.json") && list.out.contains("tmp/multiply_opencode_gpt_result.json"),
+    list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json") && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"),
     "got: {}",
     list.out
   );
@@ -433,8 +509,8 @@ fn list_json_is_machine_readable() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
   // The reserved `default` (add) and the declared `multiply`, each with its skill.
-  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt", "add-claude-sonnet-4-6", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
-  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt", "multiply-claude-sonnet-4-6"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
+  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt-5.4-mini-fast", "multiply-claude-sonnet-4-6"] }"#), "got: {}", r.out);
   // --json is list-only (parse-time rejection, exit 2).
   let bad = scsh(&d, &["run", "--json"]);
   assert_eq!(bad.code, 2, "got: {}", bad.out);
@@ -728,7 +804,7 @@ fn run_skips_claude_skills_when_claude_unavailable() {
     "got: {}",
     r.out
   );
-  assert!(r.out.contains("add-opencode-gpt") && r.out.contains("2 + 3 = 5"), "got: {}", r.out);
+  assert!(r.out.contains("add-opencode-gpt-5.4-mini-fast") && r.out.contains("2 + 3 = 5"), "got: {}", r.out);
 }
 
 #[test]
