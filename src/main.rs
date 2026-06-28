@@ -88,21 +88,64 @@ enum HelpTopic {
   Cache,
 }
 
+/// Build-time git stamp (from `build.rs` via `OUT_DIR/scsh_build_info.rs`).
+mod build_info {
+  include!(concat!(env!("OUT_DIR"), "/scsh_build_info.rs"));
+}
+
 /// The version identifier: the crate version, plus the git short hash (and a `-dirty`
-/// marker) captured at build time by `build.rs`. Just the crate version when built
-/// outside a git checkout. E.g. `1.0 (a1b2c3d-dirty)`.
+/// marker) captured at build time by `build.rs`. When the build could not read git
+/// (e.g. a crates.io tarball), tries `git` from the current working directory upward.
+/// E.g. `1.0.1 (a1b2c3d-dirty)`.
 ///
-/// Cargo's manifest requires a full semver (`X.Y.Z`), so `Cargo.toml` says `1.0.0`;
-/// we display it as `1.0` (a trailing zero patch is dropped).
+/// Cargo's manifest requires a full semver (`X.Y.Z`); we display it as-is.
 fn version_id() -> String {
   let v = env!("CARGO_PKG_VERSION");
-  let v = v.strip_suffix(".0").unwrap_or(v);
-  let git = env!("SCSH_GIT_DESCRIBE");
+  let git = build_info::GIT_DESCRIBE;
+  let git = if git.is_empty() { runtime_git_describe().unwrap_or_default() } else { git.to_string() };
   if git.is_empty() {
     v.to_string()
   } else {
     format!("{v} ({git})")
   }
+}
+
+/// Last-resort: walk up from `cwd` looking for a `.git` directory (dev runs from a
+/// checkout when the binary was built without embedded git metadata).
+fn runtime_git_describe() -> Option<String> {
+  let mut dir = std::env::current_dir().ok()?;
+  for _ in 0..32 {
+    if dir.join(".git").exists() {
+      return runtime_git_describe_in(&dir);
+    }
+    dir = dir.parent()?.to_path_buf();
+  }
+  None
+}
+
+fn runtime_git_describe_in(repo: &std::path::Path) -> Option<String> {
+  let out = std::process::Command::new("git")
+    .arg("-C")
+    .arg(repo)
+    .args(["rev-parse", "HEAD"])
+    .output()
+    .ok()?;
+  if !out.status.success() {
+    return None;
+  }
+  let hash: String = String::from_utf8_lossy(&out.stdout).trim().chars().take(7).collect();
+  if hash.is_empty() {
+    return None;
+  }
+  let dirty = std::process::Command::new("git")
+    .arg("-C")
+    .arg(repo)
+    .args(["status", "--porcelain"])
+    .output()
+    .ok()
+    .filter(|o| o.status.success())
+    .is_some_and(|o| !o.stdout.is_empty());
+  Some(if dirty { format!("{hash}-dirty") } else { hash })
 }
 
 enum Action {
@@ -436,7 +479,33 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       // Every git/repo/state check passed — one compact line, then the run.
       let prof = profile.map(|p| format!(" · profile {p}")).unwrap_or_default();
       ok(&format!("git · repo {} · clean · /tmp ignored{prof}", display_path(&root)));
-      build_and_run(&rt, &root, &selected)
+      // Skip skills whose harness is unavailable on the host; fail only when none remain.
+      let mut runnable: Vec<&config::Skill> = Vec::new();
+      for skill in &selected {
+        if let Err(msg) = runtime::check_harness_host(skill.harness) {
+          warn(&format!(
+            "skipping '{}' — {} harness unavailable ({msg})",
+            skill.name,
+            skill.harness.as_str()
+          ));
+          continue;
+        }
+        let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
+        if !skill_md.is_file() {
+          fail(&format!(
+            "skill source missing: .skills/{}/SKILL.md (invocation '{}')",
+            skill.skill_source, skill.name
+          ));
+          return 1;
+        }
+        runnable.push(skill);
+      }
+      if runnable.is_empty() {
+        fail("no skills to run — every selected harness is unavailable on this host");
+        hint("see DEMO.md step 1 — probe add-opencode-gpt, add-claude-sonnet, and add-opencode-glm-5.2");
+        return 1;
+      }
+      build_and_run(&rt, &root, &runnable)
     }
   }
 }
@@ -560,38 +629,52 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
   if verbose {
     let skills: Vec<&Skill> = cfg.skills.iter().collect();
     let skills = &skills[..];
-    let tag = runtime::image_tag();
     let (uid, gid) = host_ids();
     let df = runtime::dockerfile();
-    println!("\n{}", h_head("Image"));
-    println!("{}", h_dim("--- generated Dockerfile (in memory; one generic image for every skill) ---"));
+    let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
+    for s in skills {
+      harnesses.insert(s.harness);
+    }
+    println!("\n{}", h_head("Images"));
+    println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
     print!("{df}");
-    match runtime::build_method(&rt.name) {
-      runtime::BuildMethod::Stdin => {
-        let build = runtime::build_command_stdin(&rt.name, &tag, uid, gid, &runtime::host_timezone());
-        println!("--- build (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---");
-        println!("{}", runtime::shell_join(&build));
-      }
-      runtime::BuildMethod::ContextDir => {
-        let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
-        let build =
-          runtime::build_command_context(&rt.name, &tag, &ctx.to_string_lossy(), uid, gid, &runtime::host_timezone());
-        println!("--- build (in-memory Dockerfile written to an ephemeral context dir) ---");
-        println!("{}", runtime::shell_join(&build));
+    for h in harnesses {
+      let tag = runtime::image_tag(h);
+      let target = runtime::image_target(h);
+      match runtime::build_method(&rt.name) {
+        runtime::BuildMethod::Stdin => {
+          let build = runtime::build_command_stdin(&rt.name, &tag, target, uid, gid, &runtime::host_timezone());
+          println!("--- build {target} (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---");
+          println!("{}", runtime::shell_join(&build));
+        }
+        runtime::BuildMethod::ContextDir => {
+          let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
+          let build = runtime::build_command_context(
+            &rt.name, &tag, target, &ctx.to_string_lossy(), uid, gid, &runtime::host_timezone(),
+          );
+          println!("--- build {target} (in-memory Dockerfile written to an ephemeral context dir) ---");
+          println!("{}", runtime::shell_join(&build));
+        }
       }
     }
     println!("\n{}", h_head("Per-skill commands"));
     for &skill in skills {
       let name = runtime::run_dir_name(now_secs(), &skill.name);
       let run_dir = format!("/tmp/{name}");
-      let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.name);
+      let tag = runtime::image_tag(skill.harness);
+      let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
-      println!("\n[{}]  harness={}  model={model}  timeout={timeout}", skill.name, skill.harness.as_str());
+      println!(
+        "\n[{}]  skill={}  harness={}  model={model}  timeout={timeout}",
+        skill.name, skill.skill_source, skill.harness.as_str()
+      );
       println!("  clone: {}", runtime::shell_join(&runtime::clone_command(&root.to_string_lossy(), &run_dir)));
       match resolve_env(&skill.env) {
         Ok(env) => {
-          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &cmd);
+          let vols: Vec<(String, String)> = runtime::harness_volumes(skill.harness);
+          let vol_refs: Vec<(&str, &str)> = vols.iter().map(|(h, m)| (h.as_str(), m.as_str())).collect();
+          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &vol_refs, &cmd);
           println!("  run:   {}", runtime::shell_join(&run));
         }
         Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
@@ -724,64 +807,59 @@ fn check_profile_cmd(profile: Option<&str>) -> i32 {
 }
 
 fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32 {
-  // Isolate children into their own process groups and catch SIGINT/SIGTERM, so a stray signal
-  // can't kill a container mid-run and a kill restores the terminal + tears the children down.
   ui::signals::install();
-  let tag = runtime::image_tag();
   let (uid, gid) = host_ids();
   let secs = now_secs();
-  // Sweep run-clones left in /tmp by past runs (failed skills' kept clones, or clones from
-  // a crash before cleanup) before starting. Only dirs older than a full day are removed, so
-  // a concurrently-running scsh's fresh clone is never touched. Skipped under SCSH_KEEP_RUNS=1.
   if !keep_run_dirs() {
     let swept = sweep_stale_run_dirs(secs);
     if swept > 0 {
       hint(&format!("swept {swept} stale run dir{} from /tmp", plural(swept)));
     }
   }
-  // The caller's HEAD before any skill runs — the base against which a commit-enabled
-  // skill's new commits are measured (`base..clone-HEAD`). `None` for a repo with no
-  // commits yet (nothing to rebase onto), in which case commit integration is skipped.
   let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
 
-  // Whether the host's opencode login will be forwarded into each run. Printed BEFORE the live
-  // board takes over the screen, so it stays in the normal scrollback above the final summary.
-  if opencode_auth_enabled() {
-    match host_opencode_auth() {
-      Some(_) => ok("opencode creds found (forwarded into each skill)"),
-      None => hint("no opencode creds found (~/.local/share/opencode/auth.json); skills may fail to authenticate — try 'opencode auth login'"),
-    }
+  let needs_opencode = skills.iter().any(|s| s.harness == config::Harness::Opencode);
+  let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
+  if needs_opencode && opencode_auth_enabled() && runtime::opencode_auth_ready() {
+    ok("opencode creds found (bind-mounted into opencode skills)");
+  }
+  if needs_claude && runtime::claude_container_auth_ready() {
+    let via = if runtime::claude_oauth_token().is_some() {
+      "CLAUDE_CODE_OAUTH_TOKEN"
+    } else {
+      "~/.claude/.credentials.json"
+    };
+    ok(&format!("claude credentials found ({via} forwarded into claude skills)"));
   }
 
-  // The interactive live board: the image build, then every skill, each a collapsible row you
-  // click to expand — its output, every line stamped with its time relative to that proc's
-  // start. Scroll with the wheel / arrows. Off a TTY it degrades to plain ▶/✓/✗ lines. It owns
-  // the terminal until `finish`, so nothing else should print to the screen during the run.
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr());
 
-  // 1. Build ONE generic image (opencode + a dev toolchain + the agent user) every skill's
-  //    container runs from — it bakes no skill command; each run supplies its own.
   let df = runtime::dockerfile();
-  let build = ui.proc(format!("using {} · build", backend_name(&rt.name)), true);
-  build.start();
-  if let Err((msg, code)) = run_build(&build, &rt.name, &tag, &df, uid, gid) {
-    build.finish_fail(Some(&msg));
-    ui.finish();
-    fail(&msg);
-    return code;
+  let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
+  for s in skills {
+    harnesses.insert(s.harness);
   }
-  build.finish_ok(None);
+  for h in harnesses {
+    let tag = runtime::image_tag(h);
+    let target = runtime::image_target(h);
+    let build = ui.proc(format!("using {} · build {}", backend_name(&rt.name), h.as_str()), true);
+    build.start();
+    if let Err((msg, code)) = run_build(&build, &rt.name, &tag, target, &df, uid, gid) {
+      build.finish_fail(Some(&msg));
+      ui.finish();
+      fail(&msg);
+      return code;
+    }
+    build.finish_ok(None);
+  }
 
-  // 2. Run every skill in parallel: each gets its own clone and container — its own row on the
-  //    board — and must produce its declared result file.
-  let tag = tag.as_str();
   let base_ref = base.as_deref();
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let handles: Vec<_> = skills
       .iter()
       .map(|&skill| {
         let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
-        scope.spawn(move || run_one_skill(skill, rt, tag, root, secs, p, base_ref))
+        scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref))
       })
       .collect();
     handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
@@ -900,14 +978,17 @@ impl SkillRun {
 /// Run a single skill end to end in its own clone and container, driving `spinner`
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
 fn run_one_skill(
-  skill: &Skill, rt: &Runtime, tag: &str, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
+  skill: &Skill, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
   // Resolve forwarded env first: a missing required (${VAR:?…}) variable refuses
   // the skill before any work — no clone, no container.
   let env = match resolve_env(&skill.env) {
-    Ok(e) => e,
+    Ok(mut e) => {
+      e.push(("SCSH_RESULT".to_string(), skill.result.clone()));
+      e
+    }
     Err(message) => {
       spinner.finish_fail(Some(&message));
       return SkillRun::failed(None, None, None);
@@ -970,15 +1051,41 @@ fn run_one_skill(
     let _ = std::fs::create_dir_all(parent);
   }
   let log = log_path.to_string_lossy().into_owned();
-  // Forward host opencode credentials so the container is authenticated; remove the
-  // copy right after the run so the secret never lingers in the system temp dir.
-  let auth = if opencode_auth_enabled() { forward_opencode_auth(&run_dir) } else { None };
-  let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.name);
-  let run = runtime::run_command(&rt.name, tag, &run_dir_str, &name, &env, &cmd);
+  // Bind-mount host harness credentials into the container when present.
+  let opencode_auth = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
+    host_opencode_auth()
+  } else {
+    None
+  };
+  if opencode_auth.is_some() {
+    prepare_opencode_auth_mount_dir(&run_dir);
+  }
+  let claude_auth = if skill.harness == config::Harness::Claude && claude_auth_enabled() {
+    forward_claude_auth(&run_dir)
+  } else {
+    None
+  };
+  let tag = runtime::image_tag(skill.harness);
+  let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
+  let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
+    runtime::claude_auth_mounts(auth_root)
+  } else if let Some(ref host) = opencode_auth {
+    runtime::opencode_auth_mounts(host)
+  } else {
+    runtime::harness_volumes(skill.harness)
+  };
+  let vol_refs: Vec<(&str, &str)> = vols.iter().map(|(h, m)| (h.as_str(), m.as_str())).collect();
+  let mut container_env = env.clone();
+  if skill.harness == config::Harness::Claude {
+    if let Some(token) = runtime::claude_oauth_token() {
+      container_env.push((runtime::CLAUDE_OAUTH_TOKEN_ENV.to_string(), token));
+    }
+  }
+  let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd);
   let timeout = skill.timeout.map(Duration::from_secs);
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
-  if let Some(p) = &auth {
-    let _ = std::fs::remove_file(p);
+  if let Some(p) = &claude_auth {
+    let _ = std::fs::remove_dir_all(p);
   }
   match result {
     Ok((true, _, _)) => {}
@@ -1183,13 +1290,24 @@ fn kill_container(runtime: &str, name: &str) {
 // ---------------------------------------------------------------------------
 // opencode credentials
 //
-// opencode in the container needs the host's login to talk to a model. The agent
-// user's home is the bind-mounted run dir, and opencode reads its auth from
-// `$XDG_DATA_HOME/opencode/auth.json` (default `~/.local/share/opencode/…`). So
-// scsh copies just that one file (the OAuth token, which keeps itself renewed)
-// into each run dir before the run and removes it right after, so the secret
-// never lingers in the system temp dir. Opt out with `SCSH_NO_OPENCODE_AUTH=1`.
+// opencode in the container needs the host's login to talk to a model — especially
+// custom/third-party providers configured in opencode (e.g. Nebius GLM). The image
+// sets `XDG_DATA_HOME` to `repo/tmp/.xdg-data`, so scsh bind-mounts the host's
+// `~/.local/share/opencode/auth.json` (or `$XDG_DATA_HOME/opencode/auth.json`) into
+// that path when the file exists, after ensuring the parent dir exists in the run clone.
+// Opt out with `SCSH_NO_OPENCODE_AUTH=1`.
+//
+// Claude Code reads OAuth from `CLAUDE_CODE_OAUTH_TOKEN` (preferred — from `claude setup-token`)
+// or `~/.claude/.credentials.json` (plus optional `~/.claude.json` / `~/.claude` config).
+// scsh copies the host's Claude config into the run dir's gitignored tmp/ and bind-mounts
+// it into the container; when the token env var is set it is also passed into the container
+// and written as `.credentials.json` in the copy. Opt out with `SCSH_NO_CLAUDE_AUTH=1`.
 // ---------------------------------------------------------------------------
+
+/// Whether scsh forwards Claude credentials into runs (on unless opted out).
+fn claude_auth_enabled() -> bool {
+  !matches!(std::env::var("SCSH_NO_CLAUDE_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
 
 /// Whether scsh forwards opencode credentials into runs (on unless opted out).
 fn opencode_auth_enabled() -> bool {
@@ -1207,11 +1325,7 @@ fn keep_run_dirs() -> bool {
 /// The opencode `auth.json` path for the given `XDG_DATA_HOME` / `HOME` (pure, so
 /// it can be unit-tested). XDG wins when set and non-empty, else `HOME/.local/share`.
 fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
-  let base = match xdg_data_home {
-    Some(x) if !x.is_empty() => PathBuf::from(x),
-    _ => PathBuf::from(home?).join(".local").join("share"),
-  };
-  Some(base.join("opencode").join("auth.json"))
+  runtime::opencode_auth_in(xdg_data_home, home)
 }
 
 /// The host's opencode `auth.json`, if it exists.
@@ -1220,27 +1334,81 @@ fn host_opencode_auth() -> Option<PathBuf> {
   path.is_file().then_some(path)
 }
 
-/// Copy `src` (the host auth) into `run_dir`'s opencode data dir, `chmod 600`, and
-/// return the destination — where the container's opencode will read it. The data dir lives
-/// under the gitignored `tmp/` (matching the image's `XDG_DATA_HOME`), so the forwarded secret
-/// never shows as an untracked file in the cloned repo.
-fn copy_auth_into(run_dir: &Path, src: &Path) -> Option<PathBuf> {
+/// Ensure the run clone has the opencode data-dir parent so a file bind-mount target exists.
+fn prepare_opencode_auth_mount_dir(run_dir: &Path) {
   let dir = run_dir.join(runtime::AGENT_XDG_DATA_REL).join("opencode");
-  std::fs::create_dir_all(&dir).ok()?;
-  let dest = dir.join("auth.json");
-  std::fs::copy(src, &dest).ok()?;
+  let _ = std::fs::create_dir_all(&dir);
+}
+
+/// Copy the host's Claude config into `run_dir` for the upcoming run, returning the auth root
+/// (so the caller can remove it afterward). Uses `CLAUDE_CODE_OAUTH_TOKEN` when set, else
+/// `~/.claude/.credentials.json`, and copies `~/.claude` / `~/.claude.json` when present.
+fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
+  let home = std::env::var_os("HOME").map(PathBuf::from);
+  let token = runtime::claude_oauth_token();
+  let host_claude = home.as_ref().filter(|h| h.join(".claude").is_dir());
+  let host_json = home.as_ref().filter(|h| h.join(".claude.json").is_file());
+  let host_creds = host_claude
+    .as_ref()
+    .map(|h| h.join(".claude").join(".credentials.json"))
+    .filter(|p| p.is_file());
+
+  if token.is_none() && host_creds.is_none() && host_claude.is_none() && host_json.is_none() {
+    return None;
+  }
+
+  let root = run_dir.join(runtime::CLAUDE_AUTH_REL);
+  let claude_dir = root.join(".claude");
+  std::fs::create_dir_all(&claude_dir).ok()?;
+
+  if let Some(h) = host_claude {
+    copy_dir_all(&h.join(".claude"), &claude_dir).ok()?;
+  }
+  if let Some(h) = host_json {
+    std::fs::copy(h.join(".claude.json"), root.join(".claude.json")).ok()?;
+  }
+  if let Some(t) = &token {
+    write_claude_credentials_file(&claude_dir, t)?;
+  }
+
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o600));
+    if let Ok(json) = root.join(".claude.json").canonicalize() {
+      let _ = std::fs::set_permissions(&json, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Ok(creds) = claude_dir.join(".credentials.json").canonicalize() {
+      let _ = std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600));
+    }
   }
-  Some(dest)
+  Some(root)
 }
 
-/// Forward the host's opencode credentials into `run_dir` for the upcoming run,
-/// returning the copied secret's path (so the caller can remove it afterward).
-fn forward_opencode_auth(run_dir: &Path) -> Option<PathBuf> {
-  copy_auth_into(run_dir, &host_opencode_auth()?)
+fn write_claude_credentials_file(claude_dir: &Path, token: &str) -> Option<()> {
+  let path = claude_dir.join(".credentials.json");
+  let body = format!("{{\"claudeAiOauth\":{{\"accessToken\":{}}}}}", json::quote(token));
+  std::fs::write(&path, body).ok()?;
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+  }
+  Some(())
+}
+
+fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
+  std::fs::create_dir_all(dst)?;
+  for entry in std::fs::read_dir(src)? {
+    let entry = entry?;
+    let path = entry.path();
+    let dest = dst.join(entry.file_name());
+    if entry.file_type()?.is_dir() {
+      copy_dir_all(&path, &dest)?;
+    } else {
+      std::fs::copy(&path, &dest)?;
+    }
+  }
+  Ok(())
 }
 
 /// Resolve a skill's `env:` specs against the host environment into the
@@ -1392,9 +1560,12 @@ fn cache_key(root: &Path, skill: &Skill, env: &[(String, String)]) -> Option<Str
   let mut blob = String::new();
   blob.push_str("scsh-cache v1\n");
   blob.push_str(&format!("repo-tree={tree}\n"));
-  blob.push_str(&format!("skill={}\n", skill.name));
+  blob.push_str(&format!("invocation={}\n", skill.name));
+  blob.push_str(&format!("skill={}\n", skill.skill_source));
+  blob.push_str(&format!("harness={}\n", skill.harness.as_str()));
+  blob.push_str(&format!("model={}\n", skill.model.as_deref().unwrap_or("")));
   blob.push_str("skill-files:\n");
-  for (rel, hash) in skill_file_hashes(root, &skill.name) {
+  for (rel, hash) in skill_file_hashes(root, &skill.skill_source) {
     blob.push_str(&format!("{rel} {hash}\n"));
   }
   blob.push_str("env:\n");
@@ -1522,13 +1693,13 @@ fn now_secs() -> u64 {
 /// collapsible build row, timestamped). docker/podman take the in-memory Dockerfile on stdin;
 /// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
 fn run_build(
-  build: &ui::screen::Proc, runtime_name: &str, tag: &str, dockerfile: &str, uid: u32, gid: u32,
+  build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
   let (ok, last) = match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
-      let cmd = runtime::build_command_stdin(runtime_name, tag, uid, gid, &tz);
+      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz);
       build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started)?
     }
     runtime::BuildMethod::ContextDir => {
@@ -1538,7 +1709,7 @@ fn run_build(
         let _ = std::fs::remove_dir_all(&dir);
         return Err((format!("could not write Dockerfile to build context: {e}"), 1));
       }
-      let cmd = runtime::build_command_context(runtime_name, tag, &dir.to_string_lossy(), uid, gid, &tz);
+      let cmd = runtime::build_command_context(runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz);
       let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
       let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
       out?
@@ -1965,13 +2136,16 @@ fn install_from_manifest(
       skipped.push(skill.name.clone());
       continue;
     }
-    let dir = clone.join(".skills").join(&skill.name);
+    let dir = clone.join(".skills").join(&skill.skill_source);
     if !dir.join("SKILL.md").is_file() {
-      hint(&format!("{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped", skill.name, skill.name));
+      hint(&format!(
+        "{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped",
+        skill.name, skill.skill_source
+      ));
       continue;
     }
-    copy_skill_dir(root, &dir, &skill.name, overwrite, &mut c);
-    installed.push(skill.name.clone());
+    copy_skill_dir(root, &dir, &skill.skill_source, overwrite, &mut c);
+    installed.push(skill.skill_source.clone());
     if !existing.contains(&skill.name) {
       if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
         append.push_str(&block);
@@ -2097,10 +2271,10 @@ fn link_skill_hosts(_root: &Path) -> Vec<String> {
 
 /// Show how to run the scaffolded example skills.
 fn print_skill_usage() {
-  println!("\nThe demo .scsh.yml has two skills: `add` (A + B) runs by default; `multiply`");
-  println!("(X * Y) lives in the `multiply` profile because it REQUIRES X and Y. scsh resolves");
-  println!("the env you forward (or refuses the skill). Examples — successes ({}) and the", ok_mark());
-  println!("intended refusal scsh guards against ({}):", refused_mark());
+  println!("\nThe demo .scsh.yml runs `add` on three routes by default (opencode+GPT, claude+Sonnet,");
+  println!("opencode+GLM); `multiply` (X * Y) lives in the `multiply` profile because it REQUIRES X");
+  println!("and Y. scsh resolves the env you forward (or refuses the skill). Examples — successes");
+  println!("({}) and the intended refusal scsh guards against ({}):", ok_mark(), refused_mark());
   println!();
   example("scsh run", "add with defaults A=2 B=3 -> 2 + 3 = 5", true);
   example("A=10 B=20 scsh run", "add forwards your A,B -> 10 + 20 = 30", true);
@@ -2322,14 +2496,15 @@ fn print_help_config() {
   println!();
   println!("{} {}", h_head(".scsh.yml"), console::style("\u{2014} the project config file").bold());
   println!("{}", h_dim("The whole file is just your skills; scsh owns the container command. The base"));
-  println!("{}", h_dim("image is built in (Debian + opencode + a dev toolchain) — no version/project/image header."));
+  println!("{}", h_dim("image is built in (Debian + shared base + per-harness CLI) — no version/project/image header."));
   println!();
   print!(
     "{}",
-    r#"  skills:                 # the only top-level key: one or more, keyed by skill name
-    add:                  #   the name (matches a .skills/<name>/)
-      harness: opencode   #     required; the harness that runs it (only `opencode`)
-      model: openai/...   #     optional; the model the harness passes to the tool
+    r#"  skills:                 # the only top-level key: one or more run invocations
+    add-opencode-gpt:       #   invocation name (container label, cache key)
+      skill: add            #   optional; .skills/<name>/ folder (default: the key)
+      harness: opencode     #     required; `opencode` or `claude`
+      model: openai/...     #     optional; the model the harness passes to the tool
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
@@ -2366,7 +2541,9 @@ fn print_help_config() {
   println!("{}", h_dim("  this manifest EXCEPT those marked `autoinstall: false` or named `internal-*` (both"));
   println!("{}", h_dim("  authoring-only), merging the rest into that repo's own .scsh.yml."));
   println!();
-  println!("{}", h_dim("The harness runs, inside the container:  opencode -m <model> run \"run skill <name>\""));
+  println!("{}", h_dim("Harness commands (inside the container):"));
+  println!("{}", h_dim("  opencode: opencode -m <model> run \"run skill <source>\""));
+  println!("{}", h_dim("  claude:   claude -p \"Run .skills/<source>/SKILL.md …\" (CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json)"));
   println!();
 }
 
@@ -2393,14 +2570,17 @@ fn print_help_internals() {
   println!();
   println!("{}", h_head("How a run works"));
   print!(
-    r#"  scsh builds ONE generic image (opencode + a non-root `agent` user whose UID/GID
-  match yours), version-checking opencode during the build. Then, for EVERY skill in
+    r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`) from a shared
+  base, version-checking each CLI during the build. Then, for EVERY selected skill in
   parallel, it makes a fresh full clone of this repo into a /tmp run dir
-  (scsh-YYYYMMDD-HHMMSS-utc-run-<skill>, all branches) and runs the skill's harness
+  (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation>, all branches) and runs the skill's harness
   in its own container with that clone bind-mounted at /home/agent/repo (the WORKDIR).
   The clone is mounted UNDER the agent's home, not as it, so the harness's home-dir
   scratch (~/.cache, ~/.config, ~/.npm) stays out of the cloned tree. Files the skill
   writes are owned by you on the host.
+
+  scsh injects SCSH_RESULT=<result path> into every container so one skill folder can
+  serve multiple invocations with different result files.
 
   Each skill MUST produce its declared `result` file. Missing after the container
   exits -> that skill fails and the whole invocation exits non-zero; otherwise scsh
@@ -2408,10 +2588,13 @@ fn print_help_internals() {
   <name>.bak.YYYYMMDD-HHMMSS-utc. All skills run regardless, so one run reports
   every skill's outcome.
 
-  So the container's opencode can reach a model, scsh copies your host opencode auth
-  (~/.local/share/opencode/auth.json) into the run's gitignored tmp/ (as XDG_DATA_HOME)
-  for its duration and removes it afterward (opt out: SCSH_NO_OPENCODE_AUTH=1). Every
-  line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
+  Auth: opencode skills bind-mount the host ~/.local/share/opencode/auth.json when present
+  (needed for custom opencode providers such as Nebius GLM; opt out: SCSH_NO_OPENCODE_AUTH=1).
+  Claude skills use host CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and/or
+  ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container
+  (opt out: SCSH_NO_CLAUDE_AUTH=1).
+  Unavailable harnesses are skipped; a run fails only when every selected skill is skipped.
+  Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
   The Dockerfile is generated in memory (streamed to the builder's stdin), and your
   repository is modified only by the result copies (into the gitignored tmp/).
@@ -2437,7 +2620,8 @@ fn print_help_internals() {
     r#"  A glibc Debian-slim base, baked with a broad dev/CLI toolchain so skills work with
   no setup step. Built once, then cached and reused (the first run does the build):
     languages/build  python3 (+ uv), Go, Rust (cargo), C/C++ (gcc/g++/make/cmake),
-                     perl, gawk, node (+ opencode, the harness)
+                     perl, gawk, node
+    harness images   scsh-opencode (+ opencode-ai), scsh-claude (+ @anthropic-ai/claude-code)
     data/CLI         jq, yq, ripgrep, shellcheck, git (+ git-lfs), gh, sqlite3,
                      psql, protoc, curl/wget, tar/gzip/xz/zip/unzip, patch, tree
     cloud            aws (v2), gcloud + gsutil, kubectl
@@ -2581,23 +2765,13 @@ mod tests {
     assert!(cli(&["run", "--nope"]).is_err(), "an unknown flag after `run` is not a profile");
   }
 
-  #[cfg(unix)]
   #[test]
-  fn copy_auth_into_writes_a_private_file_at_the_opencode_path() {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
-    let src = tmp.join("src.json");
-    let run = tmp.join("run");
+  fn prepare_opencode_auth_mount_dir_creates_xdg_parent() {
+    let run = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
     std::fs::create_dir_all(&run).unwrap();
-    std::fs::write(&src, "{\"token\":\"secret\"}").unwrap();
-
-    let dest = copy_auth_into(&run, &src).expect("auth copied");
-    // The credential lands under the gitignored tmp/ (the image's XDG_DATA_HOME), not the repo root.
-    assert_eq!(dest, run.join("tmp/.xdg-data/opencode/auth.json"));
-    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"token\":\"secret\"}");
-    assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
-
-    let _ = std::fs::remove_dir_all(&tmp);
+    prepare_opencode_auth_mount_dir(&run);
+    assert!(run.join("tmp/.xdg-data/opencode").is_dir());
+    let _ = std::fs::remove_dir_all(&run);
   }
 
   // --- commit integration ---------------------------------------------------
@@ -2756,6 +2930,7 @@ mod tests {
   fn mk_skill(name: &str) -> config::Skill {
     config::Skill {
       name: name.into(),
+      skill_source: name.into(),
       harness: config::Harness::Opencode,
       model: None,
       timeout: None,
@@ -2823,7 +2998,11 @@ mod tests {
 
     // A commit-enabled skill journals its commits (a patch mbox); they round-trip and a
     // multi-line patch with quotes survives the JSON quoting.
-    let patch = "From abc Mon Sep 17 00:00:00 2001\nSubject: [PATCH] add: 2 + 3 = 5\n\n\"diff\" body\n";
+    let patch = r#"From abc Mon Sep 17 00:00:00 2001
+Subject: [PATCH] add: 2 + 3 = 5
+
+"diff" body
+"#;
     cache_store(&caller, "withcommit", result, Some(patch));
     let e2 = cache_lookup(&caller, "withcommit").expect("hit");
     assert_eq!(e2.result, result);
