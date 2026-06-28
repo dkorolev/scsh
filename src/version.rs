@@ -17,7 +17,6 @@ pub fn git_stamp() -> String {
 }
 
 /// CLI-style version line: `1.8.0 (85555ff-dirty)` or just `1.8.0`.
-#[allow(dead_code)] // used by CLI wiring in the next commit; daemon uses pkg_version/git_stamp in HTML.
 pub fn display() -> String {
   let git = git_stamp();
   if git.is_empty() {

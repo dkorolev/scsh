@@ -7,12 +7,12 @@
 
 mod config;
 mod daemon;
-mod sha1;
-mod version;
 mod json;
 mod runtime;
+mod sha1;
 mod sha256;
 mod ui;
+mod version;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -63,6 +63,8 @@ fn run(args: &[String]) -> i32 {
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
     // the real interactive board over a few scripted subprocesses.
     Mode::UiDemo { frames } => ui::demo::run(frames),
+    Mode::Daemon { action } => daemon_cmd(action),
+    Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
   }
 }
 
@@ -76,7 +78,25 @@ enum Mode {
   List,
   CheckProfile,
   Run,
-  UiDemo { frames: bool },
+  UiDemo {
+    frames: bool,
+  },
+  Daemon {
+    action: DaemonAction,
+  },
+  /// Hidden: the long-lived HTTP server process.
+  DaemonServe {
+    mode: daemon::DaemonMode,
+    port: u16,
+  },
+}
+
+#[derive(Clone, Copy)]
+enum DaemonAction {
+  Start,
+  Stop,
+  Restart,
+  Status,
 }
 
 /// Which help page to print. The default (`scsh help` / a bare `scsh`) is a compact
@@ -91,58 +111,8 @@ enum HelpTopic {
   Cache,
 }
 
-mod build_info {
-  include!(concat!(env!("OUT_DIR"), "/scsh_build_info.rs"));
-}
-
-/// The version identifier: the crate version, plus the git short hash (and a `-dirty`
-/// marker) captured at build time by `build.rs`. When the build could not read git
-/// (e.g. a crates.io tarball), tries `git` from the current working directory upward.
-/// E.g. `1.0.1 (a1b2c3d-dirty)`.
-///
-/// Cargo's manifest requires a full semver (`X.Y.Z`); we display it as-is.
 fn version_id() -> String {
-  let v = env!("CARGO_PKG_VERSION");
-  let git = build_info::GIT_DESCRIBE;
-  let git = if git.is_empty() { runtime_git_describe().unwrap_or_default() } else { git.to_string() };
-  if git.is_empty() {
-    v.to_string()
-  } else {
-    format!("{v} ({git})")
-  }
-}
-
-/// Last-resort: walk up from `cwd` looking for a `.git` directory (dev runs from a
-/// checkout when the binary was built without embedded git metadata).
-fn runtime_git_describe() -> Option<String> {
-  let mut dir = std::env::current_dir().ok()?;
-  for _ in 0..32 {
-    if dir.join(".git").exists() {
-      return runtime_git_describe_in(&dir);
-    }
-    dir = dir.parent()?.to_path_buf();
-  }
-  None
-}
-
-fn runtime_git_describe_in(repo: &std::path::Path) -> Option<String> {
-  let out = std::process::Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().ok()?;
-  if !out.status.success() {
-    return None;
-  }
-  let hash: String = String::from_utf8_lossy(&out.stdout).trim().chars().take(7).collect();
-  if hash.is_empty() {
-    return None;
-  }
-  let dirty = std::process::Command::new("git")
-    .arg("-C")
-    .arg(repo)
-    .args(["status", "--porcelain"])
-    .output()
-    .ok()
-    .filter(|o| o.status.success())
-    .is_some_and(|o| !o.stdout.is_empty());
-  Some(if dirty { format!("{hash}-dirty") } else { hash })
+  version::display()
 }
 
 enum Action {
@@ -229,6 +199,43 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // (one or more) install skills from those repos, in order, instead of scsh's bundled one.
       "installskills" => Some(Mode::InstallSkills),
       "updateskills" => Some(Mode::UpdateSkills),
+      "daemon" => {
+        i += 1;
+        let sub = args.get(i).ok_or("daemon needs a subcommand: start, stop, restart, or status")?;
+        let action = match sub.as_str() {
+          "start" => DaemonAction::Start,
+          "stop" => DaemonAction::Stop,
+          "restart" => DaemonAction::Restart,
+          "status" => DaemonAction::Status,
+          other => return Err(format!("unknown daemon subcommand '{other}' (try: start, stop, restart, status)")),
+        };
+        Some(Mode::Daemon { action })
+      }
+      "__daemon-serve" => {
+        let mut mode = daemon::DaemonMode::Ephemeral;
+        let mut port = daemon::daemon_port();
+        loop {
+          i += 1;
+          match args.get(i).map(|s| s.as_str()) {
+            None => break,
+            Some("--mode") => {
+              i += 1;
+              let m = args.get(i).ok_or("__daemon-serve --mode needs persistent or ephemeral")?;
+              mode = daemon::DaemonMode::parse(m).ok_or_else(|| format!("bad daemon mode '{m}'"))?;
+            }
+            Some("--port") => {
+              i += 1;
+              let p = args.get(i).ok_or("__daemon-serve --port needs a number")?;
+              port = p.parse().map_err(|_| format!("bad port '{p}'"))?;
+            }
+            Some(other) if other.starts_with('-') => {
+              return Err(format!("unknown __daemon-serve option '{other}'"));
+            }
+            Some(_) => break,
+          }
+        }
+        Some(Mode::DaemonServe { mode, port })
+      }
       "--profile" | "--profiles" => {
         i += 1;
         let name = args.get(i).ok_or("--profile needs a name, e.g. --profile code-review (or default,code-review)")?;
@@ -502,7 +509,7 @@ so they would not be in the container",
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      build_and_run(&rt, &root, &runnable)
+      build_and_run(&rt, &root, &runnable, profile)
     }
   }
 }
@@ -877,8 +884,150 @@ fn check_profile_cmd(profile: Option<&str>) -> i32 {
   1
 }
 
-fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation]) -> i32 {
+fn daemon_cmd(action: DaemonAction) -> i32 {
+  match action {
+    DaemonAction::Start => match daemon::start_persistent() {
+      Ok(()) => {
+        ok(&format!("session browser daemon listening on {}", daemon::base_url(daemon::daemon_port())));
+        0
+      }
+      Err(e) => {
+        fail(&format!("could not start daemon: {e}"));
+        hint("→ check SCSH_DAEMON_PORT and whether another process is already listening on that port");
+        1
+      }
+    },
+    DaemonAction::Stop => match daemon::stop() {
+      Ok(true) => {
+        ok("session browser daemon stopped");
+        0
+      }
+      Ok(false) => {
+        fail("session browser daemon is not running");
+        hint("→ start it with: scsh daemon start");
+        1
+      }
+      Err(e) => {
+        fail(&format!("could not stop daemon: {e}"));
+        hint("→ check SCSH_DAEMON_PORT and stale files under $TMPDIR/scsh-daemon/");
+        1
+      }
+    },
+    DaemonAction::Restart => {
+      let _ = daemon::stop();
+      match daemon::start_persistent() {
+        Ok(()) => {
+          ok(&format!("session browser daemon restarted on {}", daemon::base_url(daemon::daemon_port())));
+          0
+        }
+        Err(e) => {
+          fail(&format!("could not restart daemon: {e}"));
+          hint("→ check SCSH_DAEMON_PORT and whether another process is listening on that port");
+          1
+        }
+      }
+    }
+    DaemonAction::Status => {
+      let port = daemon::daemon_port();
+      if daemon::Client::daemon_alive() {
+        if let Some(pid) = daemon::read_live_pid(port) {
+          ok(&format!("session browser daemon running (pid {pid}) on {}", daemon::base_url(port)));
+        } else {
+          ok(&format!("session browser daemon responding on {}", daemon::base_url(port)));
+        }
+        0
+      } else if let Some(pid) = daemon::read_live_pid(port) {
+        fail(&format!("session browser daemon pid {pid} exists but is not responding on {}", daemon::base_url(port)));
+        hint("→ recover with: scsh daemon restart");
+        1
+      } else {
+        fail("session browser daemon is not running");
+        hint("→ start it with: scsh daemon start");
+        1
+      }
+    }
+  }
+}
+
+fn daemon_serve(mode: daemon::DaemonMode, port: u16) -> i32 {
+  let server = daemon::Server::new(mode, port);
+  match server.run() {
+    Ok(()) => 0,
+    Err(e) => {
+      fail(&format!("session browser daemon exited: {e}"));
+      hint("→ check SCSH_DAEMON_PORT and logs from the child process");
+      1
+    }
+  }
+}
+
+/// Absolute repo path for the session browser (canonical when possible).
+fn repo_path_for_session(root: &Path) -> String {
+  daemon::absolutize_repo_path(root)
+}
+
+/// Best-effort daemon teardown on every exit path (build failure, skill failure, panic, early return).
+struct DaemonSession {
+  client: Option<std::sync::Arc<daemon::Client>>,
+  ping_active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+  registered: bool,
+}
+
+impl DaemonSession {
+  fn cleanup(&mut self) {
+    if let Some(flag) = self.ping_active.take() {
+      flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(c) = self.client.take() {
+      if self.registered {
+        c.flush();
+        c.deregister();
+        ok(&format!("session {}", c.session_url()));
+      }
+    }
+  }
+}
+
+impl Drop for DaemonSession {
+  fn drop(&mut self) {
+    self.cleanup();
+  }
+}
+
+fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>) -> i32 {
   ui::signals::install();
+
+  // Session browser daemon — `scsh run` always tries to attach; ephemeral auto-start when needed.
+  let session_id = daemon::new_session_id();
+  let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
+  match daemon::ensure_for_run() {
+    Ok(()) => {
+      let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
+      let skill_meta: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.harness.as_str())).collect();
+      if client.register_session(&repo_path_for_session(root), &current_branch(root), profile, &skill_meta) {
+        ok(&format!("track progress at {}", client.session_url()));
+        let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ping_flag = std::sync::Arc::clone(&ping_active);
+        let ping_client = std::sync::Arc::clone(&client);
+        std::thread::spawn(move || {
+          while ping_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            ping_client.ping();
+            std::thread::sleep(Duration::from_secs(2));
+          }
+        });
+        daemon_session.client = Some(client);
+        daemon_session.ping_active = Some(ping_active);
+        daemon_session.registered = true;
+      } else {
+        hint(&format!("session browser daemon is up but registration failed; try {}", client.session_url()));
+      }
+    }
+    Err(e) => {
+      hint(&format!("session browser daemon unavailable ({e}); continuing without live browser UI"));
+    }
+  }
+  let daemon_client = daemon_session.client.clone();
+
   let (uid, gid) = host_ids();
   let secs = now_secs();
   if !keep_run_dirs() {
@@ -900,7 +1049,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     ok(&format!("claude credentials found ({via} forwarded into claude skills)"));
   }
 
-  let ui = ui::screen::LiveUi::new(console::user_attended_stderr());
+  let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
 
   let df = runtime::dockerfile();
   let tz = runtime::host_timezone();
@@ -918,11 +1067,26 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   let mut build_procs = Vec::with_capacity(harness_list.len());
   for &h in &harness_list {
     let label = format!("using {} · build {}", backend_name(&rt.name), h.as_str());
-    build_procs.push(ui.proc(label, true));
+    let build = ui.proc(label.clone(), true);
+    if let Some(c) = &daemon_client {
+      c.proc_add(build.index(), &label, daemon::ProcKind::Build, None, Some(h.as_str()), None);
+    }
+    build_procs.push(build);
   }
   let mut skill_procs = Vec::with_capacity(skills.len());
   for skill in skills {
-    let p = ui.proc(format!("{}: {}", skill.harness.as_str(), skill.name), false);
+    let label = format!("{}: {}", skill.harness.as_str(), skill.name);
+    let p = ui.proc(label.clone(), false);
+    if let Some(c) = &daemon_client {
+      c.proc_add(
+        p.index(),
+        &label,
+        daemon::ProcKind::Skill,
+        Some(skill.name.as_str()),
+        Some(skill.harness.as_str()),
+        skill.model.as_deref(),
+      );
+    }
     p.note("waiting for image build…");
     skill_procs.push(p);
   }
@@ -976,10 +1140,14 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     p.note("starting…");
   }
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
+    let dc = daemon_client.clone();
     let handles: Vec<_> = skills
       .iter()
       .zip(skill_procs)
-      .map(|(&skill, p)| scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref)))
+      .map(|(&skill, p)| {
+        let dc = dc.clone();
+        scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref, dc))
+      })
       .collect();
     handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
   });
@@ -1098,6 +1266,7 @@ impl SkillRun {
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
 fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -1228,7 +1397,13 @@ fn run_one_skill(
   let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd, repo_mount);
   let timeout = skill.timeout.map(Duration::from_secs);
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
+  if let Some(c) = &daemon_client {
+    c.container_event(spinner.index(), "start", &name);
+  }
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
+  if let Some(c) = &daemon_client {
+    c.container_event(spinner.index(), "stop", &name);
+  }
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
   }
@@ -2794,6 +2969,7 @@ fn print_help_overview() {
   help_row("init-demo-project", "Scaffold and commit a demo project.");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs).");
   help_row("updateskills [url…]", "Reinstall skills, overwriting local copies.");
+  help_row("daemon", "start | stop | restart | status");
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");

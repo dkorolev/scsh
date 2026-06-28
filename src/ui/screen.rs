@@ -40,6 +40,9 @@ use super::live::{Model, Row, Status, Sty};
 use super::signals::{isolate_child, register_child, terminate_all, unregister_child};
 use super::TICK;
 
+/// Optional session-browser event sink (see [`crate::daemon::Client`]).
+pub type EventSink = std::sync::Arc<crate::daemon::Client>;
+
 /// True while raw mode / mouse reporting is active, so [`restore_terminal`] is idempotent and a
 /// signal handler or panic can always put the terminal back.
 static TUI_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -69,20 +72,21 @@ pub fn restore_terminal() {
 pub struct LiveUi {
   attended: bool,
   model: Arc<Mutex<Model>>,
-  /// Per-proc start instant (set when the proc starts), so the render thread can tick the clock
-  /// and a worker can stamp each output line relative to its proc's start.
+  /// Per-proc start instants for elapsed time on the live board.
   starts: Arc<Mutex<Vec<Option<Instant>>>>,
   stop: Arc<AtomicBool>,
-  /// The screen row the inline board currently starts at — published by the render thread so
-  /// [`LiveUi::finish`] knows where to wipe it and print the compact summary.
+  /// Screen row where the inline board's first line was last drawn — published by the render thread
+  /// so `finish` can clear from there downward.
   top: Arc<AtomicUsize>,
   render: Option<JoinHandle<()>>,
+  sink: Option<EventSink>,
 }
 
 impl LiveUi {
   /// Start a live board. `attended` should be [`console::user_attended_stderr`]; when false the
-  /// board degrades to plain lines and never touches the terminal.
-  pub fn new(attended: bool) -> LiveUi {
+  /// board degrades to plain lines and never touches the terminal. An optional `sink` forwards
+  /// proc lifecycle events to the session browser daemon.
+  pub fn new(attended: bool, sink: Option<EventSink>) -> LiveUi {
     let model = Arc::new(Mutex::new(Model::new()));
     let starts = Arc::new(Mutex::new(Vec::new()));
     let stop = Arc::new(AtomicBool::new(false));
@@ -96,7 +100,7 @@ impl LiveUi {
     };
     // If we asked for a TUI but couldn't enter it (enter_tui returned false), fall back to plain.
     let attended = render.is_some();
-    LiveUi { attended, model, starts, stop, top, render }
+    LiveUi { attended, model, starts, stop, top, render, sink }
   }
 
   /// Declare a proc (the image build, or a skill) up front, returning the handle a worker drives.
@@ -108,7 +112,16 @@ impl LiveUi {
       m.add(label.clone())
     };
     self.starts.lock().unwrap().push(None);
-    Proc { i, label, attended: self.attended, tail, model: Arc::clone(&self.model), starts: Arc::clone(&self.starts) }
+    let sink = self.sink.clone();
+    Proc {
+      i,
+      label,
+      attended: self.attended,
+      tail,
+      model: Arc::clone(&self.model),
+      starts: Arc::clone(&self.starts),
+      sink,
+    }
   }
 
   /// Pin the board viewport to the top (manifest-first row order). Called once all procs are
@@ -160,31 +173,50 @@ pub struct Proc {
   tail: bool,
   model: Arc<Mutex<Model>>,
   starts: Arc<Mutex<Vec<Option<Instant>>>>,
+  sink: Option<EventSink>,
 }
 
 impl Proc {
+  /// Row index in the live board (and in the session browser).
+  pub fn index(&self) -> usize {
+    self.i
+  }
+
   /// Mark the proc running and start its clock. Off-TTY, announce it with a `▶` line.
   pub fn start(&self) {
     *self.starts.lock().unwrap().get_mut(self.i).unwrap() = Some(Instant::now());
     self.model.lock().unwrap().set_status(self.i, Status::Running);
+    if let Some(s) = &self.sink {
+      s.proc_start(self.i);
+    }
     if !self.attended {
       eprintln!("{} {}…", style("▶").cyan(), style(&self.label).bold());
     }
   }
 
-  /// Set the dim header note (a phase, e.g. "cloning…"). No-op off-TTY.
+  /// Set the dim header note (a phase, e.g. "cloning…"). Forwards to the session browser when connected.
   pub fn note(&self, msg: &str) {
+    if let Some(s) = &self.sink {
+      s.proc_note(self.i, msg);
+    }
     if self.attended {
       self.model.lock().unwrap().set_note(self.i, Some(msg.to_string()));
     }
   }
 
-  /// Append a timestamped line to this proc's captured output (and echo it off-TTY).
+  /// Append a timestamped line to this proc's captured output. Off-TTY, only tailing procs
+  /// (image builds) echo lines to the terminal; skill rows keep clone/fsck chatter on the board.
   pub fn emit(&self, msg: &str) {
     let at = self.start_instant().elapsed().as_secs_f64();
-    if self.attended {
+    if let Some(s) = &self.sink {
+      s.proc_line(self.i, at, msg);
+    }
+    // Attended board and daemon-backed off-TTY runs keep lines in the model; plain off-TTY runs
+    // only echo (main behavior) unless a sink needs the lines for the session browser.
+    if self.attended || self.sink.is_some() {
       self.model.lock().unwrap().push_line(self.i, at, msg.to_string());
-    } else {
+    }
+    if !self.attended && (self.tail || self.sink.is_none()) {
       eprintln!("  {}", style(msg).dim());
     }
   }
@@ -286,6 +318,15 @@ impl Proc {
       m.set_status(self.i, status);
       m.set_detail(self.i, detail.filter(|d| !d.is_empty()).map(str::to_string));
     }
+    if let Some(s) = &self.sink {
+      let ps = match status {
+        Status::Ok => crate::daemon::ProcStatus::Ok,
+        Status::Fail => crate::daemon::ProcStatus::Fail,
+        Status::Running => crate::daemon::ProcStatus::Running,
+        Status::Queued => crate::daemon::ProcStatus::Waiting,
+      };
+      s.proc_finish(self.i, ps, detail, elapsed);
+    }
     if !self.attended {
       eprintln!("{}", summary_line(&self.label, status, elapsed, detail));
     }
@@ -301,7 +342,8 @@ impl Proc {
   fn pump<R: Read + Send + 'static>(
     &self, reader: R, started: Instant, last: Arc<Mutex<Option<String>>>,
   ) -> JoinHandle<()> {
-    let (i, attended, tail, model) = (self.i, self.attended, self.tail, Arc::clone(&self.model));
+    let (i, attended, tail, model, sink) =
+      (self.i, self.attended, self.tail, Arc::clone(&self.model), self.sink.clone());
     thread::spawn(move || {
       for line in BufReader::new(reader).lines() {
         let Ok(raw) = line else { break };
@@ -310,6 +352,9 @@ impl Proc {
           continue;
         }
         let at = started.elapsed().as_secs_f64();
+        if let Some(s) = &sink {
+          s.proc_line(i, at, &cleaned);
+        }
         {
           let mut m = model.lock().unwrap();
           m.push_line(i, at, cleaned.clone());
@@ -571,12 +616,57 @@ mod tests {
     assert_eq!(lines, vec!["✓ build  4s".to_string(), "✗ add  0.0s  boom".to_string()]);
   }
 
+  #[cfg(unix)]
+  #[test]
+  fn emit_off_tty_without_sink_echoes_but_does_not_record_model_lines() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("skill", false);
+    p.start();
+    p.emit("git fsck --no-progress…");
+    let m = ui.model.lock().unwrap();
+    assert_eq!(m.procs[0].lines.len(), 0);
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn emit_off_tty_with_sink_records_lines_without_echo_for_non_tail() {
+    struct PinDaemonPort {
+      previous: Option<String>,
+    }
+    impl PinDaemonPort {
+      fn ephemeral() -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let previous = std::env::var("SCSH_DAEMON_PORT").ok();
+        std::env::set_var("SCSH_DAEMON_PORT", port.to_string());
+        Self { previous }
+      }
+    }
+    impl Drop for PinDaemonPort {
+      fn drop(&mut self) {
+        match &self.previous {
+          Some(v) => std::env::set_var("SCSH_DAEMON_PORT", v),
+          None => std::env::remove_var("SCSH_DAEMON_PORT"),
+        }
+      }
+    }
+    let _pin = PinDaemonPort::ephemeral();
+    let client = std::sync::Arc::new(crate::daemon::Client::new("abcdef".into()));
+    let ui = LiveUi::new(false, Some(client.clone()));
+    let p = ui.proc("skill", false);
+    p.start();
+    p.emit("daemon line");
+    let m = ui.model.lock().unwrap();
+    assert_eq!(m.procs[0].lines.len(), 1);
+    assert_eq!(m.procs[0].lines[0].text, "daemon line");
+    client.flush();
+  }
+
   // The off-TTY Proc path runs real (tiny) subprocesses, pumping their output into the model as
   // timestamped lines — the same code the attended TUI uses, minus the terminal.
   #[cfg(unix)]
   #[test]
   fn proc_pumps_timestamped_lines_into_the_model() {
-    let ui = LiveUi::new(false); // off-TTY: no terminal take-over
+    let ui = LiveUi::new(false, None); // off-TTY: no terminal take-over
     let p = ui.proc("seq", false);
     p.start();
     let (ok, last) = p.run("seq", &["3".to_string()]).unwrap();
@@ -594,7 +684,7 @@ mod tests {
   #[cfg(unix)]
   #[test]
   fn proc_run_timed_kills_an_overrunning_child() {
-    let ui = LiveUi::new(false);
+    let ui = LiveUi::new(false, None);
     let p = ui.proc("sleep", false);
     p.start();
     let (ok, timed_out, _) = p.run_timed("sleep", &["5".to_string()], Some(Duration::from_millis(150))).unwrap();

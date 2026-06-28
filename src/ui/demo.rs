@@ -87,7 +87,7 @@ fn sh(script: &str) -> Vec<String> {
 /// The real interactive board over scripted subprocesses — for a human or the PTY harness.
 fn live_demo() -> i32 {
   super::signals::install();
-  let ui = LiveUi::new(console::user_attended_stderr());
+  let ui = LiveUi::new(console::user_attended_stderr(), None);
 
   let build = ui.proc("using demo · build", true);
   build.start();

@@ -107,3 +107,86 @@ pub fn stop() -> std::io::Result<bool> {
   let _ = std::fs::remove_file(&pid_path);
   Ok(true)
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::net::TcpListener;
+  use std::sync::Mutex;
+
+  static DAEMON_SPAWN_LOCK: Mutex<()> = Mutex::new(());
+
+  fn unused_local_port() -> u16 {
+    TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+  }
+
+  struct RestoreDaemonPortEnv {
+    previous: Option<String>,
+  }
+
+  impl RestoreDaemonPortEnv {
+    fn set(port: u16) -> Self {
+      let previous = std::env::var(paths::PORT_ENV).ok();
+      std::env::set_var(paths::PORT_ENV, port.to_string());
+      Self { previous }
+    }
+  }
+
+  impl Drop for RestoreDaemonPortEnv {
+    fn drop(&mut self) {
+      match &self.previous {
+        Some(v) => std::env::set_var(paths::PORT_ENV, v),
+        None => std::env::remove_var(paths::PORT_ENV),
+      }
+    }
+  }
+
+  struct EphemeralDaemonGuard {
+    port: u16,
+  }
+
+  impl Drop for EphemeralDaemonGuard {
+    fn drop(&mut self) {
+      let _ = stop();
+      let _ = std::fs::remove_file(paths::state_file(self.port));
+    }
+  }
+
+  fn wait_daemon_ready() {
+    for _ in 0..40 {
+      if Client::daemon_alive() {
+        return;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+  }
+
+  #[test]
+  fn ensure_for_run_spawns_ephemeral_daemon() {
+    let _spawn = DAEMON_SPAWN_LOCK.lock().unwrap();
+    let port = unused_local_port();
+    let _env = RestoreDaemonPortEnv::set(port);
+    let _guard = EphemeralDaemonGuard { port };
+    let _ = stop();
+    ensure_for_run().expect("ensure_for_run");
+    wait_daemon_ready();
+    assert!(Client::daemon_alive(), "daemon should accept TCP on {}", port);
+    assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Ephemeral));
+  }
+
+  #[test]
+  fn start_persistent_replaces_ephemeral_daemon() {
+    let _spawn = DAEMON_SPAWN_LOCK.lock().unwrap();
+    let port = unused_local_port();
+    let _env = RestoreDaemonPortEnv::set(port);
+    let _guard = EphemeralDaemonGuard { port };
+    let _ = stop();
+    ensure_for_run().expect("ensure_for_run");
+    wait_daemon_ready();
+    assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Ephemeral));
+    start_persistent().expect("start_persistent");
+    wait_daemon_ready();
+    assert!(Client::daemon_alive(), "persistent daemon should accept TCP on {}", port);
+    assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Persistent));
+  }
+}
