@@ -877,3 +877,114 @@ fn claude_add_skill_runs_when_configured() {
   let body = std::fs::read_to_string(d.join("tmp/add_claude_sonnet_4_6_result.json")).unwrap();
   assert!(body.contains("2 + 3 = 5") || body.contains("result"), "got: {body}");
 }
+
+fn unused_local_port() -> u16 {
+  std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+#[test]
+fn daemon_start_status_stop() {
+  let d = unique_dir("daemon");
+  let port = unused_local_port();
+  let port_s = port.to_string();
+  let _guard = DaemonTestGuard { dir: d.clone(), port };
+  let start = Command::new(bin())
+    .args(["daemon", "start"])
+    .env("SCSH_DAEMON_PORT", &port_s)
+    .current_dir(&d)
+    .output()
+    .expect("daemon start");
+  assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
+  let status = {
+    let mut last = None;
+    for _ in 0..40 {
+      let status = Command::new(bin())
+        .args(["daemon", "status"])
+        .env("SCSH_DAEMON_PORT", &port_s)
+        .current_dir(&d)
+        .output()
+        .expect("daemon status");
+      if status.status.success() {
+        last = Some(status);
+        break;
+      }
+      last = Some(status);
+      std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    last.expect("daemon status")
+  };
+  assert!(status.status.success(), "daemon status: {}", String::from_utf8_lossy(&status.stderr));
+  let html = daemon_http_get("/", port).expect("GET /");
+  assert!(html.contains("scsh session browser"), "got: {}", html);
+  let stop = Command::new(bin())
+    .args(["daemon", "stop"])
+    .env("SCSH_DAEMON_PORT", &port_s)
+    .current_dir(&d)
+    .output()
+    .expect("daemon stop");
+  assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
+}
+
+#[test]
+fn daemon_restart() {
+  let d = unique_dir("daemon-restart");
+  let port = unused_local_port();
+  let port_s = port.to_string();
+  let _guard = DaemonTestGuard { dir: d.clone(), port };
+  let start = Command::new(bin())
+    .args(["daemon", "start"])
+    .env("SCSH_DAEMON_PORT", &port_s)
+    .current_dir(&d)
+    .output()
+    .expect("daemon start");
+  assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
+  let restart = Command::new(bin())
+    .args(["daemon", "restart"])
+    .env("SCSH_DAEMON_PORT", &port_s)
+    .current_dir(&d)
+    .output()
+    .expect("daemon restart");
+  assert!(restart.status.success(), "daemon restart: {}", String::from_utf8_lossy(&restart.stderr));
+  let html = daemon_http_get("/", port).expect("GET / after restart");
+  assert!(html.contains("scsh session browser"), "got: {}", html);
+  let stop = Command::new(bin())
+    .args(["daemon", "stop"])
+    .env("SCSH_DAEMON_PORT", &port_s)
+    .current_dir(&d)
+    .output()
+    .expect("daemon stop");
+  assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
+}
+
+struct DaemonTestGuard {
+  dir: std::path::PathBuf,
+  port: u16,
+}
+
+impl Drop for DaemonTestGuard {
+  fn drop(&mut self) {
+    let _ = Command::new(bin())
+      .args(["daemon", "stop"])
+      .env("SCSH_DAEMON_PORT", self.port.to_string())
+      .current_dir(&self.dir)
+      .output();
+    let daemon_dir = std::env::temp_dir().join("scsh-daemon");
+    let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{}.json", self.port)));
+    let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{}.pid", self.port)));
+    let _ = std::fs::remove_dir_all(&self.dir);
+  }
+}
+
+fn daemon_http_get(path: &str, port: u16) -> Option<String> {
+  use std::io::{Read, Write};
+  use std::net::TcpStream;
+  use std::time::Duration;
+  let mut stream =
+    TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().ok()?, Duration::from_millis(500)).ok()?;
+  stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+  let req = format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+  stream.write_all(req.as_bytes()).ok()?;
+  let mut resp = String::new();
+  stream.read_to_string(&mut resp).ok()?;
+  Some(resp)
+}

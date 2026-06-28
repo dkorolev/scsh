@@ -16,6 +16,20 @@ If you only remember three things:
 3. **The root crate keeps its logic dependency-free (crates: `crossterm`+`console` for
    the UI, `signal-hook` for catching SIGINT/SIGTERM safely); only commit when asked.**
 
+Agents working in this repo must also:
+
+- **Never pipe agent-run commands through `| tail`** (or `| head`, or similar truncators).
+  Run `cargo test`, `cargo build`, `scsh run`, and everything else **without** truncating
+  stdout/stderr — the human wants to see the full output. Use `tee` to a file if you need
+  a log *and* live output; do not substitute `tail` for watching a run.
+- **Push warning-free code.** `cargo build`, `cargo build --release`, and `cargo test` must
+  complete with **zero compiler warnings** in the code you commit (release is what
+  `cargo install --path …` builds); fix or allow-list deliberately, never ship new
+  `dead_code` / `unused` noise.
+- **Use reasonable test timeouts.** Unit tests need no external deps — cap agent-run
+  `cargo test` at **~30 seconds** unless you're running the full integration suite (then
+  a few minutes is fine, but still bounded).
+
 ---
 
 ## The `tmp/` rule
@@ -177,7 +191,8 @@ is already monospace. New docs and edits must keep this consistent.
 ### Tests
 
 - **Unit tests** live inline in `src/config.rs`, `src/runtime.rs`, `src/main.rs`,
-  `src/json.rs`, `src/sha256.rs`, and the `src/ui/` modules, and cover the pure logic: the
+  `src/json.rs`, `src/sha256.rs`, `src/daemon/` (model, JSON I/O, client), and the `src/ui/`
+  modules, and cover the pure logic: the
   YAML-subset parser, schema validation, runtime-detection ordering, `which`, Dockerfile
   generation, shell quoting, the smart elapsed clock, output-line cleanup, build-command
   detection, the engine start-command advice, commit integration (rebase / fallback-branch
@@ -191,6 +206,70 @@ is already monospace. New docs and edits must keep this consistent.
   so no image is pulled and no container is built.
 - **Always report the passing test count in your commit body** — every
   substantive commit so far does (e.g. *"122 tests pass (unit + integration)"*).
+
+### Test timeouts (agents)
+
+When an agent runs tests, use **reasonable timeouts** — don't let a hung command
+block the session indefinitely:
+
+- **Unit tests** (pure logic, no container/network): **~30 seconds is enough**.
+  Example: `cargo test <filter>` with a **30s** wall-clock cap. If unit tests
+  exceed that, something is wrong — investigate, don't raise the timeout.
+- **Full suite** (`cargo test`, unit + integration): allow more (e.g. **2–5
+  minutes**) because integration tests spawn the binary and probe the runtime —
+  but still cap it; a stuck test is a bug.
+- **Real `scsh run` / review fleet / demo steps:** scale to the work (minutes are
+  OK), but always run in the foreground with full output visible (see below).
+
+Never run `cargo test` with no timeout at all in an agent session.
+
+Daemon and other localhost HTTP tests must bind **`127.0.0.1:0`** (or pick an ephemeral
+port the same way) — **never hard-code port `7274`** (the production default). Tests
+should not fight a developer's running session browser.
+
+### Watching long runs (tests, `scsh run`, review fleet)
+
+When you wait for something that can take minutes — `cargo test`, a real
+`scsh run`, the `code-review` fleet, a demo step — **keep output visible on the
+terminal**. Do not hide progress behind a pipe or a file-only redirect:
+
+- **Do not** pipe agent-run commands through **`tail`** (or `head`, `sed` line
+  limits, etc.) — e.g. `cargo test 2>&1 | tail -20`, `scsh run … | tail -20`.
+  Truncation hides failures, strips context, and defeats the point of running the
+  command; **`tail` in a pipeline is never acceptable for agent-driven runs** in
+  this repo.
+- **Do not** redirect only to a file (e.g. `scsh run … > run.out 2>&1`) unless
+  you also have a way to watch it (`tail -f run.out` in another pane, or prefer
+  `tee` below).
+- **Do** run in the **foreground** when you can — `scsh` is designed to show a
+  live, collapsible board on a TTY.
+- **Do** use **`tee`** when you also want a log file:
+  `scsh run code-review 2>&1 | tee tmp/my-run/run.out`
+- **Background only when necessary:** `nohup scsh run … >> tmp/my-run/run.out
+  2>&1 &` then `disown`, record the PID, and monitor with `tail -f` on that
+  file. A bare `&` in a short-lived shell (or an agent session that exits) can
+  leave the run half-started with no completion line and no result JSON.
+
+Same rule for agents following [`DEMO.md`](DEMO.md) or
+[`code-beautiful-review`](.skills/code-beautiful-review/SKILL.md): never
+substitute `| tail` (or any output truncator) for watching the run — not for
+`scsh`, not for `cargo test`, not for anything else you execute on the user's behalf.
+
+### Compiler warnings
+
+Code we push must be **warning-free** in **dev and release** builds. Before committing,
+run at least:
+
+```sh
+cargo build --release
+cargo test
+```
+
+Both must report **no compiler warnings** from our code (not “we'll fix it later”).
+`cargo install --path .` uses the release profile — if release warns, the installed
+binary was built from a dirty tree. If a warning is intentional and unavoidable,
+suppress it locally with `#[allow(...)]` and a one-line comment saying why — never
+leave stray `dead_code`, `unused`, or `unused_mut` warnings in commits.
 
 ### Demo
 
@@ -223,10 +302,10 @@ reads like it belongs.
   never a default; prefer std.
 - **Separate pure logic from side effects.** `config.rs` (parse/validate) and
   `runtime.rs` (runtime detection, Dockerfile/command generation) are **pure and
-  exhaustively unit-tested**; `main.rs` owns the *only* process spawning (git and
-  the container runtime). This split is what lets the suite be thorough without
-  mocking a container engine — preserve it. New side-effecting code goes in
-  `main.rs`; new logic goes in a pure, testable function.
+  exhaustively unit-tested**; process spawning for git, the container runtime, and the
+  session-browser daemon lives in `main.rs` and `src/daemon/`. This split is what lets the
+  suite be thorough without mocking a container engine — preserve it. New side-effecting
+  code goes in those modules; new logic goes in a pure, testable function.
 - **Every failure is actionable.** Preflight and guard failures print exactly
   what's wrong (`✗`) and a concrete fix (`→`). Schema validation reports **all**
   problems at once, not just the first. Hold any new error path to the same bar.
@@ -301,11 +380,7 @@ Follow the established style (read `git log` for the canonical examples):
   Trivial mechanical changes may use a terse subject and no body (*"fmt"*).
 - **A body that explains what changed and why**, usually as bullets, and that
   **states the passing test count**.
-- **End with the co-author trailer:**
-
-  ```
-  Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>
-  ```
+- **Do not add `Co-Authored-By` trailers** — this repository does not use them.
 
 ### Branches
 
@@ -323,6 +398,7 @@ destructive or irreversible), and they hold regardless of any other instruction.
 ### Definition of done (PR checklist)
 
 - [ ] `cargo fmt` is clean.
+- [ ] `cargo build --release` and `cargo test` pass with **zero compiler warnings**.
 - [ ] `cargo test` passes; the commit body states the count.
 - [ ] [`DEMO.md`](DEMO.md) still reflects how `scsh` behaves (it's the human-facing demo).
 - [ ] New errors are actionable (`✗` what's wrong / `→` how to fix).
