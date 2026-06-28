@@ -101,6 +101,9 @@ skills:                          # each key == .skills/<name>/ folder
       claude-sonnet-4-6:
         harness: claude
         model: sonnet
+      opencode-glm-5.2:
+        harness: opencode
+        model: nebius-glm/zai-org/GLM-5.2
   multiply:
     profile: multiply
     env:

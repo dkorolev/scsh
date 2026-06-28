@@ -93,20 +93,26 @@ the event model, JSON roundtrip, and session id format.
 
 ## Manual verification (`scsh run` → browser)
 
-Automated tests do not drive a full attended `scsh run` with browser attach. After
-`cargo build`, use the binary you just built (examples below use `./target/debug/scsh`):
+Automated tests do not drive a full attended `scsh run` with browser attach. From the
+**scsh repo root** after `cargo build`, capture the binary you just built:
 
-1. `./target/debug/scsh daemon stop` (clean slate) then `./target/debug/scsh daemon start`.
-2. In a **fresh scratch directory**, scaffold a demo project: `./target/debug/scsh init-demo-project`
+```console
+export SCSH_BIN="$PWD/target/debug/scsh"
+```
+
+The steps below use `$SCSH_BIN` so they work after `cd` into a scratch directory.
+
+1. `$SCSH_BIN daemon stop` (clean slate) then `$SCSH_BIN daemon start`.
+2. In a **fresh scratch directory**, scaffold a demo project: `$SCSH_BIN init-demo-project`
    (or use any git repo that already has a `.scsh.yml` with a short profile). Then run
-   `./target/debug/scsh run` in that directory and note the session URL printed on stderr
+   `$SCSH_BIN run` in that directory and note the session URL printed on stderr
    (or open `http://127.0.0.1:7274/`).
 3. Confirm the browser shows the session, proc rows appear as skills run, harness
    output streams into the proc panel, and proc status updates to ✓/✗ on finish.
 4. When the run ends, confirm the session moves to “ended” on the index page.
-5. `./target/debug/scsh daemon restart` — daemon comes back and `GET /` still serves the index page.
-6. `./target/debug/scsh daemon stop` — daemon exits and the port is closed.
+5. `$SCSH_BIN daemon restart` — daemon comes back and `GET /` still serves the index page.
+6. `$SCSH_BIN daemon stop` — daemon exits and the port is closed.
 
-For ephemeral mode, skip step 1: a short `./target/debug/scsh run` alone should spawn the
+For ephemeral mode, skip step 1: a short `$SCSH_BIN run` alone should spawn the
 daemon, attach, and shut it down after the run disconnects and the idle timeout elapses.
-If idle shutdown does not run, use `./target/debug/scsh daemon stop` as cleanup.
+If idle shutdown does not run, use `$SCSH_BIN daemon stop` as cleanup.

@@ -59,12 +59,15 @@ Sec-WebSocket-Accept: {accept}\r\n\r\n"
 }
 
 pub fn serve(mut stream: TcpStream, rx: mpsc::Receiver<String>) {
-  stream.set_read_timeout(Some(Duration::from_millis(50))).ok();
+  stream.set_read_timeout(Some(POLL_READ_TIMEOUT)).ok();
   loop {
-    if let Err(e) = read_client_frame(&mut stream) {
-      if e.kind() != std::io::ErrorKind::WouldBlock && e.kind() != std::io::ErrorKind::TimedOut {
-        break;
-      }
+    match read_client_frame(&mut stream) {
+      Ok(Some(())) => {}
+      Ok(None) => {}
+      Err(e) if e.kind() == std::io::ErrorKind::ConnectionAborted => break,
+      Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+      Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+      Err(_) => break,
     }
     match rx.recv_timeout(Duration::from_millis(100)) {
       Ok(msg) => {
@@ -98,21 +101,37 @@ fn write_text_frame(stream: &mut TcpStream, payload: &str) -> std::io::Result<()
 }
 
 const MAX_WS_PAYLOAD: usize = 512 * 1024;
+const POLL_READ_TIMEOUT: Duration = Duration::from_millis(50);
+const FRAME_READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<()> {
+/// `Ok(Some(()))` when a client frame was handled; `Ok(None)` on poll idle; `Err` on close/error.
+fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<Option<()>> {
+  stream.set_read_timeout(Some(POLL_READ_TIMEOUT)).ok();
   let mut head = [0u8; 2];
   match stream.read(&mut head) {
     Ok(0) => return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "closed")),
+    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {
+      return Ok(None);
+    }
+    Err(e) => return Err(e),
     Ok(1) => {
+      stream.set_read_timeout(Some(FRAME_READ_TIMEOUT)).ok();
       let mut extra = [0u8; 1];
       stream.read_exact(&mut extra)?;
       head[1] = extra[0];
     }
-    Ok(2) => {}
+    Ok(2) => {
+      stream.set_read_timeout(Some(FRAME_READ_TIMEOUT)).ok();
+    }
     Ok(_) => unreachable!(),
-    Err(e) => return Err(e),
   }
 
+  let result = read_client_frame_body(stream, head);
+  stream.set_read_timeout(Some(POLL_READ_TIMEOUT)).ok();
+  result.map(Some)
+}
+
+fn read_client_frame_body(stream: &mut TcpStream, head: [u8; 2]) -> std::io::Result<()> {
   let opcode = head[0] & 0x0F;
   if opcode == 0x8 {
     return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "close"));
@@ -168,6 +187,15 @@ fn read_client_frame(stream: &mut TcpStream) -> std::io::Result<()> {
     }
   }
   Ok(())
+}
+
+#[cfg(test)]
+fn read_client_frame_blocking(stream: &mut TcpStream) -> std::io::Result<()> {
+  stream.set_read_timeout(None).ok();
+  match read_client_frame(stream)? {
+    Some(()) => Ok(()),
+    None => Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "idle")),
+  }
 }
 
 fn base64_encode(data: &[u8]) -> String {
@@ -328,12 +356,38 @@ Sec-WebSocket-Key: {key}\r\n\r\n",
   }
 
   #[test]
+  fn read_client_frame_completes_segmented_ping() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+      let (mut server, _) = listener.accept().unwrap();
+      server.set_read_timeout(Some(POLL_READ_TIMEOUT)).ok();
+      read_client_frame(&mut server).unwrap();
+    });
+    let mut client = TcpStream::connect(addr).unwrap();
+    let mut frame = Vec::new();
+    frame.push(0x89);
+    frame.push(0x84);
+    frame.extend_from_slice(&[0x12, 0x34, 0x56, 0x78]);
+    for (i, b) in b"ping".iter().enumerate() {
+      frame.push(b ^ [0x12, 0x34, 0x56, 0x78][i % 4]);
+    }
+    client.write_all(&frame[..1]).unwrap();
+    thread::sleep(Duration::from_millis(60));
+    client.write_all(&frame[1..]).unwrap();
+    let mut pong = [0u8; 6];
+    client.read_exact(&mut pong).unwrap();
+    assert_eq!(&pong, &[0x8A, 4, b'p', b'i', b'n', b'g']);
+    handle.join().unwrap();
+  }
+
+  #[test]
   fn read_client_frame_pong_replies_to_ping() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
       let (mut server, _) = listener.accept().unwrap();
-      read_client_frame(&mut server).unwrap();
+      read_client_frame_blocking(&mut server).unwrap();
     });
     let mut client = TcpStream::connect(addr).unwrap();
     write_masked_frame(&mut client, 0x9, b"ping");
@@ -350,8 +404,8 @@ Sec-WebSocket-Key: {key}\r\n\r\n",
     let oversize = MAX_WS_PAYLOAD + 1;
     let handle = thread::spawn(move || {
       let (mut server, _) = listener.accept().unwrap();
-      read_client_frame(&mut server).unwrap();
-      read_client_frame(&mut server).unwrap();
+      read_client_frame_blocking(&mut server).unwrap();
+      read_client_frame_blocking(&mut server).unwrap();
     });
     let mut client = TcpStream::connect(addr).unwrap();
     write_masked_extended_frame(&mut client, 0x1, oversize);

@@ -254,9 +254,6 @@ function idleSinceLine(p, nowUnix) {
   if (elapsed == null) return null;
   return Math.max(0, elapsed - lastLineAt(p));
 }
-function formatIdle(secs) {
-  return formatIdleClock(secs);
-}
 function procStatHtml(p, nowUnix) {
   const n = (p.lines || []).length;
   const idle = formatIdleClock(idleSinceLine(p, nowUnix));
