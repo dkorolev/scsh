@@ -14,7 +14,7 @@ If you only remember three things:
 1. **`tmp/` always means the repo subdirectory, never the system temp dir.**
 2. **Pure logic stays separate from side effects, and everything is tested.**
 3. **The root crate keeps its logic dependency-free (crates: `crossterm`+`console` for
-   the UI, `signal-hook` for catching Ctrl-\/SIGINT/SIGTERM safely); only commit when asked.**
+   the UI, `signal-hook` for catching SIGINT/SIGTERM safely); only commit when asked.**
 
 ---
 
@@ -182,8 +182,8 @@ is already monospace. New docs and edits must keep this consistent.
   generation, shell quoting, the smart elapsed clock, output-line cleanup, build-command
   detection, the engine start-command advice, commit integration (rebase / fallback-branch
   / run-twice), SHA-256 vectors, the result cache (key determinism/sensitivity,
-  store/lookup/restore), and the Ctrl-\ expander (SIGQUIT bumps the counter; the shared
-  output log records every line). They need nothing but `cargo` (and `git`, for the
+  store/lookup/restore), and the live board's model (layout, scrolling, expand/collapse). They
+  need nothing but `cargo` (and `git`, for the
   commit-integration and cache-key tests).
 - **Integration tests** (`tests/cli.rs`) drive the compiled binary through the
   whole flow. They require `git` and a runtime on `PATH`, but **must never use
@@ -214,9 +214,9 @@ reads like it belongs.
 
 - **Logic stays dependency-free in the root crate.** Its crates are
   `crossterm` + `console` (pure-Rust, the live UI) and `signal-hook` — a deliberate,
-  called-out dependency for one thing: catching Ctrl-\/SIGINT/SIGTERM *safely* (std has
-  no signal API; `signal-hook` wraps the OS bits in a safe API). The Ctrl-\ feature
-  also isolates each child in its own process group via the safe `Command::process_group`.
+  called-out dependency for one thing: catching SIGINT/SIGTERM *safely* (std has
+  no signal API; `signal-hook` wraps the OS bits in a safe API). scsh also isolates
+  each child in its own process group via the safe `Command::process_group`.
   Everything else — including the `.scsh.yml` config (a small purpose-built parser, *not*
   a general YAML library), the JSON reader, and SHA-256 — is standard-library only.
   Reach for another crate only as a deliberate decision to call out in the commit,
