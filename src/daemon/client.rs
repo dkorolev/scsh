@@ -80,9 +80,14 @@ impl Client {
     self.post_sync_after_flush("/api/v1/deregister", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
   }
 
-  /// Close the async poster and wait briefly for queued posts to drain.
-  pub fn flush(&self) {
-    self.flush_poster();
+  /// Drain the poster, deregister synchronously, then stop the poster thread.
+  pub fn finish_session(&self) {
+    self.deregister();
+    self.close_poster();
+  }
+
+  /// Close the async poster after queued work is drained (see `finish_session`).
+  pub fn close_poster(&self) {
     let mut post_tx = self.inner.post_tx.lock().unwrap_or_else(|e| e.into_inner());
     *post_tx = None;
     let mut poster = self.inner.poster.lock().unwrap_or_else(|e| e.into_inner());
@@ -94,6 +99,12 @@ impl Client {
       });
       let _ = done_rx.recv_timeout(Duration::from_secs(3));
     }
+  }
+
+  /// Drain buffered proc lines and close the async poster.
+  pub fn flush(&self) {
+    self.flush_poster();
+    self.close_poster();
   }
 
   pub fn proc_add(
