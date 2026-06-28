@@ -6,6 +6,9 @@
 //! under its configured harness.
 
 mod config;
+mod daemon;
+mod sha1;
+mod version;
 mod json;
 mod runtime;
 mod sha256;
