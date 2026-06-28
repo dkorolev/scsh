@@ -59,7 +59,7 @@ fn frames_demo() -> i32 {
   print_rows(&m.layout(width, 0));
 
   println!();
-  println!("=== FRAME 3 — scrolling: a long expanded proc in a 6-row window (following the tail) ===");
+  println!("=== FRAME 3 — scrolling: a long expanded proc in a 6-row window (from the top) ===");
   let mut m2 = Model::new();
   let s = m2.add("opencode: review");
   m2.set_status(s, Status::Running);
@@ -69,7 +69,7 @@ fn frames_demo() -> i32 {
     m2.push_line(s, n as f64 * 0.5, format!("scanning file {n}"));
   }
   let (vis, off) = m2.view(width, 6, 0);
-  println!("(showing rows {}..{} of {} — the head scrolled off the top)", off, off + vis.len(), m2.total_rows(width));
+  println!("(showing rows {}..{} of {} — expand opens here; scroll down for the rest)", off, off + vis.len(), m2.total_rows(width));
   print_rows(&vis);
   0
 }

@@ -6,9 +6,7 @@
 //! row: a ▶/▼ triangle, a status glyph, the label, a smart elapsed clock, and a dim note.
 //! Click a row (the driver maps the mouse to a proc) to [`Model::toggle`] it; expanding shows
 //! that proc's captured output, every line stamped with `+<elapsed>` **relative to when that
-//! proc started**. The view scrolls (the model owns the scroll offset and follow flags); rows
-//! never wrap — each is clipped to the width the driver passes in. Expanding a proc pins the
-//! viewport to that proc's latest output; End resumes following the whole board.
+//! proc started**. Scroll within the expanded block to read it all; End jumps to the fleet tail.
 
 use super::clock::format_elapsed;
 use super::FRAMES;
@@ -95,14 +93,11 @@ pub struct Model {
   /// While true, the viewport sticks to the bottom of the whole board (like `tail -f`). The user
   /// turns it off by scrolling up, and back on with End / scroll-to-bottom.
   follow: bool,
-  /// When set, the viewport sticks to the latest output line of this expanded proc instead of
-  /// the global board tail — so expanding a run in the middle of a fleet still shows its tail.
-  follow_proc: Option<usize>,
 }
 
 impl Model {
   pub fn new() -> Model {
-    Model { procs: Vec::new(), scroll: 0, follow: true, follow_proc: None }
+    Model { procs: Vec::new(), scroll: 0, follow: true }
   }
 
   /// Add a proc, returning its index (the handle the driver/worker uses to update it).
@@ -150,26 +145,25 @@ impl Model {
     }
   }
 
-  /// Toggle a proc's expanded state (what a mouse click on its header does). Expanding pins the
-  /// viewport to that proc's latest output; collapsing clears the pin.
+  /// Toggle a proc's expanded state (what a mouse click on its header does). Expanding scrolls
+  /// the viewport to that proc's header so you can read its output from the top; collapsing
+  /// leaves the scroll position unchanged.
   pub fn toggle(&mut self, i: usize) {
     if let Some(p) = self.procs.get_mut(i) {
       p.expanded = !p.expanded;
       if p.expanded {
-        self.follow_proc = Some(i);
         self.follow = false;
-      } else if self.follow_proc == Some(i) {
-        self.follow_proc = None;
+        self.scroll = self.proc_first_row_index(i);
       }
     }
   }
 
-  /// Expand or collapse every proc at once (the `e` / `c` keys). Resumes global tail-follow.
+  /// Expand or collapse every proc at once (the `e` / `c` keys). Resumes global tail-follow when
+  /// expanding all.
   pub fn set_all_expanded(&mut self, expanded: bool) {
     for p in &mut self.procs {
       p.expanded = expanded;
     }
-    self.follow_proc = None;
     if expanded {
       self.follow = true;
     }
@@ -214,13 +208,12 @@ impl Model {
   }
 
   /// Scroll by `delta` rows (negative = up/back, positive = down/forward) within a `height`-tall
-  /// viewport. Scrolling up drops follow (global and per-proc); reaching the bottom restores global follow.
+  /// viewport. Scrolling up drops global follow; reaching the bottom restores it.
   pub fn scroll_by(&mut self, delta: isize, width: usize, height: usize) {
     let total = self.total_rows(width);
     let height = height.max(1);
     let max_off = total.saturating_sub(height);
     let cur = self.viewport_offset(height, max_off);
-    self.follow_proc = None;
     let next = cur.saturating_add_signed(delta).min(max_off);
     self.scroll = next;
     self.follow = next >= max_off;
@@ -230,33 +223,25 @@ impl Model {
   pub fn scroll_to_top(&mut self) {
     self.scroll = 0;
     self.follow = false;
-    self.follow_proc = None;
   }
   pub fn scroll_to_bottom(&mut self) {
     self.follow = true;
-    self.follow_proc = None;
   }
 
-  /// Laid-out row index of this proc's last row (header, or last expanded output line).
-  fn proc_last_row_index(&self, proc_index: usize) -> usize {
+  /// Laid-out row index of this proc's header row.
+  fn proc_first_row_index(&self, proc_index: usize) -> usize {
     let mut row = 0usize;
     for (i, p) in self.procs.iter().enumerate() {
-      let rows = rows_for_proc(p);
       if i == proc_index {
-        return row + rows - 1;
+        return row;
       }
-      row += rows;
+      row += rows_for_proc(p);
     }
     row.saturating_sub(1)
   }
 
   /// First visible row offset for the current follow mode.
-  fn viewport_offset(&self, height: usize, max_off: usize) -> usize {
-    if let Some(i) = self.follow_proc {
-      if self.procs.get(i).is_some_and(|p| p.expanded) {
-        return self.proc_last_row_index(i).saturating_sub(height - 1).min(max_off);
-      }
-    }
+  fn viewport_offset(&self, _height: usize, max_off: usize) -> usize {
     if self.follow {
       max_off
     } else {
@@ -489,16 +474,17 @@ mod tests {
     let total = m.total_rows(80);
     assert_eq!(total, 21, "1 header + 20 lines");
 
-    // Per-proc follow (set by toggle): the viewport sticks to this proc's latest line.
+    // Expand scrolls to the proc header (top of its block).
     let (vis, off) = m.view(80, 5, 0);
     assert_eq!(vis.len(), 5);
-    assert_eq!(off, total - 5, "follow pins to the proc tail");
-    assert!(vis.last().unwrap().plain().contains("line 19"));
+    assert_eq!(off, 0);
+    assert!(vis[1].plain().contains("line 0"));
 
-    // Scroll up: follow turns off, the offset moves back.
-    m.scroll_by(-3, 80, 5);
+    // Scroll down through the output.
+    m.scroll_by(100, 80, 5);
     let (_, off2) = m.view(80, 5, 0);
-    assert_eq!(off2, total - 5 - 3);
+    assert_eq!(off2, total - 5);
+    assert!(m.view(80, 5, 0).0.last().unwrap().plain().contains("line 19"));
 
     // Scrolling back to the bottom resumes global following.
     m.scroll_by(100, 80, 5);
@@ -506,7 +492,7 @@ mod tests {
   }
 
   #[test]
-  fn expanded_proc_follows_its_own_tail_not_the_global_board() {
+  fn expanded_proc_opens_at_its_header_not_the_fleet_tail() {
     let mut m = Model::new();
     let a = m.add("skill-a");
     let _b = m.add("skill-b");
@@ -514,18 +500,18 @@ mod tests {
     for n in 0..20 {
       m.push_line(a, n as f64, format!("a-{n}"));
     }
-    // skill-b adds rows below skill-a in the layout; global tail would hide a's output.
     let total = m.total_rows(80);
     assert_eq!(total, 22, "a: header+20 lines, b: header");
 
     let (vis, off) = m.view(80, 5, 0);
-    let last = vis.last().unwrap().plain();
-    assert!(last.contains("a-19"), "pinned proc tail: {last:?}");
-    assert_eq!(off, 21 - 5, "offset pins to skill-a's last line");
+    assert_eq!(off, 0, "proc a starts at row 0");
+    assert!(vis[0].plain().contains("skill-a"));
+    assert!(vis[1].plain().contains("a-0"));
+    assert!(!vis.iter().any(|r| r.plain().contains("a-19")));
   }
 
   #[test]
-  fn new_lines_on_followed_proc_stay_in_view() {
+  fn new_lines_do_not_move_viewport_while_reading_from_the_top() {
     let mut m = Model::new();
     let a = m.add("skill-a");
     let _b = m.add("skill-b");
@@ -533,14 +519,32 @@ mod tests {
     for n in 0..10 {
       m.push_line(a, n as f64, format!("a-{n}"));
     }
-    let (vis, _) = m.view(80, 5, 0);
-    assert!(vis.last().unwrap().plain().contains("a-9"));
+    let (vis, off) = m.view(80, 5, 0);
+    assert!(vis.iter().any(|r| r.plain().contains("a-0")));
 
     m.push_line(a, 11.0, "a-10");
     m.push_line(a, 12.0, "a-11");
-    let (vis2, _) = m.view(80, 5, 0);
-    assert!(vis2.last().unwrap().plain().contains("a-11"));
-    assert!(!vis2.iter().any(|r| r.plain().contains("a-0")), "head scrolled off");
+    let (vis2, off2) = m.view(80, 5, 0);
+    assert_eq!(off2, off);
+    assert!(vis2.iter().any(|r| r.plain().contains("a-0")));
+    assert!(!vis2.iter().any(|r| r.plain().contains("a-11")));
+  }
+
+  #[test]
+  fn expand_later_proc_scrolls_to_its_header() {
+    let mut m = Model::new();
+    for _ in 0..6 {
+      m.add("header-only");
+    }
+    let target = m.add("skill-f");
+    m.toggle(target);
+    for n in 0..5 {
+      m.push_line(target, n as f64, format!("f-{n}"));
+    }
+    let (vis, off) = m.view(80, 5, 0);
+    assert_eq!(off, 6, "six collapsed headers precede skill-f");
+    assert!(vis[0].plain().contains("skill-f"));
+    assert!(vis.get(1).is_some_and(|r| r.plain().contains("f-0")));
   }
 
   #[test]

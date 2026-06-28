@@ -4,8 +4,8 @@
 //! every skill in its own container — all of which can be slow. On an attended terminal these
 //! show up on a single **interactive live board**: the image build, then every skill, each a
 //! collapsible row (a ▶/▼ triangle, a status glyph, the label, a smart elapsed clock, and a dim
-//! note). **Click a row** to expand its captured output — the viewport pins to that proc's latest
-//! lines as they arrive — and **scroll** with the wheel or arrows (End resumes global tail-follow).
+//! note). **Click a row** to expand its captured output from the top — scroll (wheel, arrows,
+//! PgUp/PgDn) to read the rest; **End** resumes following the fleet tail.
 //! to plain `▶` / `✓` / `✗` lines so pipes and CI stay readable.
 //!
 //! The pieces, mirroring the design's "pure logic vs. side effects" split:
