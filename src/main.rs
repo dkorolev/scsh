@@ -13,7 +13,7 @@ mod ui;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use config::ResolvedInvocation;
 use runtime::Runtime;
@@ -1321,7 +1321,15 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
   set_clone_identity(run_dir);
   spinner.note("checking clone integrity…");
   let fsck = runtime::fsck_command(&run_dir.to_string_lossy());
+  spinner.emit("git fsck --no-progress…");
+  let fsck_started = Instant::now();
   let (ok, last) = spinner.run(&fsck[0], &fsck[1..]).map_err(|e| format!("failed to run git fsck: {e}"))?;
+  let fsck_secs = fsck_started.elapsed().as_secs_f64();
+  spinner.emit(&format!(
+    "git fsck {} ({})",
+    if ok { "ok" } else { "failed" },
+    ui::clock::format_elapsed(fsck_secs),
+  ));
   if !ok {
     return Err(match last {
       Some(l) if !l.is_empty() => format!("git fsck failed on run clone: {l}"),
