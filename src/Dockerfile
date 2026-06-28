@@ -6,7 +6,8 @@
 # target arch at build time (dpkg --print-architecture -> amd64|arm64).
 #
 # Two final images share one base (`scsh-base`): `scsh-opencode` and `scsh-claude`. Each
-# installs its harness CLI last. scsh builds only the image(s) a run needs (`--target`).
+# installs its harness CLI last. scsh builds only the image(s) a run needs, in one buildx bake
+# or one sequential build pass when several harnesses are required (`--target` per image).
 FROM debian:bookworm-slim AS scsh-base
 LABEL scsh.generated=true
 
@@ -113,7 +114,7 @@ RUN set -eu; \
 
 WORKDIR /home/agent/repo
 
-# SCSH=1: skill runs under scsh. Repo is bind-mounted (host pushed clone IN). Skills must not git fetch/pull inside. After exit, scsh pulls result OUT; commits OUT only when commits: true.
+# SCSH=1: skill runs under scsh. Repo arrives via bind-mount or git transport. Skills must not git fetch/pull remotes inside. After exit, scsh pulls result OUT; commits OUT only when commits: true.
 ENV SCSH=1
 ENV HOME=/home/agent
 ENV LANG=C.UTF-8

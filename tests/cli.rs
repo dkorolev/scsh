@@ -470,7 +470,9 @@ fn init_demo_then_list() {
   assert!(!v.out.contains("CMD ["), "image should bake no CMD; got: {}", v.out);
   assert!(v.out.contains("USER agent") && v.out.contains("AGENT_UID="), "got: {}", v.out);
   assert!(
-    v.out.contains("scsh-opencode:latest") && v.out.contains("git clone") && v.out.contains(":/home/agent"),
+    v.out.contains("scsh-opencode:latest")
+      && (v.out.contains("git clone") || v.out.contains("transport.git"))
+      && v.out.contains(":/home/agent"),
     "got: {}",
     v.out
   );
@@ -838,11 +840,7 @@ fn run_fails_when_every_selected_harness_unavailable() {
   git(&d, &["commit", "-m", "claude only"]);
   let r = scsh(&d, &["run"]);
   assert_ne!(r.code, 0, "got: {}", r.out);
-  assert!(
-    r.out.contains("no skills to run") || r.out.contains("every selected harness is unavailable"),
-    "got: {}",
-    r.out
-  );
+  assert!(r.out.contains("no skills to run") || r.out.contains("every selected skill was skipped"), "got: {}", r.out);
 }
 
 #[test]

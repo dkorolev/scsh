@@ -378,14 +378,92 @@ pub fn build_command_context(
   v
 }
 
-/// Run argv: run the freshly built image with the repo clone bind-mounted at
-/// [`AGENT_REPO`], removing the container afterwards. For rootless podman,
-/// `--userns=keep-id` maps the host UID to the same UID inside the container so
-/// the `agent` user can read/write the mount; docker (and Apple `container`) map
-/// the UID directly and need no such flag.
+/// One harness image scsh may build from the shared Dockerfile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageBuildSpec {
+  pub harness: Harness,
+  pub tag: String,
+  pub target: String,
+  pub fingerprint: String,
+}
+
+pub fn image_build_spec(harness: Harness, dockerfile: &str, uid: u32, gid: u32, tz: &str) -> ImageBuildSpec {
+  let target = image_target(harness);
+  ImageBuildSpec {
+    harness,
+    tag: image_tag(harness),
+    target: target.to_string(),
+    fingerprint: image_build_fingerprint(dockerfile, target, uid, gid, tz),
+  }
+}
+
+/// True when the runtime exposes `buildx bake` (multi-target build in one command).
+pub fn runtime_supports_bake(runtime: &str) -> bool {
+  std::process::Command::new(runtime)
+    .args(["buildx", "version"])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+/// Build argv for one `buildx bake` that tags every listed harness target.
+pub fn build_command_bake(runtime: &str, bake_targets: &[String]) -> Vec<String> {
+  let mut v = vec![runtime.into(), "buildx".into(), "bake".into(), "--load".into(), "-f".into(), "-".into()];
+  v.extend(bake_targets.iter().cloned());
+  v
+}
+
+/// JSON bake definition: one context dir, multiple Dockerfile `--target`s sharing `scsh-base`.
+pub fn bake_definition_json(context_dir: &str, specs: &[ImageBuildSpec], uid: u32, gid: u32, tz: &str) -> String {
+  use crate::json::quote;
+  let mut entries = Vec::with_capacity(specs.len());
+  for spec in specs {
+    entries.push(format!(
+      r#"    {}: {{
+      "context": {},
+      "dockerfile": "Dockerfile",
+      "target": {},
+      "tags": [{}],
+      "args": {{
+        "AGENT_UID": "{uid}",
+        "AGENT_GID": "{gid}",
+        "TZ": {}
+      }},
+      "labels": {{
+        {}: {}
+      }}
+    }}"#,
+      quote(&spec.target),
+      quote(context_dir),
+      quote(&spec.target),
+      quote(&spec.tag),
+      quote(tz),
+      quote(BUILD_FINGERPRINT_LABEL),
+      quote(&spec.fingerprint),
+    ));
+  }
+  format!("{{\n  \"target\": {{\n{}\n  }}\n}}", entries.join(",\n"))
+}
+
+/// How the caller repo reaches the container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RepoMountMode {
+  /// Linux-friendly path: bind-mount the host run dir at [`AGENT_REPO`].
+  Full,
+  /// macOS Apple Container: repo is cloned inside the container from a host git daemon;
+  /// only the gitignored `tmp/` tree is bind-mounted for results and forwarded auth.
+  TmpOnly,
+}
+
+/// Run argv: run the freshly built image, removing the container afterwards. For
+/// rootless podman, `--userns=keep-id` maps the host UID to the same UID inside the
+/// container so the `agent` user can read/write the mount; docker (and Apple
+/// `container`) map the UID directly and need no such flag.
 pub fn run_command(
-  runtime: &str, tag: &str, clone_dir: &str, name: &str, env: &[(String, String)], volumes: &[(&str, &str)],
-  command: &str,
+  runtime: &str, tag: &str, run_dir: &str, name: &str, env: &[(String, String)], volumes: &[(&str, &str)],
+  command: &str, repo_mount: RepoMountMode,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
   if runtime == "podman" {
@@ -399,8 +477,16 @@ pub fn run_command(
     v.push("-v".into());
     v.push(format!("{host}:{mount}"));
   }
-  v.push("-v".into());
-  v.push(format!("{clone_dir}:{AGENT_REPO}"));
+  match repo_mount {
+    RepoMountMode::Full => {
+      v.push("-v".into());
+      v.push(format!("{run_dir}:{AGENT_REPO}"));
+    }
+    RepoMountMode::TmpOnly => {
+      v.push("-v".into());
+      v.push(format!("{run_dir}/tmp:{AGENT_REPO}/tmp"));
+    }
+  }
   v.push(tag.into());
   v.push("/bin/sh".into());
   v.push("-c".into());
@@ -462,7 +548,7 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
       if opencode_auth_ready() {
         Ok(())
       } else {
-        Err("opencode auth not found (~/.local/share/opencode/auth.json) — run `opencode auth login`".into())
+        Err("opencode harness unavailable (auth not found at ~/.local/share/opencode/auth.json — run `opencode auth login`)".into())
       }
     }
     Harness::Claude => {
@@ -470,8 +556,8 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         Ok(())
       } else {
         Err(
-          "CLAUDE_CODE_OAUTH_TOKEN is not set and ~/.claude/.credentials.json was not found \
-           — run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN in your shell"
+          "claude harness unavailable (CLAUDE_CODE_OAUTH_TOKEN is not set and ~/.claude/.credentials.json was not found \
+           — run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN in your shell)"
             .into(),
         )
       }
@@ -714,21 +800,200 @@ pub fn sanitize_component(s: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Cloning the host repo into the run dir
+// Repo sync: host push IN, host fetch OUT (never GitHub from inside the container)
 // ---------------------------------------------------------------------------
 
-/// `git clone` argv: host-side push IN — full clone of the host repo at `src` into `dst`.
-/// This is the **only** git step before the container. The clone is bind-mounted at
-/// `/home/agent/repo` (push into the container). Skills inside MUST NOT fetch/pull again.
-/// After the container exits, scsh pulls result files OUT on the host; commits too when
-/// `commits: true` (local fetch from `dst`, not GitHub — see `integrate_commits`).
+/// Bare repo directory name under a run dir — host `git push` target for push IN.
+pub const TRANSPORT_BARE: &str = "transport.git";
+
+/// Bare repo directory name under a run dir — container `git push` target for pull OUT.
+pub const PULL_BARE: &str = "pull.git";
+
+/// Container env: optional override for the host address of the per-run `git daemon`.
+/// When unset, the container entry resolves it from `ip route` (default gateway).
+pub const GIT_TRANSPORT_HOST_ENV: &str = "SCSH_GIT_HOST";
+
+/// Container env: port for the per-run `git daemon`.
+pub const GIT_TRANSPORT_PORT_ENV: &str = "SCSH_GIT_PORT";
+
+/// Shell snippet run inside the container: host IP for the per-run git daemon.
+/// Uses the container's default-route gateway (vmnet bridge on Apple Container).
+/// `SCSH_GIT_HOST` overrides when set.
+pub const GIT_TRANSPORT_HOST_SHELL: &str =
+  "host=${SCSH_GIT_HOST:-$(ip -4 route show default 2>/dev/null | awk '{print $3; exit}')}";
+
+/// Shell guard: fail fast when the gateway cannot be determined.
+pub const GIT_TRANSPORT_HOST_GUARD: &str =
+  "[ -n \"$host\" ] || { echo \"scsh: could not determine host gateway for git transport (set SCSH_GIT_HOST)\" >&2; exit 1; }";
+
+/// Whether scsh moves git state via local push/fetch + git daemon instead of bind-mounting
+/// `.git` across macOS→Linux (Apple Container). On macOS Apple Container this is always
+/// enabled — bind-mounting `.git` corrupts objects. Elsewhere override with `SCSH_GIT_TRANSPORT=0|1`.
+pub fn uses_git_transport(runtime: &str) -> bool {
+  if cfg!(target_os = "macos") && runtime == "container" {
+    return true;
+  }
+  match std::env::var("SCSH_GIT_TRANSPORT").ok().as_deref() {
+    Some("0") | Some("false") => false,
+    Some("1") | Some("true") => true,
+    _ => false,
+  }
+}
+
+/// Pick a free TCP port on all interfaces for a short-lived `git daemon`.
+pub fn pick_ephemeral_port() -> Result<u16, String> {
+  use std::net::TcpListener;
+  let listener = TcpListener::bind("0.0.0.0:0").map_err(|e| format!("could not bind an ephemeral port: {e}"))?;
+  listener.local_addr().map(|a| a.port()).map_err(|e| format!("could not read ephemeral port: {e}"))
+}
+
+/// `git clone` argv: host-side push IN when bind-mounting (Linux host → Linux container).
 pub fn clone_command(src: &str, dst: &str) -> Vec<String> {
   vec!["git".into(), "clone".into(), src.into(), dst.into()]
 }
 
-/// `git fsck` argv: verify a host-side run clone before bind-mounting it into a container.
+/// `git fsck` argv: verify clone integrity after host-side push IN / clone.
 pub fn fsck_command(repo: &str) -> Vec<String> {
   vec!["git".into(), "-C".into(), repo.into(), "fsck".into(), "--no-progress".into()]
+}
+
+/// Create an empty bare repository at `path` (parent dirs created as needed).
+pub fn init_bare_repo(path: &Path) -> Result<(), String> {
+  if path.is_dir() {
+    return Ok(());
+  }
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+  }
+  use std::process::Command;
+  Command::new("git")
+    .args(["init", "--bare"])
+    .arg(path)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+    .then_some(())
+    .ok_or_else(|| format!("git init --bare failed for {}", path.display()))
+}
+
+/// Host push IN: mirror every local `refs/heads/*` branch into the bare transport repo.
+/// Code-review prep uses `git branch -f main <base>`; pushing heads (not stale
+/// `refs/remotes/origin/*`) ensures `origin/main..HEAD` resolves inside the container.
+pub fn push_transport_refs(root: &Path, bare: &Path) -> Result<(), String> {
+  init_bare_repo(bare)?;
+  let bare_s = bare.to_string_lossy();
+  let Some(heads) = git_stdout(root, &["for-each-ref", "--format=%(refname)", "refs/heads"]) else {
+    return Err(format!("could not read local branches in {}", root.display()));
+  };
+  let mut pushed = false;
+  for line in heads.lines() {
+    let refname = line.trim();
+    if refname.is_empty() {
+      continue;
+    }
+    let spec = format!("{refname}:{refname}");
+    if !git_ok(root, &["push", "--quiet", &bare_s, &spec]) {
+      return Err(format!("git push {refname} to {} failed", bare.display()));
+    }
+    pushed = true;
+  }
+  if !pushed {
+    return Err(format!("no local branches to push from {}", root.display()));
+  }
+  if let Some(branch) = git_stdout(root, &["rev-parse", "--abbrev-ref", "HEAD"]) {
+    let branch = branch.trim();
+    if !branch.is_empty() && branch != "HEAD" {
+      let head_ref = format!("refs/heads/{branch}");
+      if !git_bare_ok(bare, &["symbolic-ref", "HEAD", &head_ref]) {
+        return Err(format!("could not set HEAD on {}", bare.display()));
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Path scsh fetches commits from after a run: the run clone, or `pull.git` when git transport
+/// moved the repo only inside the container.
+pub fn commits_fetch_path(run_dir: &Path) -> PathBuf {
+  let pull = run_dir.join(PULL_BARE);
+  if pull.is_dir() {
+    pull
+  } else {
+    run_dir.to_path_buf()
+  }
+}
+
+/// Shell wrapper run inside the container before the harness: clone from the host git daemon,
+/// materialize `origin/*` locals, optionally set commit identity, run the harness, optionally
+/// push commits back to the host bare `pull.git`.
+pub fn git_transport_entry(harness: &str, push_commits: bool, commit_name: &str, commit_email: &str) -> String {
+  let mut script = format!(
+    "set -e\n\
+     {host_shell}\n\
+     {host_guard}\n\
+     git clone \"git://${{host}}:${{{port}}}/transport.git\" /home/agent/.scsh-clone\n\
+     (cd /home/agent/.scsh-clone && tar -cf - .) | (cd {repo} && tar -xf -)\n\
+     rm -rf /home/agent/.scsh-clone\n\
+     cd {repo}\n\
+     git rev-parse --verify origin/main >/dev/null 2>&1 || {{ echo \"scsh: origin/main missing after git transport clone (point local main at the review base)\" >&2; exit 1; }}\n\
+     cur=$(git rev-parse --abbrev-ref HEAD)\n\
+     for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin); do\n\
+       branch=${{ref#origin/}}\n\
+       [ \"$branch\" = HEAD ] && continue\n\
+       [ \"$branch\" = \"$cur\" ] && continue\n\
+       git branch --force \"$branch\" \"origin/$branch\" >/dev/null 2>&1 || true\n\
+     done\n",
+    host_shell = GIT_TRANSPORT_HOST_SHELL,
+    host_guard = GIT_TRANSPORT_HOST_GUARD,
+    port = GIT_TRANSPORT_PORT_ENV,
+    repo = AGENT_REPO,
+  );
+  if push_commits {
+    script.push_str(&format!(
+      "git config user.email {}\ngit config user.name {}\n",
+      shell_quote(commit_email),
+      shell_quote(commit_name),
+    ));
+  }
+  script.push_str(harness);
+  if push_commits {
+    script.push_str("\ngit push \"git://${host}:${SCSH_GIT_PORT}/pull.git\" HEAD");
+  }
+  script
+}
+
+fn git_ok(dir: &Path, args: &[&str]) -> bool {
+  use std::process::Command;
+  Command::new("git")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+fn git_bare_ok(bare: &Path, args: &[&str]) -> bool {
+  use std::process::Command;
+  Command::new("git")
+    .arg("--git-dir")
+    .arg(bare)
+    .args(args)
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
+  use std::process::Command;
+  let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+  out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Given the lines of `git for-each-ref --format='%(refname:short)'
@@ -1052,6 +1317,37 @@ mod tests {
   }
 
   #[test]
+  fn bake_definition_json_lists_every_target() {
+    let df = dockerfile();
+    let specs = vec![
+      image_build_spec(Harness::Opencode, &df, 501, 20, "UTC"),
+      image_build_spec(Harness::Claude, &df, 501, 20, "UTC"),
+    ];
+    let json = bake_definition_json("/tmp/ctx", &specs, 501, 20, "UTC");
+    assert!(json.contains("\"scsh-opencode\""));
+    assert!(json.contains("\"scsh-claude\""));
+    assert!(json.contains("\"scsh-opencode:latest\""));
+    assert!(json.contains("\"scsh-claude:latest\""));
+    assert!(json.contains("\"/tmp/ctx\""));
+  }
+
+  #[test]
+  fn build_command_bake_names_each_target() {
+    let cmd = build_command_bake("docker", &["scsh-opencode".into(), "scsh-claude".into()]);
+    let want: Vec<String> = vec![
+      "docker".into(),
+      "buildx".into(),
+      "bake".into(),
+      "--load".into(),
+      "-f".into(),
+      "-".into(),
+      "scsh-opencode".into(),
+      "scsh-claude".into(),
+    ];
+    assert_eq!(cmd, want);
+  }
+
+  #[test]
   fn image_build_fingerprint_is_stable_and_target_specific() {
     let df = dockerfile();
     let a = image_build_fingerprint(&df, "scsh-opencode", 501, 20, "UTC");
@@ -1095,7 +1391,16 @@ mod tests {
       ]
     );
     assert_eq!(
-      run_command("docker", "scsh-opencode:latest", "/tmp/clone", "run-s", &[], &[], "opencode run 'run skill s'"),
+      run_command(
+        "docker",
+        "scsh-opencode:latest",
+        "/tmp/run",
+        "run-s",
+        &[],
+        &[],
+        "opencode run 'run skill s'",
+        RepoMountMode::Full,
+      ),
       vec![
         "docker",
         "run",
@@ -1103,7 +1408,7 @@ mod tests {
         "--name",
         "run-s",
         "-v",
-        "/tmp/clone:/home/agent/repo",
+        "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
         "/bin/sh",
         "-c",
@@ -1112,13 +1417,39 @@ mod tests {
     );
     assert_eq!(
       run_command(
+        "container",
+        "scsh-opencode:latest",
+        "/tmp/run",
+        "run-s",
+        &[],
+        &[],
+        "git clone",
+        RepoMountMode::TmpOnly,
+      ),
+      vec![
+        "container",
+        "run",
+        "--rm",
+        "--name",
+        "run-s",
+        "-v",
+        "/tmp/run/tmp:/home/agent/repo/tmp",
+        "scsh-opencode:latest",
+        "/bin/sh",
+        "-c",
+        "git clone"
+      ]
+    );
+    assert_eq!(
+      run_command(
         "podman",
         "scsh-claude:latest",
-        "/tmp/clone",
+        "/tmp/run",
         "run-s",
         &[],
         &[("/home/u/.claude", "/home/agent/.claude:ro")],
-        "claude -p hi"
+        "claude -p hi",
+        RepoMountMode::Full,
       ),
       vec![
         "podman",
@@ -1130,7 +1461,7 @@ mod tests {
         "-v",
         "/home/u/.claude:/home/agent/.claude:ro",
         "-v",
-        "/tmp/clone:/home/agent/repo",
+        "/tmp/run:/home/agent/repo",
         "scsh-claude:latest",
         "/bin/sh",
         "-c",
@@ -1141,11 +1472,12 @@ mod tests {
       run_command(
         "docker",
         "scsh-opencode:latest",
-        "/tmp/clone",
+        "/tmp/run",
         "run-s",
         &[],
         &[("/home/u/.local/share/opencode/auth.json", OPENCODE_AUTH_MOUNT)],
-        "opencode run 'run skill s'"
+        "opencode run 'run skill s'",
+        RepoMountMode::Full,
       ),
       vec![
         "docker",
@@ -1156,7 +1488,7 @@ mod tests {
         "-v",
         "/home/u/.local/share/opencode/auth.json:/home/agent/repo/tmp/.xdg-data/opencode/auth.json",
         "-v",
-        "/tmp/clone:/home/agent/repo",
+        "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
         "/bin/sh",
         "-c",
@@ -1189,7 +1521,16 @@ mod tests {
   fn run_command_forwards_env_as_e_flags() {
     let env = vec![("A".to_string(), "20".to_string()), ("B".to_string(), "22".to_string())];
     assert_eq!(
-      run_command("docker", "scsh-opencode:latest", "/tmp/clone", "run-s", &env, &[], "opencode run 'run skill s'"),
+      run_command(
+        "docker",
+        "scsh-opencode:latest",
+        "/tmp/run",
+        "run-s",
+        &env,
+        &[],
+        "opencode run 'run skill s'",
+        RepoMountMode::Full,
+      ),
       vec![
         "docker",
         "run",
@@ -1201,7 +1542,7 @@ mod tests {
         "-e",
         "B=22",
         "-v",
-        "/tmp/clone:/home/agent/repo",
+        "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
         "/bin/sh",
         "-c",
@@ -1218,6 +1559,133 @@ mod tests {
   #[test]
   fn fsck_command_checks_clone_integrity() {
     assert_eq!(fsck_command("/tmp/dst"), vec!["git", "-C", "/tmp/dst", "fsck", "--no-progress"]);
+  }
+
+  #[test]
+  fn uses_git_transport_on_macos_apple_container_only() {
+    let prev = std::env::var("SCSH_GIT_TRANSPORT").ok();
+    std::env::remove_var("SCSH_GIT_TRANSPORT");
+    if cfg!(target_os = "macos") {
+      assert!(uses_git_transport("container"));
+    } else {
+      assert!(!uses_git_transport("container"));
+    }
+    assert!(!uses_git_transport("docker"));
+    std::env::set_var("SCSH_GIT_TRANSPORT", "0");
+    if cfg!(target_os = "macos") {
+      assert!(uses_git_transport("container"), "Apple Container always uses git transport");
+    } else {
+      assert!(!uses_git_transport("container"));
+    }
+    std::env::set_var("SCSH_GIT_TRANSPORT", "1");
+    assert!(uses_git_transport("docker"));
+    match prev {
+      Some(v) => std::env::set_var("SCSH_GIT_TRANSPORT", v),
+      None => std::env::remove_var("SCSH_GIT_TRANSPORT"),
+    }
+  }
+
+  #[test]
+  fn push_transport_refs_maps_origin_branches_to_heads() {
+    use std::process::Command;
+    let tmp = std::env::temp_dir().join(format!("scsh-push-transport-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = tmp.join("root");
+    let bare = tmp.join("bare.git");
+    Command::new("git").args(["init", "-q"]).arg(&root).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
+    std::fs::write(root.join("f"), "x").unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "init"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
+    Command::new("git")
+      .args(["-C"])
+      .arg(&root)
+      .args(["remote", "add", "origin", "https://example.invalid/scsh.git"])
+      .status()
+      .unwrap();
+    Command::new("git")
+      .args(["-C"])
+      .arg(&root)
+      .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
+      .status()
+      .unwrap();
+    std::fs::write(root.join("f"), "y").unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
+    push_transport_refs(&root, &bare).unwrap();
+    let show = Command::new("git").args(["-C"]).arg(&bare).args(["show-ref"]).output().unwrap();
+    let refs = String::from_utf8_lossy(&show.stdout);
+    assert!(refs.contains("refs/heads/main"), "expected refs/heads/main in bare, got:\n{refs}");
+    assert!(refs.contains("refs/heads/feature"), "expected feature branch in bare, got:\n{refs}");
+    assert!(!refs.contains("refs/remotes/origin/main"), "bare should not store remote-tracking refs:\n{refs}");
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn push_transport_refs_uses_local_main_not_stale_origin() {
+    use std::process::Command;
+    let tmp = std::env::temp_dir().join(format!("scsh-push-main-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = tmp.join("root");
+    let bare = tmp.join("bare.git");
+    let work = tmp.join("work");
+    Command::new("git").args(["init", "-q"]).arg(&root).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
+    std::fs::write(root.join("f"), "stale").unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "stale"]).status().unwrap();
+    let stale = Command::new("git").args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
+    let stale = String::from_utf8_lossy(&stale.stdout).trim().to_string();
+    std::fs::write(root.join("f"), "base").unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "base"]).status().unwrap();
+    let base_sha = Command::new("git").args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
+    let base_sha = String::from_utf8_lossy(&base_sha.stdout).trim().to_string();
+    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
+    Command::new("git")
+      .args(["-C"])
+      .arg(&root)
+      .args(["remote", "add", "origin", "https://example.invalid/scsh.git"])
+      .status()
+      .unwrap();
+    Command::new("git")
+      .args(["-C"])
+      .arg(&root)
+      .args(["update-ref", "refs/remotes/origin/main", &stale])
+      .status()
+      .unwrap();
+    std::fs::write(root.join("f"), "feature").unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
+    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-f", "main", &base_sha]).status().unwrap();
+    push_transport_refs(&root, &bare).unwrap();
+    Command::new("git").args(["clone", "-q"]).arg(&bare).arg(&work).status().unwrap();
+    let origin_main = Command::new("git").args(["-C"]).arg(&work).args(["rev-parse", "origin/main"]).output().unwrap();
+    let origin_main = String::from_utf8_lossy(&origin_main.stdout).trim().to_string();
+    assert_eq!(origin_main, base_sha, "origin/main must match force-updated local main");
+    assert_ne!(origin_main, stale, "must not use stale refs/remotes/origin/main");
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn git_transport_entry_clones_before_harness() {
+    let entry = git_transport_entry("echo hi", false, "bot", "bot@example.com");
+    assert!(entry.contains("ip -4 route show default"));
+    assert!(entry.contains("git clone"));
+    assert!(entry.contains("transport.git"));
+    assert!(entry.contains("origin/main missing after git transport clone"));
+    assert!(entry.contains("echo hi"));
+    assert!(!entry.contains("pull.git"));
+    let entry = git_transport_entry("echo hi", true, "bot", "bot@example.com");
+    assert!(entry.contains("pull.git"));
+    assert!(entry.contains("user.email"));
   }
 
   #[test]
