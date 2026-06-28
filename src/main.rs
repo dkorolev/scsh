@@ -88,7 +88,6 @@ enum HelpTopic {
   Cache,
 }
 
-/// Build-time git stamp (from `build.rs` via `OUT_DIR/scsh_build_info.rs`).
 mod build_info {
   include!(concat!(env!("OUT_DIR"), "/scsh_build_info.rs"));
 }
@@ -359,7 +358,10 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
   if is_run {
     let dirty = uncommitted_changes(&root);
     if !dirty.is_empty() {
-      fail("working tree has uncommitted changes — scsh runs a clone of committed state, so they would not be in the container");
+      fail(
+        "working tree has uncommitted changes — scsh runs a clone of committed state, \
+so they would not be in the container",
+      );
       let shown = dirty.len().min(10);
       for p in &dirty[..shown] {
         hint(&format!("uncommitted: {p}"));
@@ -477,11 +479,11 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       // Every git/repo/state check passed — one compact line, then the run.
       let prof = profile.map(|p| format!(" · profile {p}")).unwrap_or_default();
       ok(&format!("git · repo {} · clean · /tmp ignored{prof}", display_path(&root)));
-      // Skip skills whose harness is unavailable on the host; fail only when none remain.
+      // Skip skills whose harness is unavailable on this host; fail only when none remain.
       let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
       for skill in &selected {
         if let Err(msg) = runtime::check_harness_host(skill.harness) {
-          warn(&format!("skipping '{}' — {} harness unavailable ({msg})", skill.name, skill.harness.as_str()));
+          warn(&format!("skipping '{}' — {msg}", skill.name));
           continue;
         }
         let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
@@ -492,10 +494,8 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
         runnable.push(skill);
       }
       if runnable.is_empty() {
-        fail("no skills to run — every selected harness is unavailable on this host");
-        hint(
-          "see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast, add-claude-sonnet-4-6, and add-opencode-glm-5.2",
-        );
+        fail("no skills to run — every selected skill was skipped (harness unavailable on this host)");
+        hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
       build_and_run(&rt, &root, &runnable)
@@ -634,30 +634,71 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
     println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
     print!("{df}");
     let host_tz = runtime::host_timezone();
-    for h in harnesses {
-      let tag = runtime::image_tag(h);
-      let target = runtime::image_target(h);
-      let fingerprint = runtime::image_build_fingerprint(&df, target, uid, gid, &host_tz);
+    let specs: Vec<runtime::ImageBuildSpec> =
+      harnesses.iter().map(|h| runtime::image_build_spec(*h, &df, uid, gid, &host_tz)).collect();
+    if specs.len() <= 1 {
+      for spec in &specs {
+        match runtime::build_method(&rt.name) {
+          runtime::BuildMethod::Stdin => {
+            let build =
+              runtime::build_command_stdin(&rt.name, &spec.tag, &spec.target, uid, gid, &host_tz, &spec.fingerprint);
+            println!("--- build {} (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---", spec.target);
+            println!("{}", runtime::shell_join(&build));
+          }
+          runtime::BuildMethod::ContextDir => {
+            let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
+            let build = runtime::build_command_context(
+              &rt.name,
+              &spec.tag,
+              &spec.target,
+              &ctx.to_string_lossy(),
+              uid,
+              gid,
+              &host_tz,
+              &spec.fingerprint,
+            );
+            println!("--- build {} (in-memory Dockerfile written to an ephemeral context dir) ---", spec.target);
+            println!("{}", runtime::shell_join(&build));
+          }
+        }
+      }
+    } else if runtime::runtime_supports_bake(&rt.name) {
+      let targets: Vec<String> = specs.iter().map(|s| s.target.clone()).collect();
+      let bake = runtime::build_command_bake(&rt.name, &targets);
+      let names: Vec<&str> = targets.iter().map(String::as_str).collect();
+      println!("--- build {} (one buildx bake; shared scsh-base; agent uid={uid} gid={gid}) ---", names.join(", "));
+      println!("{}", runtime::shell_join(&bake));
+      println!("{}", h_dim("# bake definition on stdin; Dockerfile in an ephemeral context dir"));
+    } else {
+      let names: Vec<&str> = specs.iter().map(|s| s.target.as_str()).collect();
+      println!(
+        "--- build {} (one sequential build; shared scsh-base; agent uid={uid} gid={gid}) ---",
+        names.join(", ")
+      );
       match runtime::build_method(&rt.name) {
         runtime::BuildMethod::Stdin => {
-          let build = runtime::build_command_stdin(&rt.name, &tag, target, uid, gid, &host_tz, &fingerprint);
-          println!("--- build {target} (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---");
-          println!("{}", runtime::shell_join(&build));
+          for spec in &specs {
+            let build =
+              runtime::build_command_stdin(&rt.name, &spec.tag, &spec.target, uid, gid, &host_tz, &spec.fingerprint);
+            println!("{}", runtime::shell_join(&build));
+          }
         }
         runtime::BuildMethod::ContextDir => {
           let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
-          let build = runtime::build_command_context(
-            &rt.name,
-            &tag,
-            target,
-            &ctx.to_string_lossy(),
-            uid,
-            gid,
-            &host_tz,
-            &fingerprint,
-          );
-          println!("--- build {target} (in-memory Dockerfile written to an ephemeral context dir) ---");
-          println!("{}", runtime::shell_join(&build));
+          for spec in &specs {
+            let build = runtime::build_command_context(
+              &rt.name,
+              &spec.tag,
+              &spec.target,
+              &ctx.to_string_lossy(),
+              uid,
+              gid,
+              &host_tz,
+              &spec.fingerprint,
+            );
+            println!("{}", runtime::shell_join(&build));
+          }
+          println!("{}", h_dim("# same ephemeral context dir for every target above"));
         }
       }
     }
@@ -675,12 +716,25 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         skill.skill_source,
         skill.harness.as_str()
       );
-      println!("  clone: {}", runtime::shell_join(&runtime::clone_command(&root.to_string_lossy(), &run_dir)));
+      if runtime::uses_git_transport(&rt.name) {
+        println!("  push:  git push {run_dir}/{} HEAD refs/remotes/origin/*", runtime::TRANSPORT_BARE);
+        println!(
+          "  run:   container clones git://<gateway>:<port>/{} (gateway from ip route; port in SCSH_GIT_PORT)",
+          runtime::TRANSPORT_BARE
+        );
+      } else {
+        println!("  clone: {}", runtime::shell_join(&runtime::clone_command(&root.to_string_lossy(), &run_dir)));
+      }
       match resolve_env(&skill.env) {
         Ok(env) => {
           let vols: Vec<(String, String)> = runtime::harness_volumes(skill.harness);
           let vol_refs: Vec<(&str, &str)> = vols.iter().map(|(h, m)| (h.as_str(), m.as_str())).collect();
-          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &vol_refs, &cmd);
+          let repo_mount = if runtime::uses_git_transport(&rt.name) {
+            runtime::RepoMountMode::TmpOnly
+          } else {
+            runtime::RepoMountMode::Full
+          };
+          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &vol_refs, &cmd, repo_mount);
           println!("  run:   {}", runtime::shell_join(&run));
         }
         Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
@@ -859,7 +913,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   // Image builds first (runtime setup), then skills in manifest order.
   let mut build_procs = Vec::with_capacity(harness_list.len());
   for &h in &harness_list {
-    build_procs.push(ui.proc(format!("using {} · build {}", backend_name(&rt.name), h.as_str()), true));
+    let label = format!("using {} · build {}", backend_name(&rt.name), h.as_str());
+    build_procs.push(ui.proc(label, true));
   }
   let mut skill_procs = Vec::with_capacity(skills.len());
   for skill in skills {
@@ -869,39 +924,43 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   }
   ui.pin_board_to_top();
 
-  let build_failed: Option<(String, i32)> = std::thread::scope(|scope| {
-    harness_list
-      .into_iter()
-      .zip(build_procs)
-      .map(|(h, build)| {
-        let rt_name = rt_name.clone();
-        let df = df.clone();
-        let tz = tz.clone();
-        scope.spawn(move || {
-          let tag = runtime::image_tag(h);
-          let target = runtime::image_target(h);
-          let fingerprint = runtime::image_build_fingerprint(&df, target, uid, gid, &tz);
-          build.start();
-          if runtime::image_is_up_to_date(&rt_name, &tag, &fingerprint) {
-            build.finish_ok(Some("up to date"));
-            return Ok(());
-          }
-          match run_build(&build, &rt_name, &tag, target, &df, uid, gid, &fingerprint) {
-            Ok(()) => {
-              build.finish_ok(None);
-              Ok(())
-            }
-            Err(e) => {
-              build.finish_fail(Some(&e.0));
-              Err(e)
-            }
-          }
-        })
-      })
-      .collect::<Vec<_>>()
-      .into_iter()
-      .find_map(|h| h.join().unwrap_or_else(|_| Err(("harness image build thread panicked".into(), 1))).err())
-  });
+  let mut stale_specs: Vec<runtime::ImageBuildSpec> = Vec::new();
+  let mut stale_proc_indices: Vec<usize> = Vec::new();
+  for (i, &h) in harness_list.iter().enumerate() {
+    let build = &build_procs[i];
+    build.start();
+    let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
+    if runtime::image_is_up_to_date(&rt_name, &spec.tag, &spec.fingerprint) {
+      build.finish_ok(Some("up to date"));
+    } else {
+      stale_specs.push(spec);
+      stale_proc_indices.push(i);
+    }
+  }
+
+  let build_failed = if stale_specs.is_empty() {
+    None
+  } else {
+    for &i in stale_proc_indices.iter().skip(1) {
+      build_procs[i].note("sharing one build");
+    }
+    let lead = stale_proc_indices[0];
+    match run_builds(&build_procs[lead], &rt_name, &df, &stale_specs, uid, gid) {
+      Ok(()) => {
+        let detail = if stale_specs.len() > 1 { Some("shared build") } else { None };
+        for &i in &stale_proc_indices {
+          build_procs[i].finish_ok(detail);
+        }
+        None
+      }
+      Err(e) => {
+        for &i in &stale_proc_indices {
+          build_procs[i].finish_fail(Some(&e.0));
+        }
+        Some(e)
+      }
+    }
+  };
   if let Some((msg, code)) = build_failed {
     ui.finish();
     fail(&msg);
@@ -1070,10 +1129,10 @@ fn run_one_skill(
     }
   }
 
-  // Own clone of the repo on the HOST (push IN). Bind-mounted into the container at
-  // /home/agent/repo — skills must not git fetch/pull/push/clone inside. After the
-  // container exits, scsh pulls the result file OUT; commits too when commits: true.
-  spinner.note("cloning…");
+  // Own run dir on the HOST (push IN). Either a full clone bind-mounted into the container,
+  // or (macOS Apple Container) a bare transport repo + git daemon the container clones from.
+  // After the container exits, scsh pulls the result file OUT; commits too when commits: true.
+  spinner.note("preparing repo…");
   let run_dir = match prepare_run_dir(secs, &skill.name, &rt.name) {
     Ok(d) => d,
     Err(e) => {
@@ -1082,7 +1141,21 @@ fn run_one_skill(
     }
   };
   let run_dir_str = run_dir.to_string_lossy().into_owned();
-  if let Err(e) = clone_into(root, &run_dir, &spinner) {
+  let git_transport = runtime::uses_git_transport(&rt.name);
+  let mut git_daemon = None;
+  if git_transport {
+    if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, &spinner) {
+      spinner.finish_fail(Some(&e));
+      return SkillRun::failed(Some(run_dir_str), None, None);
+    }
+    match GitTransport::start(&run_dir) {
+      Ok(d) => git_daemon = Some(d),
+      Err(e) => {
+        spinner.finish_fail(Some(&e));
+        return SkillRun::failed(Some(run_dir_str), None, None);
+      }
+    }
+  } else if let Err(e) = clone_into(root, &run_dir, &spinner) {
     spinner.finish_fail(Some(&e));
     return SkillRun::failed(Some(run_dir_str), None, None);
   }
@@ -1124,7 +1197,6 @@ fn run_one_skill(
     None
   };
   let tag = runtime::image_tag(skill.harness);
-  let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
   let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
     runtime::claude_auth_mounts(auth_root)
   } else if let Some(ref forward) = opencode_forward {
@@ -1139,7 +1211,17 @@ fn run_one_skill(
       container_env.push((runtime::CLAUDE_OAUTH_TOKEN_ENV.to_string(), token));
     }
   }
-  let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd);
+  if let Some(d) = &git_daemon {
+    container_env.extend(d.env());
+  }
+  let harness = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
+  let cmd = if git_transport {
+    runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
+  } else {
+    harness
+  };
+  let repo_mount = if git_transport { runtime::RepoMountMode::TmpOnly } else { runtime::RepoMountMode::Full };
+  let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd, repo_mount);
   let timeout = skill.timeout.map(Duration::from_secs);
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
@@ -1185,7 +1267,8 @@ fn run_one_skill(
       if let (Some(key), Some(c)) = (&key, &content) {
         // Journal a commit-enabled skill's new commits (base..clone-HEAD) as a patch
         // alongside the result, so a future cache hit can replay them.
-        let commits = if skill.commits { base.and_then(|b| commit_patch(&run_dir, b)) } else { None };
+        let commits =
+          if skill.commits { base.and_then(|b| commit_patch(&runtime::commits_fetch_path(&run_dir), b)) } else { None };
         cache_store(root, key, c, commits.as_deref());
       }
       let message = content.as_deref().and_then(json::message);
@@ -1298,10 +1381,10 @@ fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, Str
 
 /// Full clone (all history, all branches) of the host repo at `root` into the
 /// already-created, empty `run_dir`, then materialize every remote branch as a
-/// local one so the container sees them all. This is host-side work only — the
-/// container gets a read-only snapshot via bind-mount and must never reach out to
-/// git remotes to "refresh" what scsh already pushed in.
+/// local one so the container sees them all. Used when bind-mounting the run dir
+/// (Linux host → Linux container). Skills must not reach out to git remotes.
 fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result<(), String> {
+  spinner.note("cloning…");
   let cmd = runtime::clone_command(&root.to_string_lossy(), &run_dir.to_string_lossy());
   let (ok, last) = spinner.run(&cmd[0], &cmd[1..]).map_err(|e| format!("failed to run git clone: {e}"))?;
   if !ok {
@@ -1326,6 +1409,64 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
     });
   }
   Ok(())
+}
+
+/// macOS Apple Container push IN: host `git push` into a bare transport repo; the container
+/// clones from a short-lived `git daemon` (Linux-owned `.git`). Only `run_dir/tmp` is mounted.
+fn prepare_git_transport(root: &Path, run_dir: &Path, commits: bool, spinner: &ui::screen::Proc) -> Result<(), String> {
+  std::fs::create_dir_all(run_dir.join("tmp"))
+    .map_err(|e| format!("could not create {}: {e}", run_dir.join("tmp").display()))?;
+  spinner.note("pushing…");
+  let bare = run_dir.join(runtime::TRANSPORT_BARE);
+  runtime::push_transport_refs(root, &bare).map_err(|e| {
+    spinner.emit(&format!("git push failed: {e}"));
+    e
+  })?;
+  if commits {
+    runtime::init_bare_repo(&run_dir.join(runtime::PULL_BARE))?;
+  }
+  Ok(())
+}
+
+/// Per-run `git daemon` serving `transport.git` (and optionally `pull.git`) from a run dir.
+struct GitTransport {
+  child: std::process::Child,
+  port: u16,
+}
+
+impl GitTransport {
+  fn start(run_dir: &Path) -> Result<Self, String> {
+    let port = runtime::pick_ephemeral_port()?;
+    let base = run_dir.to_string_lossy();
+    let child = Command::new("git")
+      .args([
+        "daemon",
+        "--reuseaddr",
+        &format!("--base-path={base}"),
+        "--export-all",
+        "--enable=receive-pack",
+        &format!("--port={port}"),
+        "--listen=0.0.0.0",
+      ])
+      .stdin(std::process::Stdio::null())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .spawn()
+      .map_err(|e| format!("could not start git daemon: {e}"))?;
+    std::thread::sleep(Duration::from_millis(100));
+    Ok(Self { child, port })
+  }
+
+  fn env(&self) -> Vec<(String, String)> {
+    vec![(runtime::GIT_TRANSPORT_PORT_ENV.to_string(), self.port.to_string())]
+  }
+}
+
+impl Drop for GitTransport {
+  fn drop(&mut self) {
+    let _ = self.child.kill();
+    let _ = self.child.wait();
+  }
 }
 
 /// The deliberately unmistakable identity scsh stamps on commits a skill makes in its
@@ -1582,19 +1723,21 @@ enum Integration {
 /// cherry-picks onto the caller's current branch. Returns `None` when the skill added
 /// no commits. scsh never pushes to any remote.
 fn integrate_commits(
-  root: &Path, clone: &Path, base: &str, skill: &str, stamp: &str,
+  root: &Path, run_dir: &Path, base: &str, skill: &str, stamp: &str,
 ) -> Result<Option<Integration>, String> {
-  // The clone's branch tip — what the skill left after (maybe) committing.
-  let tip = match git_capture(clone, &["rev-parse", "HEAD"]) {
+  let source = runtime::commits_fetch_path(run_dir);
+  // The skill's branch tip — what it left after (maybe) committing.
+  let tip = match git_capture(&source, &["rev-parse", "HEAD"]) {
     Some(t) => t.trim().to_string(),
     None => return Err("could not read the clone's HEAD".into()),
   };
   if tip == base {
     return Ok(None); // the skill added nothing
   }
-  // Make the clone's new objects available in the caller repo (host pulls from the
-  // local run-clone path — NOT from GitHub; the container never contacted a remote).
-  if !git_status_ok(root, &["fetch", "--no-tags", "--quiet", &clone.to_string_lossy(), "HEAD"]) {
+  // Make the skill's new objects available in the caller repo (host fetch from the local
+  // run clone or pull.git bare repo — NOT from GitHub).
+  let fetch_path = source.to_string_lossy();
+  if !git_status_ok(root, &["fetch", "--no-tags", "--quiet", &fetch_path, "HEAD"]) {
     return Err("could not fetch the skill's commits from its clone".into());
   }
   let range = format!("{base}..{tip}");
@@ -1774,7 +1917,87 @@ fn now_secs() -> u64 {
   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Build the image through the live board's build proc (so its output streams into the
+/// Build one or more harness images through the live board's build proc. Multiple targets
+/// share one `buildx bake` (docker/podman) or one sequential build pass (Apple Container)
+/// so `scsh-base` is built once.
+fn run_builds(
+  build: &ui::screen::Proc, runtime_name: &str, dockerfile: &str, specs: &[runtime::ImageBuildSpec], uid: u32, gid: u32,
+) -> Result<(), (String, i32)> {
+  if specs.is_empty() {
+    return Ok(());
+  }
+  if specs.len() == 1 {
+    let s = &specs[0];
+    return run_build(build, runtime_name, &s.tag, &s.target, dockerfile, uid, gid, &s.fingerprint);
+  }
+
+  let tz = runtime::host_timezone();
+  let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
+
+  if runtime::runtime_supports_bake(runtime_name) {
+    let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
+    let path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
+    if let Err(e) = std::fs::write(&path, dockerfile) {
+      let _ = std::fs::remove_dir_all(&dir);
+      return Err((format!("could not write Dockerfile to build context: {e}"), 1));
+    }
+    let bake = runtime::bake_definition_json(&dir.to_string_lossy(), specs, uid, gid, &tz);
+    let targets: Vec<String> = specs.iter().map(|s| s.target.clone()).collect();
+    let cmd = runtime::build_command_bake(runtime_name, &targets);
+    let out = build.run_with_stdin(&cmd[0], &cmd[1..], bake.as_bytes()).map_err(started);
+    let _ = std::fs::remove_dir_all(&dir);
+    return finish_build_outcome(out);
+  }
+
+  match runtime::build_method(runtime_name) {
+    runtime::BuildMethod::Stdin => {
+      for spec in specs {
+        let cmd = runtime::build_command_stdin(runtime_name, &spec.tag, &spec.target, uid, gid, &tz, &spec.fingerprint);
+        finish_build_outcome(build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started))?;
+      }
+      Ok(())
+    }
+    runtime::BuildMethod::ContextDir => {
+      let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
+      let path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
+      if let Err(e) = std::fs::write(&path, dockerfile) {
+        let _ = std::fs::remove_dir_all(&dir);
+        return Err((format!("could not write Dockerfile to build context: {e}"), 1));
+      }
+      let dir_str = dir.to_string_lossy().into_owned();
+      for spec in specs {
+        let cmd = runtime::build_command_context(
+          runtime_name,
+          &spec.tag,
+          &spec.target,
+          &dir_str,
+          uid,
+          gid,
+          &tz,
+          &spec.fingerprint,
+        );
+        finish_build_outcome(build.run(&cmd[0], &cmd[1..]).map_err(started))?;
+      }
+      let _ = std::fs::remove_dir_all(&dir);
+      Ok(())
+    }
+  }
+}
+
+fn finish_build_outcome(out: Result<(bool, Option<String>), (String, i32)>) -> Result<(), (String, i32)> {
+  let (ok, last) = out?;
+  if ok {
+    Ok(())
+  } else {
+    let msg = match last {
+      Some(l) if !l.is_empty() => format!("image build failed: {l}"),
+      _ => "image build failed".into(),
+    };
+    Err((msg, 1))
+  }
+}
+
+/// Build a single harness image through the live board's build proc (so its output streams into the
 /// collapsible build row, timestamped). docker/podman take the in-memory Dockerfile on stdin;
 /// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
 fn run_build(
@@ -2367,8 +2590,8 @@ fn link_skill_hosts(_root: &Path) -> Vec<String> {
 
 /// Show how to run the scaffolded example skills.
 fn print_skill_usage() {
-  println!("\nThe demo .scsh.yml runs `add` on three routes by default (opencode+GPT, claude+Sonnet,");
-  println!("opencode+GLM); `multiply` (X * Y) lives in the `multiply` profile because it REQUIRES X");
+  println!("\nThe demo .scsh.yml runs `add` on two routes by default (opencode+GPT, claude+Sonnet);");
+  println!("`multiply` (X * Y) lives in the `multiply` profile because it REQUIRES X");
   println!("and Y. scsh resolves the env you forward (or refuses the skill). Examples — successes");
   println!("({}) and the intended refusal scsh guards against ({}):", ok_mark(), refused_mark());
   println!();
@@ -2524,6 +2747,11 @@ fn help_row(name: &str, desc: &str) {
   println!("  {} {} {}", h_dim("\u{2022}"), console::style(format!("{name:<25}")).bold(), h_dim(desc));
 }
 
+/// Indented continuation line for a multi-line help entry (aligns under the description).
+fn help_cont(desc: &str) {
+  println!("      {}", h_dim(desc));
+}
+
 fn print_help(topic: HelpTopic) {
   match topic {
     HelpTopic::Overview => print_help_overview(),
@@ -2555,18 +2783,14 @@ fn print_help_overview() {
   );
   println!();
   println!("{}", h_head("Commands:"));
-  help_row("run [profile…]", "Build the image and run skills in parallel — see `scsh help run`.");
-  help_row(
-    "list   (alias: ls)",
-    "List every skill by profile — result, commits, env (--verbose: + internals; --json: machine-readable).",
-  );
-  help_row("check-profile <name>", "Exit 0 if a profile exists with at least one skill (runtime-free; for scripts).");
-  help_row("init-demo-project", "Scaffold + commit a ready-to-run demo project.");
-  help_row(
-    "installskills [url…]",
-    "Install skills — bundled, or one+ repos' (merging each .scsh.yml); needs a clean tree.",
-  );
-  help_row("updateskills [url…]", "Reinstall skills, overwriting files — bundled or repos'.");
+  help_row("run [profile…]", "Build the image; run skills in parallel.");
+  help_cont("See `scsh help run` for profiles, preflight, and exit codes.");
+  help_row("list (ls)", "List skills by profile (--verbose, --json).");
+  help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
+  help_row("init-demo-project", "Scaffold and commit a demo project.");
+  help_row("installskills [url…]", "Install skills (bundled or from git URLs).");
+  help_row("updateskills [url…]", "Reinstall skills, overwriting local copies.");
+  help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -2577,9 +2801,9 @@ fn print_help_overview() {
   help_row("scsh help cache", "How results are cached, and when a re-run is a hit.");
   println!();
   println!("{}", h_head("Options:"));
-  help_row("[profile…] / --profile <names>", "run only these profiles — bare after `run` (`run a b`) or a comma/semicolon list (`default` = the no-profile skills).");
-  help_row("--verbose", "with list, also print the image Dockerfile and exact commands.");
-  help_row("--json", "with list, print the profiles and their skills as JSON (runtime-free).");
+  help_row("--profile <names>", "With `run`: only these profiles (`default` = no-profile skills).");
+  help_row("--verbose", "With list: also print the Dockerfile and exact commands.");
+  help_row("--json", "With list: print profiles and skills as JSON.");
   println!();
   println!("{}", h_dim("`run` bakes a dev toolchain into the image (python3/uv, Go, Rust, gh, aws, gcloud,"));
   println!("{}", h_dim("kubectl, psql, protoc, \u{2026}; no Java) and builds it with this machine's timezone."));
@@ -2626,13 +2850,17 @@ fn print_help_run() {
   println!();
   println!("{}", h_head("What `run` does (summary)"));
   println!("{}", h_dim("  Builds one image per harness needed (`scsh-opencode`, `scsh-claude`), then runs"));
-  println!("{}", h_dim("  every selected skill in parallel — each in its own container on a fresh host-side"));
-  println!("{}", h_dim("  clone bind-mounted at /home/agent/repo. Skills must not git fetch/pull inside."));
-  println!("{}", h_dim("  After exit, scsh copies each skill's `result` file back into your repo (under tmp/)."));
+  println!("{}", h_dim("  every selected skill in parallel — each in its own container. On Linux/docker/podman"));
+  println!("{}", h_dim("  the run dir is bind-mounted at /home/agent/repo; on macOS Apple Container scsh"));
+  println!("{}", h_dim("  git-pushes into a bare repo and the container clones via a local git daemon."));
+  println!("{}", h_dim("  Skills must not git fetch/pull remotes inside. After exit, scsh copies each"));
   println!("{}", h_dim("  Skills with `commits: true` may also bring commits back via local cherry-pick."));
   println!(
     "{}",
-    h_dim("  Unavailable harnesses are skipped; the run fails only when every selected skill is skipped.")
+    h_dim(
+      "  Unavailable harnesses and opencode models are skipped; \
+the run fails only when every selected skill is skipped.",
+    )
   );
   println!();
   println!("{}", h_head("Exit codes"));
@@ -2641,6 +2869,14 @@ fn print_help_run() {
   println!();
   println!("{}", h_head("Useful environment variables"));
   help_row("SCSH_RUNTIME", "Force container runtime: docker, podman, or container (Apple).");
+  help_row(
+    "SCSH_GIT_TRANSPORT",
+    "Force git push/fetch transport (1) or bind-mount clone (0). Ignored on macOS Apple Container.",
+  );
+  help_row(
+    runtime::GIT_TRANSPORT_HOST_ENV,
+    "Override git-daemon host IP inside the container (default: ip route gateway).",
+  );
   help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
   help_row("SCSH_QUIET=1", "Disable verbose harness output on the live board.");
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
@@ -2651,7 +2887,7 @@ fn print_help_run() {
   println!("{}", h_dim("  prints the kept run-clone path — inspect tmp/scsh-run.log there for full harness output."));
   println!();
   println!("{}", h_head("See also"));
-  help_row("scsh help internals", "Clone/fsck, repo sync, auth forwarding, live board, image contents.");
+  help_row("scsh help internals", "Repo sync, auth forwarding, live board, image contents.");
   help_row("scsh help .scsh.yml", "Config schema: harness, invocations, env, commits, timeout.");
   help_row("scsh help cache", "When an identical re-run is served from tmp/.sccache/.");
   println!();
@@ -2716,7 +2952,13 @@ fn print_help_config() {
   println!();
   println!("{}", h_dim("Harness commands (inside the container):"));
   println!("{}", h_dim("  opencode: opencode -m <model> run \"run skill <source>\""));
-  println!("{}", h_dim("  claude:   claude -p \"Run .skills/<source>/SKILL.md …\" (CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json)"));
+  println!(
+    "{}",
+    h_dim(
+      "  claude:   claude -p \"Run .skills/<source>/SKILL.md …\" \
+(CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json)",
+    )
+  );
   println!();
 }
 
@@ -2744,26 +2986,26 @@ fn print_help_internals() {
   println!("{}", h_head("How a run works"));
   print!(
     r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`) from a shared
-  base in parallel (skipping any whose tag already matches the embedded Dockerfile fingerprint),
-  version-checking each CLI during the build. Then, for EVERY selected skill in
-  parallel, it makes a fresh full clone of this repo into a /tmp run dir
-  (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman, or scsh-<nonce>-run-<invocation>
-  on Apple container — ≤ 64 chars, middle-truncated with .. when needed — all branches) and runs the skill's harness
-  in its own container with that clone bind-mounted at /home/agent/repo (the WORKDIR).
-  The clone is mounted UNDER the agent's home, not as it, so the harness's home-dir
-  scratch (~/.cache, ~/.config, ~/.npm) stays out of the cloned tree. Files the skill
-  writes are owned by you on the host.
+  base in one buildx bake or one sequential build pass (skipping any whose tag already matches
+  the embedded Dockerfile fingerprint), version-checking each CLI during the build. Then, for
+  EVERY selected skill in parallel, it prepares a /tmp run dir (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman,
+  or scsh-<nonce>-run-<invocation> on Apple container — ≤ 64 chars, middle-truncated with .. when
+  needed) and runs the skill's harness in its own container. On docker/podman/Linux the host
+  git-clones into the run dir and bind-mounts it at /home/agent/repo. On macOS Apple Container
+  scsh git-pushes into a bare transport repo and the container clones from a per-run git daemon
+  (only run_dir/tmp is bind-mounted — results, logs, forwarded auth). The repo lives UNDER the
+  agent's home, not as it, so harness scratch stays out of the tree.
 
   scsh injects SCSH_RESULT=<result path> into every container so one skill folder can
   serve multiple invocations with different result files.
 
   Repo sync — push IN, pull OUT (never GitHub from inside the container):
-  scsh git-clones on the HOST into /tmp/scsh-*-run-* and runs `git fsck` on each clone
-  (push into the container). Skills must not git fetch, pull, push, or clone inside.
-  After the container exits, scsh on the HOST pulls OUT: (1) the result file — always;
-  (2) new commits from the run clone — only when commits: true AND the skill committed —
-  via local fetch from the clone path and cherry-pick (never from GitHub). scsh never
-  pushes to any remote. Reviewer skills are review-only (no commits).
+  Host push IN: git clone + bind-mount (docker/podman/Linux), or git push to transport.git +
+  container git clone via git:// (Apple Container on macOS). Skills must not git fetch, pull,
+  push, or clone remotes inside. After the container exits, scsh on the HOST pulls OUT: (1) the
+  result file — always (from bind-mounted tmp/); (2) new commits — only when commits: true AND
+  the skill committed — via local git fetch from the run clone or pull.git and cherry-pick.
+  scsh never pushes to any remote. Reviewer skills are review-only (no commits).
 
   Each skill MUST produce its declared `result` file. Missing after the container
   exits -> that skill fails and the whole invocation exits non-zero; otherwise scsh
@@ -2780,7 +3022,7 @@ fn print_help_internals() {
   (opt out: SCSH_NO_CLAUDE_AUTH=1).
   Harness runs pass `--verbose` (Claude) or `--print-logs --log-level INFO` (OpenCode) so
   the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
-  Unavailable harnesses are skipped; a run fails only when every selected skill is skipped.
+  Unavailable harnesses and opencode models are skipped; a run fails only when every selected skill is skipped.
   Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
   The Dockerfile is generated in memory (streamed to the builder's stdin), and your

@@ -7,7 +7,7 @@ Review these before merging or extending.
 
 - **Skill key == folder name** — each `.scsh.yml` key must match `.skills/<name>/`. The legacy `skill:` pointer is rejected.
 - **Direct run or matrix** — declare `harness` (+ optional `model`, …) for a single invocation named after the key, *or* an `invocations:` map where each route expands to `{skill}-{route}` at run time.
-- **Demo config** ships two matrix skills (`add`, `multiply`) with three and two routes respectively. Models: **`openai/gpt-5.4-mini-fast`**, **`sonnet`**, **`nebius-glm/zai-org/GLM-5.2`**.
+- **Demo config** ships two matrix skills (`add`, `multiply`) with two routes each. Models: **`openai/gpt-5.4-mini-fast`** and **`sonnet`**.
 - **`commits: true` only on the `add` → `opencode-gpt-5.4-mini-fast` route** — avoids duplicate git commits when several add routes run in parallel.
 - **`profile:`** can be set per skill; each `invocations:` row may override it.
 
@@ -25,8 +25,7 @@ Review these before merging or extending.
 
 - **OpenCode:** copy `auth.json` into run dir (existing behavior); only for opencode skills.
 - **Claude:** forward host `CLAUDE_CODE_OAUTH_TOKEN` (from `claude setup-token`) and/or copy `~/.claude/.credentials.json` plus optional `~/.claude` / `~/.claude.json` into the run dir and bind-mount into the container.
-- **Preflight:** `scsh run` **skips** skills whose harness is unavailable; it **fails** only when every selected skill is skipped. Claude needs `CLAUDE_CODE_OAUTH_TOKEN` or `~/.claude/.credentials.json` (macOS Keychain login alone is not enough for Linux containers).
-- OpenCode still does **not** probe the model API — file presence only (same as before).
+- **Preflight:** `scsh run` **skips** skills whose harness is unavailable on this host; it **fails** only when every selected skill is skipped. Claude needs `CLAUDE_CODE_OAUTH_TOKEN` or `~/.claude/.credentials.json` (macOS Keychain login alone is not enough for Linux containers).
 
 ## Results
 
@@ -39,9 +38,10 @@ scsh moves git state **only between the host and the run clone** on local disk. 
 
 **Before the container (host pushes IN):**
 
-1. scsh **`git clone`s on the host** into `/tmp/scsh-*-run-*` from the caller's committed state.
-2. scsh materializes `origin/*` as local branches in that clone and runs **`git fsck`** on it — a corrupt clone fails before any container starts.
-3. scsh **bind-mounts** the clone at `/home/agent/repo` — that is the push into the container. The skill sees a complete snapshot; it must not `git fetch`, `git pull`, `git push`, or `git clone` to "refresh" it.
+1. scsh prepares a run dir under `/tmp/scsh-*-run-*`.
+2. **Docker / Podman / Linux:** scsh **`git clone`s on the host** from the caller's committed state, materializes `origin/*` as local branches, runs **`git fsck`**, then **bind-mounts** the clone at `/home/agent/repo`.
+3. **macOS Apple Container:** scsh **`git push`es** the caller's committed state into a bare `transport.git` in the run dir (plus optional `pull.git` when `commits: true`), starts a short-lived **`git daemon`** on the host, and the container **clones** from `git://…/transport.git`. Only `run_dir/tmp` is bind-mounted — not `.git`.
+4. In both paths the skill sees a complete snapshot; it must not `git fetch`, `git pull`, `git push`, or `git clone` to "refresh" it.
 
 **After the container exits (host pulls OUT — externally, on the host):**
 
@@ -60,7 +60,7 @@ If `origin/main` is wrong or missing in the clone, fix the **host** checkout bef
 ## Tests / DEMO
 
 - Integration tests for claude skills run **only when** `claude auth status` succeeds locally; otherwise marked N/A in test output.
-- DEMO step 1 probes three routes (gpt-5.4-mini-fast, sonnet-4-6, glm-5.2) via `opencode models` and claude auth; **fails** if none probe ok. Later steps note N/A when a route is missing.
+- DEMO step 1 probes two routes (gpt-5.4-mini-fast, sonnet-4-6) via `opencode models` and claude auth; **fails** if none probe ok. Later steps note N/A when a route is missing.
 
 ## Install path
 
