@@ -78,10 +78,11 @@ enum Mode {
 
 /// Which help page to print. The default (`scsh help` / a bare `scsh`) is a compact
 /// overview of the commands; the deep-dive topics keep their detail OUT of the default
-/// output (`scsh help .scsh.yml`, `scsh help internals`, `scsh help cache`).
+/// output (`scsh help run`, `scsh help .scsh.yml`, `scsh help internals`, `scsh help cache`).
 #[derive(Clone, Copy)]
 enum HelpTopic {
   Overview,
+  Run,
   Config,
   Internals,
   Cache,
@@ -181,6 +182,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "help" | "-h" | "--help" => {
         // An optional next token selects a deep-dive topic; otherwise the overview.
         let topic = match args.get(i + 1).map(|s| s.as_str()) {
+          Some("run") => {
+            i += 1;
+            HelpTopic::Run
+          }
           Some(".scsh.yml") | Some("scsh.yml") | Some(".scsh.yaml") | Some("scsh.yaml") | Some("config")
           | Some("yaml") | Some("yml") | Some("schema") => {
             i += 1;
@@ -196,7 +201,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           }
           // A non-flag token we don't recognize is a mistyped topic — say so helpfully.
           Some(other) if !other.starts_with('-') => {
-            return Err(format!("unknown help topic '{other}' (topics: .scsh.yml, internals, cache)"));
+            return Err(format!("unknown help topic '{other}' (topics: run, .scsh.yml, internals, cache)"));
           }
           _ => HelpTopic::Overview,
         };
@@ -2545,6 +2550,7 @@ fn help_row(name: &str, desc: &str) {
 fn print_help(topic: HelpTopic) {
   match topic {
     HelpTopic::Overview => print_help_overview(),
+    HelpTopic::Run => print_help_run(),
     HelpTopic::Config => print_help_config(),
     HelpTopic::Internals => print_help_internals(),
     HelpTopic::Cache => print_help_cache(),
@@ -2572,7 +2578,7 @@ fn print_help_overview() {
   );
   println!();
   println!("{}", h_head("Commands:"));
-  help_row("run [profile…]", "Build the image and run the skills in parallel (bare names select profiles).");
+  help_row("run [profile…]", "Build the image and run skills in parallel — see `scsh help run`.");
   help_row(
     "list   (alias: ls)",
     "List every skill by profile — result, commits, env (--verbose: + internals; --json: machine-readable).",
@@ -2588,8 +2594,9 @@ fn print_help_overview() {
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
   println!("{}", h_head("More help:"));
+  help_row("scsh help run", "How to run skills: profiles, preflight, exit codes, env vars.");
   help_row("scsh help .scsh.yml", "The project config file: every field + env syntax.");
-  help_row("scsh help internals", "How a run works: preflight, clone, image, results.");
+  help_row("scsh help internals", "How a run works: clone, containers, auth, live board.");
   help_row("scsh help cache", "How results are cached, and when a re-run is a hit.");
   println!();
   println!("{}", h_head("Options:"));
@@ -2599,9 +2606,74 @@ fn print_help_overview() {
   println!();
   println!("{}", h_dim("`run` bakes a dev toolchain into the image (python3/uv, Go, Rust, gh, aws, gcloud,"));
   println!("{}", h_dim("kubectl, psql, protoc, \u{2026}; no Java) and builds it with this machine's timezone."));
-  println!("{}", h_dim("Full list: scsh help internals."));
+  println!("{}", h_dim("Full toolchain list: scsh help internals."));
   println!();
   println!("{} {}", h_dim("Aliases:"), h_dim("--help/-h \u{00b7} --version/-V \u{00b7} --init-demo-project"));
+  println!();
+}
+
+/// `scsh help run` — how to invoke `run`, for humans and agents.
+fn print_help_run() {
+  println!();
+  println!("{} {}", h_head("run"), console::style("\u{2014} run scoped skills in parallel").bold());
+  println!();
+  println!("{}", h_head("Synopsis"));
+  println!("{}", h_dim("  scsh run [profile…]"));
+  println!();
+  println!("{}", h_head("Discover what to run (before `run`)"));
+  help_row("scsh list", "Every skill by profile — result path, harness, env (human-readable).");
+  help_row("scsh list --json", "Same, as JSON — preferred for scripts and agents.");
+  help_row("scsh check-profile <name>", "Exit 0 iff that profile exists with at least one skill (no runtime).");
+  println!();
+  println!("{}", h_head("Profile selection"));
+  println!("{}", h_dim("  Skills with no `profile:` belong to the reserved `default` profile."));
+  println!("{}", h_dim("  A skill with `profile: X` runs only when you select profile X."));
+  help_row("scsh run", "Run `default` only (skills with no profile).");
+  help_row("scsh run code-review", "Run one named profile.");
+  help_row("scsh run a b", "Run several profiles (same as `scsh run --profile a,b`).");
+  help_row("scsh run --profile a,b", "Comma/semicolon-separated profile list.");
+  println!("{}", h_dim("  If every skill is profiled, bare `scsh run` is a no-op that lists profiles."));
+  println!();
+  println!("{}", h_head("Preflight (fails fast — message names one fix)"));
+  print!(
+    r#"    1. git is installed
+    2. current directory is inside a git repository
+    3. working tree is clean          (scsh clones COMMITTED state only)
+    4. .scsh.yml exists and matches the schema
+    5. tmp/ is gitignored             (build scratch + results stay untracked)
+    6. a container runtime is available (macOS: container → docker → podman;
+       otherwise docker → podman; override with SCSH_RUNTIME=<name>)
+    7. the runtime engine is running  (scsh prints how to start it)
+"#
+  );
+  println!();
+  println!("{}", h_head("What `run` does (summary)"));
+  println!("{}", h_dim("  Builds one image per harness needed (`scsh-opencode`, `scsh-claude`), then runs"));
+  println!("{}", h_dim("  every selected skill in parallel — each in its own container on a fresh host-side"));
+  println!("{}", h_dim("  clone bind-mounted at /home/agent/repo. Skills must not git fetch/pull inside."));
+  println!("{}", h_dim("  After exit, scsh copies each skill's `result` file back into your repo (under tmp/)."));
+  println!("{}", h_dim("  Skills with `commits: true` may also bring commits back via local cherry-pick."));
+  println!("{}", h_dim("  Unavailable harnesses are skipped; the run fails only when every selected skill is skipped."));
+  println!();
+  println!("{}", h_head("Exit codes"));
+  help_row("0", "Every selected skill that ran finished successfully (skipped harnesses are OK).");
+  help_row("non-zero", "At least one skill failed, or every selected skill was skipped/unavailable.");
+  println!();
+  println!("{}", h_head("Useful environment variables"));
+  help_row("SCSH_RUNTIME", "Force container runtime: docker, podman, or container (Apple).");
+  help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
+  help_row("SCSH_QUIET=1", "Disable verbose harness output on the live board.");
+  help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
+  help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
+  println!();
+  println!("{}", h_head("After a run"));
+  println!("{}", h_dim("  Read each skill's declared `result` path (usually under tmp/). On failure, scsh"));
+  println!("{}", h_dim("  prints the kept run-clone path — inspect tmp/scsh-run.log there for full harness output."));
+  println!();
+  println!("{}", h_head("See also"));
+  help_row("scsh help internals", "Clone/fsck, repo sync, auth forwarding, live board, image contents.");
+  help_row("scsh help .scsh.yml", "Config schema: harness, invocations, env, commits, timeout.");
+  help_row("scsh help cache", "When an identical re-run is served from tmp/.sccache/.");
   println!();
 }
 

@@ -90,6 +90,14 @@ fn help_topics_are_separate_pages() {
     "got: {}",
     cfg.out
   );
+  // `scsh help run` is the agent-oriented run guide: profiles, preflight, exit codes.
+  let run = scsh(&d, &["help", "run"]);
+  assert_eq!(run.code, 0, "got: {}", run.out);
+  assert!(
+    run.out.contains("Synopsis") && run.out.contains("scsh list --json") && run.out.contains("Exit codes"),
+    "got: {}",
+    run.out
+  );
   // `scsh help internals` is the how-it-works page: preflight order + the clone/run.
   let internals = scsh(&d, &["help", "internals"]);
   assert_eq!(internals.code, 0, "got: {}", internals.out);
@@ -105,7 +113,8 @@ fn help_topics_are_separate_pages() {
   // The overview points at all topics but does not carry their detail.
   let overview = scsh(&d, &["help"]);
   assert!(
-    overview.out.contains("scsh help .scsh.yml")
+    overview.out.contains("scsh help run")
+      && overview.out.contains("scsh help .scsh.yml")
       && overview.out.contains("scsh help internals")
       && overview.out.contains("scsh help cache"),
     "got: {}",
