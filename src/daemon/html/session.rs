@@ -82,7 +82,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     "<h1><a href=\"/\">scsh</a> › session <code>{id}</code></h1>\n\
 <p class=\"dim\">profile {profile}</p>\n{session_meta}\n{skills}\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
-<p class=\"permalink\">Permanent link: <a href=\"/session/{id}\">{permalink}</a></p>",
+<p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
     id = id,
     profile = esc(profile),
     session_meta = session_meta,

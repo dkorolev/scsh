@@ -1,5 +1,6 @@
 //! HTML and JavaScript string escaping for daemon pages.
 
+/// Escape text for HTML. Single quotes are intentionally omitted — every attribute must use double quotes.
 pub(crate) fn esc(s: &str) -> String {
   let mut out = String::with_capacity(s.len());
   for c in s.chars() {

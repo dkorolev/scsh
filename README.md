@@ -251,7 +251,7 @@ more. Off a TTY (a pipe, a file, CI) there's no board — each step prints a pla
 line, so logs stay readable.
 
 When the session browser daemon is running, the same events also appear in a browser at a
-permanent `http://127.0.0.1:7274/session/abcdef` URL printed at the end of `scsh run`.
+deep link `http://127.0.0.1:7274/session/abcdef` URL printed at the end of `scsh run`.
 
 > **See it without a container or a model:** `scsh __ui-demo` runs the real board over a few
 > scripted subprocesses (click the rows, scroll), and `scsh __ui-demo --frames` prints a few static
