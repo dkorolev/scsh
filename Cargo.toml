@@ -9,6 +9,19 @@ license = "MIT"
 name = "scsh"
 path = "src/main.rs"
 
+# scsh keeps its own logic dependency-free; these crates only support the terminal UX.
+# `crossterm` drives the interactive live board — raw mode, mouse reporting, the alternate
+# screen, and key/mouse/resize events — so each long step is a collapsible row you click to
+# expand and scroll (no `derive-more` feature: it needs a newer rustc than scsh targets).
+# `console` does the cross-cutting text bits crossterm doesn't: NO_COLOR / TTY-aware colour,
+# ANSI stripping, and Unicode-aware width/truncation. `signal-hook` is a **safe** way to catch
+# terminal signals (std has none), so a kill restores the terminal and tears the (isolated)
+# child process groups down instead of orphaning containers.
+[dependencies]
+console = "0.16"
+signal-hook = "0.4"
+crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
+
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.
 [profile.release]
