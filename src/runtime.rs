@@ -384,12 +384,7 @@ pub fn build_command_context(
 /// the `agent` user can read/write the mount; docker (and Apple `container`) map
 /// the UID directly and need no such flag.
 pub fn run_command(
-  runtime: &str,
-  tag: &str,
-  clone_dir: &str,
-  name: &str,
-  env: &[(String, String)],
-  volumes: &[(&str, &str)],
+  runtime: &str, tag: &str, clone_dir: &str, name: &str, env: &[(String, String)], volumes: &[(&str, &str)],
   command: &str,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
@@ -494,9 +489,7 @@ pub fn opencode_host_mounts() -> Vec<(String, String)> {
 }
 
 pub fn opencode_host_mounts_from(
-  xdg_data_home: Option<&OsStr>,
-  xdg_config_home: Option<&OsStr>,
-  home: Option<&OsStr>,
+  xdg_data_home: Option<&OsStr>, xdg_config_home: Option<&OsStr>, home: Option<&OsStr>,
 ) -> Vec<(String, String)> {
   let mut out = Vec::new();
   if let Some(auth) = opencode_auth_in(xdg_data_home, home).filter(|p| p.is_file()) {
@@ -617,14 +610,11 @@ pub const CONTAINER_ID_MAX_LEN: usize = 64;
 /// Six lowercase `[a-z]` letters — the Apple-container run-dir stamp in place of UTC time.
 pub fn random_nonce_6() -> String {
   let mut buf = [0u8; 6];
-  let filled = std::fs::File::open("/dev/urandom")
-    .and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf))
-    .is_ok();
+  let filled =
+    std::fs::File::open("/dev/urandom").and_then(|mut f| std::io::Read::read_exact(&mut f, &mut buf)).is_ok();
   if !filled {
-    let nanos = std::time::SystemTime::now()
-      .duration_since(std::time::UNIX_EPOCH)
-      .map(|d| d.as_nanos())
-      .unwrap_or(0) as u64;
+    let nanos =
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0) as u64;
     let seed = nanos ^ ((std::process::id() as u64) << 32);
     for (i, b) in buf.iter_mut().enumerate() {
       *b = ((seed.wrapping_mul(1_103_515_245).wrapping_add(i as u64)) % 26) as u8;
@@ -1033,7 +1023,8 @@ mod tests {
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json", true);
+    let cmd =
+      harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json", true);
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains(" --verbose --model sonnet"));
     assert!(cmd.contains("tee \"$SCSH_RUN_LOG\""));
@@ -1073,7 +1064,8 @@ mod tests {
 
   #[test]
   fn parse_label_from_container_inspect_json() {
-    let json = r#"{"variants":[{"config":{"config":{"Labels":{"scsh.generated":"true","scsh.build.fingerprint":"abc123"}}}}}]"#;
+    let json =
+      r#"{"variants":[{"config":{"config":{"Labels":{"scsh.generated":"true","scsh.build.fingerprint":"abc123"}}}}}]"#;
     assert_eq!(parse_label_from_container_inspect(json, BUILD_FINGERPRINT_LABEL).as_deref(), Some("abc123"));
     assert!(parse_label_from_container_inspect(json, "missing").is_none());
   }
@@ -1152,10 +1144,7 @@ mod tests {
         "/tmp/clone",
         "run-s",
         &[],
-        &[(
-          "/home/u/.local/share/opencode/auth.json",
-          OPENCODE_AUTH_MOUNT
-        )],
+        &[("/home/u/.local/share/opencode/auth.json", OPENCODE_AUTH_MOUNT)],
         "opencode run 'run skill s'"
       ),
       vec![
@@ -1228,10 +1217,7 @@ mod tests {
 
   #[test]
   fn fsck_command_checks_clone_integrity() {
-    assert_eq!(
-      fsck_command("/tmp/dst"),
-      vec!["git", "-C", "/tmp/dst", "fsck", "--no-progress"]
-    );
+    assert_eq!(fsck_command("/tmp/dst"), vec!["git", "-C", "/tmp/dst", "fsck", "--no-progress"]);
   }
 
   #[test]

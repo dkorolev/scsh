@@ -253,7 +253,11 @@ impl Model {
 /// Layout row count for one proc: one header, plus expanded output (or a placeholder).
 fn rows_for_proc(p: &Proc) -> usize {
   1 + if p.expanded {
-    if p.lines.is_empty() { 1 } else { p.lines.len() }
+    if p.lines.is_empty() {
+      1
+    } else {
+      p.lines.len()
+    }
   } else {
     0
   }

@@ -69,7 +69,12 @@ fn frames_demo() -> i32 {
     m2.push_line(s, n as f64 * 0.5, format!("scanning file {n}"));
   }
   let (vis, off) = m2.view(width, 6, 0);
-  println!("(showing rows {}..{} of {} — expand opens here; scroll down for the rest)", off, off + vis.len(), m2.total_rows(width));
+  println!(
+    "(showing rows {}..{} of {} — expand opens here; scroll down for the rest)",
+    off,
+    off + vis.len(),
+    m2.total_rows(width)
+  );
   print_rows(&vis);
   0
 }

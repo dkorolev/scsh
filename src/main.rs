@@ -124,12 +124,7 @@ fn runtime_git_describe() -> Option<String> {
 }
 
 fn runtime_git_describe_in(repo: &std::path::Path) -> Option<String> {
-  let out = std::process::Command::new("git")
-    .arg("-C")
-    .arg(repo)
-    .args(["rev-parse", "HEAD"])
-    .output()
-    .ok()?;
+  let out = std::process::Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().ok()?;
   if !out.status.success() {
     return None;
   }
@@ -461,10 +456,8 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       // this config declares.
       if profile.is_some() {
         let declared = declared_profiles(&cfg);
-        let unknown: Vec<String> = requested_profiles(profile)
-          .into_iter()
-          .filter(|p| p != "default" && !declared.contains(p))
-          .collect();
+        let unknown: Vec<String> =
+          requested_profiles(profile).into_iter().filter(|p| p != "default" && !declared.contains(p)).collect();
         if !unknown.is_empty() {
           fail(&format!("unknown profile{}: {}", plural(unknown.len()), unknown.join(", ")));
           let mut avail = vec!["default".to_string()];
@@ -488,26 +481,21 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
       for skill in &selected {
         if let Err(msg) = runtime::check_harness_host(skill.harness) {
-          warn(&format!(
-            "skipping '{}' — {} harness unavailable ({msg})",
-            skill.name,
-            skill.harness.as_str()
-          ));
+          warn(&format!("skipping '{}' — {} harness unavailable ({msg})", skill.name, skill.harness.as_str()));
           continue;
         }
         let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
         if !skill_md.is_file() {
-          fail(&format!(
-            "skill source missing: .skills/{}/SKILL.md (invocation '{}')",
-            skill.skill_source, skill.name
-          ));
+          fail(&format!("skill source missing: .skills/{}/SKILL.md (invocation '{}')", skill.skill_source, skill.name));
           return 1;
         }
         runnable.push(skill);
       }
       if runnable.is_empty() {
         fail("no skills to run — every selected harness is unavailable on this host");
-        hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast, add-claude-sonnet-4-6, and add-opencode-glm-5.2");
+        hint(
+          "see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast, add-claude-sonnet-4-6, and add-opencode-glm-5.2",
+        );
         return 1;
       }
       build_and_run(&rt, &root, &runnable)
@@ -659,7 +647,14 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         runtime::BuildMethod::ContextDir => {
           let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
           let build = runtime::build_command_context(
-            &rt.name, &tag, target, &ctx.to_string_lossy(), uid, gid, &host_tz, &fingerprint,
+            &rt.name,
+            &tag,
+            target,
+            &ctx.to_string_lossy(),
+            uid,
+            gid,
+            &host_tz,
+            &fingerprint,
           );
           println!("--- build {target} (in-memory Dockerfile written to an ephemeral context dir) ---");
           println!("{}", runtime::shell_join(&build));
@@ -676,7 +671,9 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
       println!(
         "\n[{}]  skill={}  harness={}  model={model}  timeout={timeout}",
-        skill.name, skill.skill_source, skill.harness.as_str()
+        skill.name,
+        skill.skill_source,
+        skill.harness.as_str()
       );
       println!("  clone: {}", runtime::shell_join(&runtime::clone_command(&root.to_string_lossy(), &run_dir)));
       match resolve_env(&skill.env) {
@@ -753,10 +750,8 @@ fn load_config_for_inspection() -> Result<config::Config, i32> {
 /// no-`profile:` skills) first, then each declared profile in first-seen order.
 fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<String>)> {
   let expanded = config::expand_invocations(cfg);
-  let mut groups: Vec<(String, Vec<String>)> = vec![(
-    "default".to_string(),
-    expanded.iter().filter(|s| s.profile.is_none()).map(|s| s.name.clone()).collect(),
-  )];
+  let mut groups: Vec<(String, Vec<String>)> =
+    vec![("default".to_string(), expanded.iter().filter(|s| s.profile.is_none()).map(|s| s.name.clone()).collect())];
   for p in declared_profiles(cfg) {
     if p == "default" {
       continue;
@@ -842,11 +837,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     ok("opencode creds found (auth.json and opencode config bind-mounted when present)");
   }
   if needs_claude && runtime::claude_container_auth_ready() {
-    let via = if runtime::claude_oauth_token().is_some() {
-      "CLAUDE_CODE_OAUTH_TOKEN"
-    } else {
-      "~/.claude/.credentials.json"
-    };
+    let via =
+      if runtime::claude_oauth_token().is_some() { "CLAUDE_CODE_OAUTH_TOKEN" } else { "~/.claude/.credentials.json" };
     ok(&format!("claude credentials found ({via} forwarded into claude skills)"));
   }
 
@@ -908,11 +900,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
       })
       .collect::<Vec<_>>()
       .into_iter()
-      .find_map(|h| {
-        h.join()
-          .unwrap_or_else(|_| Err(("harness image build thread panicked".into(), 1)))
-          .err()
-      })
+      .find_map(|h| h.join().unwrap_or_else(|_| Err(("harness image build thread panicked".into(), 1))).err())
   });
   if let Some((msg, code)) = build_failed {
     ui.finish();
@@ -1330,11 +1318,7 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
   let fsck_started = Instant::now();
   let (ok, last) = spinner.run(&fsck[0], &fsck[1..]).map_err(|e| format!("failed to run git fsck: {e}"))?;
   let fsck_secs = fsck_started.elapsed().as_secs_f64();
-  spinner.emit(&format!(
-    "git fsck {} ({})",
-    if ok { "ok" } else { "failed" },
-    ui::clock::format_elapsed(fsck_secs),
-  ));
+  spinner.emit(&format!("git fsck {} ({})", if ok { "ok" } else { "failed" }, ui::clock::format_elapsed(fsck_secs),));
   if !ok {
     return Err(match last {
       Some(l) if !l.is_empty() => format!("git fsck failed on run clone: {l}"),
@@ -1454,10 +1438,7 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let token = runtime::claude_oauth_token();
   let host_claude = home.as_ref().filter(|h| h.join(".claude").is_dir());
   let host_json = home.as_ref().filter(|h| h.join(".claude.json").is_file());
-  let host_creds = host_claude
-    .as_ref()
-    .map(|h| h.join(".claude").join(".credentials.json"))
-    .filter(|p| p.is_file());
+  let host_creds = host_claude.as_ref().map(|h| h.join(".claude").join(".credentials.json")).filter(|p| p.is_file());
 
   if token.is_none() && host_creds.is_none() && host_claude.is_none() && host_json.is_none() {
     return None;
@@ -1814,9 +1795,8 @@ fn run_build(
         let _ = std::fs::remove_dir_all(&dir);
         return Err((format!("could not write Dockerfile to build context: {e}"), 1));
       }
-      let cmd = runtime::build_command_context(
-        runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz, fingerprint,
-      );
+      let cmd =
+        runtime::build_command_context(runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz, fingerprint);
       let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
       let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
       out?
@@ -2246,10 +2226,7 @@ fn install_from_manifest(
     }
     let dir = clone.join(".skills").join(&skill.name);
     if !dir.join("SKILL.md").is_file() {
-      hint(&format!(
-        "{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped",
-        skill.name, skill.name
-      ));
+      hint(&format!("{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped", skill.name, skill.name));
       continue;
     }
     copy_skill_dir(root, &dir, &skill.name, overwrite, &mut c);
@@ -2653,7 +2630,10 @@ fn print_help_run() {
   println!("{}", h_dim("  clone bind-mounted at /home/agent/repo. Skills must not git fetch/pull inside."));
   println!("{}", h_dim("  After exit, scsh copies each skill's `result` file back into your repo (under tmp/)."));
   println!("{}", h_dim("  Skills with `commits: true` may also bring commits back via local cherry-pick."));
-  println!("{}", h_dim("  Unavailable harnesses are skipped; the run fails only when every selected skill is skipped."));
+  println!(
+    "{}",
+    h_dim("  Unavailable harnesses are skipped; the run fails only when every selected skill is skipped.")
+  );
   println!();
   println!("{}", h_head("Exit codes"));
   help_row("0", "Every selected skill that ran finished successfully (skipped harnesses are OK).");
@@ -2682,7 +2662,10 @@ fn print_help_config() {
   println!();
   println!("{} {}", h_head(".scsh.yml"), console::style("\u{2014} the project config file").bold());
   println!("{}", h_dim("The whole file is just your skills; scsh owns the container command. The base"));
-  println!("{}", h_dim("image is built in (Debian + shared base + per-harness CLI) — no version/project/image header."));
+  println!(
+    "{}",
+    h_dim("image is built in (Debian + shared base + per-harness CLI) — no version/project/image header.")
+  );
   println!();
   print!(
     "{}",
@@ -2908,7 +2891,10 @@ mod tests {
     let home = OsString::from("/home/u");
     assert_eq!(runtime::opencode_auth_in(Some(&xdg), Some(&home)), Some(PathBuf::from("/data/opencode/auth.json")));
     // No XDG → HOME/.local/share.
-    assert_eq!(runtime::opencode_auth_in(None, Some(&home)), Some(PathBuf::from("/home/u/.local/share/opencode/auth.json")));
+    assert_eq!(
+      runtime::opencode_auth_in(None, Some(&home)),
+      Some(PathBuf::from("/home/u/.local/share/opencode/auth.json"))
+    );
     // Empty XDG falls back to HOME too.
     let empty = OsString::from("");
     assert_eq!(
@@ -2976,14 +2962,8 @@ mod tests {
   fn opencode_config_path_prefers_xdg_then_home() {
     let xdg = OsString::from("/cfg");
     let home = OsString::from("/home/u");
-    assert_eq!(
-      runtime::opencode_config_dir(Some(&xdg), Some(&home)),
-      Some(PathBuf::from("/cfg/opencode"))
-    );
-    assert_eq!(
-      runtime::opencode_config_dir(None, Some(&home)),
-      Some(PathBuf::from("/home/u/.config/opencode"))
-    );
+    assert_eq!(runtime::opencode_config_dir(Some(&xdg), Some(&home)), Some(PathBuf::from("/cfg/opencode")));
+    assert_eq!(runtime::opencode_config_dir(None, Some(&home)), Some(PathBuf::from("/home/u/.config/opencode")));
   }
 
   #[test]

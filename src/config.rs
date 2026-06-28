@@ -306,10 +306,7 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
     }
     for (path, names) in by_result {
       if names.len() > 1 {
-        errors.push(format!(
-          "duplicate result path '{path}' shared by invocations: {}",
-          names.join(", ")
-        ));
+        errors.push(format!("duplicate result path '{path}' shared by invocations: {}", names.join(", ")));
       }
     }
   }
@@ -331,9 +328,8 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
       errors.push(format!("duplicate key 'skills.{name}.{k}'"));
     }
   }
-  const SK: &[&str] = &[
-    "harness", "model", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result",
-  ];
+  const SK: &[&str] =
+    &["harness", "model", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result"];
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
@@ -342,9 +338,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     }
   }
   if fm.contains_key("skill") {
-    errors.push(format!(
-      "'skills.{name}.skill' is not allowed — the skill key must match the .skills/<name>/ folder"
-    ));
+    errors.push(format!("'skills.{name}.skill' is not allowed — the skill key must match the .skills/<name>/ folder"));
   }
 
   // harness: required for direct runs; forbidden when `invocations:` is set.
@@ -636,14 +630,16 @@ fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> V
     let commits = match fm.get("commits").copied() {
       None => None,
       Some(Node::Map(_)) => {
-        errors.push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false, not a mapping"));
+        errors
+          .push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false, not a mapping"));
         None
       }
       Some(Node::Scalar(s)) => match s.trim() {
         "true" => Some(true),
         "false" => Some(false),
         other => {
-          errors.push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false (got '{other}')"));
+          errors
+            .push(format!("'skills.{skill}.invocations.{default_name}.commits' must be true or false (got '{other}')"));
           None
         }
       },
@@ -975,7 +971,8 @@ mod tests {
     assert_eq!(add.invocations.len(), 3);
     let expanded = expand_invocations(&cfg);
     assert_eq!(expanded.len(), 5);
-    let add_oc = expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
+    let add_oc =
+      expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
     assert_eq!(add_oc.skill_source, "add");
     assert_eq!(add_oc.harness, Harness::Opencode);
     assert_eq!(add_oc.model.as_deref(), Some("openai/gpt-5.4-mini-fast"));
@@ -983,7 +980,8 @@ mod tests {
     assert!(add_oc.commits, "add-opencode-gpt-5.4-mini-fast is commit-enabled");
     let add_cl = expanded.iter().find(|s| s.name == "add-claude-sonnet-4-6").expect("add-claude-sonnet-4-6");
     assert!(!add_cl.commits);
-    let mul_oc = expanded.iter().find(|s| s.name == "multiply-opencode-gpt-5.4-mini-fast").expect("multiply-opencode-gpt");
+    let mul_oc =
+      expanded.iter().find(|s| s.name == "multiply-opencode-gpt-5.4-mini-fast").expect("multiply-opencode-gpt");
     assert_eq!(mul_oc.profile.as_deref(), Some("multiply"));
   }
 
@@ -1136,10 +1134,7 @@ mod tests {
         harness: opencode
 "#;
     let errs = validate(yaml).unwrap_err();
-    assert!(
-      errs.iter().any(|e| e.contains("duplicate result path 'tmp/route-a.json'")),
-      "got {errs:?}"
-    );
+    assert!(errs.iter().any(|e| e.contains("duplicate result path 'tmp/route-a.json'")), "got {errs:?}");
   }
 
   #[test]
@@ -1456,16 +1451,14 @@ skills:
   #[test]
   fn unknown_top_level_key_reported() {
     // version/project/image are no longer part of the schema — they read as unknown.
-    let errs = validate(
-      &format!(
-        "{}version: 1\n",
-        one_skill(
-          r#"    harness: opencode
+    let errs = validate(&format!(
+      "{}version: 1\n",
+      one_skill(
+        r#"    harness: opencode
     result: tmp/x.json
 "#,
-        )
-      ),
-    )
+      )
+    ))
     .unwrap_err();
     assert!(errs.iter().any(|e| e.contains("unknown top-level key 'version'")), "got {errs:?}");
     assert!(errs.iter().any(|e| e.contains("only top-level key is 'skills'")), "got {errs:?}");

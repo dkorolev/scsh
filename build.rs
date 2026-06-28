@@ -29,11 +29,8 @@ fn main() {
     );
   }
 
-  std::fs::write(
-    out_dir.join("scsh_build_info.rs"),
-    format!("pub const GIT_DESCRIBE: &str = {describe:?};\n"),
-  )
-  .expect("write scsh_build_info.rs");
+  std::fs::write(out_dir.join("scsh_build_info.rs"), format!("pub const GIT_DESCRIBE: &str = {describe:?};\n"))
+    .expect("write scsh_build_info.rs");
 
   // Kept for integration tests (`option_env!("SCSH_GIT_DESCRIBE")`).
   println!("cargo:rustc-env=SCSH_GIT_DESCRIBE={describe}");

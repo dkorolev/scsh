@@ -438,15 +438,28 @@ fn init_demo_then_list() {
   assert_eq!(init.code, 0, "got: {}", init.out);
   let cfg = std::fs::read_to_string(d.join(".scsh.yml")).expect(".scsh.yml written");
   // The v1.0 config is just the skills — no version/project/image boilerplate.
-  assert!(cfg.contains("skills:") && cfg.contains("  add:") && cfg.contains("invocations:") && cfg.contains("  multiply:"), "got: {cfg}");
+  assert!(
+    cfg.contains("skills:") && cfg.contains("  add:") && cfg.contains("invocations:") && cfg.contains("  multiply:"),
+    "got: {cfg}"
+  );
   assert!(!cfg.contains("version:") && !cfg.contains("project:") && !cfg.contains("image:"), "got: {cfg}");
 
   // `scsh list`: every skill grouped by profile — `add` under `default`, `multiply` under
   // its profile, each with its result file. No container internals (those need --verbose).
   let list = scsh(&d, &["list"]);
   assert_eq!(list.code, 0, "got: {}", list.out);
-  assert!(list.out.contains("add-opencode-gpt-5.4-mini-fast") && list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json"), "got: {}", list.out);
-  assert!(list.out.contains("multiply-opencode-gpt-5.4-mini-fast") && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"), "got: {}", list.out);
+  assert!(
+    list.out.contains("add-opencode-gpt-5.4-mini-fast")
+      && list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json"),
+    "got: {}",
+    list.out
+  );
+  assert!(
+    list.out.contains("multiply-opencode-gpt-5.4-mini-fast")
+      && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"),
+    "got: {}",
+    list.out
+  );
   assert!(!list.out.contains("FROM debian"), "internals must be hidden without --verbose; got: {}", list.out);
   assert!(!list.out.contains("git clone"), "internals must be hidden without --verbose; got: {}", list.out);
 
@@ -476,7 +489,8 @@ fn list_groups_skills_by_profile() {
   assert_eq!(list.code, 0, "got: {}", list.out);
   // Both skills appear with their result files, and the profile groups are shown.
   assert!(
-    list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json") && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"),
+    list.out.contains("tmp/add_opencode-gpt-5.4-mini-fast_result.json")
+      && list.out.contains("tmp/multiply_opencode-gpt-5.4-mini-fast_result.json"),
     "got: {}",
     list.out
   );
@@ -519,7 +533,13 @@ fn list_json_is_machine_readable() {
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
   // The reserved `default` (add) and the declared `multiply`, each with its skill.
   assert!(r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "add-opencode-glm-5.2"] }"#), "got: {}", r.out);
-  assert!(r.out.contains(r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt-5.4-mini-fast", "multiply-claude-sonnet-4-6"] }"#), "got: {}", r.out);
+  assert!(
+    r.out.contains(
+      r#"{ "name": "multiply", "skills": ["multiply-opencode-gpt-5.4-mini-fast", "multiply-claude-sonnet-4-6"] }"#
+    ),
+    "got: {}",
+    r.out
+  );
   // --json is list-only (parse-time rejection, exit 2).
   let bad = scsh(&d, &["run", "--json"]);
   assert_eq!(bad.code, 2, "got: {}", bad.out);
@@ -736,11 +756,7 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   // Collapsed: a closed triangle heads each proc row, with a [N] keyboard-toggle hint.
   assert!(r.out.contains("▶ "), "a collapsed ▶ triangle should be present; got: {}", r.out);
-  assert!(
-    r.out.contains("[0]") && r.out.contains("[1]"),
-    "rows carry their shortcut hint; got: {}",
-    r.out
-  );
+  assert!(r.out.contains("[0]") && r.out.contains("[1]"), "rows carry their shortcut hint; got: {}", r.out);
   // Expanded: an open triangle, plus output lines each stamped relative to the proc's start.
   assert!(r.out.contains("▼ "), "an expanded ▼ triangle should appear; got: {}", r.out);
   assert!(r.out.contains("+0.3s") && r.out.contains("STEP 1/3"), "timestamped build output; got: {}", r.out);
@@ -757,9 +773,7 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
 }
 
 fn claude_container_auth_ready() -> bool {
-  std::env::var("CLAUDE_CODE_OAUTH_TOKEN")
-    .map(|s| !s.is_empty())
-    .unwrap_or(false)
+  std::env::var("CLAUDE_CODE_OAUTH_TOKEN").map(|s| !s.is_empty()).unwrap_or(false)
     || std::env::var_os("HOME")
       .map(PathBuf::from)
       .is_some_and(|home| home.join(".claude").join(".credentials.json").is_file())
@@ -770,14 +784,10 @@ fn claude_integration_ready() -> bool {
 }
 
 fn opencode_auth_ready() -> bool {
-  std::env::var_os("HOME")
-    .map(PathBuf::from)
-    .is_some_and(|home| {
-      let xdg = std::env::var_os("XDG_DATA_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| home.join(".local/share"));
-      xdg.join("opencode").join("auth.json").is_file()
-    })
+  std::env::var_os("HOME").map(PathBuf::from).is_some_and(|home| {
+    let xdg = std::env::var_os("XDG_DATA_HOME").map(PathBuf::from).unwrap_or_else(|| home.join(".local/share"));
+    xdg.join("opencode").join("auth.json").is_file()
+  })
 }
 
 #[test]
@@ -808,11 +818,7 @@ fn run_skips_claude_skills_when_claude_unavailable() {
   git(&d, &["commit", "-m", "two-route demo"]);
   let r = scsh(&d, &["run"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
-  assert!(
-    r.out.contains("skipping 'add-claude-sonnet-4-6'"),
-    "got: {}",
-    r.out
-  );
+  assert!(r.out.contains("skipping 'add-claude-sonnet-4-6'"), "got: {}", r.out);
   assert!(r.out.contains("add-opencode-gpt-5.4-mini-fast") && r.out.contains("2 + 3 = 5"), "got: {}", r.out);
 }
 
