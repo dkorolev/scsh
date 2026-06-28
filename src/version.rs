@@ -1,5 +1,7 @@
 //! scsh version and build-time git stamp for CLI and session browser UI.
 
+use std::sync::OnceLock;
+
 include!(concat!(env!("OUT_DIR"), "/scsh_build_info.rs"));
 
 /// Crate version from `Cargo.toml` (e.g. `1.8.0`).
@@ -9,6 +11,11 @@ pub fn pkg_version() -> &'static str {
 
 /// Git short hash from build time, or a runtime `git rev-parse` fallback; empty when unknown.
 pub fn git_stamp() -> String {
+  static CACHE: OnceLock<String> = OnceLock::new();
+  CACHE.get_or_init(compute_git_stamp).clone()
+}
+
+fn compute_git_stamp() -> String {
   let embedded = GIT_DESCRIBE;
   if !embedded.is_empty() {
     return embedded.to_string();

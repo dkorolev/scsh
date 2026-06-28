@@ -3,8 +3,6 @@
 //! Serves a small web UI on `127.0.0.1:7274` (default) that collects events from
 //! `scsh run` — image builds, container starts, and harness output — grouped by session id.
 
-#![allow(dead_code, unused_imports)]
-
 mod client;
 mod html;
 mod jsonio;

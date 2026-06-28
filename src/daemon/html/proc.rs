@@ -106,9 +106,6 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
         .map(|m| esc(m))
         .unwrap_or_else(|| r#"<span class="dim">(harness default)</span>"#.to_string());
       parts.push(format!(r#"<span><strong>model</strong> {model}</span>"#));
-      if parts.is_empty() {
-        return String::new();
-      }
       format!(r#"<div class="proc-meta">{parts}</div>"#, parts = parts.join(" · "))
     }
   }

@@ -17,6 +17,7 @@ const PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const WS_TICK: Duration = Duration::from_millis(500);
 const MAX_PROC_LINES: usize = 5000;
 const MAX_HTTP_BODY: usize = 512 * 1024;
+const MAX_HTTP_HEADER: usize = 64 * 1024;
 
 pub struct Server {
   store: Arc<Mutex<Store>>,
@@ -191,7 +192,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
       continue;
     }
 
-    if buf.len() > 65536 + content_length {
+    if buf.len() > MAX_HTTP_HEADER + content_length {
       break;
     }
 
@@ -803,15 +804,16 @@ mod tests {
   fn server_new_resets_started_at_on_reload() {
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
     std::fs::create_dir_all(crate::daemon::paths::daemon_dir()).unwrap();
+    let path = state_file(port);
+    let _guard = StateFileGuard(path.clone());
     let stale = Store::new(DaemonMode::Persistent, port, 1);
-    std::fs::write(state_file(port), save_store(&stale)).unwrap();
+    std::fs::write(&path, save_store(&stale)).unwrap();
     let before = now_unix_secs();
     let server = Server::new(DaemonMode::Persistent, port);
     server.persist_now();
-    let loaded = load_store(&std::fs::read_to_string(state_file(port)).unwrap()).unwrap();
+    let loaded = load_store(&std::fs::read_to_string(&path).unwrap()).unwrap();
     assert!(loaded.started_at >= before, "reload should refresh started_at");
     assert_ne!(loaded.started_at, 1);
-    let _ = std::fs::remove_file(state_file(port));
   }
 
   #[test]
@@ -829,5 +831,13 @@ mod tests {
       .unwrap();
     drop(client);
     assert!(handle.join().unwrap().is_err());
+  }
+
+  struct StateFileGuard(std::path::PathBuf);
+
+  impl Drop for StateFileGuard {
+    fn drop(&mut self) {
+      let _ = std::fs::remove_file(&self.0);
+    }
   }
 }

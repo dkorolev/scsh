@@ -33,8 +33,14 @@ jobs:
       - name: Build (release)
         run: cargo build --release
 
-      - name: Test (debug)
-        run: cargo test
+      - name: Unit tests (debug)
+        run: cargo test --bin scsh
 
-      - name: Test (release)
-        run: cargo test --release
+      - name: Unit tests (release)
+        run: cargo test --release --bin scsh
+
+      - name: Integration tests (debug)
+        run: cargo test --test cli
+
+      - name: Integration tests (release)
+        run: cargo test --release --test cli
