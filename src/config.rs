@@ -773,11 +773,11 @@ mod tests {
     assert_eq!(add_oc.result, "tmp/add_opencode_gpt_result.json");
     assert_eq!(add_oc.profile, None);
     assert!(add_oc.commits, "add-opencode-gpt is commit-enabled");
-    let add_cl = cfg.skills.iter().find(|s| s.name == "add-claude-sonnet").expect("add-claude-sonnet present");
+    let add_cl = cfg.skills.iter().find(|s| s.name == "add-claude-sonnet-4-6").expect("add-claude-sonnet-4-6 present");
     assert_eq!(add_cl.skill_source, "add");
     assert_eq!(add_cl.harness, Harness::Claude);
-    assert_eq!(add_cl.result, "tmp/add_claude_sonnet_result.json");
-    assert!(!add_cl.commits, "add-claude-sonnet does not contribute commits");
+    assert_eq!(add_cl.result, "tmp/add_claude_sonnet_4_6_result.json");
+    assert!(!add_cl.commits, "add-claude-sonnet-4-6 does not contribute commits");
     assert_eq!(add_cl.model.as_deref(), Some("sonnet"));
     let add_glm = cfg.skills.iter().find(|s| s.name == "add-opencode-glm-5.2").expect("add-opencode-glm-5.2 present");
     assert_eq!(add_glm.harness, Harness::Opencode);
@@ -788,10 +788,10 @@ mod tests {
     assert_eq!(mul_oc.skill_source, "multiply");
     assert_eq!(mul_oc.profile.as_deref(), Some("multiply"));
     assert_eq!(mul_oc.result, "tmp/multiply_opencode_gpt_result.json");
-    let mul_cl = cfg.skills.iter().find(|s| s.name == "multiply-claude-sonnet").expect("multiply-claude-sonnet present");
+    let mul_cl = cfg.skills.iter().find(|s| s.name == "multiply-claude-sonnet-4-6").expect("multiply-claude-sonnet-4-6 present");
     assert_eq!(mul_cl.skill_source, "multiply");
     assert_eq!(mul_cl.harness, Harness::Claude);
-    assert_eq!(mul_cl.result, "tmp/multiply_claude_sonnet_result.json");
+    assert_eq!(mul_cl.result, "tmp/multiply_claude_sonnet_4_6_result.json");
   }
 
   #[test]

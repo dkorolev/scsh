@@ -43,7 +43,7 @@ skills:
       - A: ${A:-2}
       - B: ${B:-3}
     result: tmp/add_opencode_gpt_result.json
-  add-claude-sonnet:              # sonnet-4-6 (harness model: sonnet)
+  add-claude-sonnet-4-6:          # sonnet-4-6 (harness model: sonnet)
     skill: add
     harness: claude
     model: sonnet
@@ -51,7 +51,7 @@ skills:
     env:
       - A: ${A:-2}
       - B: ${B:-3}
-    result: tmp/add_claude_sonnet_result.json
+    result: tmp/add_claude_sonnet_4_6_result.json
   add-opencode-glm-5.2:           # glm-5.2
     skill: add
     harness: opencode
@@ -75,7 +75,7 @@ skills:
       - X: ${X}
       - Y: ${Y}
     result: tmp/multiply_opencode_gpt_result.json
-  multiply-claude-sonnet:
+  multiply-claude-sonnet-4-6:
     skill: multiply
     harness: claude
     model: sonnet
@@ -84,4 +84,4 @@ skills:
     env:
       - X: ${X}
       - Y: ${Y}
-    result: tmp/multiply_claude_sonnet_result.json
+    result: tmp/multiply_claude_sonnet_4_6_result.json
