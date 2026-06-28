@@ -2,8 +2,9 @@
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use super::html;
@@ -18,6 +19,10 @@ const WS_TICK: Duration = Duration::from_millis(500);
 const MAX_PROC_LINES: usize = 5000;
 const MAX_HTTP_BODY: usize = 512 * 1024;
 const MAX_HTTP_HEADER: usize = 64 * 1024;
+
+fn lock_store(store: &Mutex<Store>) -> MutexGuard<'_, Store> {
+  store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
 
 pub struct Server {
   store: Arc<Mutex<Store>>,
@@ -75,7 +80,10 @@ impl Server {
           let ws_dirty = Arc::clone(&self.ws_dirty);
           let ws_hub = Arc::clone(&self.ws_hub);
           std::thread::spawn(move || {
-            if handle_connection(stream, &store, &ws_hub).unwrap_or(false) {
+            let mutated =
+              catch_unwind(AssertUnwindSafe(|| handle_connection(stream, &store, &ws_hub).unwrap_or(false)))
+                .unwrap_or(false);
+            if mutated {
               dirty.store(true, Ordering::Relaxed);
               ws_dirty.store(true, Ordering::Relaxed);
             }
@@ -91,7 +99,7 @@ impl Server {
         let now = now_unix_secs();
         let include_sessions = self.ws_dirty.load(Ordering::Relaxed);
         let json = {
-          let mut store = self.store.lock().unwrap();
+          let mut store = lock_store(&self.store);
           store.reconcile(now);
           if include_sessions {
             tick_json(&*store, now)
@@ -108,7 +116,7 @@ impl Server {
 
       let now = now_unix_secs();
       let shutdown = {
-        let mut store = self.store.lock().unwrap();
+        let mut store = lock_store(&self.store);
         store.reconcile(now);
         store.should_shutdown_ephemeral(now)
       };
@@ -140,7 +148,7 @@ impl Server {
   }
 
   fn persist_now(&self) {
-    let store = self.store.lock().unwrap();
+    let store = lock_store(&self.store);
     let text = save_store(&store);
     let _ = std::fs::write(state_file(self.port), text);
     self.dirty.store(false, Ordering::Relaxed);
@@ -263,12 +271,12 @@ fn route(req: &HttpRequest, store: &Arc<Mutex<Store>>) -> (u16, String, &'static
   }
   match req.path.as_str() {
     "/" => {
-      let html = html::index_page(&*store.lock().unwrap());
+      let html = html::index_page(&*lock_store(store));
       (200, html, "text/html; charset=utf-8", false)
     }
     path if path.starts_with("/session/") => {
       let id = path.strip_prefix("/session/").unwrap_or("");
-      let store = store.lock().unwrap();
+      let store = lock_store(store);
       if let Some(page) = html::session_page(&*store, id) {
         (200, page, "text/html; charset=utf-8", false)
       } else {
@@ -276,14 +284,14 @@ fn route(req: &HttpRequest, store: &Arc<Mutex<Store>>) -> (u16, String, &'static
       }
     }
     "/api/v1/sessions" => {
-      let store = store.lock().unwrap();
+      let store = lock_store(store);
       let ids: Vec<String> = store.sessions.keys().cloned().collect();
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
-      let store = store.lock().unwrap();
+      let store = lock_store(store);
       if let Some(s) = store.sessions.get(id) {
         (200, crate::daemon::jsonio::session_json_api(s), "application/json", false)
       } else {
@@ -300,7 +308,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
     _ => return false,
   };
   let now = now_unix_secs();
-  let mut store = store.lock().unwrap();
+  let mut store = lock_store(store);
   store.touch(now);
 
   match path {
