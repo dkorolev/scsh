@@ -1,0 +1,19 @@
+[package]
+name = "scsh"
+version = "0.1.0"
+edition = "2021"
+description = "Scoped Skills Helper — preflight a git repo and run its scoped skills in ephemeral containers."
+license = "MIT"
+
+[[bin]]
+name = "scsh"
+path = "src/main.rs"
+
+# Tuned for a small, self-contained release binary. `cargo test` uses the dev
+# profile (unwinding), so these settings do not affect the test run.
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
