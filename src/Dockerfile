@@ -113,6 +113,7 @@ RUN set -eu; \
 
 WORKDIR /home/agent/repo
 
+# SCSH=1: skill runs under scsh. Repo is bind-mounted (host pushed clone IN). Skills must not git fetch/pull inside. After exit, scsh pulls result OUT; commits OUT only when commits: true.
 ENV SCSH=1
 ENV HOME=/home/agent
 ENV LANG=C.UTF-8

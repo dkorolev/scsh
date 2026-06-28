@@ -945,11 +945,11 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     }
   }
 
-  // 4. Bring back commits from commit-enabled skills. This runs SEQUENTIALLY, after
-  //    the parallel work: each skill's commits are rebased onto the caller's
-  //    now-current branch (which earlier skills may have advanced), so order doesn't
-  //    matter and a plain fast-forward isn't assumed. Commits that don't apply cleanly
-  //    are saved to a distinct branch instead of touching the caller's branch.
+  // 4. Pull commits OUT from commit-enabled skills (host-only, after containers exit).
+  //    Runs SEQUENTIALLY: each skill's new commits in its run clone (base..clone-HEAD)
+  //    are fetched from the LOCAL clone path — not from GitHub — and cherry-picked onto
+  //    the caller's branch. Only when commits: true AND the skill actually committed.
+  //    Commits that don't apply cleanly are saved to scsh/incoming/<skill>-… instead.
   if let Some(base) = &base {
     let stamp = runtime::format_utc_timestamp(secs);
     for (skill, o) in skills.iter().zip(outcomes.iter()) {
@@ -1077,7 +1077,9 @@ fn run_one_skill(
     }
   }
 
-  // Own clone of the repo, so parallel skills never share a working tree.
+  // Own clone of the repo on the HOST (push IN). Bind-mounted into the container at
+  // /home/agent/repo — skills must not git fetch/pull/push/clone inside. After the
+  // container exits, scsh pulls the result file OUT; commits too when commits: true.
   spinner.note("cloning…");
   let run_dir = match prepare_run_dir(secs, &skill.name, &rt.name) {
     Ok(d) => d,
@@ -1178,6 +1180,7 @@ fn run_one_skill(
     }
   }
 
+  // Pull the result file OUT of the run clone into the caller repo (host-side, always).
   // The result file is required: missing → this skill (and the whole run) fails.
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
     Ok(dest) => {
@@ -1302,7 +1305,9 @@ fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, Str
 
 /// Full clone (all history, all branches) of the host repo at `root` into the
 /// already-created, empty `run_dir`, then materialize every remote branch as a
-/// local one so the container sees them all.
+/// local one so the container sees them all. This is host-side work only — the
+/// container gets a read-only snapshot via bind-mount and must never reach out to
+/// git remotes to "refresh" what scsh already pushed in.
 fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result<(), String> {
   let cmd = runtime::clone_command(&root.to_string_lossy(), &run_dir.to_string_lossy());
   let (ok, last) = spinner.run(&cmd[0], &cmd[1..]).map_err(|e| format!("failed to run git clone: {e}"))?;
@@ -1335,9 +1340,10 @@ fn set_clone_identity(run_dir: &Path) {
   let _ = git_capture(run_dir, &["config", "user.name", SCSH_COMMIT_NAME]);
 }
 
-/// Best-effort: create a local branch for each `origin/*` branch the clone
-/// fetched, so `git branch` in the container lists them all. Failures here never
-/// abort the run — the full history is already present either way.
+/// Best-effort: create a local branch for each `origin/*` branch the host-side
+/// clone already has, so `git branch` in the container lists them all without any
+/// fetch inside the container. Failures here never abort the run — the full history
+/// is already present either way.
 fn materialize_branches(run_dir: &std::path::Path) {
   let current = git_capture(run_dir, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default();
   let refs = match git_capture(run_dir, &["for-each-ref", "--format=%(refname:short)", "refs/remotes/origin"]) {
@@ -1515,10 +1521,10 @@ fn resolve_env(env: &[config::EnvVar]) -> Result<Vec<(String, String)>, String> 
   Ok(out)
 }
 
-/// Require the skill's `result` file in the clone, then copy it back to the same
-/// relative path in the host repo, moving any pre-existing file aside to
-/// `<name>.bak.YYYYMMDD-HHMMSS-utc` first. Returns the destination path. Pure of
-/// terminal output — the caller's spinner / summary does the reporting.
+/// Pull the skill's `result` file OUT of the run clone into the caller repo (host-side,
+/// after the container exits). Moves any pre-existing host file aside to
+/// `<name>.bak.YYYYMMDD-HHMMSS-utc` first. This is always done for every skill — unlike
+/// commits, which are pulled out only when `commits: true` and the skill committed.
 fn collect_skill_result(root: &Path, run_dir: &Path, result: &str, secs: u64) -> Result<String, String> {
   let produced = run_dir.join(result);
   if !produced.is_file() {
@@ -1566,15 +1572,12 @@ enum Integration {
   Saved { branch: String, count: usize },
 }
 
-/// Bring a commit-enabled skill's new commits — the ones it added to its clone, i.e.
-/// `base..clone-HEAD` — into the caller repo at `root`. Tries to rebase them onto the
-/// caller's CURRENT branch via cherry-pick (so multiple skills compose regardless of
-/// order, and an out-of-order fast-forward is never assumed); if they don't apply
-/// cleanly, saves them to a distinct `scsh/incoming/<skill>-<stamp>-<short>` branch and
-/// leaves the caller's branch alone. Returns `None` when the skill added no commits.
-///
-/// Bringing commits in is a real side effect: each run that commits adds its commits
-/// again (so running twice yields two commits — there is no dedup).
+/// Pull new commits OUT of a commit-enabled skill's run clone into the caller repo.
+/// Called on the **host** after the container exits. Only when the skill declared
+/// `commits: true` and actually added commits (`base..clone-HEAD` non-empty).
+/// Uses `git fetch` from the **local run-clone path** — not from GitHub — then
+/// cherry-picks onto the caller's current branch. Returns `None` when the skill added
+/// no commits. scsh never pushes to any remote.
 fn integrate_commits(
   root: &Path, clone: &Path, base: &str, skill: &str, stamp: &str,
 ) -> Result<Option<Integration>, String> {
@@ -1586,7 +1589,8 @@ fn integrate_commits(
   if tip == base {
     return Ok(None); // the skill added nothing
   }
-  // Make the clone's new objects available in the caller repo (fetch its branch tip).
+  // Make the clone's new objects available in the caller repo (host pulls from the
+  // local run-clone path — NOT from GitHub; the container never contacted a remote).
   if !git_status_ok(root, &["fetch", "--no-tags", "--quiet", &clone.to_string_lossy(), "HEAD"]) {
     return Err("could not fetch the skill's commits from its clone".into());
   }
@@ -2680,6 +2684,14 @@ fn print_help_internals() {
 
   scsh injects SCSH_RESULT=<result path> into every container so one skill folder can
   serve multiple invocations with different result files.
+
+  Repo sync — push IN, pull OUT (never GitHub from inside the container):
+  scsh git-clones on the HOST into /tmp/scsh-*-run-* and bind-mounts at /home/agent/repo
+  (push into the container). Skills must not git fetch, pull, push, or clone inside.
+  After the container exits, scsh on the HOST pulls OUT: (1) the result file — always;
+  (2) new commits from the run clone — only when commits: true AND the skill committed —
+  via local fetch from the clone path and cherry-pick (never from GitHub). scsh never
+  pushes to any remote. Reviewer skills are review-only (no commits).
 
   Each skill MUST produce its declared `result` file. Missing after the container
   exits -> that skill fails and the whole invocation exits non-zero; otherwise scsh

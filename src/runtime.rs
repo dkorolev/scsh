@@ -220,7 +220,8 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str
     Harness::Opencode => {
       let instruction = format!(
         "run skill {skill_source}. Follow .skills/{skill_source}/SKILL.md exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable)."
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       let mut cmd = String::from("opencode");
       if let Some(m) = model {
@@ -235,7 +236,8 @@ pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str
     Harness::Claude => {
       let prompt = format!(
         "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable)."
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       let mut cmd = String::from("claude -p ");
       cmd.push_str(&shell_quote(&prompt));
@@ -706,10 +708,11 @@ pub fn sanitize_component(s: &str) -> String {
 // Cloning the host repo into the run dir
 // ---------------------------------------------------------------------------
 
-/// `git clone` argv that makes a full (deep, all-history) clone of the host repo
-/// at `src` into `dst`. A local clone already fetches every branch into
-/// `refs/remotes/origin/*`; scsh then materializes them as local branches (see
-/// [`local_branches_to_create`]) so all branches are present in the container.
+/// `git clone` argv: host-side push IN — full clone of the host repo at `src` into `dst`.
+/// This is the **only** git step before the container. The clone is bind-mounted at
+/// `/home/agent/repo` (push into the container). Skills inside MUST NOT fetch/pull again.
+/// After the container exits, scsh pulls result files OUT on the host; commits too when
+/// `commits: true` (local fetch from `dst`, not GitHub — see `integrate_commits`).
 pub fn clone_command(src: &str, dst: &str) -> Vec<String> {
   vec!["git".into(), "clone".into(), src.into(), dst.into()]
 }
@@ -993,6 +996,7 @@ mod tests {
     assert!(cmd.contains("run skill add"));
     assert!(cmd.contains("tmp/add.json"));
     assert!(cmd.contains("SCSH_RESULT"));
+    assert!(cmd.contains("preloaded"));
     assert!(cmd.ends_with("2>&1 | tee \"$SCSH_RUN_LOG\""));
     let cmd = harness_command(Harness::Opencode, None, "multiply", "tmp/mul.json");
     assert!(cmd.starts_with("opencode run "));

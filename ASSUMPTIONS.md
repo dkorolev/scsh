@@ -33,6 +33,26 @@ Review these before merging or extending.
 - **`SCSH_RESULT` env var** injected into every container with the invocation's `result:` path so one skill folder serves multiple invocations with different output files.
 - Demo scripts (`add.py`, `multiply.py`) honor `SCSH_RESULT`.
 
+## Repo sync (push IN, pull OUT — never GitHub from inside the container)
+
+scsh moves git state **only between the host and the run clone** on local disk. Containers never contact GitHub (or any remote).
+
+**Before the container (host pushes IN):**
+
+1. scsh **`git clone`s on the host** into `/tmp/scsh-*-run-*` from the caller's committed state.
+2. scsh materializes `origin/*` as local branches in that clone.
+3. scsh **bind-mounts** the clone at `/home/agent/repo` — that is the push into the container. The skill sees a complete snapshot; it must not `git fetch`, `git pull`, `git push`, or `git clone` to "refresh" it.
+
+**After the container exits (host pulls OUT — externally, on the host):**
+
+1. **Result file:** scsh copies the skill's declared `result` from the run clone back into the caller repo (`collect_skill_result`). Always, for every skill.
+2. **Commits (optional):** only when the skill declares `commits: true` *and* the skill actually added commits in its clone (`base..clone-HEAD` non-empty). Then scsh **on the host** fetches those objects from the **local run-clone path** (not from GitHub) and cherry-picks them onto the caller's branch (`integrate_commits`). Reviewer skills do not commit; this path is for skills like demo `add`.
+3. scsh never pushes to any remote.
+
+If `origin/main` is wrong or missing in the clone, fix the **host** checkout before `scsh run` — fetching inside the container is forbidden and usually fails (the run clone's `origin` is often a filesystem path).
+
+**`code-beautiful-review`** may `git fetch` on the **host** while pinning the review base (steps 1–2); that prepares what gets pushed into containers and does not authorize skills inside containers to fetch.
+
 ## Cache keys
 
 - Include invocation name, skill source, harness, model, skill files, env, and repo tree hash.
