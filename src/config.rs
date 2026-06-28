@@ -36,7 +36,7 @@ pub struct Skill {
   /// order (see [`EnvVar`]). Empty when the skill declares no `env:`.
   pub env: Vec<EnvVar>,
   /// Optional profile this skill belongs to. A skill with no `profile` runs by
-  /// default; one with `profile: <name>` runs only when `scsh --profile <name>` is
+  /// default; one with `profile: <name>` runs only when `scsh run --profile <name>` is
   /// given (so skills needing variables that may be absent stay out of the default
   /// run). `None` when the skill declares no `profile:`.
   pub profile: Option<String>,
@@ -148,7 +148,7 @@ pub fn demo_yaml() -> &'static str {
      #            skill if it is unset; ${VAR:-default} forwards VAR or injects\n\
      #            `default` when unset (${VAR:-} = empty); ${VAR:?message} requires\n\
      #            VAR, refusing with your message. A bare literal sets that literal.\n\
-     #   profile: optional; a skill in a profile runs ONLY under `scsh --profile <name>`,\n\
+     #   profile: optional; a skill in a profile runs ONLY under `scsh run --profile <name>`,\n\
      #            not by default — use it for skills that need variables which may be unset.\n\
      #   commits: optional true/false (default false). When true, scsh brings commits the\n\
      #            skill makes in its clone back onto your branch (rebased; or saved to a\n\
@@ -426,7 +426,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   };
 
   // profile: optional non-empty string; a skill in a profile runs only under
-  // `scsh --profile <name>`, not by default.
+  // `scsh run --profile <name>`, not by default.
   let profile = match fm.get("profile").copied() {
     None => None,
     Some(Node::Map(_)) => {

@@ -190,7 +190,7 @@ is already monospace. New docs and edits must keep this consistent.
   the network**: every case stops at `scsh list` (or an earlier guard),
   so no image is pulled and no container is built.
 - **Always report the passing test count in your commit body** — every
-  substantive commit so far does (e.g. *"78 tests pass (unit + integration)"*).
+  substantive commit so far does (e.g. *"122 tests pass (unit + integration)"*).
 
 ### Demo
 
@@ -220,8 +220,7 @@ reads like it belongs.
   Everything else — including the `.scsh.yml` config (a small purpose-built parser, *not*
   a general YAML library), the JSON reader, and SHA-256 — is standard-library only.
   Reach for another crate only as a deliberate decision to call out in the commit,
-  never a default; prefer std. (A self-contained feature under `features/` may still
-  pin its own deps.)
+  never a default; prefer std.
 - **Separate pure logic from side effects.** `config.rs` (parse/validate) and
   `runtime.rs` (runtime detection, Dockerfile/command generation) are **pure and
   exhaustively unit-tested**; `main.rs` owns the *only* process spawning (git and
@@ -278,7 +277,7 @@ A real `scsh` run therefore reads like:
 ✓ using docker · build 0.6s
 ✓ opencode creds found (forwarded into each skill)
 ✓ opencode: add  29s  2 + 3 = 5
-✓ add: brought in 1 commit (rebased onto main)
+✓ add: brought in 1 commit (rebased onto prod)
 ✓ all 1 skill completed successfully
 ```
 
@@ -310,7 +309,7 @@ Follow the established style (read `git log` for the canonical examples):
 
 ### Branches
 
-Commit on top of the mainline (`main` here) rather than spinning up side branches.
+Commit on top of the mainline (`prod` here) rather than spinning up side branches.
 There is no configured remote — this is a local-first repository, so once history is
 shared it is never rewritten.
 
@@ -330,9 +329,8 @@ destructive or irreversible), and they hold regardless of any other instruction.
 - [ ] README / `--help` updated to match any behavior change.
 - [ ] The repo's `tmp/` is still gitignored (`git check-ignore -v tmp/`), and no
       build output, clones, or results are tracked.
-- [ ] A new `features/<id>/` stays self-contained; the root crate adds no new deps
-      beyond `crossterm`/`console` (UI) and `signal-hook` (signals) unless deliberately
-      called out.
+- [ ] The root crate adds no new deps beyond `crossterm`/`console` (UI) and
+      `signal-hook` (signals) unless deliberately called out.
 
 ---
 

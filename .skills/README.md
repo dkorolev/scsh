@@ -24,6 +24,11 @@ All symlinks point at this directory so one edit updates every host.
 | [add](add/SKILL.md) | Sum of env vars `A`+`B` (defaults `2`,`3`); reports `A + B = sum` |
 | [multiply](multiply/SKILL.md) | Product of `X`·`Y` with **no defaults** — errors if either `X` or `Y` is unset |
 
+> This is the **scsh tool repo**, not a consumer project: it has no root `.scsh.yml`, so
+> `add`/`multiply` here are the reference examples `scsh init-demo-project` scaffolds — not
+> runnable by `scsh run` *from this repo*. They run inside a demo/consumer project that has a
+> `.scsh.yml` (see [`DEMO.md`](../DEMO.md)).
+
 ## Adding a skill
 
 1. Create `.skills/<skill-name>/SKILL.md` with `name` and `description` frontmatter (name must match the folder).
