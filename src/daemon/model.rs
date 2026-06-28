@@ -260,7 +260,7 @@ impl Store {
   }
 
   pub fn proc_mut(&mut self, session_id: &str, proc_index: usize) -> Option<&mut ProcRecord> {
-    self.session_mut(session_id).and_then(|s| s.procs.get_mut(proc_index))
+    self.session_mut(session_id).and_then(|s| s.procs.iter_mut().find(|p| p.index == proc_index))
   }
 
   pub fn insert_session(&mut self, id: String, session: Session) {

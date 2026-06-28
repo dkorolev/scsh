@@ -493,7 +493,7 @@ function renderSession(session, nowUnix) {
   procs.forEach(p => {
     const idx = String(p.index);
     const userOpen = open.has(idx);
-    let det = root.querySelector('details.proc[data-index="' + idx + '"]');
+    let det = root.querySelector('details.proc[data-index="' + CSS.escape(idx) + '"]');
     if (!det) {
       const wrap = document.createElement('div');
       wrap.innerHTML = procHtml(p, false, nowUnix);

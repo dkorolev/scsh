@@ -19,7 +19,9 @@ During `scsh run`, if no persistent daemon is already running, `scsh` auto-start
 shuts down **five minutes** after the last client disconnects.
 
 Every `scsh run` gets a session id of six random lowercase letters. When the run finishes, the
-last line printed is the permanent URL:
+last line printed is the deep link URL (reachable while a daemon is listening on that port;
+start `scsh daemon start` for durable post-run browsing, or rely on persisted state after
+`scsh daemon restart`):
 
 ```text
 http://127.0.0.1:7274/session/abcdef
@@ -94,7 +96,7 @@ the event model, JSON roundtrip, and session id format.
 ## Manual verification (`scsh run` → browser)
 
 Automated tests do not drive a full attended `scsh run` with browser attach. From the
-**scsh repo root** after `cargo build`, capture the binary you just built:
+**`scsh` repo root** after `cargo build`, capture the binary you just built:
 
 ```console
 export SCSH_BIN="$PWD/target/debug/scsh"
@@ -116,3 +118,11 @@ The steps below use `$SCSH_BIN` so they work after `cd` into a scratch directory
 For ephemeral mode, skip step 1: a short `$SCSH_BIN run` alone should spawn the
 daemon, attach, and shut it down after the run disconnects and the idle timeout elapses.
 If idle shutdown does not run, use `$SCSH_BIN daemon stop` as cleanup.
+
+7. Remove the scratch directory and any daemon artifacts under the system temp dir, for example:
+
+   ```console
+   rm -rf "$SCRATCH_DIR"
+   rm -f "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.json" \
+         "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.pid"
+   ```

@@ -138,6 +138,10 @@ fn read_client_frame_body(stream: &mut TcpStream, head: [u8; 2]) -> std::io::Res
   }
 
   let masked = head[1] & 0x80 != 0;
+  if !masked {
+    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "unmasked client frame"));
+  }
+
   let mut len = (head[1] & 0x7F) as usize;
   if len == 126 {
     let mut ext = [0u8; 2];
@@ -149,42 +153,52 @@ fn read_client_frame_body(stream: &mut TcpStream, head: [u8; 2]) -> std::io::Res
     len = u64::from_be_bytes(ext) as usize;
   }
 
-  let mut mask = [0u8; 4];
-  if masked {
-    stream.read_exact(&mut mask)?;
-  }
-  if len > MAX_WS_PAYLOAD {
-    let mut discard = [0u8; 4096];
-    let mut remaining = len;
-    while remaining > 0 {
-      let chunk = remaining.min(discard.len());
-      stream.read_exact(&mut discard[..chunk])?;
-      remaining -= chunk;
-    }
-    return Ok(());
-  }
   const MAX_CONTROL_PAYLOAD: usize = 125;
-  if matches!(opcode, 0x8 | 0x9 | 0xA) && len > MAX_CONTROL_PAYLOAD {
-    let mut discard = vec![0u8; len];
-    stream.read_exact(&mut discard)?;
+  if matches!(opcode, 0x9 | 0xA) && len > MAX_CONTROL_PAYLOAD {
+    let mut mask = [0u8; 4];
+    stream.read_exact(&mut mask)?;
+    discard_payload(stream, len)?;
     return Ok(());
   }
-  if len > 0 {
-    let mut payload = vec![0u8; len];
-    stream.read_exact(&mut payload)?;
-    if masked {
-      for (i, b) in payload.iter_mut().enumerate() {
-        *b ^= mask[i % 4];
-      }
-    }
-    if opcode == 0x9 {
-      // Ping → pong with same payload.
-      let mut frame = Vec::with_capacity(2 + payload.len());
-      frame.push(0x8A);
-      frame.push(payload.len() as u8);
-      frame.extend_from_slice(&payload);
-      stream.write_all(&frame)?;
-    }
+  if opcode == 0x9 && len == 0 {
+    return Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "zero-length ping"));
+  }
+
+  let mut mask = [0u8; 4];
+  stream.read_exact(&mut mask)?;
+
+  if len > MAX_WS_PAYLOAD {
+    discard_payload(stream, len)?;
+    return Ok(());
+  }
+
+  if len == 0 {
+    return Ok(());
+  }
+
+  let mut payload = vec![0u8; len];
+  stream.read_exact(&mut payload)?;
+  for (i, b) in payload.iter_mut().enumerate() {
+    *b ^= mask[i % 4];
+  }
+  if opcode == 0x9 {
+    // Ping → pong with same payload (non-zero only; zero-length rejected above).
+    let mut frame = Vec::with_capacity(2 + payload.len());
+    frame.push(0x8A);
+    frame.push(payload.len() as u8);
+    frame.extend_from_slice(&payload);
+    stream.write_all(&frame)?;
+  }
+  Ok(())
+}
+
+fn discard_payload(stream: &mut TcpStream, len: usize) -> std::io::Result<()> {
+  let mut discard = [0u8; 4096];
+  let mut remaining = len;
+  while remaining > 0 {
+    let chunk = remaining.min(discard.len());
+    stream.read_exact(&mut discard[..chunk])?;
+    remaining -= chunk;
   }
   Ok(())
 }
@@ -302,17 +316,24 @@ Sec-WebSocket-Key: {key}\r\n\r\n",
       assert!(text.contains("101 Switching Protocols"));
       assert!(text.contains("Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
       let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
-      while buf.len() <= header_end {
+      loop {
+        let body = &buf[header_end..];
+        if body.len() >= 2 && body[0] == 0x81 {
+          let len = body[1] as usize;
+          if len < 126 && body.len() >= 2 + len {
+            break;
+          }
+        }
         let n = client.read(&mut chunk).unwrap();
         if n == 0 {
-          break;
+          panic!("connection closed before complete websocket frame");
         }
         buf.extend_from_slice(&chunk[..n]);
       }
       let frame = &buf[header_end..];
-      assert!(!frame.is_empty(), "expected websocket frame after handshake");
-      assert_eq!(frame[0], 0x81);
-      assert!(String::from_utf8_lossy(frame).contains("tick"));
+      let len = frame[1] as usize;
+      let payload = &frame[2..2 + len];
+      assert!(String::from_utf8_lossy(payload).contains("tick"));
       handle.join().unwrap();
     });
   }
@@ -325,8 +346,14 @@ Sec-WebSocket-Key: {key}\r\n\r\n",
     let mut frame = Vec::new();
     frame.push(0x80 | opcode);
     let len = payload.len();
-    assert!(len < 126);
-    frame.push(0x80 | len as u8);
+    if len < 126 {
+      frame.push(0x80 | len as u8);
+    } else if len < 65536 {
+      frame.push(0x80 | 126);
+      frame.extend_from_slice(&(len as u16).to_be_bytes());
+    } else {
+      panic!("write_masked_frame: payload too large for test helper");
+    }
     let mask = [0x12, 0x34, 0x56, 0x78];
     frame.extend_from_slice(&mask);
     for (i, b) in payload.iter().enumerate() {
@@ -409,6 +436,27 @@ Sec-WebSocket-Key: {key}\r\n\r\n",
     });
     let mut client = TcpStream::connect(addr).unwrap();
     write_masked_extended_frame(&mut client, 0x1, oversize);
+    write_masked_frame(&mut client, 0x9, b"ok");
+    let mut pong = [0u8; 4];
+    client.read_exact(&mut pong).unwrap();
+    assert_eq!(pong[0], 0x8A);
+    assert_eq!(pong[1], 2);
+    assert_eq!(&pong[2..], b"ok");
+    handle.join().unwrap();
+  }
+
+  #[test]
+  fn read_client_frame_discards_oversize_control_ping() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let oversize_ping = vec![b'a'; 126];
+    let handle = thread::spawn(move || {
+      let (mut server, _) = listener.accept().unwrap();
+      read_client_frame_blocking(&mut server).unwrap();
+      read_client_frame_blocking(&mut server).unwrap();
+    });
+    let mut client = TcpStream::connect(addr).unwrap();
+    write_masked_frame(&mut client, 0x9, &oversize_ping);
     write_masked_frame(&mut client, 0x9, b"ok");
     let mut pong = [0u8; 4];
     client.read_exact(&mut pong).unwrap();

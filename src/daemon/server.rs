@@ -24,6 +24,10 @@ fn lock_store(store: &Mutex<Store>) -> MutexGuard<'_, Store> {
   store.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+fn lock_last_persist(last: &Mutex<Option<Instant>>) -> MutexGuard<'_, Option<Instant>> {
+  last.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 pub struct Server {
   store: Arc<Mutex<Store>>,
   port: u16,
@@ -136,7 +140,7 @@ impl Server {
     if !self.dirty.load(Ordering::Relaxed) {
       return;
     }
-    let last = self.last_persist.lock().unwrap();
+    let last = lock_last_persist(&self.last_persist);
     let due = match *last {
       None => true,
       Some(t) => t.elapsed() >= PERSIST_DEBOUNCE,
@@ -152,7 +156,7 @@ impl Server {
     let text = save_store(&store);
     let _ = std::fs::write(state_file(self.port), text);
     self.dirty.store(false, Ordering::Relaxed);
-    *self.last_persist.lock().unwrap() = Some(Instant::now());
+    *lock_last_persist(&self.last_persist) = Some(Instant::now());
   }
 }
 
@@ -399,21 +403,32 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
         Some(s) => s,
         None => return false,
       };
-      s.procs.push(ProcRecord {
-        index: proc_index,
-        label,
-        kind,
-        status: ProcStatus::Waiting,
-        skill_name: field_str(&obj, "skill_name"),
-        harness: field_str(&obj, "harness"),
-        model: field_str(&obj, "model"),
-        started_at: None,
-        note: None,
-        detail: None,
-        elapsed: None,
-        container_name: None,
-        lines: Vec::new(),
-      });
+      let skill_name = field_str(&obj, "skill_name");
+      let harness = field_str(&obj, "harness");
+      let model = field_str(&obj, "model");
+      if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
+        p.label = label;
+        p.kind = kind;
+        p.skill_name = skill_name;
+        p.harness = harness;
+        p.model = model;
+      } else {
+        s.procs.push(ProcRecord {
+          index: proc_index,
+          label,
+          kind,
+          status: ProcStatus::Waiting,
+          skill_name,
+          harness,
+          model,
+          started_at: None,
+          note: None,
+          detail: None,
+          elapsed: None,
+          container_name: None,
+          lines: Vec::new(),
+        });
+      }
       true
     }
     "/api/v1/proc/start" => {
