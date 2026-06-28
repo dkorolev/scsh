@@ -43,7 +43,11 @@ fn run(args: &[String]) -> i32 {
       println!("scsh {}", version_id());
       0
     }
-    Mode::Run => preflight_then(Action::Run, profile),
+    Mode::InitDemo => init_demo(),
+    Mode::InstallSkills => install_skills(false, cli.source.as_deref()),
+    Mode::UpdateSkills => install_skills(true, cli.source.as_deref()),
+    Mode::List => preflight_then(Action::List, profile, cli.verbose),
+    Mode::Run => preflight_then(Action::Run, profile, cli.verbose),
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
     // the real interactive board over a few scripted subprocesses.
@@ -55,6 +59,10 @@ fn run(args: &[String]) -> i32 {
 enum Mode {
   Help(HelpTopic),
   Version,
+  InitDemo,
+  InstallSkills,
+  UpdateSkills,
+  List,
   Run,
   UiDemo { frames: bool },
 }
@@ -88,22 +96,29 @@ fn version_id() -> String {
 }
 
 enum Action {
+  List,
   Run,
 }
 
 /// A parsed command line: one command, plus the profiles that select which skills run (only
-/// valid for `run` — given as bare positional names, `--profile`, or both).
+/// valid for `run` — given as bare positional names, `--profile`, or both) and an optional
+/// source (a git URL/path for `installskills` / `updateskills`).
 struct Cli {
   mode: Mode,
   profile: Option<String>,
+  source: Option<String>,
+  verbose: bool,
 }
 
 /// Parse cargo-style subcommands. The default (no command) is `help`, so a bare
 /// `scsh` is safe and self-explanatory; `run` is the explicit "do it" command.
-/// The old `--help` / `--version` flags keep working as aliases.
+/// The old `--init-demo-project` / `--help` / `--version`
+/// flags keep working as aliases.
 fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut mode: Option<Mode> = None;
   let mut profiles: Vec<String> = Vec::new();
+  let mut source: Option<String> = None;
+  let mut verbose = false;
   let mut frames = false;
   let mut i = 0;
   while i < args.len() {
@@ -134,11 +149,23 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       }
       "version" | "-V" | "--version" => Some(Mode::Version),
       "run" => Some(Mode::Run),
+      "list" | "ls" => Some(Mode::List),
       // Hidden dev command: demo the live board with no container/model (see `ui::demo`).
       "__ui-demo" => Some(Mode::UiDemo { frames: false }),
       "--frames" => {
         frames = true;
         None
+      }
+      "init-demo-project" | "init" | "--init-demo-project" => Some(Mode::InitDemo),
+      // `installskills [<git-url>]` / `updateskills [<git-url>]`: an optional positional
+      // source installs skills from that repo instead of scsh's bundled ones.
+      "installskills" => {
+        source = take_source(args, &mut i);
+        Some(Mode::InstallSkills)
+      }
+      "updateskills" => {
+        source = take_source(args, &mut i);
+        Some(Mode::UpdateSkills)
       }
       "--profile" | "--profiles" => {
         i += 1;
@@ -149,7 +176,13 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         profiles.push(name.clone());
         None
       }
+      "--verbose" | "-v" => {
+        verbose = true;
+        None
+      }
       // After `run`, a bare token is a profile name: `scsh run a b` == `scsh run --profile a,b`.
+      // (A `-`-prefixed token is still an unknown flag, and bare tokens before a command — or
+      // after any non-`run` command — remain errors.)
       other if matches!(mode, Some(Mode::Run)) && !other.starts_with('-') => {
         profiles.push(other.to_string());
         None
@@ -168,14 +201,34 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     Mode::UiDemo { .. } => Mode::UiDemo { frames },
     other => other,
   };
-  // Positional profiles and any `--profile` values combine into one comma-joined spec.
+  // Positional profiles and any `--profile` values combine into one comma-joined spec
+  // (requested_profiles splits on `,`/`;`), so `run a b`, `run --profile a,b`, and
+  // `run --profile a b` are all equivalent.
   let profile = if profiles.is_empty() { None } else { Some(profiles.join(",")) };
   if profile.is_some() && !matches!(mode, Mode::Run) {
     return Err(
       "profiles only apply to 'run' (e.g. `scsh run code-review` or `scsh run --profile code-review`)".into(),
     );
   }
-  Ok(Cli { mode, profile })
+  if source.is_some() && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
+    return Err("a skills source (git URL) only applies to 'installskills' or 'updateskills'".into());
+  }
+  if verbose && !matches!(mode, Mode::List) {
+    return Err("--verbose only applies to 'list'".into());
+  }
+  Ok(Cli { mode, profile, source, verbose })
+}
+
+/// Consume the next arg as an `installskills`/`updateskills` source (a git URL or path) if
+/// it's present and not a flag, advancing `i` past it. `None` otherwise (use bundled skills).
+fn take_source(args: &[String], i: &mut usize) -> Option<String> {
+  match args.get(*i + 1) {
+    Some(v) if !v.starts_with('-') => {
+      *i += 1;
+      Some(v.clone())
+    }
+    _ => None,
+  }
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -213,7 +266,7 @@ fn declared_profiles(cfg: &config::Config) -> Vec<&str> {
 // Preflight + actions
 // ---------------------------------------------------------------------------
 
-fn preflight_then(action: Action, profile: Option<&str>) -> i32 {
+fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
   // The preflight checks run quietly on success and collapse into one compact
   // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
   // with an actionable ✗/→. A real run is ordered repo-hygiene-first:
@@ -331,6 +384,10 @@ fn preflight_then(action: Action, profile: Option<&str>) -> i32 {
   }
 
   match action {
+    Action::List => {
+      ok(&preflight_summary(&root, &cfg, &rt));
+      list_skills(&cfg, &rt, &root, verbose)
+    }
     Action::Run => {
       // Every requested --profile must be `default` (the no-profile skills) or a profile
       // this config declares.
@@ -362,6 +419,18 @@ fn preflight_then(action: Action, profile: Option<&str>) -> i32 {
       build_and_run(&rt, &root, &selected)
     }
   }
+}
+
+/// Compact one-line preflight summary for `list` (no run-only guards).
+fn preflight_summary(root: &Path, cfg: &config::Config, rt: &Runtime) -> String {
+  let names = cfg.skills.iter().map(|s| s.name.as_str()).collect::<Vec<_>>().join(", ");
+  let n = cfg.skills.len();
+  format!(
+    "git · repo {} · .scsh.yml valid ({n} skill{}: {names}) · using {}",
+    display_path(root),
+    if n == 1 { "" } else { "s" },
+    backend_name(&rt.name)
+  )
 }
 
 /// Friendly name for the chosen containerization backend, for the "using …" line.
@@ -424,6 +493,96 @@ fn tmp_is_gitignored(root: &std::path::Path) -> bool {
     .status()
     .map(|s| s.success())
     .unwrap_or(false)
+}
+
+/// `scsh list` / `scsh ls` — the inventory: every skill grouped by profile (the reserved
+/// `default` profile is the skills with no `profile:`), each with its result file, commit
+/// flag, and the env it needs. `--verbose` additionally prints the generated Dockerfile and
+/// the exact per-skill build/run commands.
+fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbose: bool) -> i32 {
+  println!();
+  println!(
+    "{} {}",
+    h_head("Profiles & skills"),
+    h_dim(&format!(
+      "\u{2014} {} skill{} · run one with `scsh run --profile <name>`",
+      cfg.skills.len(),
+      plural(cfg.skills.len())
+    ))
+  );
+  // Group by profile: the reserved `default` (no-profile skills) first, then each declared.
+  let mut groups: Vec<(String, Vec<&Skill>)> =
+    vec![("default".to_string(), cfg.skills.iter().filter(|s| s.profile.is_none()).collect())];
+  for p in declared_profiles(cfg) {
+    groups.push((p.to_string(), cfg.skills.iter().filter(|s| s.profile.as_deref() == Some(p)).collect()));
+  }
+  for (name, members) in &groups {
+    if members.is_empty() {
+      let note = if name == "default" { "\u{2014} empty (a bare `scsh run` is a no-op)" } else { "\u{2014} empty" };
+      println!("  {} {}", h_head(&format!("{name} (0)")), h_dim(note));
+      continue;
+    }
+    let how = if name == "default" { "scsh run".to_string() } else { format!("scsh run --profile {name}") };
+    println!("  {} {}", h_head(&format!("{name} ({})", members.len())), h_dim(&format!("\u{2014} {how}")));
+    for s in members {
+      let mut notes = String::new();
+      if s.commits {
+        notes.push_str("  \u{b7} commits back");
+      }
+      let env: Vec<&str> = s.env.iter().map(|e| e.key.as_str()).collect();
+      if !env.is_empty() {
+        notes.push_str(&format!("  \u{b7} env: {}", env.join(", ")));
+      }
+      help_row(&s.name, &format!("\u{2192} {}{notes}", s.result));
+    }
+  }
+
+  if verbose {
+    let skills: Vec<&Skill> = cfg.skills.iter().collect();
+    let skills = &skills[..];
+    let tag = runtime::image_tag();
+    let (uid, gid) = host_ids();
+    let df = runtime::dockerfile();
+    println!("\n{}", h_head("Image"));
+    println!("{}", h_dim("--- generated Dockerfile (in memory; one generic image for every skill) ---"));
+    print!("{df}");
+    match runtime::build_method(&rt.name) {
+      runtime::BuildMethod::Stdin => {
+        let build = runtime::build_command_stdin(&rt.name, &tag, uid, gid, &runtime::host_timezone());
+        println!("--- build (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---");
+        println!("{}", runtime::shell_join(&build));
+      }
+      runtime::BuildMethod::ContextDir => {
+        let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
+        let build =
+          runtime::build_command_context(&rt.name, &tag, &ctx.to_string_lossy(), uid, gid, &runtime::host_timezone());
+        println!("--- build (in-memory Dockerfile written to an ephemeral context dir) ---");
+        println!("{}", runtime::shell_join(&build));
+      }
+    }
+    println!("\n{}", h_head("Per-skill commands"));
+    for &skill in skills {
+      let name = runtime::run_dir_name(now_secs(), &skill.name);
+      let run_dir = format!("/tmp/{name}");
+      let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.name);
+      let model = skill.model.as_deref().unwrap_or("(harness default)");
+      let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
+      println!("\n[{}]  harness={}  model={model}  timeout={timeout}", skill.name, skill.harness.as_str());
+      println!("  clone: {}", runtime::shell_join(&runtime::clone_command(&root.to_string_lossy(), &run_dir)));
+      match resolve_env(&skill.env) {
+        Ok(env) => {
+          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &cmd);
+          println!("  run:   {}", runtime::shell_join(&run));
+        }
+        Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
+      }
+      println!("  after: require '{}', then copy it back into the repo (backing up any existing file)", skill.result);
+    }
+  } else {
+    println!("{}", h_dim("  run `scsh list --verbose` to also see the image Dockerfile and exact commands"));
+  }
+  println!();
+  0
 }
 
 fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&Skill]) -> i32 {
@@ -1263,6 +1422,572 @@ fn make_temp_dir() -> std::io::Result<PathBuf> {
   let dir = std::env::temp_dir().join(format!("scsh-build-{}-{nanos}", std::process::id()));
   std::fs::create_dir_all(&dir)?;
   Ok(dir)
+}
+
+fn init_demo() -> i32 {
+  if runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH");
+    hint(install_git_hint());
+    return 1;
+  }
+  let root = match git_root() {
+    Ok(r) => r,
+    Err(_) => {
+      fail("not inside a git repository");
+      hint(&format!("create one here with: {}", bold("git init .")));
+      return 1;
+    }
+  };
+  let path = root.join(".scsh.yml");
+  if path.exists() {
+    fail(&format!(".scsh.yml already exists at {} — not overwriting", path.display()));
+    hint("delete it first if you want a fresh demo config");
+    return 1;
+  }
+  if let Err(e) = std::fs::write(&path, config::demo_yaml()) {
+    fail(&format!("could not write {}: {e}", path.display()));
+    return 1;
+  }
+  ok(&format!("wrote demo config to {}", path.display()));
+
+  // Leave the repo runnable right away: a real `scsh` run refuses to proceed unless
+  // the repo's /tmp is gitignored (build scratch and result copies must stay
+  // untracked). Set that up now so the next `scsh` clears the guard instead of
+  // bouncing off it.
+  match ensure_tmp_gitignored(&root) {
+    Ok(true) => ok("added '/tmp' to .gitignore (keeps build scratch and result copies untracked)"),
+    Ok(false) => {} // already ignored — nothing to change
+    Err(e) => hint(&format!("could not update .gitignore automatically ({e}); add a '/tmp' line yourself")),
+  }
+
+  // Scaffold the example skills so the demo repo has something real to run. Never
+  // overwrite an existing skill file. Track what we wrote so it can be committed.
+  let mut skill_paths: Vec<String> = Vec::new();
+  for (rel, body, executable) in config::demo_skills() {
+    let dest = root.join(rel);
+    if dest.exists() {
+      hint(&format!("kept existing {rel} (not overwritten)"));
+      continue;
+    }
+    if let Some(parent) = dest.parent() {
+      if let Err(e) = std::fs::create_dir_all(parent) {
+        hint(&format!("could not create {}: {e}", parent.display()));
+        continue;
+      }
+    }
+    match std::fs::write(&dest, body) {
+      Ok(()) => {
+        // Scripts a skill ships are run directly by the harness, so make them executable.
+        #[cfg(unix)]
+        if executable {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755));
+        }
+        skill_paths.push(rel.to_string());
+      }
+      Err(e) => hint(&format!("could not write {}: {e}", dest.display())),
+    }
+  }
+  if !skill_paths.is_empty() {
+    let n = skill_paths.len();
+    ok(&format!("scaffolded {n} example-skill file{} under .skills/", if n == 1 { "" } else { "s" }));
+  }
+
+  // Wire up skill discovery the way this repo's convention does (see
+  // .skills/README.md): a harness looks for project skills in its OWN dir — none of
+  // them know about `.skills/` — so scsh keeps the skills in `.skills/` and symlinks
+  // each harness dir to it. That's what lets the opencode harness (and any other)
+  // find them; committed with the project, so the links survive the clone scsh
+  // mounts into the container.
+  let links = link_skill_hosts(&root);
+  if !links.is_empty() {
+    let n = links.len();
+    ok(&format!(
+      "linked {n} harness skill dir{} → .skills (so the harness finds the skills)",
+      if n == 1 { "" } else { "s" }
+    ));
+  }
+
+  // Initialize the project *fully*: commit the scaffold so the working tree is clean
+  // and the very next `scsh` runs (a real run clones COMMITTED state and refuses a
+  // dirty tree). Stage only what we created — never `git add -A` — so any unrelated
+  // work already in the repo is left untouched.
+  let mut staged = vec![".scsh.yml".to_string()];
+  if root.join(".gitignore").exists() {
+    staged.push(".gitignore".to_string());
+  }
+  staged.extend(skill_paths);
+  staged.extend(links);
+  match commit_scaffold(&root, &staged) {
+    Ok(()) => {
+      ok("committed the scaffold");
+      let remaining = uncommitted_changes(&root);
+      if remaining.is_empty() {
+        println!("\nThe project is committed and clean. Next:");
+        println!("  {}   {}", bold("scsh run"), h_dim("#  build the image and run the .scsh.yml skills in parallel"));
+      } else {
+        // We committed the scaffold, but the repo had other uncommitted changes; a
+        // real run needs a fully clean tree, so point those out too.
+        fail("the repo still has uncommitted changes — a real run needs a clean working tree");
+        hint(&format!("commit or stash them, then run {}:", bold("scsh")));
+        hint(&format!("{}", bold("git add -A && git commit -m \"wip\"")));
+      }
+    }
+    Err(e) => {
+      hint(&format!("couldn't commit the scaffold automatically ({e})"));
+      println!("\nNext: commit the scaffold, then run 'scsh' (a run clones committed state):");
+      println!("  {}", bold("git add -A && git commit -m \"add scsh demo project\""));
+      println!("  {}   {}", bold("scsh run"), h_dim("#  build the image and run the .scsh.yml skills in parallel"));
+    }
+  }
+  print_skill_usage();
+  0
+}
+
+/// Commit the freshly-scaffolded project so the working tree is clean and the very
+/// next `scsh` can run (a real run clones COMMITTED state). Stages only `paths`
+/// (never `git add -A`), so unrelated work already in the repo is left untouched.
+/// `Err` carries git's message when nothing can be committed or git refuses (e.g.
+/// no `user.name`/`user.email` configured) — init then tells the user to commit.
+fn commit_scaffold(root: &Path, paths: &[String]) -> Result<(), String> {
+  let add = Command::new("git").arg("-C").arg(root).arg("add").arg("--").args(paths).output();
+  let add = add.map_err(|e| format!("git add: {e}"))?;
+  if !add.status.success() {
+    return Err(String::from_utf8_lossy(&add.stderr).trim().to_string());
+  }
+  let out = Command::new("git")
+    .arg("-C")
+    .arg(root)
+    .args(["commit", "-q", "-m", "Add scsh demo project (config + skills)"])
+    .output()
+    .map_err(|e| format!("git commit: {e}"))?;
+  if out.status.success() {
+    Ok(())
+  } else {
+    Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
+  }
+}
+
+/// Per-file outcome of an install: how many skill files were newly written, replaced (by
+/// `updateskills`), already identical, or kept because they differ from the source.
+#[derive(Default)]
+struct InstallCounts {
+  installed: u32,
+  updated: u32,
+  already: u32,
+  /// Repo-relative paths kept untouched because they differ from the source.
+  differing: Vec<String>,
+}
+
+/// Install skills into the current repo's `.skills/` plus the harness discovery symlinks.
+/// With no `source`, installs scsh's own bundled skills (see [`config::bundled_skills`]);
+/// with a `source` (a git URL or local path), clones it and installs the `.skills/<name>/`
+/// skills it ships. `overwrite` (the `updateskills` command) replaces existing files;
+/// otherwise an identical file is "already installed", and a differing one is kept untouched.
+fn install_skills(overwrite: bool, source: Option<&str>) -> i32 {
+  if runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH");
+    hint(install_git_hint());
+    return 1;
+  }
+  let root = match git_root() {
+    Ok(r) => r,
+    Err(_) => {
+      fail("not inside a git repository");
+      hint(&format!("create one here with: {}", bold("git init .")));
+      return 1;
+    }
+  };
+
+  let counts = match source {
+    None => install_bundled(&root, overwrite),
+    Some(url) => match install_from_repo(&root, overwrite, url) {
+      Ok(c) => c,
+      Err(code) => return code,
+    },
+  };
+
+  let InstallCounts { installed, updated, already, differing } = counts;
+  if installed > 0 {
+    ok(&format!("installed {installed} skill file{} under .skills/", plural(installed as usize)));
+  }
+  if updated > 0 {
+    ok(&format!("updated {updated} skill file{}", plural(updated as usize)));
+  }
+  if already > 0 {
+    ok(&format!("{already} skill file{} already installed (identical)", plural(already as usize)));
+  }
+  for rel in &differing {
+    hint(&format!("kept your modified {rel} (it differs from the source)"));
+  }
+  if !differing.is_empty() {
+    let cmd = match source {
+      Some(url) => format!("scsh updateskills {url}"),
+      None => "scsh updateskills".to_string(),
+    };
+    hint(&format!("to replace them with the source's version, run: {}", bold(&cmd)));
+  }
+
+  // Wire up the harness discovery dirs (.opencode/.claude/.cursor/.agents/.codex →
+  // ../.skills), exactly as --init-demo-project does; existing ones are left alone.
+  let links = link_skill_hosts(&root);
+  if !links.is_empty() {
+    ok(&format!("linked {} harness skill dir{} → .skills", links.len(), if links.len() == 1 { "" } else { "s" }));
+  }
+  if installed == 0 && updated == 0 && already == 0 && differing.is_empty() && links.is_empty() {
+    ok("skills already installed; nothing to do");
+  }
+  // With no URL, all you get is scsh's bundled demo/self-test skill — point users at a real
+  // skills repo for anything else.
+  if source.is_none() {
+    hint("that's scsh's bundled demo/self-test — run /scsh-harness-demo-and-selftest to exercise scsh end to end");
+    hint(&format!(
+      "for real skills, point me at a repo, e.g. {}",
+      bold("scsh installskills https://github.com/dkorolev/beautiful-skills")
+    ));
+  }
+  0
+}
+
+/// Install scsh's own skills, embedded in the binary at build time.
+fn install_bundled(root: &Path, overwrite: bool) -> InstallCounts {
+  let mut c = InstallCounts::default();
+  for (rel, body) in config::bundled_skills() {
+    write_one(&root.join(rel), body.as_bytes(), rel, overwrite, &mut c);
+  }
+  c
+}
+
+/// Header for a `.scsh.yml` that `installskills` creates from scratch in a consumer repo
+/// (when it has none yet). The merged skill entries follow the `skills:` line.
+const CONSUMER_MANIFEST_HEADER: &str = "\
+# .scsh.yml — Scoped Skills Helper. Skills below were added by `scsh installskills`.
+# The whole file is just your skills; scsh builds them on a built-in base image.
+# Run `scsh help .scsh.yml` for the schema, or `scsh help` for commands.
+skills:
+";
+
+/// Skills whose name begins with this prefix are authoring-only by convention: scsh never
+/// installs them into a consumer repo — the same effect as `autoinstall: false`, but
+/// self-evident in the name. Used for a repo's own meta/self-check skills.
+const INTERNAL_PREFIX: &str = "internal-";
+
+/// Clone `url` (shallow) and install its skills. If the source ships a `.scsh.yml`, that
+/// manifest drives the install (only its listed skills, minus the authoring-only ones —
+/// `autoinstall: false` or named `internal-*` — are installed, and each newly-installed
+/// skill's entry is merged into the consumer's own `.scsh.yml`); otherwise every
+/// `.skills/<name>/` directory is installed (still skipping `internal-*`). Returns
+/// `Err(code)` on a clone failure, an invalid source manifest, or no installable skills.
+fn install_from_repo(root: &Path, overwrite: bool, url: &str) -> Result<InstallCounts, i32> {
+  let clone = std::env::temp_dir().join(format!("scsh-installskills-{}-{}", std::process::id(), now_secs()));
+  let _ = std::fs::remove_dir_all(&clone); // clear any stale dir from a crashed run
+  let cloned = Command::new("git")
+    .args(["clone", "--depth", "1", url])
+    .arg(&clone)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false);
+  if !cloned {
+    fail(&format!("could not clone {url}"));
+    hint("check the URL and your network/credentials, then try again");
+    let _ = std::fs::remove_dir_all(&clone);
+    return Err(1);
+  }
+
+  let manifest = clone.join(".scsh.yml");
+  let result = if manifest.is_file() {
+    install_from_manifest(root, overwrite, url, &clone, &manifest)
+  } else {
+    install_all_skill_dirs(root, overwrite, url, &clone)
+  };
+  let _ = std::fs::remove_dir_all(&clone);
+  result
+}
+
+/// Install every `.skills/<name>/` directory in the clone — the behavior when the source
+/// ships no `.scsh.yml`. No manifest entries are merged (there is no manifest to read).
+fn install_all_skill_dirs(root: &Path, overwrite: bool, url: &str, clone: &Path) -> Result<InstallCounts, i32> {
+  let mut c = InstallCounts::default();
+  let mut names: Vec<String> = Vec::new();
+  if let Ok(entries) = std::fs::read_dir(clone.join(".skills")) {
+    // A skill is a `.skills/<name>/` directory containing a SKILL.md.
+    let mut dirs: Vec<PathBuf> = entries.flatten().map(|e| e.path()).filter(|p| p.join("SKILL.md").is_file()).collect();
+    dirs.sort();
+    for dir in dirs {
+      let name = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+      if name.starts_with(INTERNAL_PREFIX) {
+        continue; // authoring-only by the `internal-` naming convention
+      }
+      copy_skill_dir(root, &dir, &name, overwrite, &mut c);
+      names.push(name);
+    }
+  }
+  if names.is_empty() {
+    fail(&format!("no skills found in {url} (expected .skills/<name>/SKILL.md)"));
+    return Err(1);
+  }
+  ok(&format!("from {url}: {} skill{} — {}", names.len(), plural(names.len()), names.join(", ")));
+  Ok(c)
+}
+
+/// Install from a source that ships a `.scsh.yml`: validate it (failing on a bad schema),
+/// install every listed skill except those marked `autoinstall: false` (skills not listed
+/// at all are skipped — the manifest is the shipping list), and merge each newly-installed
+/// skill's entry, verbatim, into the consumer's own `.scsh.yml` so `scsh run` (default
+/// skills) and `scsh run --profile <p>` pick them up immediately.
+fn install_from_manifest(
+  root: &Path, overwrite: bool, url: &str, clone: &Path, manifest: &Path,
+) -> Result<InstallCounts, i32> {
+  let src_text = match std::fs::read_to_string(manifest) {
+    Ok(t) => t,
+    Err(e) => {
+      fail(&format!("{url}: could not read its .scsh.yml: {e}"));
+      return Err(1);
+    }
+  };
+  let cfg = match config::validate(&src_text) {
+    Ok(c) => c,
+    Err(errs) => {
+      fail(&format!("{url}: its .scsh.yml does not match the schema ({} problem{})", errs.len(), plural(errs.len())));
+      for e in &errs {
+        hint(e);
+      }
+      return Err(1);
+    }
+  };
+
+  // The consumer's existing manifest (if any) tells us which skills are already declared,
+  // so we only append genuinely new entries and never clobber the user's edits.
+  let local_path = root.join(".scsh.yml");
+  let local_text = std::fs::read_to_string(&local_path).unwrap_or_default();
+  let existing: std::collections::BTreeSet<String> =
+    config::validate(&local_text).map(|c| c.skills.into_iter().map(|s| s.name).collect()).unwrap_or_default();
+
+  let mut c = InstallCounts::default();
+  let mut installed: Vec<String> = Vec::new();
+  let mut skipped: Vec<String> = Vec::new();
+  let mut added: Vec<String> = Vec::new();
+  let mut append = String::new();
+  for skill in &cfg.skills {
+    // Authoring-only skills are not installed: either marked `autoinstall: false`, or named
+    // with the `internal-` convention (a self-documenting "internal to this repo" marker).
+    if !skill.autoinstall || skill.name.starts_with(INTERNAL_PREFIX) {
+      skipped.push(skill.name.clone());
+      continue;
+    }
+    let dir = clone.join(".skills").join(&skill.name);
+    if !dir.join("SKILL.md").is_file() {
+      hint(&format!("{}: listed in .scsh.yml but has no .skills/{}/SKILL.md — skipped", skill.name, skill.name));
+      continue;
+    }
+    copy_skill_dir(root, &dir, &skill.name, overwrite, &mut c);
+    installed.push(skill.name.clone());
+    if !existing.contains(&skill.name) {
+      if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
+        append.push_str(&block);
+        added.push(skill.name.clone());
+      }
+    }
+  }
+
+  if installed.is_empty() {
+    fail(&format!("{url}: its .scsh.yml lists no installable skills (all authoring-only or missing)"));
+    return Err(1);
+  }
+  ok(&format!("from {url}: {} skill{} — {}", installed.len(), plural(installed.len()), installed.join(", ")));
+  if !skipped.is_empty() {
+    ok(&format!("skipped {} authoring-only (autoinstall: false or internal-*): {}", skipped.len(), skipped.join(", ")));
+  }
+
+  // Merge the new entries into the consumer's .scsh.yml (append-only — existing entries
+  // are left untouched), but only if the result still validates.
+  if append.is_empty() {
+    ok("the installed skills were already declared in .scsh.yml");
+  } else {
+    let merged = if local_text.trim().is_empty() {
+      format!("{CONSUMER_MANIFEST_HEADER}{append}")
+    } else {
+      let mut t = local_text.clone();
+      if !t.ends_with('\n') {
+        t.push('\n');
+      }
+      t.push_str(&append);
+      t
+    };
+    if config::validate(&merged).is_ok() && write_file(&local_path, merged.as_bytes()) {
+      ok(&format!("added {} skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
+    } else {
+      hint(
+        "installed the skill files, but merging them into .scsh.yml would make it invalid — left .scsh.yml unchanged",
+      );
+      hint(&format!("add by hand: {}", added.join(", ")));
+    }
+  }
+  Ok(c)
+}
+
+/// Copy one skill directory (every file under it) from `src` into `root/.skills/<name>/`,
+/// applying the per-file install rules.
+fn copy_skill_dir(root: &Path, src: &Path, name: &str, overwrite: bool, c: &mut InstallCounts) {
+  let dest_dir = root.join(".skills").join(name);
+  let mut files = Vec::new();
+  collect_files(src, src, &mut files);
+  files.sort();
+  for (rel, abs) in files {
+    if let Ok(body) = std::fs::read(&abs) {
+      write_one(&dest_dir.join(&rel), &body, &format!(".skills/{name}/{rel}"), overwrite, c);
+    }
+  }
+}
+
+/// Apply the install rules for one file: write if new, replace if `overwrite`, count as
+/// already-installed if identical, or keep it (recording `shown`) if it differs.
+fn write_one(dest: &Path, body: &[u8], shown: &str, overwrite: bool, c: &mut InstallCounts) {
+  if dest.is_file() {
+    let same = std::fs::read(dest).map(|d| d == body).unwrap_or(false);
+    if same {
+      c.already += 1;
+    } else if overwrite {
+      if write_file(dest, body) {
+        c.updated += 1;
+      }
+    } else {
+      c.differing.push(shown.to_string());
+    }
+  } else if write_file(dest, body) {
+    c.installed += 1;
+  }
+}
+
+/// Write a file, creating its parent dir. Reports and returns false on error.
+fn write_file(dest: &Path, body: &[u8]) -> bool {
+  if let Some(parent) = dest.parent() {
+    if let Err(e) = std::fs::create_dir_all(parent) {
+      hint(&format!("could not create {}: {e}", parent.display()));
+      return false;
+    }
+  }
+  match std::fs::write(dest, body) {
+    Ok(()) => true,
+    Err(e) => {
+      hint(&format!("could not write {}: {e}", dest.display()));
+      false
+    }
+  }
+}
+
+/// Symlink each harness's project skill-discovery dir at this repo's `.skills/`,
+/// following the repo convention (see `.skills/README.md`): a harness reads skills
+/// from its own dir — `.opencode/skills`, `.claude/skills`, `.cursor/skills`,
+/// `.agents/skills`, `.codex/skills` — and none know about `.skills/`, so each is a
+/// relative symlink (`../.skills`) to the one place the skills actually live. An
+/// existing path (real dir or symlink) is left untouched. Returns how many it made.
+#[cfg(unix)]
+fn link_skill_hosts(root: &Path) -> Vec<String> {
+  const HOSTS: &[&str] = &[".opencode/skills", ".claude/skills", ".cursor/skills", ".agents/skills", ".codex/skills"];
+  let mut made = Vec::new();
+  for host in HOSTS {
+    let link = root.join(host);
+    if link.symlink_metadata().is_ok() {
+      continue; // already present — leave it
+    }
+    let linked = link.parent().map(|p| std::fs::create_dir_all(p).is_ok()).unwrap_or(false)
+      && std::os::unix::fs::symlink("../.skills", &link).is_ok();
+    if linked {
+      made.push((*host).to_string());
+    }
+  }
+  made
+}
+
+#[cfg(not(unix))]
+fn link_skill_hosts(_root: &Path) -> Vec<String> {
+  Vec::new()
+}
+
+/// Show how to run the scaffolded example skills.
+fn print_skill_usage() {
+  println!("\nThe demo .scsh.yml has two skills: `add` (A + B) runs by default; `multiply`");
+  println!("(X * Y) lives in the `multiply` profile because it REQUIRES X and Y. scsh resolves");
+  println!("the env you forward (or refuses the skill). Examples — successes ({}) and the", ok_mark());
+  println!("intended refusal scsh guards against ({}):", refused_mark());
+  println!();
+  example("scsh run", "add with defaults A=2 B=3 -> 2 + 3 = 5", true);
+  example("A=10 B=20 scsh run", "add forwards your A,B -> 10 + 20 = 30", true);
+  example("X=6 Y=7 scsh run --profile multiply", "also runs multiply -> 6 * 7 = 42", true);
+  example("scsh run --profile multiply", "multiply REFUSED — X is required by ${X}", false);
+  println!();
+  let (var, def, req) = (env_syntax("${VAR}"), env_syntax("${VAR:-default}"), env_syntax("${VAR:?msg}"));
+  println!("The env syntax: {var} requires VAR, {def} injects a default, {req}");
+  println!("requires it with your message, and a bare literal is just that literal.");
+  println!("When a skill finishes, scsh prints the message from its JSON result file (e.g.");
+  println!("\"6 * 7 = 42\"), not just the file path. Preview the resolved env without containers:");
+  println!("  {}      (shows every skill and the profile that runs it).", bold("scsh list"));
+}
+
+/// An env-syntax token (e.g. `${VAR}`), in cyan to set it apart from the prose.
+fn env_syntax(token: &str) -> console::StyledObject<&str> {
+  console::style(token).cyan()
+}
+
+/// A green ✓ for an example that works.
+fn ok_mark() -> console::StyledObject<&'static str> {
+  console::style("\u{2713}").green()
+}
+
+/// A grey ✗ for an example scsh intentionally refuses — it's the expected guardrail, not an
+/// error, so it reads dim rather than alarming red.
+fn refused_mark() -> console::StyledObject<&'static str> {
+  console::style("\u{2717}").dim()
+}
+
+/// One example line: `  <command>  #  <comment>  <✓|✗>` — the command bold, the comment dimmed
+/// (its `${…}` tokens cyan), and the mark green for a success or grey for an intended refusal.
+fn example(cmd: &str, comment: &str, ok: bool) {
+  let mark = if ok { ok_mark() } else { refused_mark() };
+  let cmd = console::style(format!("{cmd:<35}")).bold();
+  println!("  {cmd} {}  {mark}", dim_comment(comment));
+}
+
+/// Render a `#  <comment>` for an example line: dimmed, but with any `${…}` token in cyan so the
+/// env syntax stands out even inside the comment.
+fn dim_comment(comment: &str) -> String {
+  let mut out = format!("{}", h_dim("#  "));
+  let mut rest = comment;
+  while let Some(start) = rest.find("${") {
+    if let Some(end) = rest[start..].find('}') {
+      let end = start + end + 1; // include the '}'
+      out.push_str(&format!("{}", h_dim(&rest[..start])));
+      out.push_str(&format!("{}", env_syntax(&rest[start..end])));
+      rest = &rest[end..];
+      continue;
+    }
+    break;
+  }
+  out.push_str(&format!("{}", h_dim(rest)));
+  out
+}
+
+/// Ensure the repo ignores its `/tmp` (repo-root) path, appending a `/tmp` rule to
+/// `<root>/.gitignore` when it isn't already ignored (creating the file if needed).
+/// Returns whether a rule was added (`false` = already ignored, nothing changed).
+/// It only ever **appends** — existing `.gitignore` content is never rewritten.
+fn ensure_tmp_gitignored(root: &std::path::Path) -> Result<bool, String> {
+  if tmp_is_gitignored(root) {
+    return Ok(false);
+  }
+  let path = root.join(".gitignore");
+  let mut content = match std::fs::read_to_string(&path) {
+    Ok(s) => s,
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+    Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+  };
+  if !content.is_empty() && !content.ends_with('\n') {
+    content.push('\n');
+  }
+  content.push_str("# scsh uses the system temp dir for build scratch; never track a local /tmp.\n/tmp\n");
+  std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+  Ok(true)
 }
 
 // ---------------------------------------------------------------------------
