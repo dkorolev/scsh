@@ -2306,3 +2306,344 @@ fn print_help_cache() {
   );
   println!();
 }
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::ffi::OsString;
+
+  #[test]
+  fn opencode_auth_path_prefers_xdg_then_home() {
+    let xdg = OsString::from("/data");
+    let home = OsString::from("/home/u");
+    assert_eq!(opencode_auth_in(Some(&xdg), Some(&home)), Some(PathBuf::from("/data/opencode/auth.json")));
+    // No XDG → HOME/.local/share.
+    assert_eq!(opencode_auth_in(None, Some(&home)), Some(PathBuf::from("/home/u/.local/share/opencode/auth.json")));
+    // Empty XDG falls back to HOME too.
+    let empty = OsString::from("");
+    assert_eq!(
+      opencode_auth_in(Some(&empty), Some(&home)),
+      Some(PathBuf::from("/home/u/.local/share/opencode/auth.json"))
+    );
+    // Nothing to go on → None.
+    assert_eq!(opencode_auth_in(None, None), None);
+  }
+
+  #[test]
+  fn sweep_removes_only_matching_stale_run_dirs() {
+    let base = std::env::temp_dir().join(format!("scsh-sweeptest-{}-{}", std::process::id(), now_secs()));
+    std::fs::create_dir_all(&base).unwrap();
+    // A matching run-dir, a non-matching scsh dir, an unrelated dir, and a matching *file*.
+    let run = base.join("scsh-20231114-221320-utc-run-add");
+    let install = base.join("scsh-installskills-1-2");
+    let other = base.join("some-other-dir");
+    let run_file = base.join("scsh-19700101-000000-utc-run-x"); // a file, not a dir
+    std::fs::create_dir(&run).unwrap();
+    std::fs::create_dir(&install).unwrap();
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(&run_file, b"").unwrap();
+    let now = now_secs();
+
+    // A threshold beyond any real age sweeps nothing (an in-progress run is safe).
+    assert_eq!(sweep_stale_run_dirs_in(&base, now, u64::MAX), 0);
+    assert!(run.is_dir());
+
+    // A zero threshold makes every just-created entry "stale" — but only the matching
+    // DIRECTORY is removed; a non run-dir, an unrelated dir, and a matching file are left.
+    assert_eq!(sweep_stale_run_dirs_in(&base, now, 0), 1);
+    assert!(!run.exists(), "the matching run dir is removed");
+    assert!(install.is_dir(), "a non run-dir scsh dir is left alone");
+    assert!(other.is_dir(), "an unrelated dir is left alone");
+    assert!(run_file.is_file(), "a matching *file* (not a dir) is left alone");
+
+    std::fs::remove_dir_all(&base).unwrap();
+  }
+
+  #[test]
+  fn run_positional_args_are_profiles() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    // A bare positional after `run` is a profile — `run foo` == `run --profile foo`.
+    let c = cli(&["run", "foo"]).unwrap();
+    assert!(matches!(c.mode, Mode::Run));
+    assert_eq!(c.profile.as_deref(), Some("foo"));
+    // Several positionals == a comma list — `run foo bar` == `run --profile foo,bar`.
+    assert_eq!(cli(&["run", "foo", "bar"]).unwrap().profile.as_deref(), Some("foo,bar"));
+    assert_eq!(cli(&["run", "--profile", "foo,bar"]).unwrap().profile.as_deref(), Some("foo,bar"));
+    // `--profile` and positionals combine.
+    assert_eq!(cli(&["run", "--profile", "foo", "bar"]).unwrap().profile.as_deref(), Some("foo,bar"));
+    // No profile at all → None (the reserved `default` profile runs).
+    assert_eq!(cli(&["run"]).unwrap().profile, None);
+    // Positional profiles are `run`-only, and never swallow flags or other commands.
+    assert!(cli(&["foo"]).is_err(), "a bare token without `run` is an unknown command");
+    assert!(cli(&["list", "foo"]).is_err(), "profiles don't apply to `list`");
+    assert!(cli(&["run", "--nope"]).is_err(), "an unknown flag after `run` is not a profile");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn copy_auth_into_writes_a_private_file_at_the_opencode_path() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
+    let src = tmp.join("src.json");
+    let run = tmp.join("run");
+    std::fs::create_dir_all(&run).unwrap();
+    std::fs::write(&src, "{\"token\":\"secret\"}").unwrap();
+
+    let dest = copy_auth_into(&run, &src).expect("auth copied");
+    // The credential lands under the gitignored tmp/ (the image's XDG_DATA_HOME), not the repo root.
+    assert_eq!(dest, run.join("tmp/.xdg-data/opencode/auth.json"));
+    assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"token\":\"secret\"}");
+    assert_eq!(std::fs::metadata(&dest).unwrap().permissions().mode() & 0o777, 0o600);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  // --- commit integration ---------------------------------------------------
+  // These exercise integrate_commits against real (synthetic) git repos — no
+  // container needed — so the rebase / fallback-branch / run-twice behavior is
+  // pinned down in CI. (The full container round-trip is shown in DEMO.md.)
+
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  static MT: AtomicUsize = AtomicUsize::new(0);
+
+  fn mt_dir(tag: &str) -> PathBuf {
+    let n = MT.fetch_add(1, Ordering::Relaxed);
+    let d = std::env::temp_dir().join(format!("scsh-mt-{tag}-{}-{}-{n}", std::process::id(), now_secs()));
+    std::fs::create_dir_all(&d).unwrap();
+    d
+  }
+
+  fn g(dir: &Path, args: &[&str]) {
+    assert!(git_status_ok(dir, args), "git {args:?} should succeed in {}", dir.display());
+  }
+
+  fn head(dir: &Path) -> String {
+    git_capture(dir, &["rev-parse", "HEAD"]).unwrap().trim().to_string()
+  }
+
+  /// A fresh repo with one `base` commit and a local identity.
+  fn repo(tag: &str) -> PathBuf {
+    let d = mt_dir(tag);
+    g(&d, &["init", "-q", "."]);
+    g(&d, &["config", "user.email", "t@e.st"]);
+    g(&d, &["config", "user.name", "tester"]);
+    std::fs::write(d.join("README"), "base\n").unwrap();
+    g(&d, &["add", "-A"]);
+    g(&d, &["commit", "-qm", "base"]);
+    d
+  }
+
+  /// Clone `src` and commit a change in the clone (mimicking a commit-enabled skill).
+  fn clone_and_commit(src: &Path, tag: &str, file: &str, contents: &str, msg: &str) -> PathBuf {
+    let d = mt_dir(tag);
+    assert!(
+      Command::new("git")
+        .args(["clone", "-q", &src.to_string_lossy(), &d.to_string_lossy()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false),
+      "clone should succeed"
+    );
+    set_clone_identity(&d);
+    std::fs::write(d.join(file), contents).unwrap();
+    g(&d, &["add", "-A"]);
+    g(&d, &["commit", "-qm", msg]);
+    d
+  }
+
+  #[test]
+  fn incoming_branch_name_is_distinct_and_descriptive() {
+    let n = incoming_branch_name("add", "20231114-221320", "abcdef1234567");
+    assert_eq!(n, "scsh/incoming/add-20231114-221320-utc-abcdef1");
+    // A messy skill name is sanitized into a valid ref component.
+    assert!(incoming_branch_name("My Skill!", "S", "deadbeef").starts_with("scsh/incoming/my-skill-S-utc-"));
+  }
+
+  #[test]
+  fn integrate_rebases_clean_commits_onto_the_branch() {
+    let caller = repo("clean-caller");
+    let base = head(&caller);
+    let clone = clone_and_commit(&caller, "clean-clone", "foo.txt", "hi\n", "add foo");
+
+    let outcome = integrate_commits(&caller, &clone, &base, "add", "STAMP").unwrap();
+    assert!(matches!(outcome, Some(Integration::Applied { count: 1 })), "expected 1 applied commit");
+    // The file is now committed on the caller's branch, the tree is clean, and HEAD
+    // advanced by exactly one commit.
+    assert_eq!(std::fs::read_to_string(caller.join("foo.txt")).unwrap(), "hi\n");
+    assert_eq!(git_capture(&caller, &["status", "--porcelain"]).unwrap().trim(), "");
+    assert_eq!(git_capture(&caller, &["rev-list", "--count", &format!("{base}..HEAD")]).unwrap().trim(), "1");
+    // The brought-in commit keeps the deliberately recognizable bot author (the
+    // "not-for-pushing" tripwire); the committer is the caller.
+    assert_eq!(git_capture(&caller, &["log", "-1", "--format=%ae"]).unwrap().trim(), SCSH_COMMIT_EMAIL);
+    assert_eq!(git_capture(&caller, &["log", "-1", "--format=%an"]).unwrap().trim(), SCSH_COMMIT_NAME);
+  }
+
+  #[test]
+  fn integrate_rebases_second_skill_onto_advanced_head() {
+    // Two skills both branched from the same base; the second must rebase onto the
+    // HEAD the first advanced to (not fast-forward), ending with BOTH files.
+    let caller = repo("two-caller");
+    let base = head(&caller);
+    let c1 = clone_and_commit(&caller, "two-c1", "a.txt", "A\n", "add a");
+    let c2 = clone_and_commit(&caller, "two-c2", "b.txt", "B\n", "add b");
+
+    assert!(matches!(integrate_commits(&caller, &c1, &base, "s1", "S").unwrap(), Some(Integration::Applied { .. })));
+    assert!(matches!(integrate_commits(&caller, &c2, &base, "s2", "S").unwrap(), Some(Integration::Applied { .. })));
+    assert!(caller.join("a.txt").is_file() && caller.join("b.txt").is_file(), "both skills' files land");
+    assert_eq!(git_capture(&caller, &["rev-list", "--count", &format!("{base}..HEAD")]).unwrap().trim(), "2");
+  }
+
+  #[test]
+  fn integrate_saves_conflicting_commits_to_a_branch() {
+    let caller = repo("conf-caller");
+    let base = head(&caller);
+    // Both skills are cloned up front from the SAME base (as scsh does), and both add
+    // the same file with different content.
+    let c1 = clone_and_commit(&caller, "conf-c1", "shared.txt", "one\n", "shared one");
+    let c2 = clone_and_commit(&caller, "conf-c2", "shared.txt", "two\n", "shared two");
+    // The first applies cleanly; cherry-picking the second onto the now-advanced caller
+    // (which already has shared.txt="one") is an add/add conflict.
+    integrate_commits(&caller, &c1, &base, "s1", "S").unwrap();
+    let outcome = integrate_commits(&caller, &c2, &base, "s2", "S").unwrap();
+    let branch = match outcome {
+      Some(Integration::Saved { branch, count: 1 }) => branch,
+      other => panic!("expected the conflicting commit to be saved to a branch, got {:?}", other.is_some()),
+    };
+    // The caller's branch is untouched (still "one"); the fallback branch exists and
+    // carries the skill's commit.
+    assert_eq!(std::fs::read_to_string(caller.join("shared.txt")).unwrap(), "one\n");
+    assert_eq!(git_capture(&caller, &["status", "--porcelain"]).unwrap().trim(), "", "no half-applied cherry-pick");
+    assert!(branch.starts_with("scsh/incoming/s2-"));
+    assert_eq!(git_capture(&caller, &["cat-file", "-t", &branch]).unwrap().trim(), "commit");
+  }
+
+  #[test]
+  fn integrate_is_a_noop_when_the_skill_added_no_commits() {
+    let caller = repo("noop-caller");
+    let base = head(&caller);
+    let d = mt_dir("noop-clone");
+    assert!(Command::new("git")
+      .args(["clone", "-q", &caller.to_string_lossy(), &d.to_string_lossy()])
+      .status()
+      .unwrap()
+      .success());
+    // No commit made in the clone → nothing to bring back.
+    assert!(integrate_commits(&caller, &d, &base, "add", "S").unwrap().is_none());
+  }
+
+  #[test]
+  fn commits_are_a_side_effect_run_twice_adds_twice() {
+    // Models a skill that appends a line and commits, run on two consecutive
+    // invocations (each captures its own base = the current HEAD). The result is two
+    // commits and a two-line file — adding a commit is a side effect, not deduped.
+    let caller = repo("twice-caller");
+    let base1 = head(&caller);
+    let r1 = clone_and_commit(&caller, "twice-r1", "log.txt", "x\n", "log x");
+    integrate_commits(&caller, &r1, &base1, "add", "S").unwrap();
+
+    let base2 = head(&caller); // the next run's base is the now-advanced HEAD
+    let r2 = clone_and_commit(&caller, "twice-r2", "log.txt", "x\nx\n", "log x again");
+    integrate_commits(&caller, &r2, &base2, "add", "S").unwrap();
+
+    assert_eq!(std::fs::read_to_string(caller.join("log.txt")).unwrap(), "x\nx\n");
+    assert_eq!(git_capture(&caller, &["rev-list", "--count", &format!("{base1}..HEAD")]).unwrap().trim(), "2");
+  }
+
+  // --- result cache ---------------------------------------------------------
+
+  fn mk_skill(name: &str) -> config::Skill {
+    config::Skill {
+      name: name.into(),
+      harness: config::Harness::Opencode,
+      model: None,
+      timeout: None,
+      env: Vec::new(),
+      profile: None,
+      commits: false,
+      autoinstall: true,
+      result: "tmp/r.json".into(),
+    }
+  }
+
+  #[test]
+  fn cache_key_is_deterministic_and_sensitive() {
+    let caller = repo("ck");
+    std::fs::create_dir_all(caller.join(".skills/add")).unwrap();
+    std::fs::write(caller.join(".skills/add/SKILL.md"), "name: add\nbody\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "skill"]);
+    let s = mk_skill("add");
+    let env = vec![("A".to_string(), "2".to_string()), ("B".to_string(), "3".to_string())];
+
+    let k1 = cache_key(&caller, &s, &env).unwrap();
+    assert_eq!(k1.len(), 64, "key is a sha256 hex digest");
+    // Same inputs => same key; env order doesn't matter (it's sorted).
+    assert_eq!(cache_key(&caller, &s, &env).unwrap(), k1);
+    let env_rev = vec![("B".to_string(), "3".to_string()), ("A".to_string(), "2".to_string())];
+    assert_eq!(cache_key(&caller, &s, &env_rev).unwrap(), k1);
+    // Different env => different key.
+    let env2 = vec![("A".to_string(), "9".to_string()), ("B".to_string(), "3".to_string())];
+    assert_ne!(cache_key(&caller, &s, &env2).unwrap(), k1);
+
+    // A committed change to repo content => different key (the HEAD tree changed).
+    std::fs::write(caller.join("other.txt"), "x").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "change"]);
+    assert_ne!(cache_key(&caller, &s, &env).unwrap(), k1);
+
+    // Editing the skill body => different key too.
+    let before_skill_edit = cache_key(&caller, &s, &env).unwrap();
+    std::fs::write(caller.join(".skills/add/SKILL.md"), "name: add\nNEW body\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "edit skill"]);
+    assert_ne!(cache_key(&caller, &s, &env).unwrap(), before_skill_edit);
+  }
+
+  #[test]
+  fn cache_store_lookup_and_restore_roundtrip() {
+    let caller = repo("cs");
+    let key = "deadbeef";
+    assert!(cache_lookup(&caller, key).is_none(), "empty cache misses");
+
+    let result = r#"{"result": "2 + 3 = 5"}"#;
+    cache_store(&caller, key, result, None);
+    // Stored under the repo's gitignored tmp/.sccache/<key>.json, and reads back.
+    assert!(caller.join("tmp/.sccache").join(format!("{key}.json")).is_file());
+    let entry = cache_lookup(&caller, key).expect("hit");
+    assert_eq!(entry.result, result);
+    assert!(entry.commits.is_none(), "no commits journaled for a non-committing skill");
+
+    // Restoring writes the result file (creating tmp/), exactly as a real run would have.
+    restore_cached_result(&caller, "tmp/add_result.json", result).unwrap();
+    assert_eq!(std::fs::read_to_string(caller.join("tmp/add_result.json")).unwrap(), result);
+    // And the human message is recoverable from the restored content.
+    assert_eq!(json::message(result).as_deref(), Some("2 + 3 = 5"));
+
+    // A commit-enabled skill journals its commits (a patch mbox); they round-trip and a
+    // multi-line patch with quotes survives the JSON quoting.
+    let patch = "From abc Mon Sep 17 00:00:00 2001\nSubject: [PATCH] add: 2 + 3 = 5\n\n\"diff\" body\n";
+    cache_store(&caller, "withcommit", result, Some(patch));
+    let e2 = cache_lookup(&caller, "withcommit").expect("hit");
+    assert_eq!(e2.result, result);
+    assert_eq!(e2.commits.as_deref(), Some(patch));
+  }
+
+  #[test]
+  fn cached_commits_are_replayed() {
+    let caller = repo("replay");
+    let base = git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    // Make a commit, capture it as a patch (what cache_store journals), then revert to base.
+    std::fs::write(caller.join("note.txt"), "hi\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "add note"]);
+    let patch = commit_patch(&caller, &base).expect("a commit patch");
+    g(&caller, &["reset", "--hard", &base]);
+    assert!(!caller.join("note.txt").exists(), "reverted to base");
+    // Replaying the journaled patch (what a cache HIT does) brings the commit back.
+    let res = apply_cached_commits(&caller, &patch, "demo", "20260101-000000");
+    assert!(matches!(res, Ok(Some(Integration::Applied { count: 1 }))), "expected Applied{{count:1}}");
+    assert!(caller.join("note.txt").exists(), "replayed file is present");
+    assert_eq!(git_capture(&caller, &["log", "-1", "--format=%s"]).unwrap().trim(), "add note");
+    assert_ne!(git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim(), base, "HEAD advanced past base");
+  }
+}
