@@ -17,7 +17,8 @@ const PAGE_CSS: &str = r#"
   .daemon-status .dot { width: 0.55rem; height: 0.55rem; border-radius: 50%; background: #888; flex-shrink: 0; }
   .daemon-status.live .dot { background: #3a8; }
   .daemon-status.down .dot { background: #e55; }
-  .daemon-status.connecting .dot { background: #ca6; }
+  .daemon-status.connecting .dot { background: #6af; }
+  .daemon-status.connecting { color: #6af; }
   .table-scroll { overflow-x: auto; width: 100%; margin-bottom: 1rem; }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   thead tr, tbody tr { border-bottom: 1px solid #8884; }

@@ -212,7 +212,7 @@ function setDaemonStatus(kind, label, uptime) {
 }
 function renderIndex(sessions, nowUnix) {
   const body = document.getElementById('sessions-body');
-  if (!body) return;
+  if (!body || sessions == null) return;
   nowUnix = nowUnix ?? (Date.now() / 1000);
   const ids = sortSessionIds(sessions, nowUnix);
   if (!ids.length) {
@@ -531,7 +531,8 @@ function onTick(msg) {
       renderSession(session, nowUnix);
     }
   } else {
-    renderIndex(msg.sessions ?? liveSessions, nowUnix);
+    const snapshot = msg.sessions ?? liveSessions;
+    if (snapshot) renderIndex(snapshot, nowUnix);
   }
 }
 let ws;
@@ -539,10 +540,10 @@ let reconnectMs = 400;
 function connectWs() {
   setDaemonStatus('connecting', 'connecting…', null);
   ws = new WebSocket('ws://127.0.0.1:' + WS_PORT + '/ws');
-  ws.onopen = () => { reconnectMs = 400; setDaemonStatus('live', 'daemon up · waiting for data…', null); };
+  ws.onopen = () => { reconnectMs = 400; setDaemonStatus('connecting', 'connecting…', null); };
   ws.onmessage = (ev) => { try { onTick(JSON.parse(ev.data)); } catch (_) {} };
   ws.onclose = () => {
-    setDaemonStatus('down', 'daemon unreachable — retrying…', null);
+    setDaemonStatus('connecting', 'connecting…', null);
     setTimeout(connectWs, reconnectMs);
     reconnectMs = Math.min(reconnectMs * 2, 5000);
   };

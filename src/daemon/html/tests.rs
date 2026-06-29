@@ -121,6 +121,28 @@ fn live_client_js_counts_alive_clients_and_shutdown() {
 }
 
 #[test]
+fn live_client_js_skips_index_render_without_sessions() {
+  let js = live_client_js();
+  assert!(js.contains("if (!body || sessions == null) return"));
+  assert!(js.contains("if (snapshot) renderIndex(snapshot, nowUnix)"));
+}
+
+#[test]
+fn live_client_js_shows_connecting_on_ws_close() {
+  let js = live_client_js();
+  assert!(js.contains("setDaemonStatus('connecting', 'connecting…', null)"));
+  assert!(!js.contains("daemon unreachable"));
+}
+
+#[test]
+fn wrap_page_connecting_status_uses_blue() {
+  use super::layout::wrap_page;
+  let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
+  assert!(html.contains("class=\"daemon-status connecting\""));
+  assert!(html.contains(".daemon-status.connecting .dot { background: #6af; }"));
+}
+
+#[test]
 fn wrap_page_serves_valid_css_braces() {
   use super::layout::wrap_page;
   let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");

@@ -1,6 +1,6 @@
 [package]
 name = "scsh"
-version = "1.8.0"
+version = "1.9.0"
 edition = "2021"
 description = "Scoped Skills Helper — preflight a git repo and run its scoped skills in ephemeral containers."
 license = "MIT"
