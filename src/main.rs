@@ -757,6 +757,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         skill.model.as_deref(),
         skill.effort.as_deref(),
         &skill.skill_source,
+        &skill.result,
         skill.terminal,
       );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
@@ -1976,6 +1977,7 @@ fn run_one_skill(
     skill.model.as_deref(),
     skill.effort.as_deref(),
     &skill.skill_source,
+    &skill.result,
     skill.terminal,
   );
   let cmd = if git_transport {

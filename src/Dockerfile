@@ -31,7 +31,7 @@ RUN set -eux; \
       perl gawk \
       jq sqlite3 postgresql-client \
       ripgrep shellcheck \
-      asciinema \
+      asciinema tmux \
       protobuf-compiler \
       iputils-ping traceroute bind9-dnsutils netcat-openbsd iproute2 whois socat; \
     rm -rf /var/lib/apt/lists/*

@@ -43,7 +43,11 @@ harness output and container names.
 ## Terminal recordings (asciinema)
 
 Every harness runs inside a real PTY recorded by asciinema (size from the `terminal:`
-block in `.scsh.yml`, default **200×50**). The session page shows two links per skill:
+block in `.scsh.yml`, default **200×50**). For **claude, codex, and cursor** the recording
+is the genuine end-to-end interactive TUI — the same screen a human would see — driven
+inside tmux: the skill prompt is the first message, a watcher waits for the skill's
+result file, then sends the harness its quit keys (`/exit`, double Ctrl-C) and ends the
+session. opencode and grok record their headless output streams. The session page shows two links per skill:
 
 - **▶ watch cast** — `/cast/{session}/{proc}/play`: an in-browser player (vendored
   asciinema-player) with play/pause, timeline scrubbing, speed control, and
