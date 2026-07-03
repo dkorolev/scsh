@@ -436,30 +436,20 @@ fn harness_command_verbose(
          Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
-      // Full interactive TUI (no -p): the recording shows the real Claude Code screen.
-      // No in-container seeding: the bind-mounted ~/.claude.json single-file mount is not
-      // writable from inside, so scsh merges the onboarding/consent/trust keys into the
-      // per-run copy host-side before the container starts (see main's forward_claude_auth).
-      let mut tui = String::from("claude --permission-mode bypassPermissions");
+      // Full interactive TUI (no -p): the recording shows the real Claude Code screen, and
+      // no dialog blocks it. Onboarding, theme and workspace-trust are pre-seeded into the
+      // forwarded ~/.claude.json (see main's forward_claude_auth). Permission mode is
+      // `acceptEdits`, NOT `bypassPermissions`: the latter always shows an un-skippable
+      // consent screen (no flag/env/config suppresses it), while acceptEdits auto-accepts
+      // the skill's file writes with no prompt.
+      let mut tui = String::from("claude --permission-mode acceptEdits");
       if let Some(m) = model {
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(m));
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      // Dialog answers the watcher presses when a screen appears. The bypass-permissions
-      // consent ALWAYS shows with `--permission-mode bypassPermissions` (seeding does not
-      // suppress it) and its highlighted default is "No, exit" — so it must be actively
-      // accepted with `Down Enter` (move to "Yes, I accept", confirm), never bare Enter.
-      // The rest are defensive: config seeding normally pre-answers them, but if one slips
-      // through (new claude version, changed keys) Enter takes the safe highlighted default.
-      let answers: &[(&str, &str)] = &[
-        ("Bypass Permissions mode", "Down Enter"),
-        ("Choose the text style", "Enter"),
-        ("Quick safety check", "Enter"),
-        ("trust this folder", "Enter"),
-      ];
-      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, answers, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, result, term)
     }
     Harness::Codex => {
       let prompt = format!(
@@ -469,8 +459,8 @@ fn harness_command_verbose(
       );
       // Full interactive TUI (no `exec`): the recording shows the real Codex screen. The
       // container IS the sandbox (ephemeral, --rm), so codex's own sandbox/approvals are
-      // bypassed; the repo mount is pre-trusted in config.toml so no dialog blocks.
-      let seed = "mkdir -p \"$CODEX_HOME\" && printf '\\n[projects.\"/home/agent/repo\"]\\ntrust_level = \"trusted\"\\n' >> \"$CODEX_HOME/config.toml\"".to_string();
+      // bypassed; the repo mount is pre-trusted in the forwarded config.toml (see main's
+      // forward_codex), so no dialog blocks.
       let mut tui = String::from("codex --dangerously-bypass-approvals-and-sandbox");
       if let Some(m) = model {
         tui.push_str(" -m ");
@@ -482,8 +472,7 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      let answers: &[(&str, &str)] = &[("Allow Codex to work in this folder", "Enter")];
-      wrap_tui_shell(harness, skill_source, model, &seed, &tui, TuiQuit::DoubleCtrlC, answers, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
     }
     Harness::Grok => {
       let prompt = format!(
@@ -518,24 +507,28 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Full interactive TUI (no -p): the recording shows the real cursor-agent screen.
-      // The ephemeral container is the sandbox; --force auto-approves. `--trust` is
-      // print-mode-only (the TUI rejects it with an error and exits).
-      let mut tui = String::from("cursor-agent --force --sandbox disabled");
+      // The ephemeral container is the sandbox; --force auto-approves. cursor's `--trust`
+      // is print-mode-only, and its TUI workspace-trust prompt has no flag or seedable
+      // config key — cursor records trust as a marker file under $HOME (NOT the forwarded
+      // config dir), so it is created in-container just before the TUI starts. The repo
+      // path slug is `/`-stripped, `/`->`-` of AGENT_REPO.
+      let trust_dir = format!("$HOME/.cursor/projects/{}", AGENT_REPO.trim_start_matches('/').replace('/', "-"));
+      let mut tui = format!(
+        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted && exec cursor-agent --force --sandbox disabled"
+      );
       if let Some(m) = model {
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(&cursor_model_with_effort(m, effort)));
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      // The interactive TUI always asks workspace trust ('--trust' is print-mode-only);
-      // the watcher answers it from the pane content.
-      let answers: &[(&str, &str)] = &[("Trust this workspace", "a")];
-      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::DoubleCtrlC, answers, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
     }
   }
 }
 
-/// How to politely close a harness TUI once the skill's result file exists.
+/// How to politely close a harness TUI once the skill's result file exists. The value is
+/// passed verbatim to `scsh-tui-record`, which maps it to the harness's quit keystrokes.
 #[derive(Debug, Clone, Copy)]
 enum TuiQuit {
   /// Type `/exit` + Enter (Claude Code).
@@ -544,58 +537,44 @@ enum TuiQuit {
   DoubleCtrlC,
 }
 
-/// Run an interactive harness TUI inside tmux and record the attached screen.
+impl TuiQuit {
+  /// The `scsh-tui-record` argument selecting this quit style.
+  fn as_arg(self) -> &'static str {
+    match self {
+      TuiQuit::SlashExit => "slash-exit",
+      TuiQuit::DoubleCtrlC => "double-ctrl-c",
+    }
+  }
+}
+
+/// Build the `scsh-tui-record` invocation that records a harness's interactive TUI.
 ///
-/// The pipeline this builds, all under the outer `/bin/sh -c`:
-///  1. `seed` — one-time config writes so no onboarding/trust dialog blocks the TUI;
-///  2. a detached tmux session sized `term.cols` x `term.rows` runs the TUI with the
-///     skill prompt as its first message;
-///  3. a background watcher polls: any known blocking dialog on screen (matched via
-///     `tmux capture-pane`) gets its answer key pressed, and once the skill's result
-///     file — the run's completion signal — exists, the harness receives its quit keys
-///     and the session is killed;
-///  4. `asciinema rec -c "tmux attach -r"` records the full screen to
-///     `${SCSH_RUN_LOG}.cast` and ends when the session dies. The same rendered stream
-///     still tees to the run log, and scsh's container timeout remains the hard stop.
-#[allow(clippy::too_many_arguments)]
+/// The heavy lifting lives in the `scsh-tui-record` script baked into the base image (see
+/// `src/Dockerfile`), so this stays a clean argv, not an inline shell program. The script
+/// runs the harness TUI inside a `term.cols` x `term.rows` tmux session, records the
+/// attached screen with asciinema to `${SCSH_RUN_LOG}.cast`, and — when the skill's
+/// `result` file appears (the run's completion signal) — sends the harness its quit keys
+/// and ends the recording. There is deliberately NO screen-scraping: every harness is
+/// configured (flags + seeded config) so no consent/trust/login dialog ever appears; a
+/// harness that still blocks is a setup bug that should surface, not be auto-clicked.
+///
+/// The output still tees to the run log, and scsh's container timeout remains the hard stop.
 fn wrap_tui_shell(
-  harness: Harness, skill_source: &str, model: Option<&str>, seed: &str, tui_cmd: &str, quit: TuiQuit,
-  dialog_answers: &[(&str, &str)], result: &str, term: crate::config::Terminal,
+  harness: Harness, skill_source: &str, model: Option<&str>, tui_cmd: &str, quit: TuiQuit, result: &str,
+  term: crate::config::Terminal,
 ) -> String {
   let model_label = model.unwrap_or("(harness default)");
-  let quit_keys = match quit {
-    TuiQuit::SlashExit => "tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter",
-    TuiQuit::DoubleCtrlC => "tmux send-keys -t scsh C-c; sleep 1; tmux send-keys -t scsh C-c",
-  };
-  let seed_step = if seed.is_empty() { String::new() } else { format!("{seed}; ") };
-  let answer_steps: String = dialog_answers
-    .iter()
-    .map(|(pattern, key)| {
-      format!(
-        "if tmux capture-pane -p -t scsh 2>/dev/null | grep -q {}; then tmux send-keys -t scsh {}; fi; ",
-        shell_quote(pattern),
-        key
-      )
-    })
-    .collect();
   format!(
     "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
-{seed_step}\
-tmux -f /dev/null new-session -d -x {cols} -y {rows} -s scsh {tui_q}; \
-tmux set -t scsh status off >/dev/null 2>&1; \
-( while tmux has-session -t scsh >/dev/null 2>&1; do \
-{answer_steps}\
-if [ -f {result_q} ]; then sleep 6; {quit_keys}; sleep 4; tmux kill-session -t scsh; break; fi; \
-sleep 2; done ) >/dev/null 2>&1 & \
-asciinema rec -q --cols {cols} --rows {rows} -c 'tmux attach -r -t scsh' \"${{{log_var}}}.cast\"; \
-wait; }} 2>&1 | tee \"${{{log_var}}}\"",
+scsh-tui-record {cols} {rows} {quit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log_var}}}\"",
     harness.as_str(),
     log_var = RUN_LOG_VAR,
     cols = term.cols,
     rows = term.rows,
-    tui_q = shell_quote(tui_cmd),
+    quit = quit.as_arg(),
     result_q = shell_quote(result),
+    tui_q = shell_quote(tui_cmd),
   )
 }
 
@@ -1879,20 +1858,16 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    // Interactive TUI under tmux: no -p, /exit quit keys. No in-container config writes —
-    // the bind-mounted ~/.claude.json is seeded host-side before the container starts.
-    assert!(cmd.contains("claude --permission-mode bypassPermissions --model sonnet"), "got: {cmd}");
+    // Interactive TUI recorded via scsh-tui-record (no inline shell, no screen-scraping).
+    // acceptEdits (not bypassPermissions) avoids the un-skippable consent screen; onboarding
+    // and trust are seeded host-side into the forwarded ~/.claude.json, not in the command.
+    assert!(cmd.contains("scsh-tui-record 200 50 slash-exit tmp/add_claude_sonnet_4_6_result.json "), "got: {cmd}");
+    assert!(cmd.contains("claude --permission-mode acceptEdits --model sonnet"), "got: {cmd}");
+    assert!(!cmd.contains("bypassPermissions"), "got: {cmd}");
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
-    assert!(!cmd.contains(".claude.json"), "got: {cmd}");
-    assert!(cmd.contains("tmux -f /dev/null new-session -d -x 200 -y 50 -s scsh"), "got: {cmd}");
-    assert!(cmd.contains("tmux send-keys -t scsh -l /exit"), "got: {cmd}");
-    // The bypass-permissions consent defaults to "No, exit"; the watcher must actively
-    // move to "Yes, I accept" and confirm (Down Enter), never a bare Enter that exits.
-    assert!(cmd.contains("capture-pane -p -t scsh 2>/dev/null | grep -q 'Bypass Permissions mode'"), "got: {cmd}");
-    assert!(cmd.contains("tmux send-keys -t scsh Down Enter"), "got: {cmd}");
-    assert!(cmd.contains("[ -f tmp/add_claude_sonnet_4_6_result.json ]"), "got: {cmd}");
-    assert!(cmd.contains("asciinema rec -q --cols 200 --rows 50 -c 'tmux attach -r -t scsh'"), "got: {cmd}");
-    assert!(cmd.contains("tee \"${SCSH_RUN_LOG}\""));
+    assert!(!cmd.contains("capture-pane"), "got: {cmd}");
+    assert!(!cmd.contains("send-keys"), "got: {cmd}");
+    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""), "got: {cmd}");
   }
 
   #[test]
@@ -1907,14 +1882,14 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=codex"));
-    // Interactive TUI under tmux: no `exec` subcommand, repo pre-trusted, C-c C-c quit.
+    // Interactive TUI (no `exec` subcommand) via scsh-tui-record. Folder-trust is seeded
+    // host-side into the forwarded config.toml (not in the command), so no in-command seed.
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_codex_result.json "), "got: {cmd}");
     assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"), "got: {cmd}");
     assert!(!cmd.contains("codex exec"), "got: {cmd}");
     assert!(cmd.contains(" -m gpt-5.5"));
-    assert!(cmd.contains("$CODEX_HOME/config.toml"), "got: {cmd}");
-    assert!(cmd.contains("trust_level"), "got: {cmd}");
-    assert!(cmd.contains("tmux send-keys -t scsh C-c"), "got: {cmd}");
-    assert!(cmd.contains("[ -f tmp/add_codex_result.json ]"), "got: {cmd}");
+    assert!(!cmd.contains("config.toml"), "got: {cmd}");
+    assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
@@ -1980,15 +1955,16 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=cursor"));
-    // Interactive TUI under tmux: no -p, C-c C-c quit keys.
+    // Interactive TUI via scsh-tui-record. Workspace trust is pre-seeded by creating
+    // cursor's marker file in-container (no flag/config key exists), not by scraping.
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_cursor.json "), "got: {cmd}");
     assert!(cmd.contains("cursor-agent --force --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
     assert!(!cmd.contains("--trust"), "got: {cmd}");
     assert!(cmd.contains(" --model composer-2.5-fast"));
-    assert!(cmd.contains("tmux send-keys -t scsh C-c"), "got: {cmd}");
-    // The watcher must answer the TUI's workspace-trust dialog from pane content.
-    assert!(cmd.contains("capture-pane -p -t scsh 2>/dev/null | grep -q 'Trust this workspace'"), "got: {cmd}");
-    assert!(cmd.contains("[ -f tmp/add_cursor.json ]"), "got: {cmd}");
+    assert!(cmd.contains(".cursor/projects/home-agent-repo/.workspace-trusted"), "got: {cmd}");
+    assert!(!cmd.contains("capture-pane"), "got: {cmd}");
+    assert!(!cmd.contains("send-keys"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
     let quiet = harness_command_verbose(
@@ -2014,17 +1990,19 @@ mod tests {
   }
 
   #[test]
-  fn harness_runs_under_asciinema_with_configured_pty_size() {
+  fn harness_recorded_at_configured_pty_size() {
+    // TUI harnesses (claude/codex/cursor) record via scsh-tui-record with the PTY size as
+    // its first two args; the recording path is always ${SCSH_RUN_LOG}.cast.
     let term = crate::config::Terminal { cols: 120, rows: 30 };
-    let cmd = harness_command_verbose(Harness::Claude, Some("opus"), None, "add", "tmp/add.json", false, term);
-    assert!(cmd.contains("asciinema rec -q --cols 120 --rows 30 -c "), "got: {cmd}");
-    assert!(cmd.contains("tmux -f /dev/null new-session -d -x 120 -y 30 -s scsh"), "got: {cmd}");
-    assert!(cmd.contains("\"${SCSH_RUN_LOG}.cast\""), "got: {cmd}");
-    assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "got: {cmd}");
-    for harness in [Harness::Opencode, Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor] {
-      let cmd =
-        harness_command_verbose(harness, None, None, "add", "tmp/add.json", false, crate::config::Terminal::default());
-      assert!(cmd.contains("asciinema rec -q --cols 200 --rows 50 -c "), "harness {harness:?} got: {cmd}");
+    for h in [Harness::Claude, Harness::Codex, Harness::Cursor] {
+      let cmd = harness_command_verbose(h, Some("m"), None, "add", "tmp/add.json", false, term);
+      assert!(cmd.contains("scsh-tui-record 120 30 "), "harness {h:?} got: {cmd}");
+      assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "harness {h:?} got: {cmd}");
+    }
+    // Headless harnesses (opencode/grok) record inline via asciinema at the same size.
+    for h in [Harness::Opencode, Harness::Grok] {
+      let cmd = harness_command_verbose(h, None, None, "add", "tmp/add.json", false, term);
+      assert!(cmd.contains("asciinema rec -q --cols 120 --rows 30 -c "), "harness {h:?} got: {cmd}");
     }
   }
 

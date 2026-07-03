@@ -2535,6 +2535,14 @@ fn forward_codex(run_dir: &Path) -> Option<PathBuf> {
       }
     }
   }
+  // Pre-trust the container repo path so codex's interactive TUI shows no folder-trust
+  // prompt (appended, so a forwarded host config.toml keeps its other settings).
+  {
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(dest.join("config.toml")) {
+      let _ = write!(f, "\n[projects.\"{}\"]\ntrust_level = \"trusted\"\n", runtime::AGENT_REPO);
+    }
+  }
   Some(dest)
 }
 
