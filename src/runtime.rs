@@ -431,24 +431,9 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Full interactive TUI (no -p): the recording shows the real Claude Code screen.
-      // Onboarding, bypass-permissions consent, and trust for the container repo path are
-      // MERGED into ~/.claude.json (a per-run copy of the host's, bind-mounted) so no
-      // first-run dialog blocks the headless session. jq-merge preserves the host copy's
-      // other keys; the write truncates in place (`cat >`) because a bind-mounted single
-      // file must not be replaced by rename. Fresh defaults cover a missing/empty file.
-      let merge_filter = ".hasCompletedOnboarding=true | .bypassPermissionsModeAccepted=true \
-| .projects.\"/home/agent/repo\".hasTrustDialogAccepted=true \
-| .projects.\"/home/agent/repo\".hasCompletedProjectOnboarding=true";
-      let fresh_json = "{\"hasCompletedOnboarding\":true,\"bypassPermissionsModeAccepted\":true,\
-\"theme\":\"dark\",\"autoUpdates\":false,\"projects\":{\"/home/agent/repo\":{\"hasTrustDialogAccepted\":true,\
-\"hasCompletedProjectOnboarding\":true}}}";
-      let seed = format!(
-        "{{ jq {} \"$HOME/.claude.json\" > /tmp/scsh-claude-seed.json 2>/dev/null \
-&& cat /tmp/scsh-claude-seed.json > \"$HOME/.claude.json\"; }} \
-|| printf '%s' {} > \"$HOME/.claude.json\"",
-        shell_quote(merge_filter),
-        shell_quote(fresh_json)
-      );
+      // No in-container seeding: the bind-mounted ~/.claude.json single-file mount is not
+      // writable from inside, so scsh merges the onboarding/consent/trust keys into the
+      // per-run copy host-side before the container starts (see main's forward_claude_auth).
       let mut tui = String::from("claude --permission-mode bypassPermissions");
       if let Some(m) = model {
         tui.push_str(" --model ");
@@ -456,7 +441,7 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &seed, &tui, TuiQuit::SlashExit, result, term)
+      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, result, term)
     }
     Harness::Codex => {
       let prompt = format!(
@@ -514,8 +499,9 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Full interactive TUI (no -p): the recording shows the real cursor-agent screen.
-      // The ephemeral container is the sandbox (--force --trust --sandbox disabled).
-      let mut tui = String::from("cursor-agent --force --trust --sandbox disabled");
+      // The ephemeral container is the sandbox; --force auto-approves. `--trust` is
+      // print-mode-only (the TUI rejects it with an error and exits).
+      let mut tui = String::from("cursor-agent --force --sandbox disabled");
       if let Some(m) = model {
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(&cursor_model_with_effort(m, effort)));
@@ -1886,17 +1872,11 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    // Interactive TUI under tmux: no -p, onboarding/trust seeded, /exit quit keys.
+    // Interactive TUI under tmux: no -p, /exit quit keys. No in-container config writes —
+    // the bind-mounted ~/.claude.json is seeded host-side before the container starts.
     assert!(cmd.contains("claude --permission-mode bypassPermissions --model sonnet"), "got: {cmd}");
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
-    assert!(cmd.contains("$HOME/.claude.json"), "got: {cmd}");
-    assert!(cmd.contains("hasCompletedOnboarding"), "got: {cmd}");
-    assert!(cmd.contains("hasTrustDialogAccepted"), "got: {cmd}");
-    // The seed must merge into the bind-mounted per-run copy (jq + in-place cat), with a
-    // fresh-file fallback — never a rename over the mount.
-    assert!(cmd.contains("jq "), "got: {cmd}");
-    assert!(cmd.contains("cat /tmp/scsh-claude-seed.json > \"$HOME/.claude.json\""), "got: {cmd}");
-    assert!(!cmd.contains("mv "), "got: {cmd}");
+    assert!(!cmd.contains(".claude.json"), "got: {cmd}");
     assert!(cmd.contains("tmux -f /dev/null new-session -d -x 200 -y 50 -s scsh"), "got: {cmd}");
     assert!(cmd.contains("tmux send-keys -t scsh -l /exit"), "got: {cmd}");
     assert!(cmd.contains("[ -f tmp/add_claude_sonnet_4_6_result.json ]"), "got: {cmd}");
@@ -1990,7 +1970,7 @@ mod tests {
     );
     assert!(cmd.contains("scsh: harness=cursor"));
     // Interactive TUI under tmux: no -p, C-c C-c quit keys.
-    assert!(cmd.contains("cursor-agent --force --trust --sandbox disabled"), "got: {cmd}");
+    assert!(cmd.contains("cursor-agent --force --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
     assert!(cmd.contains(" --model composer-2.5-fast"));
     assert!(cmd.contains("tmux send-keys -t scsh C-c"), "got: {cmd}");
@@ -2006,7 +1986,7 @@ mod tests {
       false,
       crate::config::Terminal::default(),
     );
-    assert!(quiet.contains("cursor-agent --force --trust --sandbox disabled"));
+    assert!(quiet.contains("cursor-agent --force --sandbox disabled"));
     assert!(!quiet.contains(" --model "));
   }
 

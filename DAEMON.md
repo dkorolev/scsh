@@ -60,7 +60,7 @@ session. opencode and grok record their headless output streams. The session pag
 While the container runs, the cast is served straight from the run dir
 (`<run_dir>/tmp/scsh-run.log.cast`, bind-mounted and growing live). When the skill ends,
 `scsh run` copies it into the caller repo's gitignored
-**`tmp/casts/<skill>-<YYYYMMDD-HHMMSS>-utc.cast`** — timestamped so past recordings can be
+**`tmp/casts/<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast`** — timestamped so past recordings can be
 revisited later — and replay keeps working after run-dir pruning. scsh never deletes these
 copies; clean `tmp/casts/` whenever you like.
 
