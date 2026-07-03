@@ -130,6 +130,45 @@ ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log
 # records it, and needs a sane TERM for the pseudo-terminal it creates.
 ENV TERM=xterm-256color
 
+# scsh-tui-record: record a harness's interactive TUI as an asciicast. `scsh run` invokes it
+# instead of embedding a shell program in the container command. It runs the harness TUI (CMD)
+# in a COLS x ROWS tmux session, records the attached screen to $SCSH_RUN_LOG.cast, and once
+# RESULT (the skill's result file) exists sends the harness its quit keystrokes and ends the
+# session. Deliberately NO screen-scraping: every harness is pre-configured (flags + seeded
+# config) so no consent/trust/login dialog ever appears; one that blocks is a setup bug that
+# should surface (via the container timeout), not be auto-clicked.
+RUN cat > /usr/local/bin/scsh-tui-record <<'SCSH_TUI_RECORD'
+#!/bin/sh
+# Usage: scsh-tui-record COLS ROWS QUIT RESULT CMD
+#   QUIT: slash-exit (Claude) | double-ctrl-c (codex, cursor)
+set -u
+cols=$1; rows=$2; quit=$3; result=$4; cmd=$5
+
+tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$cmd"
+tmux set -t scsh status off >/dev/null 2>&1 || true
+
+# Watcher: end the TUI once the skill has produced its result file.
+{
+  while tmux has-session -t scsh 2>/dev/null; do
+    if [ -f "$result" ]; then
+      sleep 4
+      case "$quit" in
+        slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
+        double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
+      esac
+      sleep 3
+      tmux kill-session -t scsh 2>/dev/null || true
+      break
+    fi
+    sleep 2
+  done
+} >/dev/null 2>&1 &
+
+asciinema rec -q --cols "$cols" --rows "$rows" -c 'tmux attach -r -t scsh' "$SCSH_RUN_LOG.cast"
+wait
+SCSH_TUI_RECORD
+RUN chmod 0755 /usr/local/bin/scsh-tui-record
+
 # --- OpenCode harness image (install harness last) ---
 FROM scsh-base AS scsh-opencode
 RUN set -eux; \
