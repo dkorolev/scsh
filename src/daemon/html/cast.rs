@@ -45,8 +45,9 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
   border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; text-decoration: none; }}
 .controls button:hover, .controls a:hover {{ border-color: #7ab4ff; }}
 #copied {{ color: #7dd87d; visibility: hidden; }}
-#player-wrap {{ padding: 0 16px 16px; }}
-.ap-player {{ max-width: 100%; }}
+/* Fill the viewport below the header/controls so fit:'both' fits vertically too. */
+#player-wrap {{ padding: 0 16px 16px; height: calc(100vh - 120px); }}
+#player, .ap-player {{ width: 100%; height: 100%; max-width: 100%; }}
 </style>
 </head>
 <body>
@@ -72,7 +73,7 @@ function hashStart() {{
 }}
 function create(startAt) {{
   if (player) {{ player.dispose(); player = null; }}
-  const opts = {{ fit: 'width', idleTimeLimit: 2, preload: true, theme: 'asciinema' }};
+  const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema' }};
   if (startAt != null) opts.startAt = startAt;
   player = AsciinemaPlayer.create(CAST_URL + '?ts=' + Date.now(), document.getElementById('player'), opts);
 }}

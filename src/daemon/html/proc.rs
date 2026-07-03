@@ -28,17 +28,31 @@ pub(crate) fn empty_output_html(status: ProcStatus) -> String {
   format!("<div class=\"dim\">{}</div>\n", empty_output_label(status))
 }
 
-/// Watch/download links for a proc's asciinema recording, when one is registered.
-/// Present mid-run too: the endpoints serve the partial cast while the container runs.
-pub(crate) fn cast_links_html(session_id: &str, proc: &ProcRecord) -> String {
-  if proc.cast_path.is_none() {
-    return String::new();
-  }
+/// Whether this proc has an asciinema recording to embed (skills do; build rows don't).
+pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
+  proc.cast_path.is_some()
+}
+
+/// Inline asciinema-player embed for a proc's recording: a toolbar (fullscreen, timestamp
+/// deep-link, reload, download) above an empty `.cast-player` box the client JS mounts the
+/// player into. Works mid-run too — the cast endpoint serves the partial file. Replaces the
+/// text-line output for recorded procs.
+pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
   let idx = proc.index;
   format!(
-    "<div class=\"castlinks\"><a href=\"/cast/{sid}/{idx}/play\">▶ watch cast</a> \
-<a href=\"/cast/{sid}/{idx}?dl=1\" download>⬇ download .cast</a></div>\n"
+    r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}">
+<div class="cast-toolbar">
+<button type="button" data-cast-fs>⛶ Fullscreen</button>
+<button type="button" data-cast-link>🔗 Link at time</button>
+<button type="button" data-cast-reload>↻ Reload</button>
+<a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
+<span class="cast-copied">copied</span>
+</div>
+<div class="cast-player"></div>
+</div>
+"#,
+    status = proc.status.as_str(),
   )
 }
 

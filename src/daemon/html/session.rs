@@ -4,8 +4,8 @@ use super::escape::esc;
 use super::format::format_elapsed_clock;
 use super::layout::wrap_page;
 use super::proc::{
-  autoscroll_ctl_html, cast_links_html, empty_output_html, proc_elapsed_secs, proc_meta_html, status_glyph,
-  summary_stats_html,
+  autoscroll_ctl_html, cast_embed_html, empty_output_html, proc_elapsed_secs, proc_has_cast, proc_meta_html,
+  status_glyph, summary_stats_html,
 };
 use crate::daemon::model::{Session, Store};
 use crate::daemon::paths::{now_unix_secs, session_url};
@@ -21,17 +21,24 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let elapsed = proc_elapsed_secs(proc, now).map(|e| format_elapsed_clock(e)).unwrap_or_else(|| "—".to_string());
     let note = proc.note.as_deref().unwrap_or("");
     let container = proc.container_name.as_deref().unwrap_or("");
-    let mut lines_html = String::new();
-    for line in &proc.lines {
-      lines_html.push_str(&format!(
-        "<div class=\"line\"><span class=\"at\">+{at:.1}s</span> {text}</div>\n",
-        at = line.at,
-        text = esc(&line.text)
-      ));
-    }
-    if lines_html.is_empty() {
-      lines_html = empty_output_html(proc.status);
-    }
+    // Recorded procs (skills) show the inline cast player; the rest (build rows) show the
+    // timestamped text output with its auto-scroll control.
+    let body_html = if proc_has_cast(proc) {
+      cast_embed_html(&session.id, proc)
+    } else {
+      let mut lines_html = String::new();
+      for line in &proc.lines {
+        lines_html.push_str(&format!(
+          "<div class=\"line\"><span class=\"at\">+{at:.1}s</span> {text}</div>\n",
+          at = line.at,
+          text = esc(&line.text)
+        ));
+      }
+      if lines_html.is_empty() {
+        lines_html = empty_output_html(proc.status);
+      }
+      format!("{}<div class=\"output\">{lines_html}</div>", autoscroll_ctl_html(proc.status))
+    };
     procs_html.push_str(&format!(
       r#"<details class="proc {status_class}" data-index="{index}">
 <summary>
@@ -42,10 +49,8 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 </summary>
 {proc_meta}
 <div class="detail">{detail}</div>
-{cast_links}
 {container_line}
-{autoscroll_ctl}
-<div class="output">{lines}</div>
+{body_html}
 </details>
 "#,
       status_class = proc.status.as_str(),
@@ -54,7 +59,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       proc_meta = proc_meta_html(proc),
-      cast_links = cast_links_html(&session.id, proc),
       elapsed = elapsed,
       note = esc(note),
       detail = esc(detail),
@@ -63,8 +67,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       } else {
         format!("<div class=\"container dim\">container: {c}</div>\n", c = esc(container))
       },
-      autoscroll_ctl = autoscroll_ctl_html(proc.status),
-      lines = lines_html
+      body_html = body_html
     ));
   }
   let profile = session.profile.as_deref().unwrap_or("default");

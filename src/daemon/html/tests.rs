@@ -69,6 +69,54 @@ fn session_proc_html_has_no_stray_backslashes() {
 }
 
 #[test]
+fn recorded_proc_embeds_cast_player_instead_of_text_output() {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "castab".into(),
+    Session {
+      id: "castab".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("default".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 1,
+      client_connected: true,
+      skills: vec![],
+      procs: vec![ProcRecord {
+        index: 2,
+        kind: ProcKind::Skill,
+        label: "claude: add".into(),
+        status: ProcStatus::Ok,
+        note: None,
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: Some("/tmp/x.cast".into()),
+        harness: Some("claude".into()),
+        skill_name: Some("add".into()),
+        model: None,
+        started_at: Some(1),
+        elapsed: Some(3.0),
+        lines: vec![],
+      }],
+    },
+  );
+  let html = session_page(&store, "castab").expect("session page");
+  // The page loads the player assets and embeds a player box wired to the cast endpoint.
+  assert!(html.contains(r#"<link rel="stylesheet" href="/assets/asciinema-player.css">"#), "player css");
+  assert!(html.contains(r#"<script src="/assets/asciinema-player.js"></script>"#), "player js");
+  let procs = session_procs_html(&html);
+  assert!(procs.contains(r#"<div class="cast" data-cast-url="/cast/castab/2""#), "cast embed");
+  assert!(procs.contains("data-cast-fs"), "fullscreen button");
+  assert!(procs.contains("data-cast-link"), "timestamp deep-link button");
+  assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
+  // A recorded proc shows the player, NOT the text output / autoscroll control.
+  assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
+  assert!(!procs.contains("autoscroll-ctl"), "no autoscroll control for recorded proc");
+}
+
+#[test]
 fn empty_output_html_has_no_backslash_artifacts() {
   let html = empty_output_html(ProcStatus::Ok);
   assert_eq!(html, "<div class=\"dim\">No output.</div>\n");
