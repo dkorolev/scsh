@@ -462,6 +462,7 @@ function castEmbedHtml(p) {
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<span class="cast-copied">copied</span>' +
+    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>' +
     '</div><div class="cast-player"></div></div>';
 }
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
@@ -493,11 +494,49 @@ function createCastPlayer(box) {
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
   mount.innerHTML = '';
-  // ?ts= busts any HTTP cache so a reload of a still-growing cast fetches fresh bytes.
-  box._player = AsciinemaPlayer.create(
-    box.dataset.castUrl + '?ts=' + Date.now(), mount,
-    { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema' }
-  );
+  const proc = box.dataset.proc;
+  const chaptersUrl = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/chapters';
+  // Load the analysis sidecar (summary + chapters) if present, then build the player with
+  // the chapters as markers (YouTube-style timeline highlights; [ / ] jump between them).
+  fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).catch(() => ({})).then(meta => {
+    const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
+    const markers = chapters.map(c => [c.t, String(c.title || '')]);
+    // ?ts= busts any HTTP cache so a reload of a still-growing cast fetches fresh bytes.
+    box._player = AsciinemaPlayer.create(
+      box.dataset.castUrl + '?ts=' + Date.now(), mount,
+      { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers }
+    );
+    renderCastSummary(box, meta.summary);
+    renderChapterChips(box, chapters);
+  });
+}
+function renderCastSummary(box, summary) {
+  let el = box.querySelector('.cast-summary');
+  if (summary) {
+    if (!el) { el = document.createElement('div'); el.className = 'cast-summary'; box.insertBefore(el, box.firstChild); }
+    el.textContent = summary;
+  } else if (el) el.remove();
+}
+function renderChapterChips(box, chapters) {
+  let bar = box.querySelector('.cast-chapters');
+  if (!chapters.length) { if (bar) bar.remove(); return; }
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'cast-chapters';
+    box.querySelector('.cast-toolbar').insertAdjacentElement('afterend', bar);
+  }
+  bar.innerHTML = chapters.map((c, i) =>
+    '<button type="button" data-seek="' + esc(String(c.t)) + '">' +
+    esc(fmtClock(c.t)) + ' ' + esc(String(c.title || ('Chapter ' + (i + 1)))) + '</button>'
+  ).join('');
+  bar.querySelectorAll('[data-seek]').forEach(btn => btn.addEventListener('click', () => {
+    if (box._player) { box._player.seek(Number(btn.dataset.seek)); box._player.play && box._player.play(); }
+  }));
+}
+function fmtClock(t) {
+  t = Math.max(0, Math.floor(t));
+  const m = Math.floor(t / 60), s = t % 60;
+  return m + ':' + (s < 10 ? '0' : '') + s;
 }
 // asciinema-player recomputes its fit on window resize; entering/exiting fullscreen changes
 // the box size, so nudge a resize for the fullscreen player to refit both dimensions.

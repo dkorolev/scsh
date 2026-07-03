@@ -201,6 +201,11 @@ fn handle_connection(
     return Ok(false);
   }
   let bare_path = req.path.split('?').next().unwrap_or("");
+  if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/chapters") {
+    let (status, body) = chapters_response(bare_path, store);
+    write_response(&mut stream, status, &body, "application/json")?;
+    return Ok(false);
+  }
   if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
     let (status, body, disposition) = cast_response(&req.path, store);
     write_cast_response(&mut stream, status, &body, disposition.as_deref())?;
@@ -248,6 +253,41 @@ fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
     .any(|kv| kv == "dl=1")
     .then(|| format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.cast\""));
   (200, body, disposition)
+}
+
+/// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar
+/// (`{ "summary": …, "chapters": [{ "t", "title" }] }`), written next to the cast file by
+/// the cursor/Composer analysis pass as `<cast-basename>.chapters.json`. Returns `{}` when
+/// no sidecar exists yet, so the player can ask unconditionally.
+fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
+  let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/chapters").unwrap_or("");
+  let Some((session_id, proc_str)) = rest.split_once('/') else {
+    return (404, "{}".into());
+  };
+  let Ok(proc_index) = proc_str.parse::<usize>() else {
+    return (404, "{}".into());
+  };
+  let cast_path = {
+    let store = lock_store(store);
+    store
+      .sessions
+      .get(session_id)
+      .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
+      .and_then(|p| p.cast_path.clone())
+  };
+  let sidecar = cast_path.and_then(|c| chapters_sidecar_path(&c));
+  match sidecar.and_then(|p| std::fs::read_to_string(p).ok()) {
+    Some(json) => (200, json),
+    None => (200, "{}".into()),
+  }
+}
+
+/// The chapters-sidecar path for a cast file: `<dir>/<stem>.chapters.json`
+/// (e.g. `…/foo.cast` → `…/foo.chapters.json`).
+pub fn chapters_sidecar_path(cast_path: &str) -> Option<std::path::PathBuf> {
+  let p = std::path::Path::new(cast_path);
+  let stem = p.file_name()?.to_str()?.strip_suffix(".cast")?;
+  Some(p.with_file_name(format!("{stem}.chapters.json")))
 }
 
 struct HttpRequest {
@@ -1038,6 +1078,13 @@ mod tests {
       .unwrap_or("")
       .contains("session ended before this proc reported finish"));
     assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn chapters_sidecar_path_derives_from_cast() {
+    let p = chapters_sidecar_path("/a/b/foo-123-utc-xyz.cast").unwrap();
+    assert_eq!(p.to_string_lossy(), "/a/b/foo-123-utc-xyz.chapters.json");
+    assert!(chapters_sidecar_path("/a/b/not-a-cast.txt").is_none());
   }
 
   #[test]

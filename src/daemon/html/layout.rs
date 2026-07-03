@@ -78,6 +78,17 @@ const PAGE_CSS: &str = r#"
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: #7ab4ff; }
   .cast-copied { color: #3a8; visibility: hidden; }
+  .cast-keys { margin-left: auto; font-size: 0.72rem; }
+  .cast-summary {
+    padding: 0.4rem 0.6rem; font-size: 0.9rem; line-height: 1.4;
+    background: #1114; border-bottom: 1px solid #8883;
+  }
+  .cast-chapters { display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.35rem 0.5rem; background: #1116; }
+  .cast-chapters button {
+    font: inherit; font-size: 0.78rem; color: #cdd; background: #2a2d36aa;
+    border: 1px solid #8884; border-radius: 5px; padding: 0.1rem 0.5rem; cursor: pointer;
+  }
+  .cast-chapters button:hover { border-color: #7ab4ff; color: #fff; }
   .cast-player { width: 100%; height: 42vh; max-height: 460px; }
   /* Fullscreen: the player box fills the viewport; asciinema-player fit:'both' scales the
      terminal to fit both width and height. */

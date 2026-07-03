@@ -45,8 +45,14 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
   border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; text-decoration: none; }}
 .controls button:hover, .controls a:hover {{ border-color: #7ab4ff; }}
 #copied {{ color: #7dd87d; visibility: hidden; }}
+#summary {{ padding: 0 16px 8px; font-size: 14px; max-width: 70ch; }}
+#summary:empty {{ display: none; }}
+#chapters {{ padding: 0 16px 10px; display: flex; flex-wrap: wrap; gap: 6px; }}
+#chapters button {{ font: inherit; font-size: 12px; color: #cdd; background: #1d1f26; border: 1px solid #2a2d36;
+  border-radius: 5px; padding: 2px 8px; cursor: pointer; }}
+#chapters button:hover {{ border-color: #7ab4ff; color: #fff; }}
 /* Fill the viewport below the header/controls so fit:'both' fits vertically too. */
-#player-wrap {{ padding: 0 16px 16px; height: calc(100vh - 120px); }}
+#player-wrap {{ padding: 0 16px 16px; height: calc(100vh - 200px); min-height: 300px; }}
 #player, .ap-player {{ width: 100%; height: 100%; max-width: 100%; }}
 </style>
 </head>
@@ -62,22 +68,36 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 <button id="reload">↻ reload recording</button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
+<div id="summary" class="dim"></div>
+<div id="chapters"></div>
 <div id="player-wrap"><div id="player"></div></div>
 <script src="/assets/asciinema-player.js"></script>
 <script>
 const CAST_URL = {cast_url_js};
 let player = null;
+let MARKERS = [];
 function hashStart() {{
   const m = location.hash.match(/^#t=([0-9:.]+)$/);
   return m ? m[1] : null;
 }}
+function fmtClock(t) {{ t = Math.max(0, Math.floor(t)); const m = Math.floor(t/60), s = t%60; return m + ':' + (s<10?'0':'') + s; }}
 function create(startAt) {{
   if (player) {{ player.dispose(); player = null; }}
-  const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema' }};
+  const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema', markers: MARKERS }};
   if (startAt != null) opts.startAt = startAt;
   player = AsciinemaPlayer.create(CAST_URL + '?ts=' + Date.now(), document.getElementById('player'), opts);
 }}
-create(hashStart());
+// Load the summary + chapters sidecar, then build the player with chapter markers.
+fetch(CAST_URL + '/chapters').then(r => r.ok ? r.json() : {{}}).catch(() => ({{}})).then(meta => {{
+  const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
+  MARKERS = chapters.map(c => [c.t, String(c.title || '')]);
+  if (meta.summary) document.getElementById('summary').textContent = meta.summary;
+  const cbar = document.getElementById('chapters');
+  cbar.innerHTML = chapters.map((c, i) => '<button data-seek="' + c.t + '">' + fmtClock(c.t) + ' ' +
+    (c.title || ('Chapter ' + (i+1))).replace(/[<&]/g, x => x === '<' ? '&lt;' : '&amp;') + '</button>').join('');
+  cbar.querySelectorAll('[data-seek]').forEach(b => b.addEventListener('click', () => {{ if (player) {{ player.seek(Number(b.dataset.seek)); player.play(); }} }}));
+  create(hashStart());
+}});
 window.addEventListener('hashchange', () => {{
   const t = hashStart();
   if (t != null && player) player.seek(t);
