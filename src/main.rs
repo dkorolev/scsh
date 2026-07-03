@@ -2426,11 +2426,13 @@ fn prepare_opencode_mount_dirs(run_dir: &Path) {
 fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from);
   let token = runtime::claude_oauth_token();
+  let keychain_creds = runtime::claude_keychain_credentials_json();
   let host_claude = home.as_ref().filter(|h| h.join(".claude").is_dir());
   let host_json = home.as_ref().filter(|h| h.join(".claude.json").is_file());
   let host_creds = host_claude.as_ref().map(|h| h.join(".claude").join(".credentials.json")).filter(|p| p.is_file());
 
-  if token.is_none() && host_creds.is_none() && host_claude.is_none() && host_json.is_none() {
+  if token.is_none() && keychain_creds.is_none() && host_creds.is_none() && host_claude.is_none() && host_json.is_none()
+  {
     return None;
   }
 
@@ -2446,8 +2448,22 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     // $CLAUDE_CONFIG_DIR/.claude.json — inside the copied dir, not the home root.
     std::fs::copy(h.join(".claude.json"), claude_dir.join(".claude.json")).ok()?;
   }
-  if let Some(t) = &token {
-    write_claude_credentials_file(&claude_dir, t)?;
+  // Credential preference: an already-copied host `.credentials.json` is complete; else
+  // the macOS keychain blob is the same complete JSON (expiry, scopes, refresh token) —
+  // required for the interactive TUI to consider itself logged in; else fall back to a
+  // minimal file from the bare env token (sufficient for headless harnesses).
+  if !claude_dir.join(".credentials.json").is_file() {
+    if let Some(json) = &keychain_creds {
+      let path = claude_dir.join(".credentials.json");
+      std::fs::write(&path, json).ok()?;
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+      }
+    } else if let Some(t) = &token {
+      write_claude_credentials_file(&claude_dir, t)?;
+    }
   }
   // The interactive TUI must not block on first-run dialogs: merge the onboarding /
   // bypass-consent / repo-trust keys into the copied state json (fresh file if none).

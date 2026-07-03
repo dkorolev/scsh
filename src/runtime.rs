@@ -260,7 +260,7 @@ pub fn cursor_api_key() -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-fn cursor_keychain_secret(service: &str) -> Option<String> {
+fn keychain_secret(service: &str) -> Option<String> {
   let out =
     std::process::Command::new("security").args(["find-generic-password", "-s", service, "-w"]).output().ok()?;
   if !out.status.success() {
@@ -271,17 +271,25 @@ fn cursor_keychain_secret(service: &str) -> Option<String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn cursor_keychain_secret(_service: &str) -> Option<String> {
+fn keychain_secret(_service: &str) -> Option<String> {
   None
 }
 
 /// macOS stores cursor-agent OAuth tokens in the login keychain after `cursor agent login`.
 pub fn cursor_keychain_access_token() -> Option<String> {
-  cursor_keychain_secret("cursor-access-token")
+  keychain_secret("cursor-access-token")
 }
 
 pub fn cursor_keychain_refresh_token() -> Option<String> {
-  cursor_keychain_secret("cursor-refresh-token")
+  keychain_secret("cursor-refresh-token")
+}
+
+/// macOS stores Claude Code's OAuth credentials in the login keychain — the item is the
+/// literal JSON of `.credentials.json` (accessToken + refreshToken + expiresAt + scopes).
+/// The interactive TUI treats a credentials file without expiry/scopes as logged-out, so
+/// forwarding this full blob (not just an access token) is what makes the TUI skip login.
+pub fn claude_keychain_credentials_json() -> Option<String> {
+  keychain_secret("Claude Code-credentials").filter(|s| s.contains("claudeAiOauth"))
 }
 
 /// Whether the host has credentials cursor containers can use.
@@ -949,10 +957,12 @@ fn claude_credentials_file_on_host() -> Option<PathBuf> {
   path.is_file().then_some(path)
 }
 
-/// Whether the host has credentials containers can use: `CLAUDE_CODE_OAUTH_TOKEN` or
-/// `~/.claude/.credentials.json`.
+/// Whether the host has credentials containers can use: `CLAUDE_CODE_OAUTH_TOKEN`,
+/// `~/.claude/.credentials.json`, or the macOS login keychain.
 pub fn claude_container_auth_ready() -> bool {
-  claude_oauth_token().is_some() || claude_credentials_file_on_host().is_some()
+  claude_oauth_token().is_some()
+    || claude_credentials_file_on_host().is_some()
+    || claude_keychain_credentials_json().is_some()
 }
 
 pub fn check_harness_host(harness: Harness) -> Result<(), String> {
@@ -969,8 +979,8 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         Ok(())
       } else {
         Err(
-          "claude harness unavailable (CLAUDE_CODE_OAUTH_TOKEN is not set and ~/.claude/.credentials.json was not found \
-           — run `claude setup-token`, then export CLAUDE_CODE_OAUTH_TOKEN in your shell)"
+          "claude harness unavailable (no CLAUDE_CODE_OAUTH_TOKEN, no ~/.claude/.credentials.json, and no macOS \
+           keychain credentials — log in with `claude`, or run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN)"
             .into(),
         )
       }
