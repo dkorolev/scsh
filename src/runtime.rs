@@ -142,13 +142,11 @@ pub fn image_target(harness: Harness) -> &'static str {
   }
 }
 
-/// In-container path where the host's Claude Code config dir is bind-mounted.
-pub const CLAUDE_CONFIG_MOUNT: &str = "/home/agent/.claude";
-
-/// In-container path for the forwarded `~/.claude.json`.
-pub const CLAUDE_JSON_MOUNT: &str = "/home/agent/.claude.json";
-
-/// Run-dir-relative path where scsh copies forwarded Claude auth before a run (gitignored `tmp/`).
+/// Run-dir-relative path where scsh copies forwarded Claude auth before a run (gitignored
+/// `tmp/`). The image sets `CLAUDE_CONFIG_DIR` to this tree's `.claude` dir, so the config
+/// rides along with the repo mount and stays writable — no bind mounts, same pattern as
+/// codex/grok/cursor. (Single-file bind mounts are read-only under Apple containers, and
+/// Claude Code's interactive TUI re-runs onboarding when it cannot write its state json.)
 pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
 
 /// In-container path where opencode reads `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` in the
@@ -441,7 +439,12 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, result, term)
+      // Defensive dialog answers: config seeding should prevent these screens, but if
+      // one appears anyway (new claude version, changed key names), Enter proceeds with
+      // the highlighted default instead of hanging until the container timeout.
+      let answers: &[(&str, &str)] =
+        &[("Choose the text style", "Enter"), ("Do you trust the files in this folder", "Enter")];
+      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, answers, result, term)
     }
     Harness::Codex => {
       let prompt = format!(
@@ -464,7 +467,8 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &seed, &tui, TuiQuit::DoubleCtrlC, result, term)
+      let answers: &[(&str, &str)] = &[("Allow Codex to work in this folder", "Enter")];
+      wrap_tui_shell(harness, skill_source, model, &seed, &tui, TuiQuit::DoubleCtrlC, answers, result, term)
     }
     Harness::Grok => {
       let prompt = format!(
@@ -508,7 +512,10 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::DoubleCtrlC, result, term)
+      // The interactive TUI always asks workspace trust ('--trust' is print-mode-only);
+      // the watcher answers it from the pane content.
+      let answers: &[(&str, &str)] = &[("Trust this workspace", "a")];
+      wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::DoubleCtrlC, answers, result, term)
     }
   }
 }
@@ -528,15 +535,17 @@ enum TuiQuit {
 ///  1. `seed` — one-time config writes so no onboarding/trust dialog blocks the TUI;
 ///  2. a detached tmux session sized `term.cols` x `term.rows` runs the TUI with the
 ///     skill prompt as its first message;
-///  3. a background watcher polls for the skill's result file — the run's completion
-///     signal — then sends the harness its quit keys and kills the session;
+///  3. a background watcher polls: any known blocking dialog on screen (matched via
+///     `tmux capture-pane`) gets its answer key pressed, and once the skill's result
+///     file — the run's completion signal — exists, the harness receives its quit keys
+///     and the session is killed;
 ///  4. `asciinema rec -c "tmux attach -r"` records the full screen to
 ///     `${SCSH_RUN_LOG}.cast` and ends when the session dies. The same rendered stream
 ///     still tees to the run log, and scsh's container timeout remains the hard stop.
 #[allow(clippy::too_many_arguments)]
 fn wrap_tui_shell(
-  harness: Harness, skill_source: &str, model: Option<&str>, seed: &str, tui_cmd: &str, quit: TuiQuit, result: &str,
-  term: crate::config::Terminal,
+  harness: Harness, skill_source: &str, model: Option<&str>, seed: &str, tui_cmd: &str, quit: TuiQuit,
+  dialog_answers: &[(&str, &str)], result: &str, term: crate::config::Terminal,
 ) -> String {
   let model_label = model.unwrap_or("(harness default)");
   let quit_keys = match quit {
@@ -544,6 +553,16 @@ fn wrap_tui_shell(
     TuiQuit::DoubleCtrlC => "tmux send-keys -t scsh C-c; sleep 1; tmux send-keys -t scsh C-c",
   };
   let seed_step = if seed.is_empty() { String::new() } else { format!("{seed}; ") };
+  let answer_steps: String = dialog_answers
+    .iter()
+    .map(|(pattern, key)| {
+      format!(
+        "if tmux capture-pane -p -t scsh 2>/dev/null | grep -q {}; then tmux send-keys -t scsh {}; fi; ",
+        shell_quote(pattern),
+        key
+      )
+    })
+    .collect();
   format!(
     "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
@@ -551,6 +570,7 @@ log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
 tmux -f /dev/null new-session -d -x {cols} -y {rows} -s scsh {tui_q}; \
 tmux set -t scsh status off >/dev/null 2>&1; \
 ( while tmux has-session -t scsh >/dev/null 2>&1; do \
+{answer_steps}\
 if [ -f {result_q} ]; then sleep 6; {quit_keys}; sleep 4; tmux kill-session -t scsh; break; fi; \
 sleep 2; done ) >/dev/null 2>&1 & \
 asciinema rec -q --cols {cols} --rows {rows} -c 'tmux attach -r -t scsh' \"${{{log_var}}}.cast\"; \
@@ -1121,44 +1141,14 @@ pub fn opencode_forward_mounts(forward_root: &Path) -> Vec<(String, String)> {
   out
 }
 
-/// Volume mounts for forwarded Claude auth copied into `auth_root` (under a run dir).
-pub fn claude_auth_mounts(auth_root: &Path) -> Vec<(String, String)> {
-  let mut out = Vec::new();
-  let claude_dir = auth_root.join(".claude");
-  if claude_dir.is_dir() {
-    out.push((claude_dir.to_string_lossy().into_owned(), CLAUDE_CONFIG_MOUNT.to_string()));
-  }
-  let claude_json = auth_root.join(".claude.json");
-  if claude_json.is_file() {
-    out.push((claude_json.to_string_lossy().into_owned(), CLAUDE_JSON_MOUNT.to_string()));
-  }
-  out
-}
-
 /// Volume mounts shown by `scsh list --verbose` (host paths; real runs use the same bind-mounts).
-/// Codex and grok need no mounts: their auth is COPIED into the run clone's gitignored
-/// `tmp/.codex` / `tmp/.grok` (the images' `CODEX_HOME` / `GROK_HOME`), which rides along
-/// with the repo mount in both mount modes.
+/// Claude, codex, grok, and cursor need no mounts: their auth/config is COPIED into the run
+/// clone's gitignored `tmp/` (the images' `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` /
+/// `CURSOR_CONFIG_DIR`), which rides along with the repo mount in both mount modes.
 pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
   match harness {
     Harness::Opencode => opencode_host_mounts(),
-    Harness::Claude => {
-      let Some(home) = std::env::var_os("HOME") else {
-        return Vec::new();
-      };
-      let home = PathBuf::from(home);
-      let mut out = Vec::new();
-      let claude_dir = home.join(".claude");
-      if claude_dir.is_dir() {
-        out.push((claude_dir.to_string_lossy().into_owned(), CLAUDE_CONFIG_MOUNT.to_string()));
-      }
-      let claude_json = home.join(".claude.json");
-      if claude_json.is_file() {
-        out.push((claude_json.to_string_lossy().into_owned(), CLAUDE_JSON_MOUNT.to_string()));
-      }
-      out
-    }
-    Harness::Codex | Harness::Grok | Harness::Cursor => Vec::new(),
+    Harness::Claude | Harness::Codex | Harness::Grok | Harness::Cursor => Vec::new(),
   }
 }
 
@@ -1972,8 +1962,11 @@ mod tests {
     // Interactive TUI under tmux: no -p, C-c C-c quit keys.
     assert!(cmd.contains("cursor-agent --force --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
+    assert!(!cmd.contains("--trust"), "got: {cmd}");
     assert!(cmd.contains(" --model composer-2.5-fast"));
     assert!(cmd.contains("tmux send-keys -t scsh C-c"), "got: {cmd}");
+    // The watcher must answer the TUI's workspace-trust dialog from pane content.
+    assert!(cmd.contains("capture-pane -p -t scsh 2>/dev/null | grep -q 'Trust this workspace'"), "got: {cmd}");
     assert!(cmd.contains("[ -f tmp/add_cursor.json ]"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));

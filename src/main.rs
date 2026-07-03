@@ -1935,9 +1935,11 @@ fn run_one_skill(
   let cursor_auth =
     if skill.harness == config::Harness::Cursor && cursor_auth_enabled() { forward_cursor(&run_dir) } else { false };
   let tag = runtime::image_tag(skill.harness);
-  let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
-    runtime::claude_auth_mounts(auth_root)
-  } else if let Some(ref forward) = opencode_forward {
+  // Claude needs no extra mounts: its forwarded config lives under the run clone's
+  // tmp/.claude-auth (the image's CLAUDE_CONFIG_DIR), riding along with the repo mount —
+  // and stays WRITABLE, which the interactive TUI requires (single-file bind mounts are
+  // read-only under Apple containers, and an unwritable config re-triggers onboarding).
+  let vols: Vec<(String, String)> = if let Some(ref forward) = opencode_forward {
     runtime::opencode_forward_mounts(forward)
   } else {
     runtime::harness_volumes(skill.harness)
@@ -2440,20 +2442,21 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     copy_dir_all(&h.join(".claude"), &claude_dir).ok()?;
   }
   if let Some(h) = host_json {
-    std::fs::copy(h.join(".claude.json"), root.join(".claude.json")).ok()?;
+    // With CLAUDE_CONFIG_DIR set (in the image), Claude Code reads its state json from
+    // $CLAUDE_CONFIG_DIR/.claude.json — inside the copied dir, not the home root.
+    std::fs::copy(h.join(".claude.json"), claude_dir.join(".claude.json")).ok()?;
   }
   if let Some(t) = &token {
     write_claude_credentials_file(&claude_dir, t)?;
   }
-  // The interactive TUI must not block on first-run dialogs; the container cannot edit
-  // the bind-mounted `.claude.json` itself (the single-file mount is not writable), so
-  // merge the onboarding/consent/trust keys into the copy here, host-side.
-  seed_claude_tui_config(&root.join(".claude.json"));
+  // The interactive TUI must not block on first-run dialogs: merge the onboarding /
+  // bypass-consent / repo-trust keys into the copied state json (fresh file if none).
+  seed_claude_tui_config(&claude_dir.join(".claude.json"));
 
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(json) = root.join(".claude.json").canonicalize() {
+    if let Ok(json) = claude_dir.join(".claude.json").canonicalize() {
       let _ = std::fs::set_permissions(&json, std::fs::Permissions::from_mode(0o600));
     }
     if let Ok(creds) = claude_dir.join(".credentials.json").canonicalize() {

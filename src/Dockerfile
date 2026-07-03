@@ -153,6 +153,10 @@ RUN set -eux; \
     npm install -g @anthropic-ai/claude-code; \
     chmod -R a+rX "$(npm root -g)"; \
     claude --version
+# Claude reads config/state from $CLAUDE_CONFIG_DIR (state json at .claude.json inside it).
+# scsh points it at the gitignored tmp/ of the repo mount, where forwarded host config is
+# copied per run — writable, which the interactive TUI needs (else it re-runs onboarding).
+ENV CLAUDE_CONFIG_DIR=/home/agent/repo/tmp/.claude-auth/.claude
 USER agent
 
 # --- OpenAI Codex CLI harness image (install harness last) ---
