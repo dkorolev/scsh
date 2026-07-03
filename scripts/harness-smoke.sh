@@ -6,16 +6,21 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-SCSH="${SCSH:-scsh}"
-if ! command -v "$SCSH" >/dev/null 2>&1; then
-  if [[ -x "$ROOT/target/debug/scsh" ]]; then
-    SCSH="$ROOT/target/debug/scsh"
-  elif [[ -x "$ROOT/target/release/scsh" ]]; then
-    SCSH="$ROOT/target/release/scsh"
-  else
-    echo "harness-smoke: scsh not found — build with: cargo build --release" >&2
-    exit 1
-  fi
+# Prefer this repo's own build — the smoke test exercises the harnesses of the checked-out
+# code, and an older `scsh` on PATH may not know them. SCSH=… still overrides.
+if [[ -n "${SCSH:-}" ]]; then
+  :
+elif [[ -x "$ROOT/target/release/scsh" && "$ROOT/target/release/scsh" -nt "$ROOT/target/debug/scsh" ]]; then
+  SCSH="$ROOT/target/release/scsh"
+elif [[ -x "$ROOT/target/debug/scsh" ]]; then
+  SCSH="$ROOT/target/debug/scsh"
+elif [[ -x "$ROOT/target/release/scsh" ]]; then
+  SCSH="$ROOT/target/release/scsh"
+elif command -v scsh >/dev/null 2>&1; then
+  SCSH="scsh"
+else
+  echo "harness-smoke: scsh not found — build with: cargo build --release" >&2
+  exit 1
 fi
 
 echo "=== harness-smoke probe ==="
