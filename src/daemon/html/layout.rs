@@ -67,7 +67,7 @@ const PAGE_CSS: &str = r#"
   .line { white-space: pre; }
   .detail, .container { overflow-x: auto; white-space: pre; max-width: 100%; }
   .at { opacity: 0.5; margin-right: 0.35rem; }
-  .cast { margin: 0.5rem 0; border: 1px solid #8884; border-radius: 6px; overflow: hidden; background: #000; }
+  .cast { position: relative; margin: 0.5rem 0; border: 1px solid #8884; border-radius: 6px; overflow: hidden; background: #000; }
   .cast-toolbar {
     display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;
     padding: 0.3rem 0.5rem; background: #1118; font-size: 0.8rem;
@@ -90,10 +90,38 @@ const PAGE_CSS: &str = r#"
   }
   .cast-chapters button:hover { border-color: #7ab4ff; color: #fff; }
   .cast-player { width: 100%; height: 42vh; max-height: 460px; }
-  /* Fullscreen: the player box fills the viewport; asciinema-player fit:'both' scales the
-     terminal to fit both width and height. */
-  .cast:fullscreen { display: flex; flex-direction: column; background: #000; }
-  .cast:fullscreen .cast-player { flex: 1 1 auto; height: auto; max-height: none; }
+  /* Brief fading chapter-name toast, bottom-centre of the player (screen, in fullscreen). */
+  .cast-toast {
+    position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);
+    max-width: 80%; padding: 0.4rem 0.9rem; border-radius: 7px; z-index: 5;
+    background: #000c; color: #fff; font-size: 1rem; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; pointer-events: none;
+    opacity: 0; transition: opacity 0.6s ease;
+  }
+  .cast-toast.show { opacity: 1; transition: opacity 0.12s ease; }
+  /* Fullscreen: the player fills the viewport (asciinema-player fit:'both' fits both ways).
+     When the terminal leaves horizontal room, `.has-side` reveals a chapters column. */
+  .cast:fullscreen {
+    display: grid; background: #000;
+    grid-template-columns: 1fr 0; grid-template-rows: auto 1fr;
+  }
+  .cast:fullscreen.has-side { grid-template-columns: 1fr var(--side-w, 360px); }
+  .cast:fullscreen .cast-toolbar { grid-column: 1 / -1; }
+  .cast:fullscreen .cast-summary, .cast:fullscreen .cast-chapters { display: none; }
+  .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto; max-height: none; min-height: 0; }
+  .cast-fs-chapters { display: none; }
+  .cast:fullscreen.has-side .cast-fs-chapters {
+    display: block; grid-column: 2; grid-row: 2; overflow-y: auto;
+    background: #14161c; border-left: 1px solid #333; padding: 0.6rem;
+  }
+  .cast-fs-chapters .fs-summary { font-size: 0.9rem; line-height: 1.45; margin-bottom: 0.8rem; opacity: 0.9; }
+  .cast-fs-chapters .fs-head { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.05em; opacity: 0.6; margin-bottom: 0.4rem; }
+  .cast-fs-chapters button {
+    display: block; width: 100%; text-align: left; font: inherit; font-size: 0.85rem;
+    color: #cdd; background: none; border: 0; border-radius: 5px; padding: 0.35rem 0.5rem; cursor: pointer;
+  }
+  .cast-fs-chapters button:hover { background: #2a2d36; color: #fff; }
+  .cast-fs-chapters .fs-t { color: #7ab4ff; margin-right: 0.4rem; font-variant-numeric: tabular-nums; }
   .cast .ap-player { width: 100%; height: 100%; }
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; }
   .session-meta {
