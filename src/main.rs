@@ -2420,63 +2420,57 @@ fn prepare_opencode_mount_dirs(run_dir: &Path) {
   let _ = std::fs::create_dir_all(run_dir.join(runtime::AGENT_XDG_DATA_REL).join("opencode"));
 }
 
-/// Copy the host's Claude config into `run_dir` for the upcoming run, returning the auth root
-/// (so the caller can remove it afterward). Uses `CLAUDE_CODE_OAUTH_TOKEN` when set, else
-/// `~/.claude/.credentials.json`, and copies `~/.claude` / `~/.claude.json` when present.
+/// Assemble the minimal Claude config the container needs into `run_dir`, returning the auth
+/// root (so the caller can remove it afterward). The image's `CLAUDE_CONFIG_DIR` points at
+/// this tree's `.claude` dir, so it rides along with the repo mount and stays writable.
+///
+/// Exactly two files are forwarded, both best-effort (a single copy failure never aborts the
+/// others — deliberately NOT bulk-copying the host's real `~/.claude`, which holds history,
+/// caches and unreadable junk and would fail partway):
+///  - `.credentials.json` — host file if present, else the full macOS keychain blob, else a
+///    minimal file from the env token. The interactive TUI treats an incomplete credentials
+///    file (token only, no expiry/scopes/refresh) as logged out, so the complete blob matters.
+///  - `.claude.json` — the host's state json (its `oauthAccount` is what lets the TUI skip the
+///    login picker), with the onboarding / bypass-consent / repo-trust keys merged in.
 fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from);
   let token = runtime::claude_oauth_token();
   let keychain_creds = runtime::claude_keychain_credentials_json();
-  let host_claude = home.as_ref().filter(|h| h.join(".claude").is_dir());
-  let host_json = home.as_ref().filter(|h| h.join(".claude.json").is_file());
-  let host_creds = host_claude.as_ref().map(|h| h.join(".claude").join(".credentials.json")).filter(|p| p.is_file());
+  let host_json = home.as_ref().map(|h| h.join(".claude.json")).filter(|p| p.is_file());
+  let host_creds = home.as_ref().map(|h| h.join(".claude").join(".credentials.json")).filter(|p| p.is_file());
 
-  if token.is_none() && keychain_creds.is_none() && host_creds.is_none() && host_claude.is_none() && host_json.is_none()
-  {
+  if token.is_none() && keychain_creds.is_none() && host_creds.is_none() && host_json.is_none() {
     return None;
   }
 
   let root = run_dir.join(runtime::CLAUDE_AUTH_REL);
   let claude_dir = root.join(".claude");
   std::fs::create_dir_all(&claude_dir).ok()?;
+  let creds_dest = claude_dir.join(".credentials.json");
+  let json_dest = claude_dir.join(".claude.json");
 
-  if let Some(h) = host_claude {
-    copy_dir_all(&h.join(".claude"), &claude_dir).ok()?;
+  // Credentials, in order of completeness: host file > full keychain blob > env token.
+  if let Some(src) = &host_creds {
+    let _ = std::fs::copy(src, &creds_dest);
+  } else if let Some(blob) = &keychain_creds {
+    let _ = std::fs::write(&creds_dest, blob);
+  } else if let Some(t) = &token {
+    let _ = write_claude_credentials_file(&claude_dir, t);
   }
-  if let Some(h) = host_json {
-    // With CLAUDE_CONFIG_DIR set (in the image), Claude Code reads its state json from
-    // $CLAUDE_CONFIG_DIR/.claude.json — inside the copied dir, not the home root.
-    std::fs::copy(h.join(".claude.json"), claude_dir.join(".claude.json")).ok()?;
+
+  // State json carrying the account identity, then the TUI-unblocking keys merged in.
+  if let Some(src) = &host_json {
+    let _ = std::fs::copy(src, &json_dest);
   }
-  // Credential preference: an already-copied host `.credentials.json` is complete; else
-  // the macOS keychain blob is the same complete JSON (expiry, scopes, refresh token) —
-  // required for the interactive TUI to consider itself logged in; else fall back to a
-  // minimal file from the bare env token (sufficient for headless harnesses).
-  if !claude_dir.join(".credentials.json").is_file() {
-    if let Some(json) = &keychain_creds {
-      let path = claude_dir.join(".credentials.json");
-      std::fs::write(&path, json).ok()?;
-      #[cfg(unix)]
-      {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-      }
-    } else if let Some(t) = &token {
-      write_claude_credentials_file(&claude_dir, t)?;
-    }
-  }
-  // The interactive TUI must not block on first-run dialogs: merge the onboarding /
-  // bypass-consent / repo-trust keys into the copied state json (fresh file if none).
-  seed_claude_tui_config(&claude_dir.join(".claude.json"));
+  seed_claude_tui_config(&json_dest);
 
   #[cfg(unix)]
   {
     use std::os::unix::fs::PermissionsExt;
-    if let Ok(json) = claude_dir.join(".claude.json").canonicalize() {
-      let _ = std::fs::set_permissions(&json, std::fs::Permissions::from_mode(0o600));
-    }
-    if let Ok(creds) = claude_dir.join(".credentials.json").canonicalize() {
-      let _ = std::fs::set_permissions(&creds, std::fs::Permissions::from_mode(0o600));
+    for f in [&json_dest, &creds_dest] {
+      if let Ok(p) = f.canonicalize() {
+        let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+      }
     }
   }
   Some(root)
@@ -2654,21 +2648,6 @@ fn write_claude_credentials_file(claude_dir: &Path, token: &str) -> Option<()> {
     let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
   }
   Some(())
-}
-
-fn copy_dir_all(src: &Path, dst: &Path) -> std::io::Result<()> {
-  std::fs::create_dir_all(dst)?;
-  for entry in std::fs::read_dir(src)? {
-    let entry = entry?;
-    let path = entry.path();
-    let dest = dst.join(entry.file_name());
-    if entry.file_type()?.is_dir() {
-      copy_dir_all(&path, &dest)?;
-    } else {
-      std::fs::copy(&path, &dest)?;
-    }
-  }
-  Ok(())
 }
 
 /// Resolve a skill's `env:` specs against the host environment into the
