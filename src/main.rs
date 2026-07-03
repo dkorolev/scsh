@@ -2091,7 +2091,13 @@ fn persist_cast(root: &Path, run_dir: &Path, skill_name: &str, epoch_secs: u64) 
   }
   let dir = root.join("tmp").join("casts");
   std::fs::create_dir_all(&dir).ok()?;
-  let dest = dir.join(format!("{skill_name}-{}-utc.cast", runtime::format_utc_timestamp(epoch_secs)));
+  // Full second-resolution timestamp PLUS a random 6-letter nonce: every run within one
+  // `scsh run` shares `epoch_secs`, so the timestamp alone would overwrite prior casts.
+  let dest = dir.join(format!(
+    "{skill_name}-{}-utc-{}.cast",
+    runtime::format_utc_timestamp(epoch_secs),
+    runtime::random_nonce_6()
+  ));
   std::fs::copy(&src, &dest).ok()?;
   Some(dest.to_string_lossy().into_owned())
 }
@@ -2439,6 +2445,10 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   if let Some(t) = &token {
     write_claude_credentials_file(&claude_dir, t)?;
   }
+  // The interactive TUI must not block on first-run dialogs; the container cannot edit
+  // the bind-mounted `.claude.json` itself (the single-file mount is not writable), so
+  // merge the onboarding/consent/trust keys into the copy here, host-side.
+  seed_claude_tui_config(&root.join(".claude.json"));
 
   #[cfg(unix)]
   {
@@ -2451,6 +2461,42 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     }
   }
   Some(root)
+}
+
+/// Merge the keys that keep Claude Code's interactive TUI from blocking on first-run
+/// dialogs — onboarding, bypass-permissions consent, and trust for the container repo
+/// path — into the run's copied `.claude.json` ([`forward_claude_auth`]). A missing or
+/// unparsable copy becomes a fresh minimal config, so the file always exists and mounts.
+fn seed_claude_tui_config(json_path: &Path) {
+  use crate::json::Value;
+  fn set(obj: &mut Vec<(String, Value)>, key: &str, val: Value) {
+    if let Some(slot) = obj.iter_mut().find(|(k, _)| k == key) {
+      slot.1 = val;
+    } else {
+      obj.push((key.to_string(), val));
+    }
+  }
+  let mut root = match std::fs::read_to_string(json_path).ok().and_then(|t| json::parse(&t).ok()) {
+    Some(Value::Object(o)) => o,
+    _ => Vec::new(),
+  };
+  set(&mut root, "hasCompletedOnboarding", Value::Bool(true));
+  set(&mut root, "bypassPermissionsModeAccepted", Value::Bool(true));
+  let repo_project = Value::Object(vec![
+    ("hasTrustDialogAccepted".to_string(), Value::Bool(true)),
+    ("hasCompletedProjectOnboarding".to_string(), Value::Bool(true)),
+  ]);
+  let merged_into_existing = match root.iter_mut().find(|(k, _)| k == "projects") {
+    Some((_, Value::Object(projects))) => {
+      set(projects, runtime::AGENT_REPO, repo_project.clone());
+      true
+    }
+    _ => false,
+  };
+  if !merged_into_existing {
+    set(&mut root, "projects", Value::Object(vec![(runtime::AGENT_REPO.to_string(), repo_project)]));
+  }
+  let _ = std::fs::write(json_path, json::write(&Value::Object(root)));
 }
 
 /// Copy the host's Codex auth/config into the run clone's `tmp/.codex` (the image's

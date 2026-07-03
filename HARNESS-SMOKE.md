@@ -20,7 +20,7 @@ This is a short, copy-pasteable smoke test for the **claude**, **codex**, and **
 - **Screencasts** — claude, codex, and cursor-agent each run as their **full interactive
   TUI** inside a recorded 200×50 PTY (`terminal:` in `.scsh.yml`) — the cast shows the
   real screen, end to end. Each run leaves a timestamped asciicast in the **gitignored** `tmp/casts/`:
-  `tmp/casts/harness-smoke-<route>-<YYYYMMDD-HHMMSS>-utc.cast` — kept forever, so old runs
+  `tmp/casts/harness-smoke-<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` — kept forever, so old runs
   can be revisited (`asciinema play <file>`, or via the session browser's ▶ watch links).
 
 Routes that probe **N/A** are skipped by `scsh run` (same as `DEMO.md`). You need **at least one** of claude, codex, or cursor available.

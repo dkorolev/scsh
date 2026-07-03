@@ -78,6 +78,23 @@ pub fn quote(s: &str) -> String {
   out
 }
 
+/// Serialize a [`Value`] back to compact JSON — the inverse of [`parse`]. Whole numbers
+/// print without a fractional part (config counters would change meaning as `1.0`).
+pub fn write(v: &Value) -> String {
+  match v {
+    Value::Null => "null".into(),
+    Value::Bool(b) => b.to_string(),
+    Value::Number(n) if n.fract() == 0.0 && n.is_finite() && n.abs() < 9.0e15 => format!("{}", *n as i64),
+    Value::Number(n) => format!("{n}"),
+    Value::String(s) => quote(s),
+    Value::Array(a) => format!("[{}]", a.iter().map(write).collect::<Vec<_>>().join(",")),
+    Value::Object(o) => {
+      let fields: Vec<String> = o.iter().map(|(k, v)| format!("{}:{}", quote(k), write(v))).collect();
+      format!("{{{}}}", fields.join(","))
+    }
+  }
+}
+
 struct Parser<'a> {
   b: &'a [u8],
   i: usize,
