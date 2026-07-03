@@ -65,15 +65,32 @@ as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
 Missing/invalid credentials fail fast with a clear "log in on the host" error before any
 container starts — scsh never tries to drive a login screen.
 
-The session page shows two links per skill:
+Each recorded skill is shown as an **inline player** in the session page (build rows keep
+their text log). The player (vendored asciinema-player, `fit:'both'`) has:
 
-- **▶ watch cast** — `/cast/{session}/{proc}/play`: an in-browser player (vendored
-  asciinema-player) with play/pause, timeline scrubbing, speed control, and
-  **deep links to timestamps** — append `#t=90` or `#t=1:30` to the player URL. While a
-  skill is still running the page shows a live badge and a *Reload recording* button.
-- **⬇ download .cast** — `/cast/{session}/{proc}?dl=1`: the raw asciicast v2 file.
-  Works **mid-run**: the recording is NDJSON, so the daemon serves the bytes written so
-  far (truncated to the last complete line), which is itself a valid partial cast.
+- **Playback** — play/pause, timeline scrubbing, and native keyboard: **space** pause,
+  **←/→** seek, **&lt;/&gt;** speed, **[/]** jump between chapters (click the player first
+  to focus it).
+- **Fullscreen** — fills the viewport, fitting the terminal both horizontally and vertically.
+- **Chapters** — if a cast has been annotated (below), its chapters show as **markers on the
+  timeline** (YouTube-style) plus clickable chapter chips, with a one-sentence **summary**
+  above the player.
+- **Link at time** — copies a deep link to the standalone player at the current timestamp
+  (`/cast/{session}/{proc}/play#t=<seconds>`).
+- **⬇ .cast** — downloads the raw asciicast v2. Works **mid-run**: the recording is NDJSON,
+  so the daemon serves the bytes written so far (truncated to the last complete line).
+
+## Cast chapters & summaries (cursor / Composer)
+
+After a run, if the `cursor-agent` CLI and a cursor login are present on the host, `scsh`
+annotates each new recording: it renders the cast to a compact timestamped transcript, asks
+cursor-agent on the **Composer** model for a one-sentence summary plus 3–8 chapters, and
+writes a `<cast>.chapters.json` sidecar next to the recording. The player loads it from
+`GET /cast/{session}/{proc}/chapters` (returns `{}` when absent). Annotate on demand with:
+
+```console
+scsh annotate-cast tmp/casts/<recording>.cast     # override model via SCSH_ANNOTATE_MODEL
+```
 
 ## Artifact formats
 
@@ -88,6 +105,24 @@ partial file valid mid-run.
 [1.34, "o", "done\r\n"]
 ```
 
+**Annotation sidecar** (`<cast-stem>.chapters.json`). Written by the annotation pass, served
+at `/cast/{session}/{proc}/chapters`. The player uses `summary` for the caption and each
+chapter as a timeline marker / jump target:
+
+```jsonc
+{
+  "summary": "One sentence describing what the session did.",  // string, required
+  "chapters": [                                                 // ascending by t; [] allowed
+    { "t": 0,   "title": "Startup" },      // t: seconds into the recording (number); title: short label
+    { "t": 6,   "title": "Read the skill" },
+    { "t": 9,   "title": "Write result JSON" }
+  ]
+}
+```
+
+Field names are `snake_case`; the Rust source of truth for the shape is `CastAnnotation` /
+`Chapter` in `src/annotate.rs`. An absent sidecar is served as `{}` (no summary, no chapters).
+
 ## Where artifacts live
 
 While the container runs, the cast is served straight from the run dir
@@ -98,6 +133,7 @@ one `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correl
 | Artifact | Path |
 | --- | --- |
 | Recording | `tmp/casts/<stem>.cast` |
+| Annotation sidecar | `tmp/casts/<stem>.chapters.json` |
 | Harness run log | `tmp/logs/<stem>.log` |
 | Verbose debug log | `tmp/logs/<stem>.debug.log` (claude/grok) · `tmp/logs/<stem>.last.log` (codex) |
 
