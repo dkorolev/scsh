@@ -2493,6 +2493,23 @@ fn seed_claude_tui_config(json_path: &Path) {
     Some(Value::Object(o)) => o,
     _ => Vec::new(),
   };
+  // The host config describes the HOST's Claude install (e.g. installMethod: "native" →
+  // ~/.local/bin/claude), which is wrong inside the container (claude is npm-global at
+  // /usr/bin/claude) and makes the TUI print a "claude command missing or broken" warning.
+  // Drop the install/updater metadata so claude uses its actual in-container install, and
+  // keep the auto-updater off (the image is immutable — nothing to update).
+  root.retain(|(k, _)| {
+    !matches!(
+      k.as_str(),
+      "installMethod"
+        | "autoUpdaterStatus"
+        | "autoUpdatesProtectedForNative"
+        | "officialMarketplaceAutoInstallAttempted"
+        | "officialMarketplaceAutoInstalled"
+        | "cachedChromeExtensionInstalled"
+    )
+  });
+  set(&mut root, "autoUpdates", Value::Bool(false));
   set(&mut root, "hasCompletedOnboarding", Value::Bool(true));
   set(&mut root, "bypassPermissionsModeAccepted", Value::Bool(true));
   let repo_project = Value::Object(vec![
