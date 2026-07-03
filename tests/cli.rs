@@ -592,15 +592,17 @@ fn harness_smoke_profile_in_tool_repo() {
   let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
   let r = scsh(&root, &["check-profile", "harness-smoke"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
-  assert!(r.out.contains("2 skills"), "got: {}", r.out);
+  assert!(r.out.contains("3 skills"), "got: {}", r.out);
   let j = scsh(&root, &["list", "--json"]);
   assert_eq!(j.code, 0, "got: {}", j.out);
-  assert!(j.out.contains("harness-smoke-grok-build"), "got: {}", j.out);
-  assert!(j.out.contains("harness-smoke-cursor-composer"), "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-claude-opus-4-8"), "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-codex-gpt-5.5"), "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-cursor-composer-fast"), "got: {}", j.out);
 }
 
-/// Full grok + cursor container smoke (builds images, calls models). Requires a **clean** git
-/// tree, a running container runtime, and host grok/cursor auth. Run manually:
+/// Full claude + codex + cursor container smoke (builds images, calls models). Requires a
+/// **clean** git tree, a running container runtime, and host claude/codex/cursor auth. Run
+/// manually:
 ///
 /// ```sh
 /// ./scripts/harness-smoke.sh

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Smoke-test the grok and cursor container harnesses via the harness-smoke skill.
+# Smoke-test the claude, codex, and cursor container harnesses via the harness-smoke skill.
 # See HARNESS-SMOKE.md for the full walkthrough.
 set -euo pipefail
 
@@ -19,29 +19,48 @@ if ! command -v "$SCSH" >/dev/null 2>&1; then
 fi
 
 echo "=== harness-smoke probe ==="
-GROK_OK=0
+CLAUDE_OK=0
+CODEX_OK=0
 CURSOR_OK=0
 
-if { test -f "$HOME/.grok/auth.json" || [ -n "${XAI_API_KEY:-}" ]; } && command -v grok >/dev/null 2>&1; then
-  echo "route grok-build (harness-smoke-grok-build): ok"
-  GROK_OK=1
+# claude: scsh forwards CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json. On macOS the
+# token usually lives only in the login keychain, so lift it into the env for this run.
+if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -f "$HOME/.claude/.credentials.json" ] \
+  && command -v security >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+  keychain_token="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
+    | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null || true)"
+  if [ -n "$keychain_token" ]; then
+    export CLAUDE_CODE_OAUTH_TOKEN="$keychain_token"
+    echo "claude: using OAuth token from the macOS keychain"
+  fi
+fi
+if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -f "$HOME/.claude/.credentials.json" ]; then
+  echo "route claude-opus-4-8 (harness-smoke-claude-opus-4-8): ok"
+  CLAUDE_OK=1
 else
-  echo "route grok-build (harness-smoke-grok-build): N/A — run \`grok login\` or export XAI_API_KEY"
+  echo "route claude-opus-4-8 (harness-smoke-claude-opus-4-8): N/A — run \`claude setup-token\` and export CLAUDE_CODE_OAUTH_TOKEN"
 fi
 
-if { test -f "$HOME/.config/cursor/auth.json" || test -f "$HOME/.cursor/auth.json" \
+if test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" || [ -n "${OPENAI_API_KEY:-}" ]; then
+  echo "route codex-gpt-5.5 (harness-smoke-codex-gpt-5.5): ok"
+  CODEX_OK=1
+else
+  echo "route codex-gpt-5.5 (harness-smoke-codex-gpt-5.5): N/A — run \`codex login\` or export OPENAI_API_KEY"
+fi
+
+if test -f "$HOME/.config/cursor/auth.json" || test -f "$HOME/.cursor/auth.json" \
   || security find-generic-password -s cursor-access-token -w >/dev/null 2>&1 \
-  || [ -n "${CURSOR_API_KEY:-}" ]; } && command -v cursor >/dev/null 2>&1; then
-  echo "route cursor-composer (harness-smoke-cursor-composer): ok"
+  || [ -n "${CURSOR_API_KEY:-}" ]; then
+  echo "route cursor-composer-fast (harness-smoke-cursor-composer-fast): ok"
   CURSOR_OK=1
 else
-  echo "route cursor-composer (harness-smoke-cursor-composer): N/A — run \`cursor agent login\` or export CURSOR_API_KEY"
+  echo "route cursor-composer-fast (harness-smoke-cursor-composer-fast): N/A — run \`cursor agent login\` or export CURSOR_API_KEY"
 fi
 
-ROUTES=$((GROK_OK + CURSOR_OK))
-echo "harness-smoke routes available: $ROUTES / 2"
+ROUTES=$((CLAUDE_OK + CODEX_OK + CURSOR_OK))
+echo "harness-smoke routes available: $ROUTES / 3"
 if [ "$ROUTES" -eq 0 ]; then
-  echo "harness-smoke: FAIL — no grok or cursor route available on this host" >&2
+  echo "harness-smoke: FAIL — no claude, codex, or cursor route available on this host" >&2
   exit 1
 fi
 
@@ -94,8 +113,9 @@ check_result() {
   fi
 }
 
-[ "$GROK_OK" -eq 1 ] && check_result "grok-build"
-[ "$CURSOR_OK" -eq 1 ] && check_result "cursor-composer"
+[ "$CLAUDE_OK" -eq 1 ] && check_result "claude-opus-4-8"
+[ "$CODEX_OK" -eq 1 ] && check_result "codex-gpt-5.5"
+[ "$CURSOR_OK" -eq 1 ] && check_result "cursor-composer-fast"
 
 echo ""
 echo "=== summary ==="

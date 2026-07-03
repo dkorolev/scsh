@@ -115,11 +115,13 @@ skills:
     timeout: 600
     result: tmp/harness-smoke-{name}.json
     invocations:
-      grok-build:
-        harness: grok
-        model: grok-build
+      claude-opus-4-8:
+        harness: claude
+        model: claude-opus-4-8
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
         effort: low
-      cursor-composer:
+      cursor-composer-fast:
         harness: cursor
-        model: composer-2.5
-        effort: low
+        model: composer-2.5-fast

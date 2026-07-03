@@ -1,6 +1,6 @@
 ---
 name: harness-smoke
-description: "Minimal headless harness smoke test — write a tiny JSON OK result to the declared path and stop. Used by HARNESS-SMOKE.md and scripts/harness-smoke.sh to verify grok and cursor container harnesses end to end. Use when the user asks to smoke-test grok or cursor harnesses."
+description: "Minimal headless harness smoke test — write a tiny JSON OK result to the declared path and stop. Used by HARNESS-SMOKE.md and scripts/harness-smoke.sh to verify claude, codex, and cursor container harnesses end to end. Use when the user asks to smoke-test claude, codex, or cursor harnesses."
 ---
 
 # harness-smoke
@@ -9,7 +9,7 @@ This is a **smoke test**, not a product feature. Your only job is to prove the h
 
 ## Steps
 
-1. Write **exactly** this JSON to `$SCSH_RESULT` (the path is also named in the run prompt, e.g. `tmp/harness-smoke-grok-build.json`):
+1. Write **exactly** this JSON to `$SCSH_RESULT` (the path is also named in the run prompt, e.g. `tmp/harness-smoke-codex-gpt-5.5.json`):
 
 ```json
 {
