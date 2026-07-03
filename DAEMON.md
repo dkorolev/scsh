@@ -44,10 +44,28 @@ harness output and container names.
 
 Every harness runs inside a real PTY recorded by asciinema (size from the `terminal:`
 block in `.scsh.yml`, default **200×50**). For **claude, codex, and cursor** the recording
-is the genuine end-to-end interactive TUI — the same screen a human would see — driven
-inside tmux: the skill prompt is the first message, a watcher waits for the skill's
-result file, then sends the harness its quit keys (`/exit`, double Ctrl-C) and ends the
-session. opencode and grok record their headless output streams. The session page shows two links per skill:
+is the genuine end-to-end interactive TUI — the same screen a human would see. The
+`scsh-tui-record` script (baked into the base image) runs the harness in a tmux session,
+records the attached screen, and — when the skill's result file appears — sends the quit
+keys (`/exit`, double Ctrl-C) and ends the session. opencode and grok record their headless
+output streams.
+
+There is **no screen-scraping**: every consent, trust, and login prompt is skipped ahead
+of time by a flag or seeded config, so the recording is clean and a stuck harness surfaces
+as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
+
+- **claude** — `--permission-mode acceptEdits` (the `bypassPermissions` consent screen has
+  no non-interactive escape); onboarding + workspace trust seeded into the forwarded
+  `.claude.json`.
+- **codex** — `--dangerously-bypass-approvals-and-sandbox`; `trust_level = "trusted"`
+  appended to the forwarded `config.toml`.
+- **cursor** — `--force`; its `~/.cursor/projects/<repo-slug>/.workspace-trusted` marker
+  pre-created in-container (`--trust` is print-mode-only, and there is no config key).
+
+Missing/invalid credentials fail fast with a clear "log in on the host" error before any
+container starts — scsh never tries to drive a login screen.
+
+The session page shows two links per skill:
 
 - **▶ watch cast** — `/cast/{session}/{proc}/play`: an in-browser player (vendored
   asciinema-player) with play/pause, timeline scrubbing, speed control, and
