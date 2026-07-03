@@ -5,6 +5,7 @@
 //! scoped skills — all of them, in parallel, each in its own ephemeral container
 //! under its configured harness.
 
+mod annotate;
 mod config;
 mod daemon;
 mod failure;
@@ -70,7 +71,67 @@ fn run(args: &[String]) -> i32 {
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
+    Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths),
   }
+}
+
+/// The Composer model annotation uses, overridable via `SCSH_ANNOTATE_MODEL`.
+fn annotate_model() -> String {
+  std::env::var("SCSH_ANNOTATE_MODEL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "composer-2.5-fast".into())
+}
+
+/// `annotate-cast <cast>…`: write a `{summary, chapters}` sidecar next to each cast using
+/// cursor-agent on the Composer model. Skips (with a note) when cursor/Composer is absent.
+fn annotate_casts_cmd(paths: &[String]) -> i32 {
+  if paths.is_empty() {
+    eprintln!("annotate-cast: give one or more .cast files, e.g. scsh annotate-cast tmp/casts/foo.cast");
+    return 2;
+  }
+  if !annotate::host_can_annotate() {
+    eprintln!("annotate-cast: cursor-agent not available (need the `cursor-agent` CLI and cursor login) — skipping");
+    return 1;
+  }
+  let model = annotate_model();
+  let mut ok = 0;
+  for path in paths {
+    let cast = std::path::Path::new(path);
+    eprint!("annotate {path} … ");
+    match annotate::annotate_cast_with(cast, &model, annotate::run_cursor_agent) {
+      Some(sidecar) => {
+        eprintln!("✓ {}", sidecar.display());
+        ok += 1;
+      }
+      None => eprintln!("✗ (no annotation produced)"),
+    }
+  }
+  if ok == paths.len() {
+    0
+  } else {
+    1
+  }
+}
+
+/// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
+/// and summaries appear in the session browser. No-op when cursor/Composer is unavailable.
+fn annotate_run_casts(cast_paths: Vec<std::path::PathBuf>) {
+  let pending: Vec<std::path::PathBuf> = cast_paths
+    .into_iter()
+    .filter(|c| daemon::chapters_sidecar_path(&c.to_string_lossy()).map(|s| !s.exists()).unwrap_or(false))
+    .collect();
+  if pending.is_empty() || !annotate::host_can_annotate() {
+    return;
+  }
+  eprintln!("scsh: annotating {} cast(s) with cursor · {} …", pending.len(), annotate_model());
+  let model = annotate_model();
+  let handles: Vec<_> = pending
+    .into_iter()
+    .map(|cast| {
+      let model = model.clone();
+      std::thread::spawn(move || annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some())
+    })
+    .collect();
+  let done = handles.into_iter().filter_map(|h| h.join().ok()).filter(|&ok| ok).count();
+  eprintln!("scsh: annotated {done} cast(s)");
 }
 
 #[derive(Clone, Copy)]
@@ -100,6 +161,8 @@ enum Mode {
   Stats,
   /// Show the run-dir prune queue; `--now` forces a janitor pass.
   Prune,
+  /// Summarize + chapter cast recordings with cursor/Composer (`annotate-cast <cast>…`).
+  AnnotateCasts,
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +202,8 @@ struct Cli {
   mode: Mode,
   profile: Option<String>,
   sources: Vec<String>,
+  /// Cast files for `annotate-cast` (positional).
+  annotate_paths: Vec<String>,
   verbose: bool,
   json: bool,
   failures: FailuresOpts,
@@ -169,6 +234,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut mode: Option<Mode> = None;
   let mut profiles: Vec<String> = Vec::new();
   let mut sources: Vec<String> = Vec::new();
+  let mut annotate_paths: Vec<String> = Vec::new();
   let mut verbose = false;
   let mut json = false;
   let mut frames = false;
@@ -263,6 +329,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         failures.last = Some(n.parse().map_err(|_| format!("bad --last value '{n}'"))?);
         None
       }
+      // `annotate-cast <cast>…`: summarize each recording and detect chapters with
+      // cursor-agent on the Composer model, writing a `<cast>.chapters.json` sidecar.
+      "annotate-cast" | "annotate-casts" => Some(Mode::AnnotateCasts),
       // `prune [--now]`: show the daemon's run-dir cleanup queue, or force a pass now.
       "prune" => Some(Mode::Prune),
       "--now" => {
@@ -336,6 +405,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         sources.push(other.to_string());
         None
       }
+      // After `annotate-cast`, each bare token is a cast file to annotate.
+      other if matches!(mode, Some(Mode::AnnotateCasts)) && !other.starts_with('-') => {
+        annotate_paths.push(other.to_string());
+        None
+      }
       other => return Err(format!("unknown command or option '{other}' (try 'scsh help')")),
     };
     if let Some(m) = m {
@@ -383,7 +457,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if prune_now && !matches!(mode, Mode::Prune) {
     return Err("--now only applies to 'prune' (e.g. `scsh prune --now`)".into());
   }
-  Ok(Cli { mode, profile, sources, verbose, json, failures, prune_now })
+  if !annotate_paths.is_empty() && !matches!(mode, Mode::AnnotateCasts) {
+    return Err("cast paths only apply to 'annotate-cast'".into());
+  }
+  Ok(Cli { mode, profile, sources, annotate_paths, verbose, json, failures, prune_now })
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -593,9 +670,32 @@ so they would not be in the container",
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      build_and_run(&rt, &root, &runnable, profile)
+      let cast_dir = root.join("tmp").join("casts");
+      let before = casts_snapshot(&cast_dir);
+      let code = build_and_run(&rt, &root, &runnable, profile);
+      // Annotate the recordings this run just produced (best-effort; no-op without cursor).
+      annotate_run_casts(new_casts_since(&cast_dir, &before));
+      code
     }
   }
+}
+
+/// The set of `.cast` files currently in `dir` (for detecting a run's new recordings).
+fn casts_snapshot(dir: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
+  std::fs::read_dir(dir)
+    .into_iter()
+    .flatten()
+    .flatten()
+    .map(|e| e.path())
+    .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("cast"))
+    .collect()
+}
+
+/// `.cast` files that appeared in `dir` since `before` was snapshotted.
+fn new_casts_since(
+  dir: &std::path::Path, before: &std::collections::BTreeSet<std::path::PathBuf>,
+) -> Vec<std::path::PathBuf> {
+  casts_snapshot(dir).into_iter().filter(|p| !before.contains(p)).collect()
 }
 
 /// Compact one-line preflight summary for `list` (no run-only guards).
