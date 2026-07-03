@@ -447,11 +447,12 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      // Defensive dialog answers: config seeding should prevent these screens, but if
-      // one appears anyway (new claude version, changed key names), Enter proceeds with
-      // the highlighted default instead of hanging until the container timeout.
+      // Defensive dialog answers: config seeding should prevent these screens, but if one
+      // appears anyway (new claude version, changed key names, a config that didn't take),
+      // Enter selects the highlighted default instead of hanging until the container
+      // timeout. The trust prompt reads "Quick safety check … Yes, I trust this folder".
       let answers: &[(&str, &str)] =
-        &[("Choose the text style", "Enter"), ("Do you trust the files in this folder", "Enter")];
+        &[("Choose the text style", "Enter"), ("Quick safety check", "Enter"), ("trust this folder", "Enter")];
       wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, answers, result, term)
     }
     Harness::Codex => {
