@@ -93,6 +93,26 @@ repo's gitignored `tmp/`).
 - **Assumed:** The daemon is best-effort — if it cannot start, `scsh run` still proceeds
   without the browser URL.
 
+## Known limitation: state file growth
+
+The daemon retains up to 200 sessions, each proc keeping up to 5000 output lines, and it
+serializes the **entire** store on every dirty WebSocket tick and state persist — while
+holding the store lock. After many heavy runs (e.g. review fleets) the state JSON can
+reach tens of megabytes, at which point event POSTs from `scsh run` start timing out and
+new runs print *"daemon is up but registration failed"* (the run itself still works; it
+just doesn't appear in the browser). Observed in practice at a ~67 MB state file.
+
+Workaround until the daemon bounds its state — reset it:
+
+```console
+scsh daemon stop
+rm "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.json"
+scsh daemon start
+```
+
+This clears session history only; `.cast` recordings live in each repo's `tmp/casts/`
+and are unaffected.
+
 ## Demo
 
 ```console
