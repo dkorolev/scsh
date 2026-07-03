@@ -67,9 +67,23 @@ const PAGE_CSS: &str = r#"
   .line { white-space: pre; }
   .detail, .container { overflow-x: auto; white-space: pre; max-width: 100%; }
   .at { opacity: 0.5; margin-right: 0.35rem; }
-  .castlinks { font-size: 0.85rem; margin: 0.35rem 0; display: flex; gap: 1rem; }
-  .castlinks a { text-decoration: none; opacity: 0.9; }
-  .castlinks a:hover { text-decoration: underline; }
+  .cast { margin: 0.5rem 0; border: 1px solid #8884; border-radius: 6px; overflow: hidden; background: #000; }
+  .cast-toolbar {
+    display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;
+    padding: 0.3rem 0.5rem; background: #1118; font-size: 0.8rem;
+  }
+  .cast-toolbar button, .cast-toolbar a {
+    font: inherit; color: #7ab4ff; background: none; border: 1px solid #8886;
+    border-radius: 5px; padding: 0.1rem 0.5rem; cursor: pointer; text-decoration: none;
+  }
+  .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: #7ab4ff; }
+  .cast-copied { color: #3a8; visibility: hidden; }
+  .cast-player { width: 100%; height: 42vh; max-height: 460px; }
+  /* Fullscreen: the player box fills the viewport; asciinema-player fit:'both' scales the
+     terminal to fit both width and height. */
+  .cast:fullscreen { display: flex; flex-direction: column; background: #000; }
+  .cast:fullscreen .cast-player { flex: 1 1 auto; height: auto; max-height: none; }
+  .cast .ap-player { width: 100%; height: 100%; }
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
@@ -97,6 +111,15 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
     None => "const SESSION_ID = null;".to_string(),
   };
+  // The session page embeds an asciinema player per proc; the index page does not need it.
+  let (player_css, player_js) = if session_id.is_some() {
+    (
+      "<link rel=\"stylesheet\" href=\"/assets/asciinema-player.css\">",
+      "<script src=\"/assets/asciinema-player.js\"></script>",
+    )
+  } else {
+    ("", "")
+  };
   format!(
     r#"<!DOCTYPE html>
 <html lang="en">
@@ -104,6 +127,7 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{title}</title>
+{player_css}
 <style>{css}</style>
 </head>
 <body>
@@ -111,6 +135,7 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 <span class="dot" aria-hidden="true"></span><span id="status-label">connecting…</span>
 <span id="status-uptime" class="dim"></span>{scsh_version}</div>
 {body}
+{player_js}
 <script>
 const WS_PORT = {port};
 {session_js}
@@ -120,9 +145,11 @@ const WS_PORT = {port};
 </html>
 "#,
     title = esc(title),
+    player_css = player_css,
     css = PAGE_CSS,
     scsh_version = scsh_version_html(),
     body = body,
+    player_js = player_js,
     port = port,
     session_js = session_js,
     live_js = live_client_js()

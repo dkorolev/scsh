@@ -424,16 +424,22 @@ function updateProcFields(det, p, nowUnix) {
       const div = document.createElement('div');
       div.className = 'container dim';
       div.textContent = 'container: ' + p.container_name;
-      const before = det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
+      const before = det.querySelector('.cast') || det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
       if (before) det.insertBefore(div, before);
     }
   } else if (containerEl) containerEl.remove();
-  const castEl = det.querySelector('.castlinks');
-  const castHtml = castLinksHtml(p);
-  if (castHtml && !castEl) {
-    const before = det.querySelector('.container') || det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
-    if (before) before.insertAdjacentHTML('beforebegin', castHtml);
-  } else if (!castHtml && castEl) castEl.remove();
+  // A proc that gained a cast (rendered earlier as text) swaps its output for the embed.
+  const castEl = det.querySelector('.cast');
+  if (hasCast(p) && !castEl) {
+    det.querySelector('.autoscroll-ctl')?.remove();
+    det.querySelector('.output')?.remove();
+    det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
+  } else if (castEl && castEl.dataset.status !== p.status) {
+    // On finish, reload once so the player has the complete recording, not the partial one.
+    const wasLive = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
+    castEl.dataset.status = p.status;
+    if (wasLive && (p.status === 'ok' || p.status === 'fail')) createCastPlayer(castEl);
+  }
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
   if (metaHtml) {
@@ -445,15 +451,64 @@ function updateProcFields(det, p, nowUnix) {
   } else if (metaBlock) metaBlock.remove();
   syncAutoscrollCtl(det, p);
 }
-function castLinksHtml(p) {
-  if (!p.cast_path || SESSION_ID == null) return '';
+function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
+function castEmbedHtml(p) {
   const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
-  return '<div class="castlinks"><a href="' + base + '/play">▶ watch cast</a> ' +
-    '<a href="' + base + '?dl=1" download>⬇ download .cast</a></div>';
+  return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
+    '" data-status="' + esc(p.status) + '">' +
+    '<div class="cast-toolbar">' +
+    '<button type="button" data-cast-fs>⛶ Fullscreen</button>' +
+    '<button type="button" data-cast-link>🔗 Link at time</button>' +
+    '<button type="button" data-cast-reload>↻ Reload</button>' +
+    '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
+    '<span class="cast-copied">copied</span>' +
+    '</div><div class="cast-player"></div></div>';
 }
+// Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
+// fit:'both' scales the terminal to fit its box in both dimensions (inline and fullscreen).
+function initCasts(root) {
+  if (typeof AsciinemaPlayer === 'undefined') return;
+  root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
+    box.dataset.ready = '1';
+    createCastPlayer(box);
+    const proc = box.dataset.proc;
+    const playUrl = () => location.origin + '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/play';
+    box.querySelector('[data-cast-fs]').addEventListener('click', () => {
+      if (document.fullscreenElement === box) document.exitFullscreen();
+      else box.requestFullscreen && box.requestFullscreen();
+    });
+    box.querySelector('[data-cast-reload]').addEventListener('click', () => createCastPlayer(box));
+    box.querySelector('[data-cast-link]').addEventListener('click', () => {
+      const t = box._player ? Math.floor(box._player.getCurrentTime() * 10) / 10 : 0;
+      const url = playUrl() + '#t=' + t;
+      if (navigator.clipboard) navigator.clipboard.writeText(url);
+      const note = box.querySelector('.cast-copied');
+      note.style.visibility = 'visible';
+      setTimeout(() => { note.style.visibility = 'hidden'; }, 1200);
+    });
+  });
+}
+function createCastPlayer(box) {
+  if (typeof AsciinemaPlayer === 'undefined') return;
+  const mount = box.querySelector('.cast-player');
+  if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
+  mount.innerHTML = '';
+  // ?ts= busts any HTTP cache so a reload of a still-growing cast fetches fresh bytes.
+  box._player = AsciinemaPlayer.create(
+    box.dataset.castUrl + '?ts=' + Date.now(), mount,
+    { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema' }
+  );
+}
+// asciinema-player recomputes its fit on window resize; entering/exiting fullscreen changes
+// the box size, so nudge a resize for the fullscreen player to refit both dimensions.
+document.addEventListener('fullscreenchange', () => {
+  try { window.dispatchEvent(new Event('resize')); } catch (_) {}
+});
 function procHtml(p, isOpen, nowUnix) {
-  const lines = (p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status);
   const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
+  const body = hasCast(p)
+    ? castEmbedHtml(p)
+    : autoscrollCtlHtml(p) + '<div class="output">' + ((p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status)) + '</div>';
   const elapsed = procElapsed(p, nowUnix);
   const elapsedText = formatElapsedClock(elapsed);
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' +
@@ -463,7 +518,7 @@ function procHtml(p, isOpen, nowUnix) {
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span> ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
-    castLinksHtml(p) + container + autoscrollCtlHtml(p) + '<div class="output">' + lines + '</div></details>';
+    container + body + '</details>';
 }
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
@@ -523,6 +578,7 @@ function renderSession(session, nowUnix) {
       syncProcOutput(det, p);
     }
   });
+  initCasts(root);
 }
 function onTick(msg) {
   if (msg.type !== 'tick') return;
@@ -575,6 +631,7 @@ startProcClock();
     if (cb) autoScrollByProc.set(det.dataset.index, cb.checked);
   });
   applyAutoScrollAll(root);
+  initCasts(root);
 })();
 "#
 }
