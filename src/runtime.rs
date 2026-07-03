@@ -309,6 +309,12 @@ pub const AGENT_XDG_DATA_REL: &str = "tmp/.xdg-data";
 /// therefore `<run_dir>/tmp/scsh-run.log`, where the full intra-container output can be read.
 pub const RUN_LOG_REL: &str = "tmp/scsh-run.log";
 
+/// Per-run asciinema recording (asciicast v2, NDJSON) of the harness PTY, RELATIVE to the
+/// repo: `${SCSH_RUN_LOG}.cast` in-container, `<run_dir>/tmp/scsh-run.log.cast` on the host.
+/// NDJSON means any byte-prefix ending on a newline is itself a valid (partial) recording,
+/// so the file can be downloaded and replayed while the skill is still running.
+pub const RUN_CAST_REL: &str = "tmp/scsh-run.log.cast";
+
 /// The env var (set in the generated image) that carries the in-container log
 /// path the harness command tees its output to.
 pub const RUN_LOG_VAR: &str = "SCSH_RUN_LOG";
@@ -388,12 +394,15 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
 /// Output is always teed to [`RUN_LOG_VAR`] for the daemon; `SCSH_QUIET=1` drops the debug flags.
 /// `effort` is the `.scsh.yml` reasoning-effort level (codex and grok only; expansion
 /// guarantees it is `None` for harnesses without an effort knob).
-pub fn harness_command(harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str) -> String {
-  harness_command_verbose(harness, model, effort, skill_source, harness_verbose_enabled())
+pub fn harness_command(
+  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, term: crate::config::Terminal,
+) -> String {
+  harness_command_verbose(harness, model, effort, skill_source, harness_verbose_enabled(), term)
 }
 
 fn harness_command_verbose(
   harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, verbose: bool,
+  term: crate::config::Terminal,
 ) -> String {
   match harness {
     Harness::Opencode => {
@@ -412,7 +421,7 @@ fn harness_command_verbose(
       }
       cmd.push_str(" run ");
       cmd.push_str(&shell_quote(&instruction));
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
     }
     Harness::Claude => {
       let prompt = format!(
@@ -432,7 +441,7 @@ fn harness_command_verbose(
         cmd.push_str(" --model ");
         cmd.push_str(&shell_quote(m));
       }
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
     }
     Harness::Codex => {
       let prompt = format!(
@@ -459,7 +468,7 @@ fn harness_command_verbose(
       }
       cmd.push(' ');
       cmd.push_str(&shell_quote(&prompt));
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
     }
     Harness::Grok => {
       let prompt = format!(
@@ -485,7 +494,7 @@ fn harness_command_verbose(
         cmd.push_str(RUN_LOG_VAR);
         cmd.push_str("}.debug\"");
       }
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
     }
     Harness::Cursor => {
       let prompt = format!(
@@ -504,7 +513,7 @@ fn harness_command_verbose(
       }
       cmd.push(' ');
       cmd.push_str(&shell_quote(&prompt));
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
     }
   }
 }
@@ -535,7 +544,15 @@ fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
 }
 
 /// Run the harness under `/bin/sh -c`, banner on stderr, all output teed to [`RUN_LOG_VAR`].
-fn wrap_harness_shell(harness: Harness, skill_source: &str, model: Option<&str>, inner: &str, verbose: bool) -> String {
+///
+/// The harness itself runs inside `asciinema rec` — a real PTY of `term.cols` x `term.rows`
+/// — which records the raw terminal stream to `${SCSH_RUN_LOG}.cast` ([`RUN_CAST_REL`])
+/// while passing it through to the tee. asciinema 2.x does not propagate the child's exit
+/// status, which changes nothing here: the pipeline already returns tee's status, and skill
+/// failure is detected by the absence of the result file, not by exit code.
+fn wrap_harness_shell(
+  harness: Harness, skill_source: &str, model: Option<&str>, inner: &str, verbose: bool, term: crate::config::Terminal,
+) -> String {
   let model_label = model.unwrap_or("(harness default)");
   // Verbose claude/grok write a separate --debug-file, and verbose codex a final-message
   // file; append them to the teed stream at the end so the run log is self-contained.
@@ -554,8 +571,15 @@ fn wrap_harness_shell(harness: Harness, skill_source: &str, model: Option<&str>,
     ),
     _ => String::new(),
   };
+  let recorded = format!(
+    "asciinema rec -q --cols {cols} --rows {rows} -c {inner_q} \"${{{log_var}}}.cast\"",
+    cols = term.cols,
+    rows = term.rows,
+    inner_q = shell_quote(inner),
+    log_var = RUN_LOG_VAR,
+  );
   format!(
-    "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} log=${{{log_var}}}\" >&2; {inner}; {post} }} 2>&1 | tee \"${{{log_var}}}\"",
+    "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; {recorded}; {post} }} 2>&1 | tee \"${{{log_var}}}\"",
     harness.as_str(),
     log_var = RUN_LOG_VAR,
   )
@@ -1750,7 +1774,14 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), None, "add", true);
+    let cmd = harness_command_verbose(
+      Harness::Opencode,
+      Some("openai/gpt-5.5"),
+      None,
+      "add",
+      true,
+      crate::config::Terminal::default(),
+    );
     assert!(cmd.contains("scsh: harness=opencode"));
     assert!(cmd.contains("opencode --print-logs --log-level DEBUG"));
     assert!(cmd.contains("-m openai/gpt-5.5"));
@@ -1758,9 +1789,11 @@ mod tests {
     assert!(cmd.contains("run skill add"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let cmd = harness_command_verbose(Harness::Opencode, None, None, "multiply", true);
+    let cmd =
+      harness_command_verbose(Harness::Opencode, None, None, "multiply", true, crate::config::Terminal::default());
     assert!(cmd.contains("opencode --print-logs --log-level DEBUG run "));
-    let quiet = harness_command_verbose(Harness::Opencode, None, None, "multiply", false);
+    let quiet =
+      harness_command_verbose(Harness::Opencode, None, None, "multiply", false, crate::config::Terminal::default());
     assert!(!quiet.contains("--print-logs"));
     assert!(quiet.contains("scsh: harness=opencode"));
     assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
@@ -1768,12 +1801,14 @@ mod tests {
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", true);
+    let cmd =
+      harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", true, crate::config::Terminal::default());
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains(" --verbose --debug --debug-file \"${SCSH_RUN_LOG}.debug\" --model sonnet"));
     assert!(cmd.contains("scsh: --- claude debug log ---"));
     assert!(cmd.contains("tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", false);
+    let quiet =
+      harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", false, crate::config::Terminal::default());
     assert!(!quiet.contains(" --verbose"));
     assert!(!quiet.contains("--debug-file"));
     assert!(!quiet.contains("claude debug log"));
@@ -1782,7 +1817,8 @@ mod tests {
 
   #[test]
   fn harness_command_builds_codex_invocation() {
-    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true);
+    let cmd =
+      harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true, crate::config::Terminal::default());
     assert!(cmd.contains("scsh: harness=codex"));
     assert!(cmd.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
     assert!(cmd.contains(" -m gpt-5.5"));
@@ -1791,7 +1827,8 @@ mod tests {
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Codex, None, None, "multiply", false);
+    let quiet =
+      harness_command_verbose(Harness::Codex, None, None, "multiply", false, crate::config::Terminal::default());
     assert!(quiet.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
     assert!(!quiet.contains("--output-last-message"));
     assert!(!quiet.contains(" -m "));
@@ -1800,7 +1837,14 @@ mod tests {
 
   #[test]
   fn harness_command_builds_grok_invocation() {
-    let cmd = harness_command_verbose(Harness::Grok, Some("grok-build"), Some("high"), "add", true);
+    let cmd = harness_command_verbose(
+      Harness::Grok,
+      Some("grok-build"),
+      Some("high"),
+      "add",
+      true,
+      crate::config::Terminal::default(),
+    );
     assert!(cmd.contains("scsh: harness=grok"));
     assert!(cmd.contains("grok -p "));
     assert!(cmd.contains(" --permission-mode bypassPermissions --always-approve"));
@@ -1811,7 +1855,8 @@ mod tests {
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Grok, None, None, "multiply", false);
+    let quiet =
+      harness_command_verbose(Harness::Grok, None, None, "multiply", false, crate::config::Terminal::default());
     assert!(quiet.contains("grok -p "));
     assert!(!quiet.contains("--debug"));
     assert!(!quiet.contains(" --effort "));
@@ -1820,14 +1865,22 @@ mod tests {
 
   #[test]
   fn harness_command_builds_cursor_invocation() {
-    let cmd = harness_command_verbose(Harness::Cursor, Some("composer-2.5"), Some("high"), "add", true);
+    let cmd = harness_command_verbose(
+      Harness::Cursor,
+      Some("composer-2.5"),
+      Some("high"),
+      "add",
+      true,
+      crate::config::Terminal::default(),
+    );
     assert!(cmd.contains("scsh: harness=cursor"));
     assert!(cmd.contains("cursor-agent -p --force --trust --sandbox disabled"));
     assert!(cmd.contains(" --model composer-2.5-fast"));
     assert!(cmd.contains(" --output-format stream-json --stream-partial-output"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Cursor, None, None, "multiply", false);
+    let quiet =
+      harness_command_verbose(Harness::Cursor, None, None, "multiply", false, crate::config::Terminal::default());
     assert!(quiet.contains("cursor-agent -p --force --trust --sandbox disabled"));
     assert!(!quiet.contains("--output-format"));
     assert!(!quiet.contains(" --model "));
@@ -1843,10 +1896,34 @@ mod tests {
   }
 
   #[test]
+  fn harness_runs_under_asciinema_with_configured_pty_size() {
+    let term = crate::config::Terminal { cols: 120, rows: 30 };
+    let cmd = harness_command_verbose(Harness::Claude, Some("opus"), None, "add", false, term);
+    assert!(cmd.contains("asciinema rec -q --cols 120 --rows 30 -c "), "got: {cmd}");
+    assert!(cmd.contains("\"${SCSH_RUN_LOG}.cast\""), "got: {cmd}");
+    assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "got: {cmd}");
+    // The recorded inner command is one shell-quoted asciinema argument; the harness
+    // invocation itself must survive inside it.
+    assert!(cmd.contains("claude -p "), "got: {cmd}");
+    for harness in [Harness::Opencode, Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor] {
+      let cmd = harness_command_verbose(harness, None, None, "add", false, crate::config::Terminal::default());
+      assert!(cmd.contains("asciinema rec -q --cols 200 --rows 50 -c "), "harness {harness:?} got: {cmd}");
+    }
+  }
+
+  #[test]
   fn harness_command_codex_passes_reasoning_effort() {
-    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), Some("xhigh"), "add", true);
+    let cmd = harness_command_verbose(
+      Harness::Codex,
+      Some("gpt-5.5"),
+      Some("xhigh"),
+      "add",
+      true,
+      crate::config::Terminal::default(),
+    );
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
-    let without = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true);
+    let without =
+      harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true, crate::config::Terminal::default());
     assert!(!without.contains("model_reasoning_effort"));
   }
 
@@ -2298,6 +2375,7 @@ mod tests {
         timeout: None,
         env: vec![],
         result: "tmp/a.json".into(),
+        terminal: crate::config::Terminal::default(),
       },
       crate::config::ResolvedInvocation {
         name: "b".into(),
@@ -2310,6 +2388,7 @@ mod tests {
         timeout: None,
         env: vec![],
         result: "tmp/b.json".into(),
+        terminal: crate::config::Terminal::default(),
       },
       crate::config::ResolvedInvocation {
         name: "c".into(),
@@ -2322,6 +2401,7 @@ mod tests {
         timeout: None,
         env: vec![],
         result: "tmp/c.json".into(),
+        terminal: crate::config::Terminal::default(),
       },
     ];
     let set = requested_opencode_models(&skills);
@@ -2371,6 +2451,7 @@ mod tests {
       timeout: None,
       env: vec![],
       result: "tmp/add.json".into(),
+      terminal: crate::config::Terminal::default(),
     }];
     let probe = OpencodeModelProbe::for_selected(&skills);
     assert!(probe.check_model("openai/anything").is_ok());

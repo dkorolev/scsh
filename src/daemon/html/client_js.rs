@@ -428,6 +428,12 @@ function updateProcFields(det, p, nowUnix) {
       if (before) det.insertBefore(div, before);
     }
   } else if (containerEl) containerEl.remove();
+  const castEl = det.querySelector('.castlinks');
+  const castHtml = castLinksHtml(p);
+  if (castHtml && !castEl) {
+    const before = det.querySelector('.container') || det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
+    if (before) before.insertAdjacentHTML('beforebegin', castHtml);
+  } else if (!castHtml && castEl) castEl.remove();
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
   if (metaHtml) {
@@ -438,6 +444,12 @@ function updateProcFields(det, p, nowUnix) {
     }
   } else if (metaBlock) metaBlock.remove();
   syncAutoscrollCtl(det, p);
+}
+function castLinksHtml(p) {
+  if (!p.cast_path || SESSION_ID == null) return '';
+  const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
+  return '<div class="castlinks"><a href="' + base + '/play">▶ watch cast</a> ' +
+    '<a href="' + base + '?dl=1" download>⬇ download .cast</a></div>';
 }
 function procHtml(p, isOpen, nowUnix) {
   const lines = (p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status);
@@ -451,7 +463,7 @@ function procHtml(p, isOpen, nowUnix) {
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span> ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
-    container + autoscrollCtlHtml(p) + '<div class="output">' + lines + '</div></details>';
+    castLinksHtml(p) + container + autoscrollCtlHtml(p) + '<div class="output">' + lines + '</div></details>';
 }
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;

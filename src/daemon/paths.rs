@@ -37,6 +37,13 @@ pub fn prune_file(port: u16) -> PathBuf {
   daemon_dir().join(format!("prune-{port}.json"))
 }
 
+/// Directory for durable copies of per-proc asciinema recordings. Run dirs are pruned
+/// shortly after a skill ends; `scsh run` copies each `.cast` here at proc finish so the
+/// session browser can replay it later. Created on first use.
+pub fn casts_dir() -> PathBuf {
+  daemon_dir().join("casts")
+}
+
 /// True when TCP connects to the daemon's localhost port within a short timeout.
 pub fn daemon_port_reachable(port: u16) -> bool {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid localhost address");

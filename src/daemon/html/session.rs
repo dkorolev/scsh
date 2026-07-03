@@ -4,7 +4,8 @@ use super::escape::esc;
 use super::format::format_elapsed_clock;
 use super::layout::wrap_page;
 use super::proc::{
-  autoscroll_ctl_html, empty_output_html, proc_elapsed_secs, proc_meta_html, status_glyph, summary_stats_html,
+  autoscroll_ctl_html, cast_links_html, empty_output_html, proc_elapsed_secs, proc_meta_html, status_glyph,
+  summary_stats_html,
 };
 use crate::daemon::model::{Session, Store};
 use crate::daemon::paths::{now_unix_secs, session_url};
@@ -41,6 +42,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 </summary>
 {proc_meta}
 <div class="detail">{detail}</div>
+{cast_links}
 {container_line}
 {autoscroll_ctl}
 <div class="output">{lines}</div>
@@ -52,6 +54,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       proc_meta = proc_meta_html(proc),
+      cast_links = cast_links_html(&session.id, proc),
       elapsed = elapsed,
       note = esc(note),
       detail = esc(detail),

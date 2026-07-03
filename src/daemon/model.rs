@@ -155,6 +155,10 @@ pub struct ProcRecord {
   pub elapsed: Option<f64>,
   pub lines: Vec<OutputLine>,
   pub container_name: Option<String>,
+  /// Host path of this proc's asciinema recording: the live run-dir file while the
+  /// container runs (grows in real time; a prefix is a valid partial cast), then the
+  /// durable copy under the daemon dir after the skill finishes.
+  pub cast_path: Option<String>,
 }
 
 /// One skill listed in a session's start payload.
@@ -362,6 +366,7 @@ mod tests {
         elapsed: Some(5.0),
         lines: Vec::new(),
         container_name: None,
+        cast_path: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -413,6 +418,7 @@ mod tests {
         elapsed: None,
         lines: Vec::new(),
         container_name: None,
+        cast_path: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -446,6 +452,7 @@ mod tests {
           elapsed: None,
           lines: Vec::new(),
           container_name: None,
+          cast_path: None,
         },
         ProcRecord {
           index: 1,
@@ -462,6 +469,7 @@ mod tests {
           elapsed: None,
           lines: Vec::new(),
           container_name: None,
+          cast_path: None,
         },
       ],
       last_seen_at: 1,

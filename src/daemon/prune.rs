@@ -108,6 +108,32 @@ fn keep_run_dirs() -> bool {
   matches!(std::env::var("SCSH_KEEP_RUNS").ok().as_deref(), Some("1") | Some("true"))
 }
 
+/// How long durable `.cast` copies under the daemon's casts dir are kept.
+pub const CAST_RETENTION_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// Delete durable cast copies whose mtime is older than [`CAST_RETENTION_SECS`]. Run-dir
+/// casts vanish with the run-dir janitor above; this sweep bounds the daemon-owned copies.
+pub fn sweep_old_casts() -> usize {
+  let Ok(entries) = std::fs::read_dir(super::paths::casts_dir()) else {
+    return 0;
+  };
+  let mut removed = 0;
+  for entry in entries.flatten() {
+    let path = entry.path();
+    if path.extension().and_then(|e| e.to_str()) != Some("cast") {
+      continue;
+    }
+    let Some(modified) = entry.metadata().ok().and_then(|m| m.modified().ok()) else {
+      continue;
+    };
+    let age = modified.elapsed().map(|d| d.as_secs()).unwrap_or(0);
+    if age > CAST_RETENTION_SECS && std::fs::remove_file(&path).is_ok() {
+      removed += 1;
+    }
+  }
+  removed
+}
+
 fn is_scsh_run_dir_path(run_dir: &str) -> bool {
   Path::new(run_dir).file_name().and_then(|n| n.to_str()).is_some_and(runtime::is_scsh_run_dir_name)
 }

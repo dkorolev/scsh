@@ -31,6 +31,7 @@ RUN set -eux; \
       perl gawk \
       jq sqlite3 postgresql-client \
       ripgrep shellcheck \
+      asciinema \
       protobuf-compiler \
       iputils-ping traceroute bind9-dnsutils netcat-openbsd iproute2 whois socat; \
     rm -rf /var/lib/apt/lists/*
@@ -125,6 +126,9 @@ ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
 ENV PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:$PATH
 ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log
+# Containers run without a runtime-allocated TTY; asciinema gives the harness a PTY and
+# records it, and needs a sane TERM for the pseudo-terminal it creates.
+ENV TERM=xterm-256color
 
 # --- OpenCode harness image (install harness last) ---
 FROM scsh-base AS scsh-opencode

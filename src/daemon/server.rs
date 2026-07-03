@@ -184,6 +184,8 @@ impl Server {
     let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
     let _ = queue.tick(now);
     queue.save(self.port);
+    drop(queue);
+    let _ = crate::daemon::prune::sweep_old_casts();
   }
 }
 
@@ -200,9 +202,54 @@ fn handle_connection(
     websocket::serve(stream, rx);
     return Ok(false);
   }
+  let bare_path = req.path.split('?').next().unwrap_or("");
+  if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
+    let (status, body, disposition) = cast_response(&req.path, store);
+    write_cast_response(&mut stream, status, &body, disposition.as_deref())?;
+    return Ok(false);
+  }
   let (status, body, content_type, mutated) = route(&req, store, prune);
   write_response(&mut stream, status, &body, content_type)?;
   Ok(mutated)
+}
+
+/// `GET /cast/<session>/<proc>[?dl=1]` — the proc's asciinema recording. The file is read
+/// at request time and truncated to its last complete line, so a cast still being written
+/// by a live container downloads and replays as a valid (partial) asciicast. `dl=1` adds a
+/// Content-Disposition attachment header for a browser "download" link.
+fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+  let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+  let rest = path.strip_prefix("/cast/").unwrap_or("");
+  let Some((session_id, proc_str)) = rest.split_once('/') else {
+    return (404, "not found".into(), None);
+  };
+  let Ok(proc_index) = proc_str.parse::<usize>() else {
+    return (404, "not found".into(), None);
+  };
+  let cast_path = {
+    let store = lock_store(store);
+    store
+      .sessions
+      .get(session_id)
+      .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
+      .and_then(|p| p.cast_path.clone())
+  };
+  let Some(cast_path) = cast_path else {
+    return (404, "no cast recorded for this proc".into(), None);
+  };
+  let Ok(bytes) = std::fs::read(&cast_path) else {
+    return (404, "cast file not available (not started yet, or pruned)".into(), None);
+  };
+  let end = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+  if end == 0 {
+    return (404, "no recorded output yet".into(), None);
+  }
+  let body = String::from_utf8_lossy(&bytes[..end]).into_owned();
+  let disposition = query
+    .split('&')
+    .any(|kv| kv == "dl=1")
+    .then(|| format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.cast\""));
+  (200, body, disposition)
 }
 
 struct HttpRequest {
@@ -316,6 +363,19 @@ fn route(
         (200, page, "text/html; charset=utf-8", false)
       } else {
         (404, "session not found".into(), "text/plain", false)
+      }
+    }
+    "/assets/asciinema-player.js" => (200, html::PLAYER_JS.to_string(), "application/javascript; charset=utf-8", false),
+    "/assets/asciinema-player.css" => (200, html::PLAYER_CSS.to_string(), "text/css; charset=utf-8", false),
+    path if path.starts_with("/cast/") && path.ends_with("/play") => {
+      let rest = path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/play").unwrap_or("");
+      let page = rest.split_once('/').and_then(|(sid, proc)| {
+        let proc_index = proc.parse::<usize>().ok()?;
+        html::cast_player_page(&*lock_store(store), sid, proc_index)
+      });
+      match page {
+        Some(page) => (200, page, "text/html; charset=utf-8", false),
+        None => (404, "cast not found".into(), "text/plain", false),
       }
     }
     "/api/v1/sessions" => {
@@ -489,6 +549,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           fail_reason: None,
           elapsed: None,
           container_name: None,
+          cast_path: None,
           lines: Vec::new(),
         });
       }
@@ -515,6 +576,18 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let note = field_str(&obj, "note").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.note = Some(note);
+        true
+      } else {
+        false
+      }
+    }
+    "/api/v1/proc/cast" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let path = field_str(&obj, "path").unwrap_or_default();
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        p.cast_path = if path.is_empty() { None } else { Some(path) };
         true
       } else {
         false
@@ -678,6 +751,29 @@ Connection: close\r\n\r\n\
   Ok(())
 }
 
+/// Like [`write_response`] but for `.cast` payloads: asciicast content type plus an
+/// optional Content-Disposition (the `?dl=1` download variant). 404 bodies are text.
+fn write_cast_response(
+  stream: &mut TcpStream, status: u16, body: &str, disposition: Option<&str>,
+) -> std::io::Result<()> {
+  let status_text = if status == 200 { "OK" } else { "Not Found" };
+  let content_type = if status == 200 { "application/x-asciicast; charset=utf-8" } else { "text/plain" };
+  let disposition_header = match disposition {
+    Some(d) => format!("Content-Disposition: {d}\r\n"),
+    None => String::new(),
+  };
+  let resp = format!(
+    "HTTP/1.1 {status} {status_text}\r\n\
+Content-Type: {content_type}\r\n\
+{disposition_header}Content-Length: {}\r\n\
+Connection: close\r\n\r\n\
+{body}",
+    body.len()
+  );
+  stream.write_all(resp.as_bytes())?;
+  Ok(())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -768,6 +864,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            cast_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -811,6 +908,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            cast_path: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -856,6 +954,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            cast_path: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -921,6 +1020,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            cast_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -940,6 +1040,77 @@ mod tests {
       .unwrap_or("")
       .contains("session ended before this proc reported finish"));
     assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn proc_cast_registers_and_cast_endpoint_serves_partial_file() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "castab".into(),
+        Session {
+          id: "castab".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: None,
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: vec![ProcRecord {
+            index: 0,
+            label: "claude: add".into(),
+            kind: ProcKind::Skill,
+            status: ProcStatus::Running,
+            skill_name: None,
+            harness: None,
+            model: None,
+            started_at: Some(50),
+            note: None,
+            detail: None,
+            fail_reason: None,
+            elapsed: None,
+            lines: Vec::new(),
+            container_name: None,
+            cast_path: None,
+          }],
+          last_seen_at: 50,
+          client_connected: true,
+        },
+      );
+    }
+    // Before registration: 404.
+    let (status, _, _) = cast_response("/cast/castab/0", &store);
+    assert_eq!(status, 404);
+
+    // Register a cast path; write a partially-flushed asciicast (last line incomplete).
+    let path = std::env::temp_dir().join(format!("scsh-test-cast-{}.cast", std::process::id()));
+    let header = r#"{"version": 2, "width": 200, "height": 50}"#;
+    std::fs::write(&path, format!("{header}\n[0.1, \"o\", \"hello\"]\n[0.2, \"o\", \"trunc")).unwrap();
+    let body = format!(r#"{{"session":"castab","proc":0,"path":{}}}"#, crate::json::quote(&path.to_string_lossy()));
+    assert!(handle_api_post("/api/v1/proc/cast", &body, &store, &prune));
+    assert_eq!(
+      store.lock().unwrap().sessions.get("castab").unwrap().procs[0].cast_path.as_deref(),
+      Some(path.to_string_lossy().as_ref())
+    );
+
+    // Inline fetch: 200, truncated to the last complete line, no disposition.
+    let (status, served, disposition) = cast_response("/cast/castab/0", &store);
+    assert_eq!(status, 200);
+    assert_eq!(served, format!("{header}\n[0.1, \"o\", \"hello\"]\n"));
+    assert!(disposition.is_none());
+
+    // Download variant carries an attachment disposition with a stable filename.
+    let (status, _, disposition) = cast_response("/cast/castab/0?dl=1", &store);
+    assert_eq!(status, 200);
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-castab-p0.cast\""));
+
+    // Unknown session/proc and vanished files are 404s, not errors.
+    assert_eq!(cast_response("/cast/nosuch/0", &store).0, 404);
+    assert_eq!(cast_response("/cast/castab/9", &store).0, 404);
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(cast_response("/cast/castab/0", &store).0, 404);
   }
 
   #[test]

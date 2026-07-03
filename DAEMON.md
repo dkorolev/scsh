@@ -38,6 +38,25 @@ harness output and container names.
 | Skill clone / harness phases | Proc notes |
 | Container start / stop | Named container around each skill |
 | Every stdout/stderr line | Build tail + harness tee (`scsh-run.log` stream) |
+| Terminal recording (`.cast`) | asciinema PTY recording of each harness (see below) |
+
+## Terminal recordings (asciinema)
+
+Every harness runs inside a real PTY recorded by asciinema (size from the `terminal:`
+block in `.scsh.yml`, default **200×50**). The session page shows two links per skill:
+
+- **▶ watch cast** — `/cast/{session}/{proc}/play`: an in-browser player (vendored
+  asciinema-player) with play/pause, timeline scrubbing, speed control, and
+  **deep links to timestamps** — append `#t=90` or `#t=1:30` to the player URL. While a
+  skill is still running the page shows a live badge and a *Reload recording* button.
+- **⬇ download .cast** — `/cast/{session}/{proc}?dl=1`: the raw asciicast v2 file.
+  Works **mid-run**: the recording is NDJSON, so the daemon serves the bytes written so
+  far (truncated to the last complete line), which is itself a valid partial cast.
+
+While the container runs, the cast is served straight from the run dir
+(`<run_dir>/tmp/scsh-run.log.cast`, bind-mounted and growing live). When the skill ends,
+`scsh run` copies it to `$TMPDIR/scsh-daemon/casts/<session>-p<proc>.cast` so replay
+survives run-dir pruning; those durable copies are swept after **7 days**.
 
 ## Configuration
 
@@ -52,10 +71,14 @@ repo's gitignored `tmp/`).
 
 - `GET /` — HTML session index
 - `GET /session/{id}` — HTML session detail
+- `GET /cast/{session}/{proc}` — asciicast v2 recording (valid partial file mid-run);
+  `?dl=1` for a download attachment
+- `GET /cast/{session}/{proc}/play` — HTML player page (scrub, pause, `#t=…` deep links)
+- `GET /assets/asciinema-player.{js,css}` — vendored player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
-  — event ingestion (used by `scsh run`)
+  — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path
 
 ## Assumptions
 

@@ -752,8 +752,13 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
-      let cmd =
-        runtime::harness_command(skill.harness, skill.model.as_deref(), skill.effort.as_deref(), &skill.skill_source);
+      let cmd = runtime::harness_command(
+        skill.harness,
+        skill.model.as_deref(),
+        skill.effort.as_deref(),
+        &skill.skill_source,
+        skill.terminal,
+      );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
       println!(
@@ -1966,8 +1971,13 @@ fn run_one_skill(
   if let Some(d) = &git_daemon {
     container_env.extend(d.env());
   }
-  let harness =
-    runtime::harness_command(skill.harness, skill.model.as_deref(), skill.effort.as_deref(), &skill.skill_source);
+  let harness = runtime::harness_command(
+    skill.harness,
+    skill.model.as_deref(),
+    skill.effort.as_deref(),
+    &skill.skill_source,
+    skill.terminal,
+  );
   let cmd = if git_transport {
     runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
   } else {
@@ -1979,10 +1989,18 @@ fn run_one_skill(
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "start", &name);
+    // The bind-mounted cast grows on the host while the harness runs; registering it now
+    // lets the session browser download/replay the recording mid-run.
+    c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name);
+    // Run dirs are pruned shortly after the skill ends (on any outcome); move the
+    // recording to the daemon's durable casts dir so replay keeps working.
+    if let Some(durable) = persist_cast(&run_dir, c.session_id(), spinner.index()) {
+      c.proc_cast(spinner.index(), &durable);
+    }
   }
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
@@ -2056,6 +2074,21 @@ fn run_one_skill(
       SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
     }
   }
+}
+
+/// Copy a run's asciinema recording into the daemon's durable casts dir
+/// (`$TMPDIR/scsh-daemon/casts/<session>-p<proc>.cast`), so the session browser can still
+/// replay it after the run dir is pruned. Returns the durable path when the copy landed.
+fn persist_cast(run_dir: &Path, session: &str, proc_index: usize) -> Option<String> {
+  let src = run_dir.join(runtime::RUN_CAST_REL);
+  if !src.is_file() {
+    return None;
+  }
+  let dir = daemon::casts_dir();
+  std::fs::create_dir_all(&dir).ok()?;
+  let dest = dir.join(format!("{session}-p{proc_index}.cast"));
+  std::fs::copy(&src, &dest).ok()?;
+  Some(dest.to_string_lossy().into_owned())
 }
 
 /// Recreate a skill's result file from a cached `content` (creating parent dirs), so a
@@ -3776,7 +3809,11 @@ fn print_help_config() {
   println!();
   print!(
     "{}",
-    r#"  skills:                 # the only top-level key: one entry per .skills/<name>/ folder
+    r#"  terminal:               # optional: PTY size for harness runs (and their .cast recordings)
+    cols: 200             #   default 200 (20..500)
+    rows: 50              #   default 50 (10..200)
+  skills:                 # one entry per .skills/<name>/ folder
+
     add:                    #   key must match the skill directory name
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
                             #     harnesses: opencode | claude | codex | grok | cursor
@@ -4344,6 +4381,7 @@ mod tests {
       profile: None,
       commits: false,
       result: "tmp/r.json".into(),
+      terminal: config::Terminal::default(),
     }
   }
 

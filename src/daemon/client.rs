@@ -162,6 +162,23 @@ impl Client {
     let _ = self.post("/api/v1/proc/note", &body);
   }
 
+  /// The six-letter session id this client reports under.
+  pub fn session_id(&self) -> &str {
+    &self.inner.session_id
+  }
+
+  /// Tell the daemon where this proc's asciinema `.cast` lives on the host: the live
+  /// run-dir file while the container runs, then the durable copy after the skill ends.
+  pub fn proc_cast(&self, proc_index: usize, path: &str) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"path\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      quote(path)
+    );
+    let _ = self.post("/api/v1/proc/cast", &body);
+  }
+
   pub fn proc_line(&self, proc_index: usize, at: f64, line: &str) {
     if let Some(tx) = lock_post_tx(&self.inner) {
       let _ = tx.send(PostJob::ProcLine { proc: proc_index, at, line: line.to_string() });
