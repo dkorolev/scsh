@@ -447,12 +447,18 @@ fn harness_command_verbose(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      // Defensive dialog answers: config seeding should prevent these screens, but if one
-      // appears anyway (new claude version, changed key names, a config that didn't take),
-      // Enter selects the highlighted default instead of hanging until the container
-      // timeout. The trust prompt reads "Quick safety check … Yes, I trust this folder".
-      let answers: &[(&str, &str)] =
-        &[("Choose the text style", "Enter"), ("Quick safety check", "Enter"), ("trust this folder", "Enter")];
+      // Dialog answers the watcher presses when a screen appears. The bypass-permissions
+      // consent ALWAYS shows with `--permission-mode bypassPermissions` (seeding does not
+      // suppress it) and its highlighted default is "No, exit" — so it must be actively
+      // accepted with `Down Enter` (move to "Yes, I accept", confirm), never bare Enter.
+      // The rest are defensive: config seeding normally pre-answers them, but if one slips
+      // through (new claude version, changed keys) Enter takes the safe highlighted default.
+      let answers: &[(&str, &str)] = &[
+        ("Bypass Permissions mode", "Down Enter"),
+        ("Choose the text style", "Enter"),
+        ("Quick safety check", "Enter"),
+        ("trust this folder", "Enter"),
+      ];
       wrap_tui_shell(harness, skill_source, model, "", &tui, TuiQuit::SlashExit, answers, result, term)
     }
     Harness::Codex => {
@@ -1880,6 +1886,10 @@ mod tests {
     assert!(!cmd.contains(".claude.json"), "got: {cmd}");
     assert!(cmd.contains("tmux -f /dev/null new-session -d -x 200 -y 50 -s scsh"), "got: {cmd}");
     assert!(cmd.contains("tmux send-keys -t scsh -l /exit"), "got: {cmd}");
+    // The bypass-permissions consent defaults to "No, exit"; the watcher must actively
+    // move to "Yes, I accept" and confirm (Down Enter), never a bare Enter that exits.
+    assert!(cmd.contains("capture-pane -p -t scsh 2>/dev/null | grep -q 'Bypass Permissions mode'"), "got: {cmd}");
+    assert!(cmd.contains("tmux send-keys -t scsh Down Enter"), "got: {cmd}");
     assert!(cmd.contains("[ -f tmp/add_claude_sonnet_4_6_result.json ]"), "got: {cmd}");
     assert!(cmd.contains("asciinema rec -q --cols 200 --rows 50 -c 'tmux attach -r -t scsh'"), "got: {cmd}");
     assert!(cmd.contains("tee \"${SCSH_RUN_LOG}\""));
