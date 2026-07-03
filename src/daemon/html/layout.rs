@@ -67,6 +67,9 @@ const PAGE_CSS: &str = r#"
   .line { white-space: pre; }
   .detail, .container { overflow-x: auto; white-space: pre; max-width: 100%; }
   .at { opacity: 0.5; margin-right: 0.35rem; }
+  .castlinks { font-size: 0.85rem; margin: 0.35rem 0; display: flex; gap: 1rem; }
+  .castlinks a { text-decoration: none; opacity: 0.9; }
+  .castlinks a:hover { text-decoration: underline; }
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;

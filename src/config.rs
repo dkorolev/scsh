@@ -16,6 +16,25 @@ use std::collections::BTreeMap;
 pub struct Config {
   /// One or more scoped skills, in file order. scsh runs them all in parallel.
   pub skills: Vec<Skill>,
+  /// PTY geometry for harness runs; every harness runs (and is asciinema-recorded)
+  /// inside a pseudo-terminal of this size. Optional top-level `terminal:` block.
+  pub terminal: Terminal,
+}
+
+/// Terminal size for the pseudo-terminal each harness runs in (`terminal: {cols, rows}`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Terminal {
+  pub cols: u16,
+  pub rows: u16,
+}
+
+pub const DEFAULT_TERMINAL_COLS: u16 = 200;
+pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
+
+impl Default for Terminal {
+  fn default() -> Self {
+    Terminal { cols: DEFAULT_TERMINAL_COLS, rows: DEFAULT_TERMINAL_ROWS }
+  }
 }
 
 /// One manifest row in `.scsh.yml`. The key must match the `.skills/<name>/` folder.
@@ -75,14 +94,16 @@ pub struct ResolvedInvocation {
   pub profile: Option<String>,
   pub commits: bool,
   pub result: String,
+  /// PTY size the harness runs (and is recorded) in — the config's top-level `terminal:`.
+  pub terminal: Terminal,
 }
 
 /// Expand every manifest skill into the invocation(s) `scsh run` would execute, in file order.
 pub fn expand_invocations(cfg: &Config) -> Vec<ResolvedInvocation> {
-  cfg.skills.iter().flat_map(expand_skill).collect()
+  cfg.skills.iter().flat_map(|s| expand_skill(s, cfg.terminal)).collect()
 }
 
-fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
+fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
   // An inherited skill-level effort applies only where the harness has an effort knob,
   // so one `effort:` can sit atop a mixed matrix (codex + claude) without erroring.
   let effort_for = |harness: Harness, route_effort: Option<&String>| -> Option<String> {
@@ -102,6 +123,7 @@ fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
       profile: skill.profile.clone(),
       commits: skill.commits,
       result: skill.result.clone(),
+      terminal,
     }];
   }
   skill
@@ -118,6 +140,7 @@ fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
       commits: route.commits.unwrap_or(skill.commits),
       result: skill.result.replace("{name}", &route.name),
+      terminal,
     })
     .collect()
 }
@@ -305,12 +328,14 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
       errors.push(format!("duplicate top-level key '{k}'"));
     }
   }
-  const KNOWN: &[&str] = &["skills"];
+  const KNOWN: &[&str] = &["skills", "terminal"];
   for (k, _) in &entries {
     if !KNOWN.contains(&k.as_str()) {
-      errors.push(format!("unknown top-level key '{k}' (the only top-level key is 'skills')"));
+      errors.push(format!("unknown top-level key '{k}' (allowed: skills, terminal)"));
     }
   }
+
+  let terminal = validate_terminal(top.get("terminal").copied(), &mut errors);
 
   // skills: required mapping of one or more named skills.
   let mut skills = Vec::new();
@@ -343,7 +368,7 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
   }
 
   if errors.is_empty() {
-    let cfg = Config { skills: skills.clone() };
+    let cfg = Config { skills: skills.clone(), terminal };
     let mut by_result: BTreeMap<String, Vec<String>> = BTreeMap::new();
     for inv in expand_invocations(&cfg) {
       by_result.entry(inv.result.clone()).or_default().push(inv.name.clone());
@@ -356,10 +381,47 @@ pub fn validate(src: &str) -> Result<Config, Vec<String>> {
   }
 
   if errors.is_empty() {
-    Ok(Config { skills })
+    Ok(Config { skills, terminal })
   } else {
     Err(errors)
   }
+}
+
+/// Validate the optional top-level `terminal:` block; absent keys keep the 200x50 default.
+fn validate_terminal(node: Option<&Node>, errors: &mut Vec<String>) -> Terminal {
+  let mut term = Terminal::default();
+  let Some(node) = node else { return term };
+  let fields = match node {
+    Node::Scalar(_) => {
+      errors.push("'terminal' must be a mapping with 'cols' and/or 'rows'".into());
+      return term;
+    }
+    Node::Map(m) => m,
+  };
+  let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+  for (k, v) in fields {
+    if seen.insert(k.as_str(), ()).is_some() {
+      errors.push(format!("duplicate key 'terminal.{k}'"));
+      continue;
+    }
+    let (target, min, max): (&mut u16, u16, u16) = match k.as_str() {
+      "cols" => (&mut term.cols, 20, 500),
+      "rows" => (&mut term.rows, 10, 200),
+      _ => {
+        errors.push(format!("unknown key 'terminal.{k}' (allowed: cols, rows)"));
+        continue;
+      }
+    };
+    match v {
+      Node::Map(_) => errors.push(format!("'terminal.{k}' must be a number, not a mapping")),
+      Node::Scalar(s) => match s.trim().parse::<u16>() {
+        Ok(n) if (min..=max).contains(&n) => *target = n,
+        Ok(n) => errors.push(format!("'terminal.{k}' is {n}, outside the allowed range {min}..={max}")),
+        Err(_) => errors.push(format!("'terminal.{k}' must be a number, got '{}'", s.trim())),
+      },
+    }
+  }
+  term
 }
 
 /// Validate one named skill's fields (`harness` required+known, `model` optional,
@@ -1050,6 +1112,43 @@ mod tests {
   }
 
   #[test]
+  fn terminal_defaults_to_200x50() {
+    let cfg = validate(&one_skill("    harness: opencode\n    result: tmp/x.json\n")).unwrap();
+    assert_eq!(cfg.terminal, Terminal { cols: 200, rows: 50 });
+  }
+
+  #[test]
+  fn terminal_block_overrides_cols_and_rows() {
+    let yaml =
+      format!("terminal:\n  cols: 120\n  rows: 30\n{}", one_skill("    harness: opencode\n    result: tmp/x.json\n"));
+    let cfg = validate(&yaml).unwrap();
+    assert_eq!(cfg.terminal, Terminal { cols: 120, rows: 30 });
+  }
+
+  #[test]
+  fn terminal_partial_override_keeps_other_default() {
+    let yaml = format!("terminal:\n  rows: 40\n{}", one_skill("    harness: opencode\n    result: tmp/x.json\n"));
+    let cfg = validate(&yaml).unwrap();
+    assert_eq!(cfg.terminal, Terminal { cols: 200, rows: 40 });
+  }
+
+  #[test]
+  fn terminal_rejects_bad_values() {
+    let base = one_skill("    harness: opencode\n    result: tmp/x.json\n");
+    let errs = validate(&format!("terminal:\n  cols: 5000\n{base}")).unwrap_err();
+    assert!(
+      errs.iter().any(|e| e.contains("'terminal.cols' is 5000, outside the allowed range 20..=500")),
+      "got {errs:?}"
+    );
+    let errs = validate(&format!("terminal:\n  rows: wide\n{base}")).unwrap_err();
+    assert!(errs.iter().any(|e| e.contains("'terminal.rows' must be a number, got 'wide'")), "got {errs:?}");
+    let errs = validate(&format!("terminal:\n  depth: 3\n{base}")).unwrap_err();
+    assert!(errs.iter().any(|e| e.contains("unknown key 'terminal.depth' (allowed: cols, rows)")), "got {errs:?}");
+    let errs = validate(&format!("terminal: big\n{base}")).unwrap_err();
+    assert!(errs.iter().any(|e| e.contains("'terminal' must be a mapping")), "got {errs:?}");
+  }
+
+  #[test]
   fn skill_key_must_match_folder_skill_field_rejected() {
     let yaml = r#"skills:
   add-gpt:
@@ -1680,7 +1779,7 @@ skills:
     ))
     .unwrap_err();
     assert!(errs.iter().any(|e| e.contains("unknown top-level key 'version'")), "got {errs:?}");
-    assert!(errs.iter().any(|e| e.contains("only top-level key is 'skills'")), "got {errs:?}");
+    assert!(errs.iter().any(|e| e.contains("allowed: skills, terminal")), "got {errs:?}");
   }
 
   #[test]

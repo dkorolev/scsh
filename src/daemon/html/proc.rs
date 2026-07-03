@@ -28,6 +28,20 @@ pub(crate) fn empty_output_html(status: ProcStatus) -> String {
   format!("<div class=\"dim\">{}</div>\n", empty_output_label(status))
 }
 
+/// Watch/download links for a proc's asciinema recording, when one is registered.
+/// Present mid-run too: the endpoints serve the partial cast while the container runs.
+pub(crate) fn cast_links_html(session_id: &str, proc: &ProcRecord) -> String {
+  if proc.cast_path.is_none() {
+    return String::new();
+  }
+  let sid = esc(session_id);
+  let idx = proc.index;
+  format!(
+    "<div class=\"castlinks\"><a href=\"/cast/{sid}/{idx}/play\">▶ watch cast</a> \
+<a href=\"/cast/{sid}/{idx}?dl=1\" download>⬇ download .cast</a></div>\n"
+  )
+}
+
 pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
   match status {
     ProcStatus::Waiting => "○",
