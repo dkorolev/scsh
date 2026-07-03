@@ -123,6 +123,10 @@ check_result() {
 [ "$CURSOR_OK" -eq 1 ] && check_result "cursor-composer-fast"
 
 echo ""
+echo "=== screencasts (gitignored tmp/casts/, timestamped — revisit any time) ==="
+ls -1t tmp/casts/harness-smoke-*.cast 2>/dev/null | head -6 || echo "  (none recorded)"
+
+echo ""
 echo "=== summary ==="
 echo "predictions passed: $pass / $((pass + fail))"
 if [ "$run_exit" -ne 0 ] || [ "$fail" -gt 0 ]; then

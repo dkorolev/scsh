@@ -162,11 +162,6 @@ impl Client {
     let _ = self.post("/api/v1/proc/note", &body);
   }
 
-  /// The six-letter session id this client reports under.
-  pub fn session_id(&self) -> &str {
-    &self.inner.session_id
-  }
-
   /// Tell the daemon where this proc's asciinema `.cast` lives on the host: the live
   /// run-dir file while the container runs, then the durable copy after the skill ends.
   pub fn proc_cast(&self, proc_index: usize, path: &str) {

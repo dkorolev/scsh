@@ -184,8 +184,6 @@ impl Server {
     let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
     let _ = queue.tick(now);
     queue.save(self.port);
-    drop(queue);
-    let _ = crate::daemon::prune::sweep_old_casts();
   }
 }
 

@@ -1996,9 +1996,11 @@ fn run_one_skill(
   let result = spinner.run_timed(&run[0], &run[1..], timeout);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name);
-    // Run dirs are pruned shortly after the skill ends (on any outcome); move the
-    // recording to the daemon's durable casts dir so replay keeps working.
-    if let Some(durable) = persist_cast(&run_dir, c.session_id(), spinner.index()) {
+  }
+  // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
+  // under the caller repo's gitignored tmp/casts/ so it can be revisited later.
+  if let Some(durable) = persist_cast(root, &run_dir, &skill.name, secs) {
+    if let Some(c) = &daemon_client {
       c.proc_cast(spinner.index(), &durable);
     }
   }
@@ -2076,17 +2078,18 @@ fn run_one_skill(
   }
 }
 
-/// Copy a run's asciinema recording into the daemon's durable casts dir
-/// (`$TMPDIR/scsh-daemon/casts/<session>-p<proc>.cast`), so the session browser can still
-/// replay it after the run dir is pruned. Returns the durable path when the copy landed.
-fn persist_cast(run_dir: &Path, session: &str, proc_index: usize) -> Option<String> {
+/// Copy a run's asciinema recording into the caller repo's gitignored `tmp/casts/`, named
+/// `<skill>-<YYYYMMDD-HHMMSS>-utc.cast`, so recordings survive run-dir pruning and can be
+/// revisited later (the session browser replays from this path too). Returns the
+/// destination when the copy landed.
+fn persist_cast(root: &Path, run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
   let src = run_dir.join(runtime::RUN_CAST_REL);
   if !src.is_file() {
     return None;
   }
-  let dir = daemon::casts_dir();
+  let dir = root.join("tmp").join("casts");
   std::fs::create_dir_all(&dir).ok()?;
-  let dest = dir.join(format!("{session}-p{proc_index}.cast"));
+  let dest = dir.join(format!("{skill_name}-{}-utc.cast", runtime::format_utc_timestamp(epoch_secs)));
   std::fs::copy(&src, &dest).ok()?;
   Some(dest.to_string_lossy().into_owned())
 }
