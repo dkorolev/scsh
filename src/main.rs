@@ -2002,8 +2002,8 @@ fn run_one_skill(
     c.container_event(spinner.index(), "stop", &name);
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
-  // under the caller repo's gitignored tmp/casts/ so it can be revisited later.
-  if let Some(durable) = persist_cast(root, &run_dir, &skill.name, secs) {
+  // and logs under the caller repo's gitignored tmp/ so they can be revisited later.
+  if let Some(durable) = persist_run_artifacts(root, &run_dir, &skill.name, secs) {
     if let Some(c) = &daemon_client {
       c.proc_cast(spinner.index(), &durable);
     }
@@ -2082,25 +2082,41 @@ fn run_one_skill(
   }
 }
 
-/// Copy a run's asciinema recording into the caller repo's gitignored `tmp/casts/`, named
-/// `<skill>-<YYYYMMDD-HHMMSS>-utc.cast`, so recordings survive run-dir pruning and can be
-/// revisited later (the session browser replays from this path too). Returns the
-/// destination when the copy landed.
-fn persist_cast(root: &Path, run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
-  let src = run_dir.join(runtime::RUN_CAST_REL);
-  if !src.is_file() {
+/// Preserve a run's artifacts into the caller repo's gitignored `tmp/` before the run dir is
+/// pruned: the asciinema recording to `tmp/casts/<stem>.cast` and the harness run log (plus
+/// any verbose `.debug`/`.last` logs) to `tmp/logs/<stem>.{log,debug.log,last.log}`. All share
+/// one `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name.
+/// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
+/// the random nonce prevents same-second runs from overwriting each other. Returns the durable
+/// cast path (for the session browser) when a recording was copied.
+fn persist_run_artifacts(root: &Path, run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
+  let stem = format!("{skill_name}-{}-utc-{}", runtime::format_utc_timestamp(epoch_secs), runtime::random_nonce_6());
+
+  // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
+  // teed harness output; `.debug` (claude/grok) and `.last` (codex) appear only in verbose runs.
+  let logs_dir = root.join("tmp").join("logs");
+  if std::fs::create_dir_all(&logs_dir).is_ok() {
+    for (rel, ext) in [
+      (runtime::RUN_LOG_REL.to_string(), "log"),
+      (format!("{}.debug", runtime::RUN_LOG_REL), "debug.log"),
+      (format!("{}.last", runtime::RUN_LOG_REL), "last.log"),
+    ] {
+      let src = run_dir.join(&rel);
+      if src.is_file() {
+        let _ = std::fs::copy(&src, logs_dir.join(format!("{stem}.{ext}")));
+      }
+    }
+  }
+
+  // Cast: returned so the daemon can serve/replay it after the run dir is gone.
+  let cast_src = run_dir.join(runtime::RUN_CAST_REL);
+  if !cast_src.is_file() {
     return None;
   }
-  let dir = root.join("tmp").join("casts");
-  std::fs::create_dir_all(&dir).ok()?;
-  // Full second-resolution timestamp PLUS a random 6-letter nonce: every run within one
-  // `scsh run` shares `epoch_secs`, so the timestamp alone would overwrite prior casts.
-  let dest = dir.join(format!(
-    "{skill_name}-{}-utc-{}.cast",
-    runtime::format_utc_timestamp(epoch_secs),
-    runtime::random_nonce_6()
-  ));
-  std::fs::copy(&src, &dest).ok()?;
+  let casts_dir = root.join("tmp").join("casts");
+  std::fs::create_dir_all(&casts_dir).ok()?;
+  let dest = casts_dir.join(format!("{stem}.cast"));
+  std::fs::copy(&cast_src, &dest).ok()?;
   Some(dest.to_string_lossy().into_owned())
 }
 

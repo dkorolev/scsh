@@ -75,12 +75,36 @@ The session page shows two links per skill:
   Works **mid-run**: the recording is NDJSON, so the daemon serves the bytes written so
   far (truncated to the last complete line), which is itself a valid partial cast.
 
+## Artifact formats
+
+**Recording — asciicast v2** (`*.cast`). The [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
+format: a header object on the first line, then one JSON array per line (NDJSON) — an output
+event is `[<seconds:number>, "o", "<text:string>"]`. Being line-delimited is what makes a
+partial file valid mid-run.
+
+```jsonc
+{"version": 2, "width": 200, "height": 50, "timestamp": 1783108212, "env": {"TERM": "xterm-256color"}}
+[0.12, "o", "[?25lstarting…\r\n"]
+[1.34, "o", "done\r\n"]
+```
+
+## Where artifacts live
+
 While the container runs, the cast is served straight from the run dir
 (`<run_dir>/tmp/scsh-run.log.cast`, bind-mounted and growing live). When the skill ends,
-`scsh run` copies it into the caller repo's gitignored
-**`tmp/casts/<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast`** — timestamped so past recordings can be
-revisited later — and replay keeps working after run-dir pruning. scsh never deletes these
-copies; clean `tmp/casts/` whenever you like.
+`scsh run` copies each run's artifacts into the caller repo's gitignored `tmp/`, all sharing
+one `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name:
+
+| Artifact | Path |
+| --- | --- |
+| Recording | `tmp/casts/<stem>.cast` |
+| Harness run log | `tmp/logs/<stem>.log` |
+| Verbose debug log | `tmp/logs/<stem>.debug.log` (claude/grok) · `tmp/logs/<stem>.last.log` (codex) |
+
+The timestamp alone is not unique — every skill in one `scsh run` shares it — so the random
+nonce keeps same-second runs from overwriting each other. Logs are kept for **every** run
+(including failures, when they matter most). scsh never deletes these copies; clean
+`tmp/casts/` and `tmp/logs/` whenever you like.
 
 ## Configuration
 
