@@ -122,24 +122,37 @@ mod tests {
     TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
   }
 
+  /// Point the daemon port AND scsh home (redb store dir) at test-owned values while a test
+  /// runs, restoring both on drop — so a spawned daemon never touches the real `~/.scsh`.
+  /// Only mutated under `DAEMON_SPAWN_LOCK`, so the process-global env is not raced.
   struct RestoreDaemonPortEnv {
-    previous: Option<String>,
+    previous_port: Option<String>,
+    previous_home: Option<String>,
+    home_dir: std::path::PathBuf,
   }
 
   impl RestoreDaemonPortEnv {
     fn set(port: u16) -> Self {
-      let previous = std::env::var(paths::PORT_ENV).ok();
+      let previous_port = std::env::var(paths::PORT_ENV).ok();
+      let previous_home = std::env::var(paths::HOME_ENV).ok();
+      let home_dir = std::env::temp_dir().join(format!("scsh-home-{}", crate::runtime::random_nonce_6()));
       std::env::set_var(paths::PORT_ENV, port.to_string());
-      Self { previous }
+      std::env::set_var(paths::HOME_ENV, &home_dir);
+      Self { previous_port, previous_home, home_dir }
     }
   }
 
   impl Drop for RestoreDaemonPortEnv {
     fn drop(&mut self) {
-      match &self.previous {
+      match &self.previous_port {
         Some(v) => std::env::set_var(paths::PORT_ENV, v),
         None => std::env::remove_var(paths::PORT_ENV),
       }
+      match &self.previous_home {
+        Some(v) => std::env::set_var(paths::HOME_ENV, v),
+        None => std::env::remove_var(paths::HOME_ENV),
+      }
+      let _ = std::fs::remove_dir_all(&self.home_dir);
     }
   }
 
