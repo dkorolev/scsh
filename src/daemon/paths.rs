@@ -10,6 +10,29 @@ use super::model::DEFAULT_PORT;
 /// Environment variable overriding the daemon HTTP port.
 pub const PORT_ENV: &str = "SCSH_DAEMON_PORT";
 
+/// Environment variable overriding the scsh home dir (default `~/.scsh`). Set by tests so a
+/// daemon never touches the real home; users may set it to relocate persistent state.
+pub const HOME_ENV: &str = "SCSH_HOME";
+
+/// The scsh home dir — `$SCSH_HOME`, else `~/.scsh` — holding persistent state (the daemon
+/// store DB). Created on first use by callers. Falls back to the daemon temp dir only if no
+/// home is resolvable (headless/detached with no `HOME`), so the daemon always has somewhere.
+pub fn scsh_home_dir() -> PathBuf {
+  if let Some(dir) = std::env::var_os(HOME_ENV).filter(|s| !s.is_empty()) {
+    return PathBuf::from(dir);
+  }
+  match std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+    Some(home) => PathBuf::from(home).join(".scsh"),
+    None => daemon_dir(),
+  }
+}
+
+/// The daemon's redb store: `~/.scsh/daemon-<port>.redb`. Per-port so daemons on different
+/// ports don't contend for one file (redb allows a single process to hold a DB at a time).
+pub fn store_db_file(port: u16) -> PathBuf {
+  scsh_home_dir().join(format!("daemon-{port}.redb"))
+}
+
 /// Current unix timestamp in seconds.
 pub fn now_unix_secs() -> u64 {
   SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -29,12 +52,16 @@ pub fn pid_file(port: u16) -> PathBuf {
   daemon_dir().join(format!("daemon-{port}.pid"))
 }
 
-pub fn state_file(port: u16) -> PathBuf {
-  daemon_dir().join(format!("daemon-{port}.json"))
-}
-
 pub fn prune_file(port: u16) -> PathBuf {
   daemon_dir().join(format!("prune-{port}.json"))
+}
+
+/// A tiny cross-process marker holding the running daemon's mode (`persistent`/`ephemeral`).
+/// The store DB is redb, which only one process may open at a time, so the mode — which the
+/// CLI reads to decide whether to replace a running ephemeral daemon — lives in this plain
+/// file next to the PID instead.
+pub fn mode_file(port: u16) -> PathBuf {
+  daemon_dir().join(format!("daemon-{port}.mode"))
 }
 
 /// True when TCP connects to the daemon's localhost port within a short timeout.
@@ -65,10 +92,16 @@ pub fn daemon_api_responds(port: u16) -> bool {
   resp.starts_with("HTTP/1.1 200") && resp.contains("application/json")
 }
 
-/// Daemon mode from persisted state JSON, when the state file exists and parses.
+/// Daemon mode from the cross-process mode marker, when present and valid.
 pub fn read_persisted_mode(port: u16) -> Option<super::model::DaemonMode> {
-  let text = std::fs::read_to_string(state_file(port)).ok()?;
-  super::jsonio::load_store(&text).ok().map(|s| s.mode)
+  let text = std::fs::read_to_string(mode_file(port)).ok()?;
+  super::model::DaemonMode::parse(text.trim())
+}
+
+/// Write the mode marker (best-effort) so `read_persisted_mode` can report it cross-process.
+pub fn write_mode_marker(port: u16, mode: super::model::DaemonMode) {
+  let _ = std::fs::create_dir_all(daemon_dir());
+  let _ = std::fs::write(mode_file(port), mode.as_str());
 }
 
 /// Send a POSIX signal to `pid` (no-op on non-Unix).

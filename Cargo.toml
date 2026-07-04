@@ -22,6 +22,10 @@ path = "src/main.rs"
 console = "0.16"
 signal-hook = "0.4"
 crossterm = { version = "0.29.0", default-features = false, features = ["events"] }
+# The session-browser daemon persists its store in an embedded, pure-Rust ACID key-value
+# DB (`~/.scsh/daemon-<port>.redb`), written per-session rather than rewriting one growing
+# JSON file every tick. redb is single-purpose, dependency-light, and needs no server.
+redb = "4.1"
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.
