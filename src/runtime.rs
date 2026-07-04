@@ -513,8 +513,9 @@ fn harness_command_verbose(
       // config dir), so it is created in-container just before the TUI starts. The repo
       // path slug is `/`-stripped, `/`->`-` of AGENT_REPO.
       let trust_dir = format!("$HOME/.cursor/projects/{}", AGENT_REPO.trim_start_matches('/').replace('/', "-"));
+      // No `exec`: the wrapping shell must survive cursor-agent to record its exit status.
       let mut tui = format!(
-        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted && exec cursor-agent --force --sandbox disabled"
+        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted && cursor-agent --force --sandbox disabled"
       );
       if let Some(m) = model {
         tui.push_str(" --model ");
@@ -564,6 +565,11 @@ fn wrap_tui_shell(
   term: crate::config::Terminal,
 ) -> String {
   let model_label = model.unwrap_or("(harness default)");
+  // Record the harness's own exit status to `${SCSH_RUN_LOG}.exit` — scsh otherwise never sees
+  // it (asciinema and the tmux pane both swallow it), which makes a harness that dies abnormally
+  // (crash, signal, OOM → 137/143/130) indistinguishable from one that just wrote no result.
+  // The `echo` writes to a file, not the terminal, so it does not pollute the recording.
+  let recorded_cmd = format!("{tui_cmd}; echo $? > \"${{{log_var}}}.exit\"", log_var = RUN_LOG_VAR);
   format!(
     "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
@@ -574,7 +580,7 @@ scsh-tui-record {cols} {rows} {quit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log
     rows = term.rows,
     quit = quit.as_arg(),
     result_q = shell_quote(result),
-    tui_q = shell_quote(tui_cmd),
+    tui_q = shell_quote(&recorded_cmd),
   )
 }
 
