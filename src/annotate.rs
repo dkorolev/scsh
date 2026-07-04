@@ -6,10 +6,17 @@
 //! and write it as the cast's `.chapters.json` sidecar (see the daemon's chapters endpoint).
 //! Best-effort throughout — annotation never fails a run, it just doesn't produce a sidecar.
 
+use std::io::Read;
 use std::path::Path;
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use crate::json::{self, Value};
+
+/// Hard cap on one annotation `cursor-agent` call. Annotation is a known-fast job (seconds),
+/// so this bounds a hang well under the §9 five-minute default — a hung external tool must
+/// never hang the run.
+pub const ANNOTATE_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// A validated annotation sidecar: a one-sentence summary and 3-8 ordered chapters.
 #[derive(Debug, Clone, PartialEq)]
@@ -218,20 +225,45 @@ where
 }
 
 /// Run cursor-agent headless on the host with `prompt`, returning its stdout on success.
-/// Runs in an empty temp dir (the prompt is self-contained) with a hard timeout via the OS.
+/// Runs in an empty temp dir (the prompt is self-contained) and is killed if it runs past
+/// [`ANNOTATE_TIMEOUT`] — a hung annotation never stalls the run (§9).
 pub fn run_cursor_agent(model: &str, prompt: &str) -> Option<String> {
   let dir = std::env::temp_dir().join(format!("scsh-annotate-{}", crate::runtime::random_nonce_6()));
   std::fs::create_dir_all(&dir).ok()?;
-  let out = Command::new("cursor-agent")
+  let child = Command::new("cursor-agent")
     .current_dir(&dir)
     .args(["-p", "--force", "--output-format", "text", "--model", model, prompt])
-    .output();
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn();
+  let result = child.ok().and_then(|c| wait_capped(c, ANNOTATE_TIMEOUT));
   let _ = std::fs::remove_dir_all(&dir);
-  let out = out.ok()?;
-  if !out.status.success() {
-    return None;
+  result
+}
+
+/// Wait for `child`, capturing its stdout, but kill it and return `None` if it runs past
+/// `timeout`. stdout is drained on a thread so a full pipe buffer can't deadlock the wait.
+fn wait_capped(mut child: Child, timeout: Duration) -> Option<String> {
+  let mut stdout = child.stdout.take()?;
+  let reader = std::thread::spawn(move || {
+    let mut buf = String::new();
+    let _ = stdout.read_to_string(&mut buf);
+    buf
+  });
+  let deadline = Instant::now() + timeout;
+  loop {
+    match child.try_wait() {
+      Ok(Some(status)) => return status.success().then(|| reader.join().unwrap_or_default()),
+      Ok(None) if Instant::now() >= deadline => {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+      }
+      Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+      Err(_) => return None,
+    }
   }
-  Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 #[cfg(test)]
@@ -279,6 +311,19 @@ mod tests {
   fn parse_annotation_rejects_missing_summary() {
     assert!(parse_annotation("{\"chapters\": []}").is_none());
     assert!(parse_annotation("no json here").is_none());
+  }
+
+  #[test]
+  fn wait_capped_returns_output_and_kills_on_timeout() {
+    // Completes in time → captured stdout.
+    let quick =
+      Command::new("sh").args(["-c", "printf hello"]).stdin(Stdio::null()).stdout(Stdio::piped()).spawn().unwrap();
+    assert_eq!(wait_capped(quick, Duration::from_secs(10)).as_deref(), Some("hello"));
+    // Runs past the cap → killed, `None`, and the call returns promptly (not after `sleep 30`).
+    let slow = Command::new("sh").args(["-c", "sleep 30"]).stdin(Stdio::null()).stdout(Stdio::piped()).spawn().unwrap();
+    let start = Instant::now();
+    assert_eq!(wait_capped(slow, Duration::from_millis(300)), None);
+    assert!(start.elapsed() < Duration::from_secs(5), "timed-out child must be killed promptly");
   }
 
   #[test]
