@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
-# Smoke-test the claude, codex, and cursor container harnesses via the harness-smoke skill.
-# See HARNESS-SMOKE.md for the full walkthrough.
+# Thin runner for HARNESS-SMOKE.md — that file is the source of truth; this executes its
+# numbered steps and prints PASS/FAIL. scsh itself probes host auth and skips harnesses that
+# are not logged in, so there is no auth-probing here: the run succeeds when every AVAILABLE
+# harness does, and we validate whatever result files the run produced.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Prefer this repo's own build — the smoke test exercises the harnesses of the checked-out
-# code, and an older `scsh` on PATH may not know them. SCSH=… still overrides.
+# Step 1: prefer this repo's own build (an older `scsh` on PATH may not know these harnesses).
 if [[ -n "${SCSH:-}" ]]; then
   :
 elif [[ -x "$ROOT/target/release/scsh" && "$ROOT/target/release/scsh" -nt "$ROOT/target/debug/scsh" ]]; then
@@ -19,119 +20,58 @@ elif [[ -x "$ROOT/target/release/scsh" ]]; then
 elif command -v scsh >/dev/null 2>&1; then
   SCSH="scsh"
 else
-  echo "harness-smoke: scsh not found — build with: cargo build --release" >&2
+  echo "harness-smoke: FAIL — scsh not found (build with: cargo build)" >&2
   exit 1
 fi
 
-echo "=== harness-smoke probe ==="
-CLAUDE_OK=0
-CODEX_OK=0
-CURSOR_OK=0
-
-# claude: scsh forwards CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json. On macOS the
-# token usually lives only in the login keychain, so lift it into the env for this run.
-if [ -z "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] && [ ! -f "$HOME/.claude/.credentials.json" ] \
-  && command -v security >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  keychain_token="$(security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null \
-    | jq -r '.claudeAiOauth.accessToken // empty' 2>/dev/null || true)"
-  if [ -n "$keychain_token" ]; then
-    export CLAUDE_CODE_OAUTH_TOKEN="$keychain_token"
-    echo "claude: using OAuth token from the macOS keychain"
-  fi
-fi
-if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || [ -f "$HOME/.claude/.credentials.json" ]; then
-  echo "route claude-opus-4-8 (harness-smoke-claude-opus-4-8): ok"
-  CLAUDE_OK=1
-else
-  echo "route claude-opus-4-8 (harness-smoke-claude-opus-4-8): N/A — run \`claude setup-token\` and export CLAUDE_CODE_OAUTH_TOKEN"
-fi
-
-if test -f "${CODEX_HOME:-$HOME/.codex}/auth.json" || [ -n "${OPENAI_API_KEY:-}" ]; then
-  echo "route codex-gpt-5.5 (harness-smoke-codex-gpt-5.5): ok"
-  CODEX_OK=1
-else
-  echo "route codex-gpt-5.5 (harness-smoke-codex-gpt-5.5): N/A — run \`codex login\` or export OPENAI_API_KEY"
-fi
-
-if test -f "$HOME/.config/cursor/auth.json" || test -f "$HOME/.cursor/auth.json" \
-  || security find-generic-password -s cursor-access-token -w >/dev/null 2>&1 \
-  || [ -n "${CURSOR_API_KEY:-}" ]; then
-  echo "route cursor-composer-fast (harness-smoke-cursor-composer-fast): ok"
-  CURSOR_OK=1
-else
-  echo "route cursor-composer-fast (harness-smoke-cursor-composer-fast): N/A — run \`cursor agent login\` or export CURSOR_API_KEY"
-fi
-
-ROUTES=$((CLAUDE_OK + CODEX_OK + CURSOR_OK))
-echo "harness-smoke routes available: $ROUTES / 3"
-if [ "$ROUTES" -eq 0 ]; then
-  echo "harness-smoke: FAIL — no claude, codex, or cursor route available on this host" >&2
-  exit 1
-fi
-
-echo ""
-echo "=== preflight ==="
-if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "harness-smoke: FAIL — not inside a git repository" >&2
-  exit 1
-fi
+# Step 2: clean tree (scsh clones committed state only).
 if [ -n "$(git status --porcelain --ignore-submodules)" ]; then
-  echo "harness-smoke: FAIL — working tree is not clean (scsh run requires committed state)" >&2
-  echo "  commit or stash your changes, then re-run: $ROOT/scripts/harness-smoke.sh" >&2
+  echo "harness-smoke: FAIL — working tree is not clean; commit or stash, then re-run" >&2
   exit 1
 fi
 
+# Step 3: the profile must exist with its skills.
+echo "=== check-profile ==="
 "$SCSH" check-profile harness-smoke
 
+# Step 4: run. scsh skips harnesses with no host auth; a skipped route does not fail the run.
 echo ""
-echo "=== run (profile harness-smoke) ==="
-echo "Using: $SCSH"
-SCSH_KEEP_RUNS=1 "$SCSH" run --profile harness-smoke
-run_exit=$?
+echo "=== run (profile harness-smoke) using $SCSH ==="
+run_exit=0
+SCSH_KEEP_RUNS=1 "$SCSH" run --profile harness-smoke || run_exit=$?
 
+# Step 5: validate every result file the run produced (≥1 required, each must be status OK).
 echo ""
 echo "=== validate result JSON ==="
-pass=0
+present=0
 fail=0
-
-check_result() {
-  local route="$1"
-  local file="tmp/harness-smoke-${route}.json"
-  if [ ! -f "$file" ]; then
-    echo "FAIL  $file — missing"
-    fail=$((fail + 1))
-    return
-  fi
+for route in claude-opus-4-8 codex-gpt-5.5 cursor-composer-fast; do
+  file="tmp/harness-smoke-${route}.json"
+  [ -f "$file" ] || continue
+  present=$((present + 1))
   if ! command -v jq >/dev/null 2>&1; then
-    echo "PASS  $file — present (install jq to validate JSON schema)"
-    pass=$((pass + 1))
-    return
+    echo "PASS  $file — present (install jq to validate JSON)"
+    continue
   fi
-  local status
   status="$(jq -r '.result.status // empty' "$file" 2>/dev/null || true)"
   if [ "$status" = "OK" ]; then
     echo "PASS  $file — result.status=OK"
-    pass=$((pass + 1))
   else
     echo "FAIL  $file — expected result.status=OK, got: ${status:-<invalid json>}"
     fail=$((fail + 1))
   fi
-}
+done
 
-[ "$CLAUDE_OK" -eq 1 ] && check_result "claude-opus-4-8"
-[ "$CODEX_OK" -eq 1 ] && check_result "codex-gpt-5.5"
-[ "$CURSOR_OK" -eq 1 ] && check_result "cursor-composer-fast"
-
+# Step 6: show the screencasts this run recorded.
 echo ""
-echo "=== screencasts (gitignored tmp/casts/, timestamped — revisit any time) ==="
+echo "=== screencasts (gitignored tmp/casts/, timestamped) ==="
 ls -1t tmp/casts/harness-smoke-*.cast 2>/dev/null | head -6 || echo "  (none recorded)"
 
 echo ""
 echo "=== summary ==="
-echo "predictions passed: $pass / $((pass + fail))"
-if [ "$run_exit" -ne 0 ] || [ "$fail" -gt 0 ]; then
+echo "result files: $present present, $fail failed validation"
+if [ "$run_exit" -ne 0 ] || [ "$fail" -gt 0 ] || [ "$present" -eq 0 ]; then
   echo "harness-smoke: FAIL"
   exit 1
 fi
 echo "harness-smoke: PASS"
-exit 0
