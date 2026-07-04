@@ -2527,10 +2527,15 @@ fn seed_claude_tui_config(json_path: &Path) {
   });
   set(&mut root, "autoUpdates", Value::Bool(false));
   set(&mut root, "hasCompletedOnboarding", Value::Bool(true));
+  // Suppress the bypass-permissions consent screen so the recorded TUI runs unattended.
+  // The acceptance must be set at BOTH the top level and the repo's project entry — with only
+  // one, the consent still appears (verified empirically). This lets `--permission-mode
+  // bypassPermissions` auto-approve edits AND command execution with no prompt.
   set(&mut root, "bypassPermissionsModeAccepted", Value::Bool(true));
   let repo_project = Value::Object(vec![
     ("hasTrustDialogAccepted".to_string(), Value::Bool(true)),
     ("hasCompletedProjectOnboarding".to_string(), Value::Bool(true)),
+    ("bypassPermissionsModeAccepted".to_string(), Value::Bool(true)),
   ]);
   let merged_into_existing = match root.iter_mut().find(|(k, _)| k == "projects") {
     Some((_, Value::Object(projects))) => {

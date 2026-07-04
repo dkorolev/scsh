@@ -437,12 +437,12 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Full interactive TUI (no -p): the recording shows the real Claude Code screen, and
-      // no dialog blocks it. Onboarding, theme and workspace-trust are pre-seeded into the
-      // forwarded ~/.claude.json (see main's forward_claude_auth). Permission mode is
-      // `acceptEdits`, NOT `bypassPermissions`: the latter always shows an un-skippable
-      // consent screen (no flag/env/config suppresses it), while acceptEdits auto-accepts
-      // the skill's file writes with no prompt.
-      let mut tui = String::from("claude --permission-mode acceptEdits");
+      // no dialog blocks it. `bypassPermissions` auto-approves BOTH file edits and command
+      // execution — real skills run bash (git, python, …), which `acceptEdits` would prompt
+      // for. Its one-time consent screen is suppressed by seeding `bypassPermissionsModeAccepted`
+      // at both the top level and the repo's project entry in the forwarded ~/.claude.json
+      // (see main's forward_claude_auth) — config, not screen-scraping.
+      let mut tui = String::from("claude --permission-mode bypassPermissions");
       if let Some(m) = model {
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(m));
@@ -1859,11 +1859,10 @@ mod tests {
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
     // Interactive TUI recorded via scsh-tui-record (no inline shell, no screen-scraping).
-    // acceptEdits (not bypassPermissions) avoids the un-skippable consent screen; onboarding
-    // and trust are seeded host-side into the forwarded ~/.claude.json, not in the command.
+    // bypassPermissions auto-approves edits AND commands (real skills run bash); its consent
+    // screen is suppressed by config seeded host-side in the forwarded ~/.claude.json.
     assert!(cmd.contains("scsh-tui-record 200 50 slash-exit tmp/add_claude_sonnet_4_6_result.json "), "got: {cmd}");
-    assert!(cmd.contains("claude --permission-mode acceptEdits --model sonnet"), "got: {cmd}");
-    assert!(!cmd.contains("bypassPermissions"), "got: {cmd}");
+    assert!(cmd.contains("claude --permission-mode bypassPermissions --model sonnet"), "got: {cmd}");
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
