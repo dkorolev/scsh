@@ -91,7 +91,7 @@ pub fn strip_ansi(s: &str) -> String {
 }
 
 /// Render an asciicast v2 recording (NDJSON) into a compact timestamped transcript:
-/// `[mm:ss] visible text`, one line per change, deduped and downsampled to `max_lines`.
+/// `[<secs>s] visible text`, one line per change, deduped and downsampled to `max_lines`.
 /// TUI redraws produce repetitive frames, so consecutive identical lines are collapsed.
 pub fn cast_transcript(cast_ndjson: &str, max_lines: usize) -> String {
   let mut events: Vec<(f64, String)> = Vec::new();
