@@ -158,6 +158,32 @@ fn subcommands_and_flag_aliases_agree() {
 }
 
 #[test]
+fn help_covers_every_command_and_exit_codes() {
+  let d = unique_dir("help");
+  git_init(&d);
+  // `help <command>` works for every command (and via alias), exit 0 with its synopsis.
+  for (topic, needle) in [
+    ("stats", "scsh stats"),
+    ("annotate-cast", "scsh annotate-cast"),
+    ("daemon", "scsh daemon"),
+    ("ls", "scsh list"),                // alias resolves to `list`
+    ("annotate", "scsh annotate-cast"), // alias resolves to `annotate-cast`
+  ] {
+    let r = scsh(&d, &["help", topic]);
+    assert_eq!(r.code, 0, "help {topic} exit: {}", r.out);
+    assert!(r.out.contains("Synopsis") && r.out.contains(needle), "help {topic} got: {}", r.out);
+  }
+  // `help exitcodes` documents the 0/1/2 table (§2 requires it).
+  let ec = scsh(&d, &["help", "exitcodes"]);
+  assert_eq!(ec.code, 0);
+  assert!(ec.out.contains("Exit codes") && ec.out.contains("Usage error"), "got: {}", ec.out);
+  // An unknown topic is a usage error that lists the real commands.
+  let bad = scsh(&d, &["help", "nope"]);
+  assert_eq!(bad.code, 2);
+  assert!(bad.out.contains("unknown help topic 'nope'") && bad.out.contains("annotate-cast"), "got: {}", bad.out);
+}
+
+#[test]
 fn version_reports_optional_git_describe() {
   // `scsh version` is `scsh <semver>` optionally followed by ` (<7 hex>[-dirty])` from
   // the build's git stamp. When this test crate was built from git, the hash must appear.
