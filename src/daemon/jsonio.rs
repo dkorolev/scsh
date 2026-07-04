@@ -1,45 +1,7 @@
 //! JSON read/write for daemon state — std-only, no serde.
 
-use super::model::{
-  trim_sessions_to_cap, DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store,
-  DEFAULT_PORT,
-};
+use super::model::{OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
 use crate::json::{parse, quote, Value};
-
-pub fn load_store(text: &str) -> Result<Store, String> {
-  let root = parse(text)?;
-  let obj = as_object(&root)?;
-  let mode =
-    DaemonMode::parse(field_str(obj, "mode").as_deref().unwrap_or("ephemeral")).unwrap_or(DaemonMode::Ephemeral);
-  let port = field_num(obj, "port").unwrap_or(DEFAULT_PORT as f64) as u16;
-  let started_at = field_num(obj, "started_at").unwrap_or(0.0) as u64;
-  let active_clients = field_num(obj, "active_clients").unwrap_or(0.0) as u32;
-  let last_activity = field_num(obj, "last_activity").unwrap_or(0.0) as u64;
-  let no_alive_since = field_num(obj, "no_alive_since").and_then(|n| if n > 0.0 { Some(n as u64) } else { None });
-  let mut sessions = parse_sessions(field_value(obj, "sessions")?)?;
-  trim_sessions_to_cap(&mut sessions);
-  Ok(Store { mode, port, started_at, active_clients, last_activity, no_alive_since, sessions })
-}
-
-pub fn save_store(store: &Store) -> String {
-  let mut out = String::from("{\n");
-  out.push_str(&format!("  \"mode\": {},\n", quote(store.mode.as_str())));
-  out.push_str(&format!("  \"port\": {},\n", store.port));
-  out.push_str(&format!("  \"started_at\": {},\n", store.started_at));
-  out.push_str(&format!("  \"active_clients\": {},\n", store.active_clients));
-  out.push_str(&format!("  \"last_activity\": {},\n", store.last_activity));
-  out.push_str(&format!(
-    "  \"no_alive_since\": {},\n",
-    match store.no_alive_since {
-      Some(t) => format!("{t}"),
-      None => "null".to_string(),
-    }
-  ));
-  out.push_str("  \"sessions\": ");
-  out.push_str(&sessions_json(&store.sessions));
-  out.push_str("\n}");
-  out
-}
 
 fn sessions_json(map: &std::collections::BTreeMap<String, Session>) -> String {
   if map.is_empty() {
@@ -54,6 +16,12 @@ fn sessions_json(map: &std::collections::BTreeMap<String, Session>) -> String {
 
 pub fn session_json_api(s: &Session) -> String {
   session_json(s)
+}
+
+/// Parse one session from its JSON (the inverse of [`session_json_api`]) — how the daemon's
+/// redb store deserializes each per-session record on load.
+pub fn parse_session_json(text: &str) -> Result<Session, String> {
+  parse_session(&parse(text)?)
 }
 
 /// WebSocket tick payload: daemon status + full session snapshot.
@@ -168,15 +136,6 @@ fn opt_str(s: &Option<String>) -> String {
     Some(v) => quote(v),
     None => "null".to_string(),
   }
-}
-
-fn parse_sessions(v: &Value) -> Result<std::collections::BTreeMap<String, Session>, String> {
-  let obj = as_object(v)?;
-  let mut out = std::collections::BTreeMap::new();
-  for (id, val) in obj {
-    out.insert(id.clone(), parse_session(val)?);
-  }
-  Ok(out)
 }
 
 fn parse_session(v: &Value) -> Result<Session, String> {
@@ -324,18 +283,7 @@ mod tests {
   }
 
   #[test]
-  fn roundtrip_empty_store() {
-    let store = Store::new(DaemonMode::Persistent, 7274, 42);
-    let loaded = load_store(&save_store(&store)).unwrap();
-    assert_eq!(loaded.mode, DaemonMode::Persistent);
-    assert_eq!(loaded.port, 7274);
-    assert_eq!(loaded.last_activity, 42);
-    assert!(loaded.sessions.is_empty());
-  }
-
-  #[test]
   fn roundtrip_session_with_proc() {
-    let mut store = Store::new(DaemonMode::Ephemeral, 7274, 1);
     let session = Session {
       id: "abcdef".into(),
       started_at: 99,
@@ -364,13 +312,13 @@ mod tests {
       last_seen_at: 105,
       client_connected: false,
     };
-    store.sessions.insert(session.id.clone(), session);
-    let loaded = load_store(&save_store(&store)).unwrap();
-    let s = loaded.sessions.get("abcdef").unwrap();
+    // The per-session JSON the store DB reads/writes must roundtrip every field.
+    let s = parse_session_json(&session_json_api(&session)).unwrap();
     assert_eq!(s.procs[0].lines[0].text, "step 1");
     assert_eq!(s.procs[0].detail.as_deref(), Some("up to date"));
     assert_eq!(s.procs[0].cast_path.as_deref(), Some("/tmp/scsh-daemon/casts/abcdef-p0.cast"));
     assert_eq!(s.ended_at, Some(105));
+    assert_eq!(s.skills[0].name, "add");
   }
 
   #[test]

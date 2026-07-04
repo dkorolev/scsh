@@ -4,6 +4,7 @@
 //! `scsh run` — image builds, container starts, and harness output — grouped by session id.
 
 mod client;
+mod db;
 mod html;
 mod jsonio;
 mod model;
@@ -149,7 +150,8 @@ mod tests {
   impl Drop for EphemeralDaemonGuard {
     fn drop(&mut self) {
       let _ = stop();
-      let _ = std::fs::remove_file(paths::state_file(self.port));
+      let _ = std::fs::remove_file(paths::store_db_file(self.port));
+      let _ = std::fs::remove_file(paths::mode_file(self.port));
     }
   }
 

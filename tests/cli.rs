@@ -963,33 +963,35 @@ fn unused_local_port() -> u16 {
   std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
 
+/// Run `scsh daemon <sub>` with the test's port AND a temp SCSH_HOME, so the spawned daemon's
+/// redb store lands under the test's own dir and never touches the real `~/.scsh`.
+fn daemon_cmd(dir: &Path, home: &Path, port: u16, sub: &str) -> std::process::Output {
+  Command::new(bin())
+    .args(["daemon", sub])
+    .env("SCSH_DAEMON_PORT", port.to_string())
+    .env("SCSH_HOME", home)
+    .current_dir(dir)
+    .output()
+    .unwrap_or_else(|e| panic!("scsh daemon {sub}: {e}"))
+}
+
 #[test]
 fn daemon_start_status_stop() {
   let d = unique_dir("daemon");
+  let home = d.join(".scsh");
   let port = unused_local_port();
-  let port_s = port.to_string();
-  let _guard = DaemonTestGuard { dir: d.clone(), port };
-  let start = Command::new(bin())
-    .args(["daemon", "start"])
-    .env("SCSH_DAEMON_PORT", &port_s)
-    .current_dir(&d)
-    .output()
-    .expect("daemon start");
+  let _guard = DaemonTestGuard { dir: d.clone(), home: home.clone(), port };
+  let start = daemon_cmd(&d, &home, port, "start");
   assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
   let status = {
     let mut last = None;
     for _ in 0..40 {
-      let status = Command::new(bin())
-        .args(["daemon", "status"])
-        .env("SCSH_DAEMON_PORT", &port_s)
-        .current_dir(&d)
-        .output()
-        .expect("daemon status");
-      if status.status.success() {
-        last = Some(status);
+      let status = daemon_cmd(&d, &home, port, "status");
+      let ok = status.status.success();
+      last = Some(status);
+      if ok {
         break;
       }
-      last = Some(status);
       std::thread::sleep(std::time::Duration::from_millis(50));
     }
     last.expect("daemon status")
@@ -997,61 +999,39 @@ fn daemon_start_status_stop() {
   assert!(status.status.success(), "daemon status: {}", String::from_utf8_lossy(&status.stderr));
   let html = daemon_http_get("/", port).expect("GET /");
   assert!(html.contains("scsh session browser"), "got: {}", html);
-  let stop = Command::new(bin())
-    .args(["daemon", "stop"])
-    .env("SCSH_DAEMON_PORT", &port_s)
-    .current_dir(&d)
-    .output()
-    .expect("daemon stop");
+  let stop = daemon_cmd(&d, &home, port, "stop");
   assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
 }
 
 #[test]
 fn daemon_restart() {
   let d = unique_dir("daemon-restart");
+  let home = d.join(".scsh");
   let port = unused_local_port();
-  let port_s = port.to_string();
-  let _guard = DaemonTestGuard { dir: d.clone(), port };
-  let start = Command::new(bin())
-    .args(["daemon", "start"])
-    .env("SCSH_DAEMON_PORT", &port_s)
-    .current_dir(&d)
-    .output()
-    .expect("daemon start");
+  let _guard = DaemonTestGuard { dir: d.clone(), home: home.clone(), port };
+  let start = daemon_cmd(&d, &home, port, "start");
   assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
-  let restart = Command::new(bin())
-    .args(["daemon", "restart"])
-    .env("SCSH_DAEMON_PORT", &port_s)
-    .current_dir(&d)
-    .output()
-    .expect("daemon restart");
+  let restart = daemon_cmd(&d, &home, port, "restart");
   assert!(restart.status.success(), "daemon restart: {}", String::from_utf8_lossy(&restart.stderr));
   let html = daemon_http_get("/", port).expect("GET / after restart");
   assert!(html.contains("scsh session browser"), "got: {}", html);
-  let stop = Command::new(bin())
-    .args(["daemon", "stop"])
-    .env("SCSH_DAEMON_PORT", &port_s)
-    .current_dir(&d)
-    .output()
-    .expect("daemon stop");
+  let stop = daemon_cmd(&d, &home, port, "stop");
   assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
 }
 
 struct DaemonTestGuard {
   dir: std::path::PathBuf,
+  home: std::path::PathBuf,
   port: u16,
 }
 
 impl Drop for DaemonTestGuard {
   fn drop(&mut self) {
-    let _ = Command::new(bin())
-      .args(["daemon", "stop"])
-      .env("SCSH_DAEMON_PORT", self.port.to_string())
-      .current_dir(&self.dir)
-      .output();
+    let _ = daemon_cmd(&self.dir, &self.home, self.port, "stop");
     let daemon_dir = std::env::temp_dir().join("scsh-daemon");
-    let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{}.json", self.port)));
     let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{}.pid", self.port)));
+    let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{}.mode", self.port)));
+    // The redb store lives under `home` (inside `dir`); removing `dir` clears it.
     let _ = std::fs::remove_dir_all(&self.dir);
   }
 }

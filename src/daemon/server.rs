@@ -1,5 +1,6 @@
 //! HTTP server for the session browser daemon.
 
+use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
@@ -7,10 +8,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use super::db::StoreDb;
 use super::html;
-use super::jsonio::{field_num, field_str, load_store, save_store, tick_json, tick_json_light};
+use super::jsonio::{field_num, field_str, tick_json, tick_json_light};
 use super::model::{DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
-use super::paths::{now_unix_secs, pid_file, state_file};
+use super::paths::{now_unix_secs, pid_file};
 use super::prune::{schedule_from_api, schedule_orphans_from_session, PruneQueue};
 use super::websocket::{self, Hub};
 use crate::json::{parse, quote, Value};
@@ -36,6 +38,11 @@ pub struct Server {
   port: u16,
   dirty: Arc<AtomicBool>,
   ws_dirty: Arc<AtomicBool>,
+  /// Session ids mutated since the last persist — the persist step writes only these.
+  dirty_sessions: Arc<Mutex<HashSet<String>>>,
+  /// The redb-backed session store. `None` when it could not be opened (persistence disabled,
+  /// daemon still serves from memory) — best-effort, never fatal.
+  db: Option<StoreDb>,
   last_persist: Mutex<Option<Instant>>,
   last_prune_tick: Mutex<Instant>,
   ws_hub: Arc<Hub>,
@@ -44,11 +51,19 @@ pub struct Server {
 impl Server {
   pub fn new(mode: DaemonMode, port: u16) -> Server {
     let now = now_unix_secs();
-    let mut store = if let Ok(text) = std::fs::read_to_string(state_file(port)) {
-      load_store(&text).unwrap_or_else(|_| Store::new(mode, port, now))
-    } else {
-      Store::new(mode, port, now)
+    let db = match StoreDb::open(port) {
+      Ok(db) => Some(db),
+      Err(e) => {
+        eprintln!("scsh daemon: store DB unavailable ({e}); serving from memory without persistence");
+        None
+      }
     };
+    let mut store = Store::new(mode, port, now);
+    if let Some(db) = &db {
+      store.sessions = db.load_sessions();
+    }
+    // Reload keeps session history but starts the daemon's own runtime state fresh: no clients
+    // are connected yet, and uptime restarts from now.
     store.mode = mode;
     store.port = port;
     store.started_at = now;
@@ -64,6 +79,8 @@ impl Server {
       port,
       dirty: Arc::new(AtomicBool::new(false)),
       ws_dirty: Arc::new(AtomicBool::new(false)),
+      dirty_sessions: Arc::new(Mutex::new(HashSet::new())),
+      db,
       last_persist: Mutex::new(None),
       last_prune_tick: Mutex::new(Instant::now()),
       ws_hub: Hub::new(),
@@ -72,6 +89,8 @@ impl Server {
 
   pub fn run(&self) -> std::io::Result<()> {
     std::fs::create_dir_all(crate::daemon::paths::daemon_dir())?;
+    // Record this daemon's mode where the CLI can read it cross-process (redb is exclusive).
+    crate::daemon::paths::write_mode_marker(self.port, lock_store(&self.store).mode);
     self.persist_now();
     {
       let now = now_unix_secs();
@@ -95,14 +114,19 @@ impl Server {
           let prune = Arc::clone(&self.prune);
           let dirty = Arc::clone(&self.dirty);
           let ws_dirty = Arc::clone(&self.ws_dirty);
+          let dirty_sessions = Arc::clone(&self.dirty_sessions);
           let ws_hub = Arc::clone(&self.ws_hub);
           std::thread::spawn(move || {
-            let mutated =
-              catch_unwind(AssertUnwindSafe(|| handle_connection(stream, &store, &prune, &ws_hub).unwrap_or(false)))
-                .unwrap_or(false);
+            let (mutated, session_id) = catch_unwind(AssertUnwindSafe(|| {
+              handle_connection(stream, &store, &prune, &ws_hub).unwrap_or((false, None))
+            }))
+            .unwrap_or((false, None));
             if mutated {
               dirty.store(true, Ordering::Relaxed);
               ws_dirty.store(true, Ordering::Relaxed);
+              if let Some(id) = session_id {
+                dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+              }
             }
           });
         }
@@ -165,12 +189,32 @@ impl Server {
     }
   }
 
+  /// Write through the sessions that changed since the last persist to the store DB, and let
+  /// it drop any session no longer live (evicted past the cap). Only dirty sessions are
+  /// serialized, and the DB I/O happens after the store lock is released — so a mutation-heavy
+  /// run never re-serializes the whole store or holds the lock across disk I/O.
   fn persist_now(&self) {
-    let store = lock_store(&self.store);
-    let text = save_store(&store);
-    let _ = std::fs::write(state_file(self.port), text);
     self.dirty.store(false, Ordering::Relaxed);
     *lock_last_persist(&self.last_persist) = Some(Instant::now());
+    let Some(db) = &self.db else { return };
+    let dirty_ids: Vec<String> = {
+      let mut set = self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner());
+      set.drain().collect()
+    };
+    // Snapshot (serialize) the dirty sessions and the full live-id set under the lock, then
+    // release it before touching disk.
+    let (dirty, keep) = {
+      let store = lock_store(&self.store);
+      let dirty: Vec<(String, String)> = dirty_ids
+        .into_iter()
+        .filter_map(|id| store.sessions.get(&id).map(|s| (id, crate::daemon::jsonio::session_json_api(s))))
+        .collect();
+      let keep: HashSet<String> = store.sessions.keys().cloned().collect();
+      (dirty, keep)
+    };
+    if let Err(e) = db.sync(&dirty, &keep) {
+      eprintln!("scsh daemon: store DB write failed: {e}");
+    }
   }
 
   fn prune_if_due(&self) {
@@ -187,9 +231,12 @@ impl Server {
   }
 }
 
+/// Handle one request. Returns `(mutated, session_id)`: `mutated` drives the persist + WS
+/// refresh, and `session_id` (extracted from a mutating POST body) is the one session to
+/// write through to the store DB — so a mutation persists just that session, not the store.
 fn handle_connection(
   mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
-) -> std::io::Result<bool> {
+) -> std::io::Result<(bool, Option<String>)> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
   stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -198,22 +245,36 @@ fn handle_connection(
     websocket::accept_handshake(&mut stream, &req.headers)?;
     let rx = ws_hub.subscribe();
     websocket::serve(stream, rx);
-    return Ok(false);
+    return Ok((false, None));
   }
   let bare_path = req.path.split('?').next().unwrap_or("");
   if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/chapters") {
     let (status, body) = chapters_response(bare_path, store);
     write_response(&mut stream, status, &body, "application/json")?;
-    return Ok(false);
+    return Ok((false, None));
   }
   if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
     let (status, body, disposition) = cast_response(&req.path, store);
     write_cast_response(&mut stream, status, &body, disposition.as_deref())?;
-    return Ok(false);
+    return Ok((false, None));
   }
   let (status, body, content_type, mutated) = route(&req, store, prune);
   write_response(&mut stream, status, &body, content_type)?;
-  Ok(mutated)
+  let session_id = if mutated { mutated_session_id(&req) } else { None };
+  Ok((mutated, session_id))
+}
+
+/// The `session` field of a mutating API POST body (all session-touching endpoints carry it),
+/// so the persist step knows which session changed. `None` for mutations without one (e.g.
+/// prune scheduling) — those write no session but still refresh the WS view.
+fn mutated_session_id(req: &HttpRequest) -> Option<String> {
+  if req.method != "POST" {
+    return None;
+  }
+  match parse(&req.body).ok()? {
+    Value::Object(o) => field_str(&o, "session").filter(|s| !s.is_empty()),
+    _ => None,
+  }
 }
 
 /// `GET /cast/<session>/<proc>[?dl=1]` — the proc's asciinema recording. The file is read
@@ -1159,19 +1220,52 @@ mod tests {
   }
 
   #[test]
-  fn server_new_resets_started_at_on_reload() {
+  fn server_reload_keeps_sessions_but_resets_runtime_state() {
+    // Point the scsh home at a throwaway dir so the redb store never touches the real ~/.scsh.
+    let home = std::env::temp_dir().join(format!("scsh-home-{}", crate::runtime::random_nonce_6()));
+    // SAFETY (edition 2021): env mutation is a safe API; only Server::new resolves the home,
+    // and this is the sole test that sets it.
+    std::env::set_var(crate::daemon::paths::HOME_ENV, &home);
     let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-    std::fs::create_dir_all(crate::daemon::paths::daemon_dir()).unwrap();
-    let path = state_file(port);
-    let _guard = StateFileGuard(path.clone());
-    let stale = Store::new(DaemonMode::Persistent, port, 1);
-    std::fs::write(&path, save_store(&stale)).unwrap();
+
+    // First instance: register a session, persist it to redb, then drop (releases the DB lock).
+    {
+      let server = Server::new(DaemonMode::Persistent, port);
+      {
+        let mut store = lock_store(&server.store);
+        let mut s = Session {
+          id: "sessaa".into(),
+          started_at: 1,
+          ended_at: None,
+          profile: None,
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: Vec::new(),
+          last_seen_at: 1,
+          client_connected: true,
+        };
+        s.client_connected = true;
+        store.insert_session("sessaa".into(), s);
+      }
+      server.dirty_sessions.lock().unwrap().insert("sessaa".into());
+      server.persist_now();
+    }
+
+    // Second instance on the same port+home: the session reloads from redb, but the daemon's
+    // own runtime state is fresh (started_at ~ now, no client connected).
     let before = now_unix_secs();
-    let server = Server::new(DaemonMode::Persistent, port);
-    server.persist_now();
-    let loaded = load_store(&std::fs::read_to_string(&path).unwrap()).unwrap();
-    assert!(loaded.started_at >= before, "reload should refresh started_at");
-    assert_ne!(loaded.started_at, 1);
+    let server2 = Server::new(DaemonMode::Persistent, port);
+    {
+      let store = lock_store(&server2.store);
+      assert!(store.sessions.contains_key("sessaa"), "session reloaded from redb");
+      assert!(store.started_at >= before, "started_at refreshed on reload");
+      assert!(!store.sessions["sessaa"].client_connected, "reload marks clients disconnected");
+    }
+    drop(server2);
+
+    std::env::remove_var(crate::daemon::paths::HOME_ENV);
+    let _ = std::fs::remove_dir_all(&home);
   }
 
   #[test]
@@ -1189,13 +1283,5 @@ mod tests {
       .unwrap();
     drop(client);
     assert!(handle.join().unwrap().is_err());
-  }
-
-  struct StateFileGuard(std::path::PathBuf);
-
-  impl Drop for StateFileGuard {
-    fn drop(&mut self) {
-      let _ = std::fs::remove_file(&self.0);
-    }
   }
 }

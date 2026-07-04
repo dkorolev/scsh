@@ -148,8 +148,17 @@ nonce keeps same-second runs from overwriting each other. Logs are kept for **ev
 | --- | --- | --- |
 | `SCSH_DAEMON_PORT` | `7274` | HTTP listen port (localhost only) |
 
-State and PID files live under the **system temp dir**: `$TMPDIR/scsh-daemon/` (not the
-repo's gitignored `tmp/`).
+## Where state lives
+
+The daemon persists its session store in an embedded **redb** database at
+**`~/.scsh/daemon-<port>.redb`** (override the `~/.scsh` dir with `SCSH_HOME`). Each session
+is one row, so a mutation writes just that session — not a rewrite of the whole store. Only
+the daemon opens the DB (redb allows one process at a time); the CLI reads the daemon's mode
+from a tiny cross-process marker instead.
+
+Runtime files — the PID lock and the mode marker (`daemon-<port>.pid`, `daemon-<port>.mode`)
+and the prune queue — live under the **system temp dir** `$TMPDIR/scsh-daemon/`. Session
+history survives a `daemon restart`; the daemon's own uptime/client state starts fresh.
 
 ## API (for scripts)
 
@@ -175,20 +184,17 @@ repo's gitignored `tmp/`).
 - **Assumed:** The daemon is best-effort — if it cannot start, `scsh run` still proceeds
   without the browser URL.
 
-## Known limitation: state file growth
+## Resetting the store
 
-The daemon retains up to 200 sessions, each proc keeping up to 5000 output lines, and it
-serializes the **entire** store on every dirty WebSocket tick and state persist — while
-holding the store lock. After many heavy runs (e.g. review fleets) the state JSON can
-reach tens of megabytes, at which point event POSTs from `scsh run` start timing out and
-new runs print *"daemon is up but registration failed"* (the run itself still works; it
-just doesn't appear in the browser). Observed in practice at a ~67 MB state file.
-
-Workaround until the daemon bounds its state — reset it:
+The daemon retains up to 200 sessions (each proc keeping up to 5000 output lines) in the
+redb store. Because it writes only the sessions that changed — not the whole store each tick
+— the store stays small and event POSTs don't stall (this replaced the earlier scheme that
+re-serialized one growing JSON file and could reach tens of megabytes). To wipe session
+history, stop the daemon and delete its DB:
 
 ```console
 scsh daemon stop
-rm "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.json"
+rm ~/.scsh/daemon-${SCSH_DAEMON_PORT:-7274}.redb
 scsh daemon start
 ```
 
@@ -250,6 +256,7 @@ If idle shutdown does not run, use `$SCSH_BIN daemon stop` as cleanup.
 
    ```console
    rm -rf "$SCRATCH_DIR"
-   rm -f "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.json" \
-         "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.pid"
+   rm -f  ~/.scsh/daemon-${SCSH_DAEMON_PORT:-7274}.redb
+   rm -f "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.pid" \
+         "$TMPDIR/scsh-daemon/daemon-${SCSH_DAEMON_PORT:-7274}.mode"
    ```
