@@ -2446,8 +2446,11 @@ fn prepare_opencode_mount_dirs(run_dir: &Path) {
 ///  - `.credentials.json` — host file if present, else the full macOS keychain blob, else a
 ///    minimal file from the env token. The interactive TUI treats an incomplete credentials
 ///    file (token only, no expiry/scopes/refresh) as logged out, so the complete blob matters.
-///  - `.claude.json` — the host's state json (its `oauthAccount` is what lets the TUI skip the
-///    login picker), with the onboarding / bypass-consent / repo-trust keys merged in.
+///  - `.claude.json` — a MINIMAL state json: just the login identity (`oauthAccount`/`userID`)
+///    lifted from the host's config so the TUI skips the login picker, plus the onboarding /
+///    bypass-consent / repo-trust keys. The full host config is deliberately NOT forwarded —
+///    its bulk (growthbook cache, history, install metadata) intermittently re-triggers the
+///    bypass-permissions consent screen, while a minimal config does not.
 fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from);
   let token = runtime::claude_oauth_token();
@@ -2474,9 +2477,10 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     let _ = write_claude_credentials_file(&claude_dir, t);
   }
 
-  // State json carrying the account identity, then the TUI-unblocking keys merged in.
+  // State json: forward ONLY the login identity from the host (not the whole config), then
+  // seed the dialog-suppressing keys onto it.
   if let Some(src) = &host_json {
-    let _ = std::fs::copy(src, &json_dest);
+    write_claude_identity(src, &json_dest);
   }
   seed_claude_tui_config(&json_dest);
 
@@ -2492,10 +2496,28 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   Some(root)
 }
 
-/// Merge the keys that keep Claude Code's interactive TUI from blocking on first-run
-/// dialogs — onboarding, bypass-permissions consent, and trust for the container repo
-/// path — into the run's copied `.claude.json` ([`forward_claude_auth`]). A missing or
-/// unparsable copy becomes a fresh minimal config, so the file always exists and mounts.
+/// Write a minimal `.claude.json` at `dest` carrying only the host's Claude **login identity**
+/// (`oauthAccount` + `userID`) — enough for the TUI to skip the login picker, without the rest
+/// of the host config that would re-trigger the bypass consent. Best-effort; a missing/unparsable
+/// host config just yields no identity (seed still writes the file).
+fn write_claude_identity(host_json: &Path, dest: &Path) {
+  use crate::json::Value;
+  let Some(Value::Object(host)) = std::fs::read_to_string(host_json).ok().and_then(|t| json::parse(&t).ok()) else {
+    return;
+  };
+  let mut identity: Vec<(String, Value)> = Vec::new();
+  for key in ["oauthAccount", "userID"] {
+    if let Some((_, v)) = host.iter().find(|(k, _)| k == key) {
+      identity.push((key.to_string(), v.clone()));
+    }
+  }
+  let _ = std::fs::write(dest, json::write(&Value::Object(identity)));
+}
+
+/// Add the keys that keep Claude Code's interactive TUI from blocking on first-run dialogs —
+/// onboarding, bypass-permissions consent, and trust for the container repo path — onto the
+/// minimal `.claude.json` from [`write_claude_identity`] ([`forward_claude_auth`]). A missing
+/// file becomes a fresh minimal config, so it always exists and mounts.
 fn seed_claude_tui_config(json_path: &Path) {
   use crate::json::Value;
   fn set(obj: &mut Vec<(String, Value)>, key: &str, val: Value) {
@@ -2509,28 +2531,12 @@ fn seed_claude_tui_config(json_path: &Path) {
     Some(Value::Object(o)) => o,
     _ => Vec::new(),
   };
-  // The host config describes the HOST's Claude install (e.g. installMethod: "native" →
-  // ~/.local/bin/claude), which is wrong inside the container (claude is npm-global at
-  // /usr/bin/claude) and makes the TUI print a "claude command missing or broken" warning.
-  // Drop the install/updater metadata so claude uses its actual in-container install, and
-  // keep the auto-updater off (the image is immutable — nothing to update).
-  root.retain(|(k, _)| {
-    !matches!(
-      k.as_str(),
-      "installMethod"
-        | "autoUpdaterStatus"
-        | "autoUpdatesProtectedForNative"
-        | "officialMarketplaceAutoInstallAttempted"
-        | "officialMarketplaceAutoInstalled"
-        | "cachedChromeExtensionInstalled"
-    )
-  });
   set(&mut root, "autoUpdates", Value::Bool(false));
   set(&mut root, "hasCompletedOnboarding", Value::Bool(true));
   // Suppress the bypass-permissions consent screen so the recorded TUI runs unattended.
   // The acceptance must be set at BOTH the top level and the repo's project entry — with only
   // one, the consent still appears (verified empirically). This lets `--permission-mode
-  // bypassPermissions` auto-approve edits AND command execution with no prompt.
+  // bypassPermissions` auto-approve every tool with no prompt.
   set(&mut root, "bypassPermissionsModeAccepted", Value::Bool(true));
   let repo_project = Value::Object(vec![
     ("hasTrustDialogAccepted".to_string(), Value::Bool(true)),
