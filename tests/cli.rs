@@ -815,11 +815,29 @@ fn ui_demo_frames_render_the_collapsible_timestamped_board() {
   );
 }
 
+/// Mirror of `runtime::claude_container_auth_ready` for the "claude unavailable" guard: the
+/// binary is a `[[bin]]` (no lib target to import), so this reproduces its checks — env token,
+/// `~/.claude/.credentials.json`, and (macOS) the login-keychain credentials scsh forwards.
+/// Keep in sync with production, or a host with keychain-only creds mis-guards the test.
 fn claude_container_auth_ready() -> bool {
   std::env::var("CLAUDE_CODE_OAUTH_TOKEN").map(|s| !s.is_empty()).unwrap_or(false)
     || std::env::var_os("HOME")
       .map(PathBuf::from)
       .is_some_and(|home| home.join(".claude").join(".credentials.json").is_file())
+    || claude_keychain_creds_present()
+}
+
+/// True when the macOS login keychain holds Claude Code credentials (the `claudeAiOauth`
+/// blob scsh forwards). Always false off macOS.
+fn claude_keychain_creds_present() -> bool {
+  if !cfg!(target_os = "macos") {
+    return false;
+  }
+  Command::new("security")
+    .args(["find-generic-password", "-s", "Claude Code-credentials", "-w"])
+    .output()
+    .map(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).contains("claudeAiOauth"))
+    .unwrap_or(false)
 }
 
 fn claude_integration_ready() -> bool {
