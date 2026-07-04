@@ -1,73 +1,73 @@
-# HARNESS-SMOKE.md — confirm claude, codex, and cursor harnesses work
+# HARNESS-SMOKE.md — executable harness for the claude, codex, and cursor containers
 
-This is a short, copy-pasteable smoke test for the **claude**, **codex**, and **cursor** container harnesses. It uses the markdown skill [`.skills/harness-smoke/SKILL.md`](.skills/harness-smoke/SKILL.md): each harness reads that file and must write a tiny JSON `{"result":{"status":"OK",…}}` file. No scripts inside the skill — the harness itself is under test.
+This file **is** the test. It is an executable Markdown harness (per the repo's testing
+principle): an agent — or a human — runs the numbered steps in order and checks each
+**Predict** line. `scripts/harness-smoke.sh` is a thin runner that executes exactly these
+steps; running the script and following this doc are equivalent.
 
-> **One-liner:** from the `scsh` repo root, with a **clean git tree** and claude/codex/cursor auth configured:
->
-> ```sh
-> ./scripts/harness-smoke.sh
-> ```
-
-## What you'll see
-
-- **Probe** — checks host auth for claude (`CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude/.credentials.json`, or the macOS keychain), codex (`~/.codex/auth.json` or `OPENAI_API_KEY`), and cursor (`~/.config/cursor/auth.json`, `~/.cursor/auth.json`, the macOS keychain, or `CURSOR_API_KEY`).
-- **Build** — `scsh-base` first, then `scsh-claude` / `scsh-codex` / `scsh-cursor` if images are stale (first run can take several minutes).
-- **Run** — up to three parallel container skills:
-  - `harness-smoke-claude-opus-4-8` (Opus) → `tmp/harness-smoke-claude-opus-4-8.json`
-  - `harness-smoke-codex-gpt-5.5` (GPT) → `tmp/harness-smoke-codex-gpt-5.5.json`
-  - `harness-smoke-cursor-composer-fast` (Composer Fast) → `tmp/harness-smoke-cursor-composer-fast.json`
-- **Validate** — script checks each expected result file for `"status": "OK"`.
-- **Screencasts** — claude, codex, and cursor-agent each run as their **full interactive
-  TUI** inside a recorded 200×50 PTY (`terminal:` in `.scsh.yml`) — the cast shows the
-  real screen, end to end. Each run leaves a timestamped asciicast in the **gitignored** `tmp/casts/`:
-  `tmp/casts/harness-smoke-<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` — kept forever, so old runs
-  can be revisited (`asciinema play <file>`, or via the session browser's ▶ watch links).
-
-Routes that probe **N/A** are skipped by `scsh run` (same as `DEMO.md`). You need **at least one** of claude, codex, or cursor available.
+It exercises the **claude**, **codex**, and **cursor** container harnesses end to end via the
+minimal skill [`.skills/harness-smoke/SKILL.md`](.skills/harness-smoke/SKILL.md): each harness
+runs its real interactive TUI (recorded to `tmp/casts/`) and must write a tiny JSON
+`{"result":{"status":"OK",…}}` file. scsh itself probes host auth and **skips** any harness
+that is not logged in, so the run succeeds as long as every *available* harness does.
 
 ## Prerequisites
 
-1. **Built `scsh`** — on `PATH`, or `./target/debug/scsh` / `./target/release/scsh` from this repo.
-2. **Container runtime** — docker, podman, or Apple `container` (macOS), engine running.
-3. **Clean git tree** — `scsh run` clones committed state only; commit or stash local edits first.
-4. **`/tmp` gitignored** — already true in this repo.
-5. **Auth (at least one harness):**
-   - **Claude:** `claude setup-token` then `export CLAUDE_CODE_OAUTH_TOKEN=…` — on macOS the script also lifts the token from the login keychain automatically (needs `jq`)
-   - **Codex:** `codex login` (writes `~/.codex/auth.json`) **or** `export OPENAI_API_KEY=…`
-   - **Cursor:** `cursor agent login` (writes `~/.cursor/auth.json` or the macOS keychain) **or** `export CURSOR_API_KEY=…`
+1. **A container runtime** — docker, podman, or Apple `container` (macOS), engine running.
+2. **At least one harness logged in on the host** (scsh forwards these into the container;
+   missing ones are skipped, not failed):
+   - **Claude** — `claude` logged in (macOS keychain), `~/.claude/.credentials.json`, or `CLAUDE_CODE_OAUTH_TOKEN`.
+   - **Codex** — `~/.codex/auth.json` (`codex login`) or `OPENAI_API_KEY`.
+   - **Cursor** — `cursor-agent` logged in (keychain / `~/.cursor/auth.json`) or `CURSOR_API_KEY`.
+3. **`jq`** (optional) — validates the result JSON; without it the runner only checks the file exists.
 
-Optional: `jq` for JSON validation in the script (without it, the script only checks that files exist).
+## The harness (run these in order)
 
-## Run it
+Run from the repo root. `SCSH` = this repo's own build (`./target/debug/scsh` or
+`./target/release/scsh`), **not** any older `scsh` on `PATH` — an older binary may not know
+these harnesses.
+
+1. **Build.** `cargo build`
+   - **Predict:** exit 0; `./target/debug/scsh` exists.
+
+2. **Clean tree.** `git status --porcelain` — commit or stash first if dirty.
+   - **Predict:** empty output. (`scsh run` clones committed state only.)
+
+3. **Profile exists.** `$SCSH check-profile harness-smoke`
+   - **Predict:** exit 0, prints `profile 'harness-smoke' has 3 skills`.
+
+4. **Run** (kept run dirs help post-mortem). `SCSH_KEEP_RUNS=1 $SCSH run --profile harness-smoke`
+   - **Predict:** exit 0. Each *available* harness prints `✓ <harness>: harness-smoke-<route>`.
+     Unavailable harnesses print an `N/A`/skip line and do **not** fail the run.
+
+5. **Validate results.** For each `tmp/harness-smoke-<route>.json` that exists
+   (`claude-opus-4-8`, `codex-gpt-5.5`, `cursor-composer-fast`): `jq .result.status <file>`
+   - **Predict:** every present file reads `"OK"`, and **at least one** file is present.
+
+6. **Screencasts recorded.** `ls -t tmp/casts/harness-smoke-*.cast`
+   - **Predict:** one fresh `<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` per succeeded route
+     (real interactive TUI; replay with `asciinema play <file>` or the session browser).
+
+## One-command runner
 
 ```sh
 cd /path/to/scsh
-git status --porcelain    # must be empty
-cargo build               # if scsh is not on PATH yet
-./scripts/harness-smoke.sh
-```
-
-Or step through manually:
-
-```sh
-scsh check-profile harness-smoke
-SCSH_KEEP_RUNS=1 scsh run --profile harness-smoke
-jq .result.status tmp/harness-smoke-claude-opus-4-8.json
-jq .result.status tmp/harness-smoke-codex-gpt-5.5.json
-jq .result.status tmp/harness-smoke-cursor-composer-fast.json
+./scripts/harness-smoke.sh        # runs steps 1–6 and prints PASS / FAIL
 ```
 
 ## Pass / fail
 
 | Check | PASS when |
 | --- | --- |
-| Probe | At least one of claude / codex / cursor routes is ok |
-| Preflight | Clean tree, profile exists, runtime up |
-| Run | `scsh run --profile harness-smoke` exits 0 (skipped routes don't fail the run) |
-| Results | Each probed-ok route has `tmp/harness-smoke-<route>.json` with `"result":{"status":"OK",…}` |
+| Preflight | Clean tree; `check-profile harness-smoke` exits 0; a container runtime is up |
+| Run | `scsh run --profile harness-smoke` exits 0 (skipped harnesses don't fail it) |
+| Results | Every present `tmp/harness-smoke-<route>.json` has `result.status == "OK"`, ≥1 present |
 
-On failure, inspect the kept run dir (`SCSH_KEEP_RUNS=1`) — scsh prints paths — and read `tmp/scsh-run.log` inside it.
+**Overall PASS** = all three rows pass. On failure, inspect the kept run dir (`SCSH_KEEP_RUNS=1`
+prints the path) and its `tmp/scsh-run.log`, or the persisted log in `tmp/logs/<stem>.log`.
 
-## Skill contract (for agents)
+## For agents
 
-If an agent runs this test, it should execute `./scripts/harness-smoke.sh` (or the manual steps above) and report **PASS** or **FAIL** per route. The skill under test is intentionally minimal: [.skills/harness-smoke/SKILL.md](.skills/harness-smoke/SKILL.md).
+Execute the numbered steps above (or run `./scripts/harness-smoke.sh`) and report **PASS**
+or **FAIL** with the per-route result. The skill under test is intentionally minimal:
+[.skills/harness-smoke/SKILL.md](.skills/harness-smoke/SKILL.md).
