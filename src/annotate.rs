@@ -120,17 +120,11 @@ pub fn cast_transcript(cast_ndjson: &str, max_lines: usize) -> String {
       events.push((*t, clipped));
     }
   }
-  // Downsample evenly to at most `max_lines` while keeping chronological order.
+  // Downsample evenly to at most `max_lines` while keeping chronological order. Timestamps
+  // are fractional seconds (not `mm:ss`) so the model can place chapters on sub-second
+  // boundaries — chapter `t` is a float.
   let step = if events.len() > max_lines { events.len().div_ceil(max_lines) } else { 1 };
-  events
-    .iter()
-    .step_by(step)
-    .map(|(t, text)| {
-      let s = *t as i64;
-      format!("[{:02}:{:02}] {}", s / 60, s % 60, text)
-    })
-    .collect::<Vec<_>>()
-    .join("\n")
+  events.iter().step_by(step).map(|(t, text)| format!("[{t:.1}s] {text}")).collect::<Vec<_>>().join("\n")
 }
 
 /// Extract and validate a [`CastAnnotation`] from a cursor-agent reply (which may wrap the
@@ -173,6 +167,11 @@ pub fn parse_annotation(reply: &str) -> Option<CastAnnotation> {
     }
   }
   chapters.sort_by(|a, b| a.t.partial_cmp(&b.t).unwrap_or(std::cmp::Ordering::Equal));
+  // Like YouTube, the first chapter always starts at the very beginning, whatever the model
+  // guessed for it — otherwise the opening segment has no marker.
+  if let Some(first) = chapters.first_mut() {
+    first.t = 0.0;
+  }
   Some(CastAnnotation { summary, chapters })
 }
 
@@ -183,9 +182,9 @@ fn annotation_prompt(transcript: &str) -> String {
 agent working). Produce a JSON object describing it.\n\n\
 Output ONLY the JSON — no prose, no markdown code fence. Schema:\n\
 {{\"summary\": \"<one sentence, what the session did>\", \
-\"chapters\": [{{\"t\": <seconds into the recording, number>, \"title\": \"<3-6 word phase name>\"}}]}}\n\n\
-Use between 3 and 8 chapters, in ascending time order, the first at or near t=0, each marking a \
-distinct phase. Keep titles terse.\n\n\
+\"chapters\": [{{\"t\": <seconds into the recording, may be fractional e.g. 12.5>, \"title\": \"<3-6 word phase name>\"}}]}}\n\n\
+Use between 3 and 8 chapters, in ascending time order. The FIRST chapter MUST start at t=0 \
+(the beginning). Each chapter marks a distinct phase; keep titles terse.\n\n\
 TRANSCRIPT:\n{transcript}"
   )
 }
@@ -254,20 +253,26 @@ mod tests {
 [1.0, \"o\", \"hello\\r\\n\"]\n\
 [65.0, \"o\", \"done\\r\\n\"]\n";
     let t = cast_transcript(cast, 120);
-    assert!(t.contains("[00:00] hello"), "got: {t}");
-    assert!(!t.contains("[00:01] hello"), "consecutive duplicate dropped: {t}");
-    assert!(t.contains("[01:05] done"), "got: {t}");
+    // Fractional-second timestamps so chapters can be floats.
+    assert!(t.contains("[0.5s] hello"), "got: {t}");
+    assert!(!t.contains("[1.0s] hello"), "consecutive duplicate dropped: {t}");
+    assert!(t.contains("[65.0s] done"), "got: {t}");
   }
 
   #[test]
-  fn parse_annotation_extracts_json_from_prose_and_sorts() {
-    let reply = "Sure, here you go:\n{\"summary\": \"Ran a build.\", \
-\"chapters\": [{\"t\": 8, \"title\": \"Finish\"}, {\"t\": 0, \"title\": \"Start\"}]}\nHope that helps!";
+  fn parse_annotation_sorts_pins_first_to_zero_and_keeps_floats() {
+    let reply = "Sure:\n{\"summary\": \"Ran a build.\", \
+\"chapters\": [{\"t\": 8.5, \"title\": \"Finish\"}, {\"t\": 2.3, \"title\": \"Start\"}]}\ndone";
     let a = parse_annotation(reply).unwrap();
     assert_eq!(a.summary, "Ran a build.");
     assert_eq!(a.chapters.len(), 2);
     assert_eq!(a.chapters[0].title, "Start"); // sorted ascending by t
-    assert_eq!(a.chapters[1].t, 8.0);
+    assert_eq!(a.chapters[0].t, 0.0); // first pinned to the beginning (YouTube-style)
+    assert_eq!(a.chapters[1].t, 8.5); // fractional timekey preserved
+                                      // Serialization keeps the float and prints 0 for the pinned first chapter.
+    let json = a.to_sidecar_json();
+    assert!(json.contains("\"t\": 0,"), "got: {json}");
+    assert!(json.contains("\"t\": 8.5,"), "got: {json}");
   }
 
   #[test]

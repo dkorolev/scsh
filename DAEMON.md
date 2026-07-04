@@ -112,10 +112,10 @@ chapter as a timeline marker / jump target:
 ```jsonc
 {
   "summary": "One sentence describing what the session did.",  // string, required
-  "chapters": [                                                 // ascending by t; [] allowed
-    { "t": 0,   "title": "Startup" },      // t: seconds into the recording (number); title: short label
-    { "t": 6,   "title": "Read the skill" },
-    { "t": 9,   "title": "Write result JSON" }
+  "chapters": [                                                 // ascending by t; first is 0; [] allowed
+    { "t": 0,    "title": "Startup" },      // t: seconds in (number, may be fractional); title: short label
+    { "t": 6.5,  "title": "Read the skill" },
+    { "t": 9.2,  "title": "Write result JSON" }
   ]
 }
 ```
