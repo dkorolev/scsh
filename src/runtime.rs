@@ -437,12 +437,13 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Full interactive TUI (no -p): the recording shows the real Claude Code screen, and
-      // no dialog blocks it. `bypassPermissions` auto-approves BOTH file edits and command
-      // execution — real skills run bash (git, python, …), which `acceptEdits` would prompt
-      // for. Its one-time consent screen is suppressed by seeding `bypassPermissionsModeAccepted`
-      // at both the top level and the repo's project entry in the forwarded ~/.claude.json
-      // (see main's forward_claude_auth) — config, not screen-scraping.
-      let mut tui = String::from("claude --permission-mode bypassPermissions");
+      // no dialog blocks it. `acceptEdits` mode has NO consent screen, and a `--settings`
+      // permission allowlist auto-approves bash so command-running skills (git, python, …)
+      // don't prompt. This replaced `--permission-mode bypassPermissions`, whose one-time
+      // consent screen the forwarded full host config re-enables intermittently — no config
+      // seed reliably suppresses it. All config, no screen-scraping.
+      let mut tui = String::from("claude --permission-mode acceptEdits --settings ");
+      tui.push_str(&shell_quote(r#"{"permissions":{"allow":["Bash(*)"]}}"#));
       if let Some(m) = model {
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(m));
@@ -1859,10 +1860,12 @@ mod tests {
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
     // Interactive TUI recorded via scsh-tui-record (no inline shell, no screen-scraping).
-    // bypassPermissions auto-approves edits AND commands (real skills run bash); its consent
-    // screen is suppressed by config seeded host-side in the forwarded ~/.claude.json.
+    // acceptEdits has no consent screen; a --settings allowlist auto-approves bash so
+    // command-running skills don't prompt.
     assert!(cmd.contains("scsh-tui-record 200 50 slash-exit tmp/add_claude_sonnet_4_6_result.json "), "got: {cmd}");
-    assert!(cmd.contains("claude --permission-mode bypassPermissions --model sonnet"), "got: {cmd}");
+    assert!(cmd.contains("claude --permission-mode acceptEdits --settings "), "got: {cmd}");
+    assert!(cmd.contains("Bash(*)") && cmd.contains("--model sonnet"), "got: {cmd}");
+    assert!(!cmd.contains("bypassPermissions"), "got: {cmd}");
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
