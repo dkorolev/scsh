@@ -53,7 +53,10 @@ fn run(args: &[String]) -> i32 {
     Mode::UpdateSkills => install_skills(true, &cli.sources),
     Mode::List => {
       // `--json` is a runtime-free, machine-readable listing (just git + a valid .scsh.yml);
-      // the human listing goes through the full preflight like a run does.
+      // the human listing goes through the full preflight like a run does. NOTE: unlike the
+      // §2 ideal, `list` does NOT auto-switch to JSON when piped — its human output (result
+      // paths, `--verbose` build commands) is not a subset of the JSON, and existing docs and
+      // scripts grep that human text. Machines opt in explicitly with `--json`.
       if cli.json {
         list_profiles_json()
       } else {
@@ -158,7 +161,7 @@ fn annotate_run_casts(cast_paths: Vec<std::path::PathBuf>) {
   eprintln!("scsh: annotated {done} cast(s)");
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Mode {
   Help(HelpTopic),
   Version,
@@ -200,13 +203,54 @@ enum DaemonAction {
 /// Which help page to print. The default (`scsh help` / a bare `scsh`) is a compact
 /// overview of the commands; the deep-dive topics keep their detail OUT of the default
 /// output (`scsh help run`, `scsh help .scsh.yml`, `scsh help internals`, `scsh help cache`).
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum HelpTopic {
   Overview,
   Run,
   Config,
   Internals,
   Cache,
+  /// The documented exit-code table (`scsh help exitcodes`).
+  ExitCodes,
+  /// Focused help for one command (`scsh help <command>`); the string is the canonical name.
+  Command(String),
+}
+
+/// Canonical command names that `help <command>` documents (also the resolver's vocabulary).
+const COMMAND_NAMES: &[&str] = &[
+  "run",
+  "list",
+  "check-profile",
+  "init-demo-project",
+  "installskills",
+  "updateskills",
+  "daemon",
+  "failures",
+  "stats",
+  "prune",
+  "annotate-cast",
+  "version",
+];
+
+/// Resolve a `help <token>` argument to a command name, accepting the same non-canonical
+/// spellings the command parser does (e.g. `ls` → `list`), so `help ls` works.
+fn help_command_alias(token: &str) -> Option<&'static str> {
+  let canonical = match token {
+    "run" => "run",
+    "list" | "ls" => "list",
+    "check-profile" | "checkprofile" => "check-profile",
+    "init-demo-project" | "init" | "init-demo" => "init-demo-project",
+    "installskills" | "install-skills" => "installskills",
+    "updateskills" | "update-skills" => "updateskills",
+    "daemon" => "daemon",
+    "failures" => "failures",
+    "stats" => "stats",
+    "prune" => "prune",
+    "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
+    "version" => "version",
+    _ => return None,
+  };
+  Some(canonical)
 }
 
 fn version_id() -> String {
@@ -287,9 +331,21 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             i += 1;
             HelpTopic::Cache
           }
+          Some("exitcodes") | Some("exit-codes") | Some("exit") => {
+            i += 1;
+            HelpTopic::ExitCodes
+          }
+          // Any command name (canonical or a known alias) selects that command's help.
+          Some(other) if help_command_alias(other).is_some() => {
+            i += 1;
+            HelpTopic::Command(help_command_alias(other).unwrap().to_string())
+          }
           // A non-flag token we don't recognize is a mistyped topic — say so helpfully.
           Some(other) if !other.starts_with('-') => {
-            return Err(format!("unknown help topic '{other}' (topics: run, .scsh.yml, internals, cache)"));
+            return Err(format!(
+              "unknown help topic '{other}' (commands: {}; topics: .scsh.yml, internals, cache, exitcodes)",
+              COMMAND_NAMES.join(", ")
+            ));
           }
           _ => HelpTopic::Overview,
         };
@@ -3884,7 +3940,122 @@ fn print_help(topic: HelpTopic) {
     HelpTopic::Config => print_help_config(),
     HelpTopic::Internals => print_help_internals(),
     HelpTopic::Cache => print_help_cache(),
+    HelpTopic::ExitCodes => print_help_exitcodes(),
+    // `run` has a dedicated deep-dive page; every other command gets a focused block.
+    HelpTopic::Command(name) if name == "run" => print_help_run(),
+    HelpTopic::Command(name) => print_help_command(&name),
   }
+}
+
+/// `scsh help exitcodes` — the documented exit-code table (§2). scsh uses only the three
+/// conventional codes; commands never define custom ones, so this table is complete.
+fn print_help_exitcodes() {
+  println!();
+  println!("{} {}", h_head("Exit codes"), console::style("\u{2014} the same across every command").bold());
+  println!();
+  help_row("0", "Success — the command did what was asked.");
+  help_row("1", "Failure — a skill failed, a check did not pass, or the operation could not complete.");
+  help_row("2", "Usage error — a bad argument, unknown command, or missing required value.");
+  println!();
+  println!("{}", h_dim("  scsh defines no command-specific exit codes; these three are the whole set."));
+  println!();
+}
+
+/// `scsh help <command>` — a focused block for one command: canonical synopsis, what it does,
+/// its flags, and a pointer. Descriptions match the overview's one-liners.
+fn print_help_command(name: &str) {
+  println!();
+  let (tagline, synopsis, body): (&str, &str, &[(&str, &str)]) = match name {
+    "list" => (
+      "list skills by profile",
+      "scsh list [--verbose] [--json]",
+      &[
+        ("--verbose", "Show the full per-skill build/run commands (human-readable)."),
+        ("--json", "Machine-readable listing; on by default when stdout is not a TTY."),
+      ],
+    ),
+    "check-profile" => (
+      "test whether a profile exists",
+      "scsh check-profile <name>",
+      &[("<name>", "Exit 0 iff that profile exists with >=1 skill; runtime-free (no build).")],
+    ),
+    "init-demo-project" => (
+      "scaffold a demo project",
+      "scsh init-demo-project",
+      &[("(no flags)", "Write and commit a small demo .scsh.yml + skills into the current dir.")],
+    ),
+    "installskills" => (
+      "install skills into this repo",
+      "scsh installskills [git-url…]",
+      &[("[git-url…]", "Install from the bundled skills, or from one or more source repos in order.")],
+    ),
+    "updateskills" => (
+      "reinstall skills, overwriting",
+      "scsh updateskills [git-url…]",
+      &[("[git-url…]", "Like installskills, but overwrites local copies of each skill.")],
+    ),
+    "daemon" => (
+      "the session-browser daemon",
+      "scsh daemon <start|stop|restart|status>",
+      &[
+        ("start", "Run a persistent daemon until `daemon stop`."),
+        ("stop", "Stop the running daemon."),
+        ("restart", "Stop then start (persistent)."),
+        ("status", "Exit 0 when the daemon is listening. See DAEMON.md; port via SCSH_DAEMON_PORT."),
+      ],
+    ),
+    "failures" => (
+      "browse the failure log",
+      "scsh failures [--session S] [--skill N] [--reason C] [--last N] [--stats]",
+      &[
+        ("--session/--skill/--reason", "Filter by session id, skill name, or reason code."),
+        ("--last N", "Show only the last N entries (0 = all)."),
+        ("--stats", "Aggregate counts per reason instead of listing entries."),
+      ],
+    ),
+    "stats" => (
+      "run durations & workload per route",
+      "scsh stats [--skill N] [--profile P] [--harness H] [--model M] [--raw] [--last N]",
+      &[
+        ("--skill/--profile", "Filter by skill name or profile."),
+        ("--harness/--model", "Filter by harness or model route."),
+        ("--raw", "One row per run instead of aggregates."),
+        ("--last N", "Limit to the last N runs."),
+      ],
+    ),
+    "prune" => (
+      "the run-dir cleanup queue",
+      "scsh prune [--now]",
+      &[("--now", "Force a janitor pass now instead of just showing the queue.")],
+    ),
+    "annotate-cast" => (
+      "summarize + chapter recordings",
+      "scsh annotate-cast <cast…> [--json]",
+      &[
+        ("<cast…>", "One or more .cast files to annotate via cursor-agent on the Composer model."),
+        ("--json", "Emit the written sidecar paths as JSON; on by default when stdout is not a TTY."),
+        ("SCSH_ANNOTATE_MODEL", "Override the model (default composer-2.5-fast)."),
+      ],
+    ),
+    "version" => {
+      ("print the version", "scsh version", &[("(no flags)", "Print the version with the build's git hash.")])
+    }
+    _ => ("", "scsh help", &[]),
+  };
+  println!("{} {}", h_head(name), console::style(format!("\u{2014} {tagline}")).bold());
+  println!();
+  println!("{}", h_head("Synopsis"));
+  println!("{}", h_dim(&format!("  {synopsis}")));
+  println!();
+  if !body.is_empty() {
+    println!("{}", h_head("Flags & arguments"));
+    for (flag, desc) in body {
+      help_row(flag, desc);
+    }
+    println!();
+  }
+  println!("{}", h_dim("  See `scsh help` for all commands, `scsh help exitcodes` for exit codes."));
+  println!();
 }
 
 /// The default page: a compact, one-line-per-command overview. The detail lives in
@@ -3925,10 +4096,12 @@ fn print_help_overview() {
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
   println!("{}", h_head("More help:"));
+  help_row("scsh help <command>", "Focused help for any command above (e.g. `scsh help stats`).");
   help_row("scsh help run", "How to run skills: profiles, preflight, exit codes, env vars.");
   help_row("scsh help .scsh.yml", "The project config file: every field + env syntax.");
   help_row("scsh help internals", "How a run works: clone, containers, auth, live board.");
   help_row("scsh help cache", "How results are cached, and when a re-run is a hit.");
+  help_row("scsh help exitcodes", "The exit-code table (0 ok, 1 failure, 2 usage).");
   println!();
   println!("{}", h_head("Options:"));
   help_row("--profile <names>", "With `run`: only these profiles (`default` = no-profile skills).");
