@@ -565,11 +565,12 @@ fn wrap_tui_shell(
   term: crate::config::Terminal,
 ) -> String {
   let model_label = model.unwrap_or("(harness default)");
-  // Record the harness's own exit status to `${SCSH_RUN_LOG}.exit` — scsh otherwise never sees
-  // it (asciinema and the tmux pane both swallow it), which makes a harness that dies abnormally
-  // (crash, signal, OOM → 137/143/130) indistinguishable from one that just wrote no result.
-  // The `echo` writes to a file, not the terminal, so it does not pollute the recording.
-  let recorded_cmd = format!("{tui_cmd}; echo $? > \"${{{log_var}}}.exit\"", log_var = RUN_LOG_VAR);
+  // `scsh-tui-record` records the harness's exit status to `${SCSH_RUN_LOG}.exit` via an EXIT
+  // trap it wraps around this command, and a per-signal trace to `${SCSH_RUN_LOG}.tuidebug`.
+  // scsh otherwise never sees the exit (asciinema and the tmux pane both swallow it), which makes
+  // a harness that dies abnormally (crash, signal, OOM → 137/143/130) indistinguishable from one
+  // that merely wrote no result. A trap is used rather than a bare `; echo $?` so a catchable
+  // signal still records — an ABSENT .exit then uniquely means an uncatchable SIGKILL.
   format!(
     "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
@@ -580,7 +581,7 @@ scsh-tui-record {cols} {rows} {quit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log
     rows = term.rows,
     quit = quit.as_arg(),
     result_q = shell_quote(result),
-    tui_q = shell_quote(&recorded_cmd),
+    tui_q = shell_quote(tui_cmd),
   )
 }
 

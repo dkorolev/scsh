@@ -214,6 +214,14 @@ impl Harness {
     &["opencode", "claude", "codex", "grok", "cursor"]
   }
 
+  /// Whether this harness runs as an interactive TUI recorded under tmux + asciinema (rather
+  /// than a headless print/exec mode). For a TUI harness a missing result file can be a transient
+  /// external interruption (a stray signal / teardown killing the pane) worth one retry, not only
+  /// a deterministic skill bug.
+  pub fn is_tui(self) -> bool {
+    matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor)
+  }
+
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
   /// grok passes `--effort`, codex passes `-c model_reasoning_effort=`, cursor appends
   /// a hyphen suffix on `--model` (e.g. `claude-opus-4-8-low`, `composer-2.5-fast`).
@@ -1764,6 +1772,17 @@ skills:
   fn skills_must_be_mapping() {
     let errs = validate("skills: hello\n").unwrap_err();
     assert!(errs.iter().any(|e| e.contains("mapping")));
+  }
+
+  #[test]
+  fn tui_harnesses_are_the_interactive_ones() {
+    // Claude/Codex/Cursor run under tmux+asciinema (their missing-result failures are retryable);
+    // Opencode/Grok are headless.
+    assert!(Harness::Claude.is_tui());
+    assert!(Harness::Codex.is_tui());
+    assert!(Harness::Cursor.is_tui());
+    assert!(!Harness::Opencode.is_tui());
+    assert!(!Harness::Grok.is_tui());
   }
 
   #[test]

@@ -1731,8 +1731,12 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
             return first;
           }
           // One automatic retry for transient infrastructure failures (fresh clone, fresh
-          // container, new live-board row). Deterministic failures return as-is.
-          let transient = first.fail_reason.as_deref().is_some_and(failure::is_transient);
+          // container, new live-board row). Deterministic failures return as-is. A missing result
+          // from a TUI harness also earns a retry: its pane can be killed by a stray signal or
+          // teardown before it writes the file, which a fresh run usually clears.
+          let transient = first.fail_reason.as_deref().is_some_and(|r| {
+            failure::is_transient(r) || (r == failure::reason::RESULT_MISSING && skill.harness.is_tui())
+          });
           if !transient || !failure::retry_enabled() {
             return first;
           }
@@ -2280,6 +2284,8 @@ fn persist_run_artifacts(root: &Path, run_dir: &Path, skill_name: &str, epoch_se
       (runtime::RUN_LOG_REL.to_string(), "log"),
       (format!("{}.debug", runtime::RUN_LOG_REL), "debug.log"),
       (format!("{}.last", runtime::RUN_LOG_REL), "last.log"),
+      (format!("{}.exit", runtime::RUN_LOG_REL), "exit"),
+      (format!("{}.tuidebug", runtime::RUN_LOG_REL), "tuidebug"),
     ] {
       let src = run_dir.join(&rel);
       if src.is_file() {

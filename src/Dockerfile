@@ -143,14 +143,36 @@ RUN cat > /usr/local/bin/scsh-tui-record <<'SCSH_TUI_RECORD'
 #   QUIT: slash-exit (Claude) | double-ctrl-c (codex, cursor)
 set -u
 cols=$1; rows=$2; quit=$3; result=$4; cmd=$5
+dbg="$SCSH_RUN_LOG.tuidebug"
+exit_file="$SCSH_RUN_LOG.exit"
+log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }
 
-tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$cmd"
+# Resolve RESULT to an absolute path so a CWD change (git-transport clones into the repo dir)
+# can never make the watcher misjudge whether the skill has finished (hypothesis: false match).
+case "$result" in /*) : ;; *) result="$(pwd)/$result" ;; esac
+
+log "start cols=$cols rows=$rows quit=$quit result=$result cwd=$(pwd) pid=$$"
+log "result_exists_at_start=$([ -f "$result" ] && echo YES || echo NO)"
+
+# Wrap the harness in traps so the pane ALWAYS records how it ended: the EXIT trap writes the
+# exit code (fires on normal exit AND catchable signals), and per-signal traps name the signal.
+# Only an uncatchable SIGKILL (OOM / force-stop) escapes — so an ABSENT .exit file is itself the
+# diagnosis. This replaces a bare `; echo $?`, which a signal would skip.
+pane_cmd="trap 'ec=\$?; echo \$ec > \"$exit_file\"; echo pane_exit=\$ec >> \"$dbg\"' EXIT; \
+trap 'echo pane_signal=TERM >> \"$dbg\"' TERM; \
+trap 'echo pane_signal=INT  >> \"$dbg\"' INT; \
+trap 'echo pane_signal=HUP  >> \"$dbg\"' HUP; \
+$cmd"
+
+tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"
+log "tmux new-session rc=$?"
 tmux set -t scsh status off >/dev/null 2>&1 || true
 
 # Watcher: end the TUI once the skill has produced its result file.
 {
   while tmux has-session -t scsh 2>/dev/null; do
     if [ -f "$result" ]; then
+      log "watcher: result appeared -> quit via $quit"
       sleep 4
       case "$quit" in
         slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
@@ -158,14 +180,18 @@ tmux set -t scsh status off >/dev/null 2>&1 || true
       esac
       sleep 3
       tmux kill-session -t scsh 2>/dev/null || true
+      log "watcher: killed session"
       break
     fi
     sleep 2
   done
+  log "watcher: exit (session gone or killed)"
 } >/dev/null 2>&1 &
 
 asciinema rec -q --cols "$cols" --rows "$rows" -c 'tmux attach -r -t scsh' "$SCSH_RUN_LOG.cast"
+log "asciinema exited rc=$?"
 wait
+log "done"
 SCSH_TUI_RECORD
 RUN chmod 0755 /usr/local/bin/scsh-tui-record
 
