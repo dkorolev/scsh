@@ -71,7 +71,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
-    Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths),
+    Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
   }
 }
 
@@ -81,34 +81,58 @@ fn annotate_model() -> String {
 }
 
 /// `annotate-cast <cast>…`: write a `{summary, chapters}` sidecar next to each cast using
-/// cursor-agent on the Composer model. Skips (with a note) when cursor/Composer is absent.
-fn annotate_casts_cmd(paths: &[String]) -> i32 {
+/// cursor-agent on the Composer model. Human output (progress, notes) goes to stderr; with
+/// `--json` (or when stdout is not a TTY) the sidecar paths are emitted as JSON on stdout,
+/// and errors as a single-key `{"Error": …}` object (§2).
+fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
+  use std::io::IsTerminal;
+  let as_json = json_flag || !std::io::stdout().is_terminal();
   if paths.is_empty() {
-    eprintln!("annotate-cast: give one or more .cast files, e.g. scsh annotate-cast tmp/casts/foo.cast");
-    return 2;
+    return annotate_error(as_json, 2, "give one or more .cast files, e.g. scsh annotate-cast tmp/casts/foo.cast");
   }
   if !annotate::host_can_annotate() {
-    eprintln!("annotate-cast: cursor-agent not available (need the `cursor-agent` CLI and cursor login) — skipping");
-    return 1;
+    return annotate_error(as_json, 1, "cursor-agent not available (need the `cursor-agent` CLI and a cursor login)");
   }
   let model = annotate_model();
-  let mut ok = 0;
+  let mut sidecars: Vec<(String, String)> = Vec::new(); // (cast, sidecar)
   for path in paths {
-    let cast = std::path::Path::new(path);
-    eprint!("annotate {path} … ");
-    match annotate::annotate_cast_with(cast, &model, annotate::run_cursor_agent) {
+    if !as_json {
+      eprint!("annotate {path} … ");
+    }
+    match annotate::annotate_cast_with(std::path::Path::new(path), &model, annotate::run_cursor_agent) {
       Some(sidecar) => {
-        eprintln!("✓ {}", sidecar.display());
-        ok += 1;
+        if !as_json {
+          eprintln!("✓ {}", sidecar.display());
+        }
+        sidecars.push((path.clone(), sidecar.to_string_lossy().into_owned()));
       }
-      None => eprintln!("✗ (no annotation produced)"),
+      None if !as_json => eprintln!("✗ (no annotation produced)"),
+      None => {}
     }
   }
-  if ok == paths.len() {
+  if as_json {
+    let items: Vec<String> = sidecars
+      .iter()
+      .map(|(cast, side)| format!("    {{ \"cast\": {}, \"sidecar\": {} }}", json::quote(cast), json::quote(side)))
+      .collect();
+    println!("{{\n  \"annotated\": [\n{}\n  ]\n}}", items.join(",\n"));
+  }
+  if sidecars.len() == paths.len() {
     0
   } else {
     1
   }
+}
+
+/// Report an `annotate-cast` failure in the active mode: a single-key `{"Error": …}` JSON
+/// object on stdout when machine-facing, a plain note on stderr for a human. Returns `code`.
+fn annotate_error(as_json: bool, code: i32, message: &str) -> i32 {
+  if as_json {
+    println!("{{ \"Error\": {{ \"message\": {} }} }}", json::quote(message));
+  } else {
+    eprintln!("annotate-cast: {message}");
+  }
+  code
 }
 
 /// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
@@ -441,8 +465,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  if json && !matches!(mode, Mode::List) {
-    return Err("--json only applies to 'list' (e.g. `scsh list --json`)".into());
+  if json && !matches!(mode, Mode::List | Mode::AnnotateCasts) {
+    return Err("--json only applies to 'list' and 'annotate-cast'".into());
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -3896,6 +3920,7 @@ fn print_help_overview() {
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
+  help_row("annotate-cast <cast…>", "Summarize + chapter recordings via cursor/Composer (--json).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -4280,6 +4305,30 @@ fn print_help_cache() {
 mod tests {
   use super::*;
   use std::ffi::OsString;
+
+  #[test]
+  fn persist_run_artifacts_copies_cast_and_logs_with_shared_stem() {
+    let base = std::env::temp_dir().join(format!("scsh-persist-test-{}", runtime::random_nonce_6()));
+    let root = base.join("repo");
+    let run_dir = base.join("run");
+    std::fs::create_dir_all(run_dir.join("tmp")).unwrap();
+    std::fs::write(run_dir.join(runtime::RUN_CAST_REL), "cast-bytes").unwrap();
+    std::fs::write(run_dir.join(runtime::RUN_LOG_REL), "log-bytes").unwrap();
+    std::fs::write(run_dir.join(format!("{}.debug", runtime::RUN_LOG_REL)), "debug-bytes").unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+
+    let cast = persist_run_artifacts(&root, &run_dir, "add", 1_700_000_000).unwrap();
+    // The returned cast lives in tmp/casts/; its stem drives the log names too.
+    let casts_dir = root.join("tmp").join("casts");
+    assert!(cast.starts_with(casts_dir.to_string_lossy().as_ref()), "cast in tmp/casts: {cast}");
+    let stem = std::path::Path::new(&cast).file_stem().unwrap().to_string_lossy().into_owned();
+    assert!(stem.starts_with("add-"), "stem starts with skill name: {stem}");
+    assert_eq!(std::fs::read_to_string(&cast).unwrap(), "cast-bytes");
+    let logs = root.join("tmp").join("logs");
+    assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.log"))).unwrap(), "log-bytes");
+    assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.debug.log"))).unwrap(), "debug-bytes");
+    let _ = std::fs::remove_dir_all(&base);
+  }
 
   #[test]
   fn opencode_auth_path_prefers_xdg_then_home() {
