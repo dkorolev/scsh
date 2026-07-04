@@ -147,6 +147,7 @@ nonce keeps same-second runs from overwriting each other. Logs are kept for **ev
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SCSH_DAEMON_PORT` | `7274` | HTTP listen port (localhost only) |
+| `SCSH_HOME` | `~/.scsh` | Dir for the persistent session store (`daemon-<port>.redb`) |
 
 ## Where state lives
 

@@ -50,7 +50,6 @@ pub struct Server {
 
 impl Server {
   pub fn new(mode: DaemonMode, port: u16) -> Server {
-    let now = now_unix_secs();
     let db = match StoreDb::open(port) {
       Ok(db) => Some(db),
       Err(e) => {
@@ -58,6 +57,14 @@ impl Server {
         None
       }
     };
+    Self::with_db(mode, port, db)
+  }
+
+  /// Build a server around an already-opened store DB. `new` resolves the DB from the port's
+  /// `~/.scsh` path; tests pass an explicit temp-file DB so they touch neither the real home
+  /// nor the process-global `SCSH_HOME`.
+  fn with_db(mode: DaemonMode, port: u16, db: Option<StoreDb>) -> Server {
+    let now = now_unix_secs();
     let mut store = Store::new(mode, port, now);
     if let Some(db) = &db {
       store.sessions = db.load_sessions();
@@ -1221,41 +1228,42 @@ mod tests {
 
   #[test]
   fn server_reload_keeps_sessions_but_resets_runtime_state() {
-    // Point the scsh home at a throwaway dir so the redb store never touches the real ~/.scsh.
-    let home = std::env::temp_dir().join(format!("scsh-home-{}", crate::runtime::random_nonce_6()));
-    // SAFETY (edition 2021): env mutation is a safe API; only Server::new resolves the home,
-    // and this is the sole test that sets it.
-    std::env::set_var(crate::daemon::paths::HOME_ENV, &home);
-    let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    // An explicit temp-file DB (via `with_db`) — no `SCSH_HOME`, no real ~/.scsh, no global env
+    // race with other tests.
+    let db_path = std::env::temp_dir().join(format!("scsh-reload-{}.redb", crate::runtime::random_nonce_6()));
+    let port = 7274;
 
     // First instance: register a session, persist it to redb, then drop (releases the DB lock).
     {
-      let server = Server::new(DaemonMode::Persistent, port);
+      let db = crate::daemon::db::StoreDb::open_path(&db_path).unwrap();
+      let server = Server::with_db(DaemonMode::Persistent, port, Some(db));
       {
         let mut store = lock_store(&server.store);
-        let mut s = Session {
-          id: "sessaa".into(),
-          started_at: 1,
-          ended_at: None,
-          profile: None,
-          repo: "/r".into(),
-          branch: "main".into(),
-          skills: Vec::new(),
-          procs: Vec::new(),
-          last_seen_at: 1,
-          client_connected: true,
-        };
-        s.client_connected = true;
-        store.insert_session("sessaa".into(), s);
+        store.insert_session(
+          "sessaa".into(),
+          Session {
+            id: "sessaa".into(),
+            started_at: 1,
+            ended_at: None,
+            profile: None,
+            repo: "/r".into(),
+            branch: "main".into(),
+            skills: Vec::new(),
+            procs: Vec::new(),
+            last_seen_at: 1,
+            client_connected: true,
+          },
+        );
       }
       server.dirty_sessions.lock().unwrap().insert("sessaa".into());
       server.persist_now();
     }
 
-    // Second instance on the same port+home: the session reloads from redb, but the daemon's
-    // own runtime state is fresh (started_at ~ now, no client connected).
+    // Second instance on the same DB: the session reloads, but the daemon's own runtime state
+    // is fresh (started_at ~ now, no client connected).
     let before = now_unix_secs();
-    let server2 = Server::new(DaemonMode::Persistent, port);
+    let db = crate::daemon::db::StoreDb::open_path(&db_path).unwrap();
+    let server2 = Server::with_db(DaemonMode::Persistent, port, Some(db));
     {
       let store = lock_store(&server2.store);
       assert!(store.sessions.contains_key("sessaa"), "session reloaded from redb");
@@ -1263,9 +1271,7 @@ mod tests {
       assert!(!store.sessions["sessaa"].client_connected, "reload marks clients disconnected");
     }
     drop(server2);
-
-    std::env::remove_var(crate::daemon::paths::HOME_ENV);
-    let _ = std::fs::remove_dir_all(&home);
+    let _ = std::fs::remove_file(&db_path);
   }
 
   #[test]

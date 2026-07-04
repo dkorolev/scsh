@@ -22,6 +22,7 @@ const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
 /// A handle to the daemon's redb store. Cheap to clone-free share via `&self` — redb
 /// serializes its own access, so no external lock is needed.
 pub struct StoreDb {
+  /// The open redb database (holds an exclusive OS lock on the file for this process's life).
   db: Database,
 }
 

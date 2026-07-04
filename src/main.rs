@@ -4001,7 +4001,9 @@ fn print_help_command(name: &str) {
         ("start", "Run a persistent daemon until `daemon stop`."),
         ("stop", "Stop the running daemon."),
         ("restart", "Stop then start (persistent)."),
-        ("status", "Exit 0 when the daemon is listening. See DAEMON.md; port via SCSH_DAEMON_PORT."),
+        ("status", "Exit 0 when the daemon is listening."),
+        ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
+        ("SCSH_HOME", "Dir for the session store DB (default ~/.scsh). See DAEMON.md."),
       ],
     ),
     "failures" => (
