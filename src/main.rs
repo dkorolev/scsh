@@ -1965,6 +1965,7 @@ fn run_one_skill(
       }
     }
   }
+  container_env.extend(runtime::harness_container_env(skill.harness));
   if let Some(d) = &git_daemon {
     container_env.extend(d.env());
   }
@@ -3757,7 +3758,6 @@ the run fails only when every selected skill is skipped.",
     "Override git-daemon host IP inside the container (default: ip route gateway).",
   );
   help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
-  help_row("SCSH_QUIET=1", "Disable verbose harness output on the live board.");
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
   println!();
@@ -3925,8 +3925,10 @@ fn print_help_internals() {
   are copied into tmp/.grok — the image's GROK_HOME — XAI_API_KEY is forwarded when set,
   and credentials are scrubbed after exit (opt out: SCSH_NO_GROK_AUTH=1). Grok is the
   recommended native harness for Grok models.
-  Harness runs pass `--verbose` (Claude) or `--print-logs --log-level INFO` (OpenCode) so
-  the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
+  Harness runs at full verbosity (OpenCode DEBUG + --print-logs; Claude --verbose --debug;
+  Codex RUST_LOG tracing + its final message appended to the log; Grok --debug + its debug
+  log appended);
+  every line is teed to tmp/scsh-run.log and the session browser daemon (opt out: SCSH_QUIET=1).
   A transient infra failure (timeout, container/clone error) is retried once on a fresh
   clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.
   Every skill outcome is also recorded durably in ~/.scsh/stats.jsonl — route, duration,

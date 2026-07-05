@@ -277,6 +277,26 @@ pub fn harness_verbose_enabled() -> bool {
   !matches!(std::env::var("SCSH_QUIET").ok().as_deref(), Some("1") | Some("true"))
 }
 
+/// Extra `-e` pairs injected into every skill container so harnesses log generously.
+pub fn harness_container_env(harness: Harness) -> Vec<(String, String)> {
+  harness_container_env_verbose(harness, harness_verbose_enabled())
+}
+
+fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String, String)> {
+  match harness {
+    Harness::Opencode => vec![("OPENCODE_CLIENT".to_string(), "scsh".to_string())],
+    Harness::Claude if verbose => {
+      vec![("DEBUG".to_string(), "1".to_string()), ("CLAUDE_CODE_DEBUG_LOG_LEVEL".to_string(), "verbose".to_string())]
+    }
+    Harness::Claude => Vec::new(),
+    // Codex is a Rust CLI; RUST_LOG enables its tracing output (stderr → the teed run log).
+    Harness::Codex if verbose => vec![("RUST_LOG".to_string(), "codex_core=info,codex_exec=info".to_string())],
+    Harness::Codex => Vec::new(),
+    // Grok's verbosity comes from --debug/--debug-file flags; no env needed.
+    Harness::Grok => Vec::new(),
+  }
+}
+
 /// The shell command a harness runs *inside the container* for one skill.
 /// Output is always teed to [`RUN_LOG_VAR`] for the daemon; `SCSH_QUIET=1` drops the debug flags.
 /// `effort` is the `.scsh.yml` reasoning-effort level (codex and grok only; expansion
@@ -1658,6 +1678,18 @@ mod tests {
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
     let without = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add.json", true);
     assert!(!without.contains("model_reasoning_effort"));
+  }
+
+  #[test]
+  fn harness_container_env_depends_on_verbosity() {
+    assert_eq!(harness_container_env_verbose(Harness::Opencode, true).len(), 1);
+    assert_eq!(harness_container_env_verbose(Harness::Opencode, false).len(), 1);
+    assert_eq!(harness_container_env_verbose(Harness::Claude, true).len(), 2);
+    assert!(harness_container_env_verbose(Harness::Claude, false).is_empty());
+    let codex = harness_container_env_verbose(Harness::Codex, true);
+    assert_eq!(codex.len(), 1);
+    assert_eq!(codex[0].0, "RUST_LOG");
+    assert!(harness_container_env_verbose(Harness::Codex, false).is_empty());
   }
 
   #[test]
