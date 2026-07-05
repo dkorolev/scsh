@@ -12,6 +12,7 @@ mod json;
 mod runtime;
 mod sha1;
 mod sha256;
+mod stats;
 mod ui;
 mod version;
 
@@ -67,6 +68,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Daemon { action } => daemon_cmd(action),
     Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
     Mode::Failures => failures_cmd(&cli.failures),
+    Mode::Stats => stats_cmd(&cli.failures, profile),
   }
 }
 
@@ -93,6 +95,8 @@ enum Mode {
   },
   /// Browse the failure log (`scsh failures`), with filters and `--stats`.
   Failures,
+  /// Browse durable run statistics (`scsh stats`): durations and workload per route.
+  Stats,
 }
 
 #[derive(Clone, Copy)]
@@ -137,7 +141,7 @@ struct Cli {
   failures: FailuresOpts,
 }
 
-/// Filters and output flags for `scsh failures`.
+/// Filters and output flags shared by `scsh failures` and `scsh stats`.
 #[derive(Default)]
 struct FailuresOpts {
   session: Option<String>,
@@ -146,6 +150,11 @@ struct FailuresOpts {
   stats: bool,
   /// How many trailing events/rows to show (`--last N`; `--last 0` = all; default 50).
   last: Option<usize>,
+  /// `scsh stats` route filters.
+  harness: Option<String>,
+  model: Option<String>,
+  /// `scsh stats --raw`: print individual rows instead of aggregates.
+  raw: bool,
 }
 
 /// Parse cargo-style subcommands. The default (no command) is `help`, so a bare
@@ -219,19 +228,28 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `failures [--session S] [--skill NAME] [--reason CODE] [--last N] [--stats]`:
       // browse the append-only failure log (see `scsh run`'s "failure log:" hint).
       "failures" => Some(Mode::Failures),
-      "--session" | "--skill" | "--reason" => {
+      // `stats [--skill NAME] [--profile P] [--harness H] [--model M] [--raw] [--last N]`:
+      // durations and workload sizes per skill and harness·model route (~/.scsh/stats.jsonl).
+      "stats" => Some(Mode::Stats),
+      "--session" | "--skill" | "--reason" | "--harness" | "--model" => {
         let flag = args[i].clone();
         i += 1;
         let value = args.get(i).ok_or_else(|| format!("{flag} needs a value"))?.clone();
         match flag.as_str() {
           "--session" => failures.session = Some(value),
           "--skill" => failures.skill = Some(value),
+          "--harness" => failures.harness = Some(value),
+          "--model" => failures.model = Some(value),
           _ => failures.reason = Some(value),
         }
         None
       }
       "--stats" => {
         failures.stats = true;
+        None
+      }
+      "--raw" => {
+        failures.raw = true;
         None
       }
       "--last" => {
@@ -325,10 +343,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   // (requested_profiles splits on `,`/`;`), so `run a b`, `run --profile a,b`, and
   // `run --profile a b` are all equivalent.
   let profile = if profiles.is_empty() { None } else { Some(profiles.join(",")) };
-  // `check-profile` carries its single profile name in the same field, so it's allowed here too.
-  if profile.is_some() && !matches!(mode, Mode::Run | Mode::CheckProfile) {
+  // `check-profile` carries its single profile name in the same field; `stats` filters by it.
+  if profile.is_some() && !matches!(mode, Mode::Run | Mode::CheckProfile | Mode::Stats) {
     return Err(
-      "profiles only apply to 'run' (e.g. `scsh run code-review` or `scsh run --profile code-review`)".into(),
+      "profiles only apply to 'run' and 'stats' (e.g. `scsh run code-review` or `scsh stats --profile code-review`)"
+        .into(),
     );
   }
   if !sources.is_empty() && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
@@ -343,9 +362,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
   }
+  if (failures.harness.is_some() || failures.model.is_some() || failures.raw) && !matches!(mode, Mode::Stats) {
+    return Err("--harness/--model/--raw only apply to 'stats'".into());
+  }
   let shared_query_flags = failures.session.is_some() || failures.skill.is_some() || failures.last.is_some();
-  if shared_query_flags && !matches!(mode, Mode::Failures) {
-    return Err("--session/--skill/--last only apply to 'failures'".into());
+  if shared_query_flags && !matches!(mode, Mode::Failures | Mode::Stats) {
+    return Err("--session/--skill/--last only apply to 'failures' or 'stats'".into());
   }
   Ok(Cli { mode, profile, sources, verbose, json, failures })
 }
@@ -1126,6 +1148,154 @@ fn print_failure_stats(events: &[failure::FailureEvent]) {
   }
 }
 
+/// `scsh stats`: aggregate the durable run statistics — how long skills take per
+/// harness·model route, against the workload they processed (commits + LOC over main).
+fn stats_cmd(opts: &FailuresOpts, profile: Option<&str>) -> i32 {
+  let records = stats::read_records();
+  let matches_common = |r: &stats::StatRecord| {
+    if let Some(s) = &opts.session {
+      if r.session != *s {
+        return false;
+      }
+    }
+    if let Some(p) = profile {
+      if r.profile.as_deref() != Some(p) {
+        return false;
+      }
+    }
+    true
+  };
+  let skill_rows: Vec<&stats::StatRecord> = records
+    .iter()
+    .filter(|r| r.kind == "skill" && matches_common(r))
+    .filter(|r| {
+      opts.skill.as_deref().is_none_or(|s| r.skill.as_deref() == Some(s) || r.skill_source.as_deref() == Some(s))
+    })
+    .filter(|r| opts.harness.as_deref().is_none_or(|h| r.harness.as_deref() == Some(h)))
+    .filter(|r| opts.model.as_deref().is_none_or(|m| r.model.as_deref() == Some(m)))
+    .collect();
+  let run_rows: Vec<&stats::StatRecord> = records.iter().filter(|r| r.kind == "run" && matches_common(r)).collect();
+  if skill_rows.is_empty() && run_rows.is_empty() {
+    println!("no recorded runs match");
+    hint(&format!("stats file: {}", stats::stats_path().display()));
+    return 0;
+  }
+  if opts.raw {
+    print_stats_raw(&skill_rows, &run_rows, opts.last);
+    return 0;
+  }
+  print_run_aggregates(&run_rows);
+  print_skill_aggregates(&skill_rows);
+  hint(&format!("stats file: {} (individual rows: scsh stats --raw)", stats::stats_path().display()));
+  0
+}
+
+fn print_stats_raw(skill_rows: &[&stats::StatRecord], run_rows: &[&stats::StatRecord], last: Option<usize>) {
+  let mut rows: Vec<&stats::StatRecord> = skill_rows.iter().chain(run_rows.iter()).copied().collect();
+  rows.sort_by_key(|r| r.ts);
+  let keep = match last {
+    Some(0) => rows.len(),
+    Some(n) => n,
+    None => 50,
+  };
+  let start = rows.len().saturating_sub(keep);
+  if start > 0 {
+    println!("… {start} earlier row(s) hidden — rerun with --last 0 for all");
+  }
+  for r in &rows[start..] {
+    let when = runtime::format_utc_timestamp(r.ts);
+    if r.kind == "run" {
+      println!(
+        "{when}  run    {:>7.1}s  profile={} session={} skills={}/{} ok  commits={} loc={}",
+        r.duration_secs,
+        r.profile.as_deref().unwrap_or("(default)"),
+        r.session,
+        r.skills_total.unwrap_or(0) - r.skills_failed.unwrap_or(0),
+        r.skills_total.unwrap_or(0),
+        r.commits,
+        r.loc_total(),
+      );
+    } else {
+      let route = r.route_label();
+      let outcome = r.outcome.as_deref().unwrap_or("?");
+      let retry = if r.attempts > 1 { " (retried)" } else { "" };
+      println!(
+        "{when}  skill  {:>7.1}s  {}  {route}  {outcome}{retry}  commits={} loc={}",
+        r.duration_secs,
+        r.skill_source.as_deref().or(r.skill.as_deref()).unwrap_or("?"),
+        r.commits,
+        r.loc_total(),
+      );
+    }
+  }
+}
+
+fn print_run_aggregates(run_rows: &[&stats::StatRecord]) {
+  if run_rows.is_empty() {
+    return;
+  }
+  use std::collections::BTreeMap;
+  let mut by_profile: BTreeMap<String, Vec<&stats::StatRecord>> = BTreeMap::new();
+  for r in run_rows {
+    by_profile.entry(r.profile.clone().unwrap_or_else(|| "(default)".into())).or_default().push(r);
+  }
+  println!("runs by profile:");
+  for (profile, rows) in &by_profile {
+    let n = rows.len() as f64;
+    let mean_secs: f64 = rows.iter().map(|r| r.duration_secs).sum::<f64>() / n;
+    let mean_commits: f64 = rows.iter().map(|r| r.commits as f64).sum::<f64>() / n;
+    let mean_loc: f64 = rows.iter().map(|r| r.loc_total() as f64).sum::<f64>() / n;
+    let failed_runs = rows.iter().filter(|r| r.skills_failed.unwrap_or(0) > 0).count();
+    println!(
+      "  {profile}: {} run(s), avg {:.0}s, avg workload {:.1} commits / {:.0} LOC{}",
+      rows.len(),
+      mean_secs,
+      mean_commits,
+      mean_loc,
+      if failed_runs > 0 { format!(", {failed_runs} with failures") } else { String::new() },
+    );
+  }
+  println!();
+}
+
+fn print_skill_aggregates(skill_rows: &[&stats::StatRecord]) {
+  if skill_rows.is_empty() {
+    return;
+  }
+  use std::collections::BTreeMap;
+  // Group by (skill_source, harness · model (effort)) — "each reviewer, each route".
+  let mut groups: BTreeMap<(String, String), Vec<&stats::StatRecord>> = BTreeMap::new();
+  for r in skill_rows {
+    let skill = r.skill_source.clone().or_else(|| r.skill.clone()).unwrap_or_else(|| "?".into());
+    groups.entry((skill, r.route_label())).or_default().push(r);
+  }
+  let skill_w = groups.keys().map(|(s, _)| s.len()).max().unwrap_or(5).max(5);
+  let route_w = groups.keys().map(|(_, r)| r.len()).max().unwrap_or(5).max(5);
+  println!("skills by route (durations exclude cache hits):");
+  println!(
+    "  {:<skill_w$}  {:<route_w$}  {:>4} {:>3} {:>4} {:>5} {:>5}  {:>7} {:>7} {:>7}  {:>8} {:>7}",
+    "skill", "route", "runs", "ok", "fail", "cache", "retry", "avg s", "min s", "max s", "~commits", "~LOC"
+  );
+  for ((skill, route), rows) in &groups {
+    let agg = stats::aggregate_skills(rows);
+    println!(
+      "  {:<skill_w$}  {:<route_w$}  {:>4} {:>3} {:>4} {:>5} {:>5}  {:>7.1} {:>7.1} {:>7.1}  {:>8.1} {:>7.0}",
+      skill,
+      route,
+      agg.runs,
+      agg.ok,
+      agg.failed,
+      agg.cached,
+      agg.retried,
+      agg.mean_secs,
+      agg.min_secs,
+      agg.max_secs,
+      agg.mean_commits,
+      agg.mean_loc,
+    );
+  }
+}
+
 /// Absolute repo path for the session browser (canonical when possible).
 fn repo_path_for_session(root: &Path) -> String {
   daemon::absolutize_repo_path(root)
@@ -1315,6 +1485,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   for p in &skill_procs {
     p.note("starting…");
   }
+  let run_started = std::time::Instant::now();
+  let workload = stats::workload_of_repo(root);
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let dc = daemon_client.clone();
     let ui_ref = &ui;
@@ -1325,7 +1497,9 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
       .map(|(&skill, p)| {
         let dc = dc.clone();
         scope.spawn(move || {
-          let first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone());
+          let attempt_started = std::time::Instant::now();
+          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone());
+          first.duration_secs = attempt_started.elapsed().as_secs_f64();
           if first.ok {
             return first;
           }
@@ -1349,7 +1523,11 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
               skill.model.as_deref(),
             );
           }
-          run_one_skill(skill, rt, root, secs, p2, base_ref, dc)
+          let retry_started = std::time::Instant::now();
+          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, dc);
+          second.duration_secs = retry_started.elapsed().as_secs_f64();
+          second.attempts = 2;
+          second
         })
       })
       .collect();
@@ -1404,6 +1582,61 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   if failed > 0 {
     failure::log_run_summary(&session_id, profile, failed, n);
     hint(&format!("failure log: {} (browse with `scsh failures`)", failure::log_path().display()));
+  }
+
+  // Persist run statistics (durable, ~/.scsh/stats.jsonl — browse with `scsh stats`): one
+  // row per skill invocation with its route, outcome, duration, and the repo workload
+  // (commits + LOC over main), plus one rollup row for the whole run.
+  {
+    let branch = current_branch(root);
+    let repo = repo_path_for_session(root);
+    for (skill, o) in skills.iter().zip(outcomes.iter()) {
+      let outcome = if o.cached {
+        "cached"
+      } else if o.ok {
+        "ok"
+      } else {
+        "fail"
+      };
+      stats::record(&stats::StatRecord {
+        ts: secs,
+        kind: "skill".into(),
+        session: session_id.clone(),
+        repo: repo.clone(),
+        branch: branch.clone(),
+        profile: profile.map(str::to_string),
+        skill: Some(skill.name.clone()),
+        skill_source: Some(skill.skill_source.clone()),
+        harness: Some(skill.harness.as_str().to_string()),
+        model: skill.model.clone(),
+        effort: skill.effort.clone(),
+        outcome: Some(outcome.into()),
+        fail_reason: o.fail_reason.clone(),
+        attempts: o.attempts,
+        duration_secs: o.duration_secs,
+        commits: workload.commits,
+        loc_added: workload.loc_added,
+        loc_deleted: workload.loc_deleted,
+        skills_total: None,
+        skills_failed: None,
+      });
+    }
+    stats::record(&stats::StatRecord {
+      ts: secs,
+      kind: "run".into(),
+      session: session_id.clone(),
+      repo,
+      branch,
+      profile: profile.map(str::to_string),
+      attempts: 1,
+      duration_secs: run_started.elapsed().as_secs_f64(),
+      commits: workload.commits,
+      loc_added: workload.loc_added,
+      loc_deleted: workload.loc_deleted,
+      skills_total: Some(n as u64),
+      skills_failed: Some(failed as u64),
+      ..Default::default()
+    });
   }
 
   // 4. Pull commits OUT from commit-enabled skills (host-only, after containers exit).
@@ -1472,6 +1705,12 @@ struct SkillRun {
   ok: bool,
   /// Stable reason code when `ok == false`.
   fail_reason: Option<String>,
+  /// Served from the content-addressed cache (no clone, no container).
+  cached: bool,
+  /// Wall-clock seconds of the (final) attempt — set by the orchestrator, for stats.
+  duration_secs: f64,
+  /// 1, or 2 when the transient-failure retry ran — set by the orchestrator.
+  attempts: u64,
   /// The `/tmp` run dir, kept for inspection when the skill failed.
   run_dir: Option<String>,
   /// Host path to the skill's output log, when its container actually ran.
@@ -1488,7 +1727,17 @@ struct SkillRun {
 
 impl SkillRun {
   fn base() -> SkillRun {
-    SkillRun { ok: false, fail_reason: None, run_dir: None, log: None, clone_dir: None, cached_commits: None }
+    SkillRun {
+      ok: false,
+      fail_reason: None,
+      cached: false,
+      duration_secs: 0.0,
+      attempts: 1,
+      run_dir: None,
+      log: None,
+      clone_dir: None,
+      cached_commits: None,
+    }
   }
   fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
     SkillRun { ok: true, log: Some(log), clone_dir, ..SkillRun::base() }
@@ -1500,7 +1749,7 @@ impl SkillRun {
   /// clone, no container). `cached_commits` carries any journaled commits to replay, so a
   /// hit for a commit-enabled skill still reproduces the commit.
   fn cached(cached_commits: Option<String>) -> SkillRun {
-    SkillRun { ok: true, cached_commits, ..SkillRun::base() }
+    SkillRun { ok: true, cached: true, cached_commits, ..SkillRun::base() }
   }
 }
 
@@ -3349,6 +3598,7 @@ fn print_help_overview() {
   help_row("daemon", "start | stop | restart | status");
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
+  help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -3608,6 +3858,8 @@ fn print_help_internals() {
   the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
   A transient infra failure (timeout, container/clone error) is retried once on a fresh
   clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.
+  Every skill outcome is also recorded durably in ~/.scsh/stats.jsonl — route, duration,
+  attempts, and the branch workload (commits + LOC over main) — browse with `scsh stats`.
   Unavailable harnesses and opencode models are skipped; a run fails only when every selected skill is skipped.
   Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
@@ -3802,6 +4054,24 @@ mod tests {
     assert!(cli(&["failures", "--last", "many"]).is_err(), "--last needs a number");
     assert!(cli(&["run", "--stats"]).is_err(), "failure filters don't apply to run");
     assert!(cli(&["list", "--session", "abc"]).is_err(), "failure filters don't apply to list");
+  }
+
+  #[test]
+  fn stats_command_parses_filters() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["stats"]).unwrap();
+    assert!(matches!(c.mode, Mode::Stats));
+    let c = cli(&["stats", "--skill", "conventions-reviewer", "--harness", "codex", "--model", "gpt-5.5"]).unwrap();
+    assert_eq!(c.failures.skill.as_deref(), Some("conventions-reviewer"));
+    assert_eq!(c.failures.harness.as_deref(), Some("codex"));
+    assert_eq!(c.failures.model.as_deref(), Some("gpt-5.5"));
+    let c = cli(&["stats", "--profile", "code-review", "--raw", "--last", "10"]).unwrap();
+    assert_eq!(c.profile.as_deref(), Some("code-review"));
+    assert!(c.failures.raw);
+    assert_eq!(c.failures.last, Some(10));
+    assert!(cli(&["run", "--raw"]).is_err(), "--raw only applies to stats");
+    assert!(cli(&["failures", "--harness", "codex"]).is_err(), "--harness only applies to stats");
+    assert!(cli(&["stats", "--reason", "clone_failed"]).is_err(), "--reason only applies to failures");
   }
 
   #[test]
