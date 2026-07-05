@@ -30,7 +30,7 @@ pub struct Skill {
   /// `invocations` is set.
   pub harness: Option<Harness>,
   pub model: Option<String>,
-  /// Reasoning effort for harnesses with an effort knob (codex, grok). With
+  /// Reasoning effort for harnesses with an effort knob (codex, grok, cursor). With
   /// `invocations:` it is the default each route may override; routes whose harness
   /// has no effort knob simply ignore an inherited value.
   pub effort: Option<String>,
@@ -150,14 +150,16 @@ pub enum EnvRule {
 }
 
 /// The built-in harness that runs a skill inside the container: `opencode`, `claude`
-/// (Claude Code), `codex` (OpenAI Codex CLI — the native harness for GPT models), or
-/// `grok` (xAI Grok CLI — the native harness for Grok models).
+/// (Claude Code), `codex` (OpenAI Codex CLI — the native harness for GPT models),
+/// `grok` (xAI Grok CLI — the native harness for Grok models), or `cursor` (Cursor
+/// Agent CLI — `cursor agent` headless).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Harness {
   Opencode,
   Claude,
   Codex,
   Grok,
+  Cursor,
 }
 
 impl Harness {
@@ -168,6 +170,7 @@ impl Harness {
       "claude" => Some(Harness::Claude),
       "codex" => Some(Harness::Codex),
       "grok" => Some(Harness::Grok),
+      "cursor" => Some(Harness::Cursor),
       _ => None,
     }
   }
@@ -179,16 +182,18 @@ impl Harness {
       Harness::Claude => "claude",
       Harness::Codex => "codex",
       Harness::Grok => "grok",
+      Harness::Cursor => "cursor",
     }
   }
 
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
-    &["opencode", "claude", "codex", "grok"]
+    &["opencode", "claude", "codex", "grok", "cursor"]
   }
 
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
-  /// grok passes `--effort`, codex passes `-c model_reasoning_effort=`.
+  /// grok passes `--effort`, codex passes `-c model_reasoning_effort=`, cursor appends
+  /// a hyphen suffix on `--model` (e.g. `claude-opus-4-8-low`, `composer-2.5-fast`).
   pub fn supports_effort(self) -> bool {
     !self.effort_levels().is_empty()
   }
@@ -198,6 +203,7 @@ impl Harness {
     match self {
       Harness::Codex => &["minimal", "low", "medium", "high", "xhigh"],
       Harness::Grok => &["low", "medium", "high", "xhigh", "max"],
+      Harness::Cursor => &["low", "medium", "high"],
       Harness::Opencode | Harness::Claude => &[],
     }
   }
@@ -740,7 +746,7 @@ fn check_effort_for_harness(field: &str, harness: Harness, effort: &str, errors:
   let levels = harness.effort_levels();
   if levels.is_empty() {
     errors.push(format!(
-      "'{field}' is set, but harness '{}' has no effort knob (effort works with: codex, grok)",
+      "'{field}' is set, but harness '{}' has no effort knob (effort works with: codex, grok, cursor)",
       harness.as_str()
     ));
   } else if !levels.contains(&effort) {
@@ -1129,6 +1135,25 @@ mod tests {
 "#;
     assert_eq!(validate(yaml).unwrap().skills[0].harness, Some(Harness::Grok));
     assert!(Harness::known().contains(&"grok"));
+  }
+
+  #[test]
+  fn cursor_harness_is_valid() {
+    let yaml = r#"skills:
+  x:
+    harness: cursor
+    model: composer-2.5
+    effort: high
+    result: tmp/x.json
+"#;
+    let cfg = validate(yaml).unwrap();
+    assert_eq!(cfg.skills[0].harness, Some(Harness::Cursor));
+    assert_eq!(cfg.skills[0].model.as_deref(), Some("composer-2.5"));
+    assert_eq!(cfg.skills[0].effort.as_deref(), Some("high"));
+    let inv = expand_invocations(&cfg);
+    assert_eq!(inv[0].harness, Harness::Cursor);
+    assert_eq!(inv[0].effort.as_deref(), Some("high"));
+    assert!(Harness::known().contains(&"cursor"));
   }
 
   #[test]

@@ -1446,6 +1446,17 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     let via = if runtime::grok_auth_file_on_host().is_some() { "~/.grok/auth.json" } else { "XAI_API_KEY" };
     ok(&format!("grok credentials found ({via} forwarded into grok skills)"));
   }
+  let needs_cursor = skills.iter().any(|s| s.harness == config::Harness::Cursor);
+  if needs_cursor && cursor_auth_enabled() && runtime::cursor_container_auth_ready() {
+    let via = if runtime::cursor_api_key().is_some() {
+      "CURSOR_API_KEY"
+    } else if runtime::cursor_auth_file_on_host().is_some() {
+      "auth.json"
+    } else {
+      "macOS keychain"
+    };
+    ok(&format!("cursor credentials found ({via} forwarded into cursor skills)"));
+  }
 
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
 
@@ -1818,6 +1829,7 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
         config::Harness::Claude => parts.push(format!("claude debug log: {l}.debug")),
         config::Harness::Codex => parts.push(format!("codex final message: {l}.last")),
         config::Harness::Grok => parts.push(format!("grok debug log: {l}.debug")),
+        config::Harness::Cursor => {}
         config::Harness::Opencode => {}
       }
     }
@@ -1936,6 +1948,8 @@ fn run_one_skill(
     if skill.harness == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
   let grok_auth =
     if skill.harness == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
+  let cursor_auth =
+    if skill.harness == config::Harness::Cursor && cursor_auth_enabled() { forward_cursor(&run_dir) } else { false };
   let tag = runtime::image_tag(skill.harness);
   let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
     runtime::claude_auth_mounts(auth_root)
@@ -1963,6 +1977,11 @@ fn run_one_skill(
       if !key.is_empty() {
         container_env.push((runtime::XAI_API_KEY_ENV.to_string(), key));
       }
+    }
+  }
+  if skill.harness == config::Harness::Cursor {
+    if let Some(key) = runtime::cursor_api_key() {
+      container_env.push((runtime::CURSOR_API_KEY_ENV.to_string(), key));
     }
   }
   container_env.extend(runtime::harness_container_env(skill.harness));
@@ -2003,6 +2022,9 @@ fn run_one_skill(
   }
   if let Some(p) = &grok_auth {
     scrub_grok_credentials(p);
+  }
+  if cursor_auth {
+    scrub_cursor_credentials(&run_dir);
   }
   match result {
     Ok((true, _, _)) => {}
@@ -2325,6 +2347,11 @@ fn grok_auth_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_GROK_AUTH").ok().as_deref(), Some("1") | Some("true"))
 }
 
+/// Whether scsh forwards cursor credentials into runs (on unless opted out).
+fn cursor_auth_enabled() -> bool {
+  !matches!(std::env::var("SCSH_NO_CURSOR_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
+
 /// Whether scsh keeps every skill's `/tmp` run-clone instead of cleaning up. By default a
 /// successful skill's clone is removed after the run (its result was collected and any commits
 /// integrated) while a failed skill's clone is kept for inspection, and stale clones from past
@@ -2479,6 +2506,66 @@ fn scrub_grok_credentials(grok_dir: &Path) {
   for name in ["auth.json", "config.toml", "user-settings.json"] {
     let _ = std::fs::remove_file(grok_dir.join(name));
   }
+}
+
+/// Copy the host's Cursor config and OAuth tokens into the run clone's gitignored tmp/.
+fn forward_cursor(run_dir: &Path) -> bool {
+  let mut forwarded = false;
+  if let Some(host_home) = runtime::cursor_home_on_host() {
+    let dest = run_dir.join(runtime::CURSOR_FORWARD_REL);
+    let mut any = false;
+    for name in ["cli-config.json", "mcp.json"] {
+      let src = host_home.join(name);
+      if src.is_file() {
+        if std::fs::create_dir_all(&dest).is_ok() {
+          if std::fs::copy(&src, dest.join(name)).is_ok() {
+            #[cfg(unix)]
+            {
+              use std::os::unix::fs::PermissionsExt;
+              let _ = std::fs::set_permissions(dest.join(name), std::fs::Permissions::from_mode(0o600));
+            }
+            any = true;
+          }
+        }
+      }
+    }
+    forwarded |= any;
+  }
+  let auth_dest = run_dir.join(runtime::CURSOR_AUTH_FORWARD_REL);
+  if let Some(src) = runtime::cursor_auth_file_on_host() {
+    if std::fs::create_dir_all(&auth_dest).is_ok() {
+      if std::fs::copy(&src, auth_dest.join("auth.json")).is_ok() {
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = std::fs::set_permissions(auth_dest.join("auth.json"), std::fs::Permissions::from_mode(0o600));
+        }
+        forwarded = true;
+      }
+    }
+  } else if let Some(access) = runtime::cursor_keychain_access_token() {
+    let refresh = runtime::cursor_keychain_refresh_token().unwrap_or_else(|| access.clone());
+    if std::fs::create_dir_all(&auth_dest).is_ok() {
+      let body = format!(r#"{{"accessToken":{},"refreshToken":{}}}"#, json::quote(&access), json::quote(&refresh));
+      if std::fs::write(auth_dest.join("auth.json"), body).is_ok() {
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = std::fs::set_permissions(auth_dest.join("auth.json"), std::fs::Permissions::from_mode(0o600));
+        }
+        forwarded = true;
+      }
+    }
+  }
+  forwarded
+}
+
+/// Remove forwarded Cursor credentials from a run dir, keeping session/log data.
+fn scrub_cursor_credentials(run_dir: &Path) {
+  for name in ["cli-config.json", "mcp.json"] {
+    let _ = std::fs::remove_file(run_dir.join(runtime::CURSOR_FORWARD_REL).join(name));
+  }
+  let _ = std::fs::remove_file(run_dir.join(runtime::CURSOR_AUTH_FORWARD_REL).join("auth.json"));
 }
 
 fn write_claude_credentials_file(claude_dir: &Path, token: &str) -> Option<()> {
@@ -3760,6 +3847,7 @@ the run fails only when every selected skill is skipped.",
   help_row("SCSH_KEEP_RUNS=1", "Keep every /tmp/scsh-*-run-* clone (also skips stale sweep).");
   help_row("SCSH_NO_OPENCODE_AUTH=1", "Do not forward opencode credentials into containers.");
   help_row("SCSH_NO_CLAUDE_AUTH=1", "Do not forward Claude credentials into containers.");
+  help_row("SCSH_NO_CURSOR_AUTH=1", "Do not forward Cursor credentials into containers.");
   println!();
   println!("{}", h_head("After a run"));
   println!("{}", h_dim("  Read each skill's declared `result` path (usually under tmp/). On failure, scsh"));
@@ -3787,11 +3875,12 @@ fn print_help_config() {
     r#"  skills:                 # the only top-level key: one entry per .skills/<name>/ folder
     add:                    #   key must match the skill directory name
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
-                            #     harnesses: opencode | claude | codex | grok
+                            #     harnesses: opencode | claude | codex | grok | cursor
       model: openai/...     #     optional; the model the harness passes to the tool
       effort: high        #     optional; reasoning effort (codex: minimal..xhigh, grok:
-                          #       low..max). With invocations: a default routes may
-                          #       override; harnesses without an effort knob ignore it
+                          #       low..max, cursor: low..high as --model slug suffixes). With
+                          #       invocations: a default routes may override; harnesses
+                          #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
@@ -3854,6 +3943,13 @@ fn print_help_config() {
     h_dim(
       "  grok:     grok -p \"Run .skills/<source>/SKILL.md …\" -m <model> --effort <level> \
 (~/.grok/auth.json or XAI_API_KEY) — the native harness for Grok models",
+    )
+  );
+  println!(
+    "{}",
+    h_dim(
+      "  cursor:   cursor-agent -p --force --trust \"Run .skills/<source>/SKILL.md …\" \
+(macOS keychain / auth.json / CURSOR_API_KEY) — the native harness for Cursor models",
     )
   );
   println!();
@@ -3925,9 +4021,13 @@ fn print_help_internals() {
   are copied into tmp/.grok — the image's GROK_HOME — XAI_API_KEY is forwarded when set,
   and credentials are scrubbed after exit (opt out: SCSH_NO_GROK_AUTH=1). Grok is the
   recommended native harness for Grok models.
+  Cursor skills copy the host ~/.cursor/cli-config.json and optional mcp.json into tmp/.cursor,
+  OAuth tokens from ~/.config/cursor/auth.json or the macOS login keychain into tmp/.config/cursor/auth.json,
+  CURSOR_API_KEY is forwarded when set, and credentials are scrubbed after exit (opt out: SCSH_NO_CURSOR_AUTH=1). Cursor is
+  the native harness for Cursor Agent models (Composer, etc.).
   Harness runs at full verbosity (OpenCode DEBUG + --print-logs; Claude --verbose --debug;
   Codex RUST_LOG tracing + its final message appended to the log; Grok --debug + its debug
-  log appended);
+  log appended; Cursor --output-format stream-json);
   every line is teed to tmp/scsh-run.log and the session browser daemon (opt out: SCSH_QUIET=1).
   A transient infra failure (timeout, container/clone error) is retried once on a fresh
   clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.

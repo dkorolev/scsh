@@ -116,6 +116,7 @@ pub fn image_tag(harness: Harness) -> String {
     Harness::Claude => "scsh-claude:latest".to_string(),
     Harness::Codex => "scsh-codex:latest".to_string(),
     Harness::Grok => "scsh-grok:latest".to_string(),
+    Harness::Cursor => "scsh-cursor:latest".to_string(),
   }
 }
 
@@ -126,6 +127,7 @@ pub fn image_target(harness: Harness) -> &'static str {
     Harness::Claude => "scsh-claude",
     Harness::Codex => "scsh-codex",
     Harness::Grok => "scsh-grok",
+    Harness::Cursor => "scsh-cursor",
   }
 }
 
@@ -207,6 +209,75 @@ pub fn grok_auth_file_on_host() -> Option<PathBuf> {
 /// Whether the host has credentials grok containers can use: `auth.json` or `XAI_API_KEY`.
 pub fn grok_container_auth_ready() -> bool {
   grok_auth_file_on_host().is_some() || std::env::var(XAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// Run-dir-relative Cursor config dir (`CURSOR_CONFIG_DIR` inside the container).
+pub const CURSOR_FORWARD_REL: &str = "tmp/.cursor";
+
+/// Run-dir-relative Linux auth dir (`$XDG_CONFIG_HOME/cursor/auth.json` in the container).
+pub const CURSOR_AUTH_FORWARD_REL: &str = "tmp/.config/cursor";
+
+/// Host env var for API-key Cursor auth (Cursor Dashboard → API Keys; works headless).
+pub const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
+
+/// In-container env var for Cursor CLI config (cli-config.json, mcp.json).
+pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
+
+/// In-container env var so Linux cursor-agent finds auth.json under tmp/.config/cursor/.
+pub const XDG_CONFIG_HOME_ENV: &str = "XDG_CONFIG_HOME";
+
+/// The host's Cursor config dir: `$CURSOR_HOME` or `~/.cursor`.
+pub fn cursor_home_on_host() -> Option<PathBuf> {
+  if let Some(dir) = std::env::var_os("CURSOR_HOME").filter(|d| !d.is_empty()) {
+    return Some(PathBuf::from(dir));
+  }
+  std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cursor"))
+}
+
+/// Host `auth.json` when cursor-agent wrote tokens to disk (typical on Linux).
+pub fn cursor_auth_file_on_host() -> Option<PathBuf> {
+  let home = std::env::var_os("HOME").map(PathBuf::from)?;
+  for path in [home.join(".config/cursor/auth.json"), home.join(".cursor/auth.json")] {
+    if path.is_file() {
+      return Some(path);
+    }
+  }
+  None
+}
+
+/// Non-empty `CURSOR_API_KEY` on the host, if set.
+pub fn cursor_api_key() -> Option<String> {
+  std::env::var(CURSOR_API_KEY_ENV).ok().filter(|s| !s.is_empty())
+}
+
+#[cfg(target_os = "macos")]
+fn cursor_keychain_secret(service: &str) -> Option<String> {
+  let out =
+    std::process::Command::new("security").args(["find-generic-password", "-s", service, "-w"]).output().ok()?;
+  if !out.status.success() {
+    return None;
+  }
+  let token = String::from_utf8(out.stdout).ok()?.trim().to_string();
+  (!token.is_empty()).then_some(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+fn cursor_keychain_secret(_service: &str) -> Option<String> {
+  None
+}
+
+/// macOS stores cursor-agent OAuth tokens in the login keychain after `cursor agent login`.
+pub fn cursor_keychain_access_token() -> Option<String> {
+  cursor_keychain_secret("cursor-access-token")
+}
+
+pub fn cursor_keychain_refresh_token() -> Option<String> {
+  cursor_keychain_secret("cursor-refresh-token")
+}
+
+/// Whether the host has credentials cursor containers can use.
+pub fn cursor_container_auth_ready() -> bool {
+  cursor_api_key().is_some() || cursor_auth_file_on_host().is_some() || cursor_keychain_access_token().is_some()
 }
 
 /// Absolute path the repo clone is bind-mounted at, and the image's WORKDIR (where the harness
@@ -294,6 +365,11 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
     Harness::Codex => Vec::new(),
     // Grok's verbosity comes from --debug/--debug-file flags; no env needed.
     Harness::Grok => Vec::new(),
+    // Point cursor-agent at forwarded config + auth under the repo's gitignored tmp/.
+    Harness::Cursor => vec![
+      (CURSOR_CONFIG_DIR_ENV.to_string(), format!("{AGENT_REPO}/{CURSOR_FORWARD_REL}")),
+      (XDG_CONFIG_HOME_ENV.to_string(), format!("{AGENT_REPO}/tmp/.config")),
+    ],
   }
 }
 
@@ -402,7 +478,51 @@ fn harness_command_verbose(
       }
       wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
     }
+    Harness::Cursor => {
+      let prompt = format!(
+        "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
+      );
+      // Headless agent run; the ephemeral container is the sandbox (--force --trust).
+      let mut cmd = String::from("cursor-agent -p --force --trust --sandbox disabled");
+      if let Some(m) = model {
+        cmd.push_str(" --model ");
+        cmd.push_str(&shell_quote(&cursor_model_with_effort(m, effort)));
+      }
+      if verbose {
+        cmd.push_str(" --output-format stream-json --stream-partial-output");
+      }
+      cmd.push(' ');
+      cmd.push_str(&shell_quote(&prompt));
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+    }
   }
+}
+
+/// Cursor `--model` slugs use hyphen suffixes (`claude-opus-4-8-low`, `gpt-5.5-high`), not
+/// bracket overrides. composer-2.5 only exposes `composer-2.5` and `composer-2.5-fast`.
+fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
+  if model.contains('[') {
+    return model.to_string();
+  }
+  let Some(effort) = effort else {
+    return model.to_string();
+  };
+  if model == "composer-2.5" || model.starts_with("composer-2.5-") {
+    return match effort {
+      "high" => "composer-2.5-fast".to_string(),
+      _ => "composer-2.5".to_string(),
+    };
+  }
+  let suffix = match effort {
+    "xhigh" if model.starts_with("gpt-5.5") => "extra-high",
+    other => other,
+  };
+  if model.ends_with(&format!("-{suffix}")) {
+    return model.to_string();
+  }
+  format!("{model}-{suffix}")
 }
 
 /// Run the harness under `/bin/sh -c`, banner on stderr, all output teed to [`RUN_LOG_VAR`].
@@ -775,6 +895,17 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         )
       }
     }
+    Harness::Cursor => {
+      if cursor_container_auth_ready() {
+        Ok(())
+      } else {
+        Err(
+          "cursor harness unavailable (no cursor auth on host — run `cursor agent login`, \
+           or export CURSOR_API_KEY in your shell)"
+            .into(),
+        )
+      }
+    }
   }
 }
 
@@ -945,7 +1076,7 @@ pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
       }
       out
     }
-    Harness::Codex | Harness::Grok => Vec::new(),
+    Harness::Codex | Harness::Grok | Harness::Cursor => Vec::new(),
   }
 }
 
@@ -1433,6 +1564,8 @@ mod tests {
     assert_eq!(image_tag(Harness::Opencode), "scsh-opencode:latest");
     assert_eq!(image_tag(Harness::Claude), "scsh-claude:latest");
     assert_eq!(image_tag(Harness::Codex), "scsh-codex:latest");
+    assert_eq!(image_tag(Harness::Grok), "scsh-grok:latest");
+    assert_eq!(image_tag(Harness::Cursor), "scsh-cursor:latest");
   }
 
   #[test]
@@ -1464,6 +1597,18 @@ mod tests {
     assert!(df.contains("npm install -g @xai-official/grok"));
     assert!(df.contains("ENV GROK_HOME=/home/agent/repo/tmp/.grok"));
     assert!(df.contains("grok --version"));
+  }
+
+  #[test]
+  fn dockerfile_cursor_stage_points_cursor_home_into_repo_tmp() {
+    let df = dockerfile();
+    assert!(df.contains("FROM scsh-base AS scsh-cursor"));
+    assert!(df.contains("downloads.cursor.com/lab/"));
+    assert!(df.contains("ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent"));
+    assert!(df.contains("mv \"$tmp/dist-package\" \"$CURSOR_AGENT_HOME\""));
+    assert!(df.contains("ENV CURSOR_CONFIG_DIR=/home/agent/repo/tmp/.cursor"));
+    assert!(df.contains("ENV XDG_CONFIG_HOME=/home/agent/repo/tmp/.config"));
+    assert!(df.contains("cursor-agent --version"));
   }
 
   #[test]
@@ -1673,6 +1818,32 @@ mod tests {
   }
 
   #[test]
+  fn harness_command_builds_cursor_invocation() {
+    let cmd =
+      harness_command_verbose(Harness::Cursor, Some("composer-2.5"), Some("high"), "add", "tmp/add_cursor.json", true);
+    assert!(cmd.contains("scsh: harness=cursor"));
+    assert!(cmd.contains("cursor-agent -p --force --trust --sandbox disabled"));
+    assert!(cmd.contains(" --model composer-2.5-fast"));
+    assert!(cmd.contains(" --output-format stream-json --stream-partial-output"));
+    assert!(cmd.contains(".skills/add/SKILL.md"));
+    assert!(cmd.contains("tmp/add_cursor.json"));
+    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    let quiet = harness_command_verbose(Harness::Cursor, None, None, "multiply", "tmp/mul.json", false);
+    assert!(quiet.contains("cursor-agent -p --force --trust --sandbox disabled"));
+    assert!(!quiet.contains("--output-format"));
+    assert!(!quiet.contains(" --model "));
+  }
+
+  #[test]
+  fn cursor_model_with_effort_maps_to_cursor_agent_slugs() {
+    assert_eq!(cursor_model_with_effort("claude-opus-4-8[effort=low]", Some("high")), "claude-opus-4-8[effort=low]");
+    assert_eq!(cursor_model_with_effort("composer-2.5", Some("high")), "composer-2.5-fast");
+    assert_eq!(cursor_model_with_effort("composer-2.5", Some("low")), "composer-2.5");
+    assert_eq!(cursor_model_with_effort("claude-opus-4-8", Some("low")), "claude-opus-4-8-low");
+    assert_eq!(cursor_model_with_effort("gpt-5.5", Some("xhigh")), "gpt-5.5-extra-high");
+  }
+
+  #[test]
   fn harness_command_codex_passes_reasoning_effort() {
     let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), Some("xhigh"), "add", "tmp/add.json", true);
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
@@ -1690,6 +1861,10 @@ mod tests {
     assert_eq!(codex.len(), 1);
     assert_eq!(codex[0].0, "RUST_LOG");
     assert!(harness_container_env_verbose(Harness::Codex, false).is_empty());
+    let cursor = harness_container_env_verbose(Harness::Cursor, false);
+    assert_eq!(cursor.len(), 2);
+    assert_eq!(cursor[0].0, "CURSOR_CONFIG_DIR");
+    assert_eq!(cursor[1].0, "XDG_CONFIG_HOME");
   }
 
   #[test]

@@ -6,7 +6,7 @@
 # target arch at build time (dpkg --print-architecture -> amd64|arm64).
 #
 # Four final images share one base (`scsh-base`): `scsh-opencode`, `scsh-claude`,
-# `scsh-codex`, and `scsh-grok`. Each installs its harness CLI last. scsh builds only the
+# `scsh-codex`, `scsh-grok`, and `scsh-cursor`. Each installs its harness CLI last. scsh builds only the
 # image(s) a run needs, in one buildx bake or one sequential build pass when several
 # harnesses are required (`--target` per image).
 FROM debian:bookworm-slim AS scsh-base
@@ -179,4 +179,30 @@ RUN set -eux; \
 # Grok reads auth/config from $GROK_HOME (default ~/.grok). Same trick as codex: point it
 # at the gitignored tmp/ of the repo mount, where forwarded host credentials are copied.
 ENV GROK_HOME=/home/agent/repo/tmp/.grok
+USER agent
+
+# --- Cursor Agent CLI harness image (install harness last) ---
+FROM scsh-base AS scsh-cursor
+ARG CURSOR_AGENT_VERSION=2026.07.01-41b2de7
+ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    case "$arch" in \
+      amd64) cursorarch=x64 ;; \
+      arm64) cursorarch=arm64 ;; \
+      *) echo "scsh: unsupported architecture" >&2; exit 1 ;; \
+    esac; \
+    tmp="$(mktemp -d)"; \
+    curl -fsSL "https://downloads.cursor.com/lab/${CURSOR_AGENT_VERSION}/linux/${cursorarch}/agent-cli-package.tar.gz" \
+      | tar -xzf - -C "$tmp"; \
+    rm -rf "$CURSOR_AGENT_HOME"; \
+    mv "$tmp/dist-package" "$CURSOR_AGENT_HOME"; \
+    rm -rf "$tmp"; \
+    ln -sf "$CURSOR_AGENT_HOME/cursor-agent" /usr/local/bin/cursor-agent; \
+    ln -sf "$CURSOR_AGENT_HOME/cursor-agent" /usr/local/bin/agent; \
+    cursor-agent --version
+# cursor-agent reads cli-config from $CURSOR_CONFIG_DIR and OAuth tokens from
+# $XDG_CONFIG_HOME/cursor/auth.json on Linux. scsh forwards both into gitignored tmp/ per run.
+ENV CURSOR_CONFIG_DIR=/home/agent/repo/tmp/.cursor
+ENV XDG_CONFIG_HOME=/home/agent/repo/tmp/.config
 USER agent
