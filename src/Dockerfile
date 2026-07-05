@@ -6,9 +6,9 @@
 # target arch at build time (dpkg --print-architecture -> amd64|arm64).
 #
 # Four final images share one base (`scsh-base`): `scsh-opencode`, `scsh-claude`,
-# `scsh-codex`, `scsh-grok`, and `scsh-cursor`. Each installs its harness CLI last. scsh builds only the
-# image(s) a run needs, in one buildx bake or one sequential build pass when several
-# harnesses are required (`--target` per image).
+# `scsh-codex`, `scsh-grok`, and `scsh-cursor`. Each installs its harness CLI last. scsh builds
+# `scsh-base:latest` first (or skips when up to date), then only the harness image(s)
+# a run needs (`--target` per image).
 FROM debian:bookworm-slim AS scsh-base
 LABEL scsh.generated=true
 

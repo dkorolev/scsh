@@ -109,6 +109,17 @@ fn is_executable(p: &Path) -> bool {
   std::fs::metadata(p).map(|m| m.is_file()).unwrap_or(false)
 }
 
+/// Tag for the shared base image (`scsh-base` Dockerfile stage).
+pub const BASE_IMAGE_TAG: &str = "scsh-base:latest";
+
+/// Dockerfile `--target` for the shared base image.
+pub const BASE_IMAGE_TARGET: &str = "scsh-base";
+
+/// Fingerprint for [`BASE_IMAGE_TAG`] (toolchain layer only; harness stages excluded).
+pub fn base_image_fingerprint(dockerfile: &str, uid: u32, gid: u32, tz: &str) -> String {
+  image_build_fingerprint(dockerfile, BASE_IMAGE_TARGET, uid, gid, tz)
+}
+
 /// The tag of the harness-specific image scsh builds.
 pub fn image_tag(harness: Harness) -> String {
   match harness {
@@ -680,6 +691,7 @@ pub fn image_build_spec(harness: Harness, dockerfile: &str, uid: u32, gid: u32, 
 }
 
 /// True when the runtime exposes `buildx bake` (multi-target build in one command).
+#[allow(dead_code)] // retained for tests; runs build base then per-harness instead.
 pub fn runtime_supports_bake(runtime: &str) -> bool {
   std::process::Command::new(runtime)
     .args(["buildx", "version"])
@@ -691,6 +703,7 @@ pub fn runtime_supports_bake(runtime: &str) -> bool {
 }
 
 /// Build argv for one `buildx bake` that tags every listed harness target.
+#[allow(dead_code)] // retained for tests; runs build base then per-harness instead.
 pub fn build_command_bake(runtime: &str, bake_targets: &[String]) -> Vec<String> {
   let mut v = vec![runtime.into(), "buildx".into(), "bake".into(), "--load".into(), "-f".into(), "-".into()];
   v.extend(bake_targets.iter().cloned());
@@ -698,6 +711,7 @@ pub fn build_command_bake(runtime: &str, bake_targets: &[String]) -> Vec<String>
 }
 
 /// JSON bake definition: one context dir, multiple Dockerfile `--target`s sharing `scsh-base`.
+#[allow(dead_code)] // retained for tests; runs build base then per-harness instead.
 pub fn bake_definition_json(context_dir: &str, specs: &[ImageBuildSpec], uid: u32, gid: u32, tz: &str) -> String {
   use crate::json::quote;
   let mut entries = Vec::with_capacity(specs.len());
@@ -1915,6 +1929,16 @@ mod tests {
       "scsh-claude".into(),
     ];
     assert_eq!(cmd, want);
+  }
+
+  #[test]
+  fn base_image_fingerprint_matches_scsh_base_target() {
+    let df = dockerfile();
+    assert_eq!(
+      base_image_fingerprint(&df, 501, 20, "UTC"),
+      image_build_fingerprint(&df, BASE_IMAGE_TARGET, 501, 20, "UTC")
+    );
+    assert_ne!(base_image_fingerprint(&df, 501, 20, "UTC"), image_build_fingerprint(&df, "scsh-codex", 501, 20, "UTC"));
   }
 
   #[test]

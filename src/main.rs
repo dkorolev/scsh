@@ -729,73 +729,23 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
     println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
     print!("{df}");
     let host_tz = runtime::host_timezone();
+    let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &host_tz);
+    println!("--- build {} first (shared toolchain; agent uid={uid} gid={gid}) ---", runtime::BASE_IMAGE_TARGET);
+    print_build_command(
+      &rt.name,
+      runtime::BASE_IMAGE_TAG,
+      runtime::BASE_IMAGE_TARGET,
+      &df,
+      uid,
+      gid,
+      &host_tz,
+      &base_fp,
+    );
     let specs: Vec<runtime::ImageBuildSpec> =
       harnesses.iter().map(|h| runtime::image_build_spec(*h, &df, uid, gid, &host_tz)).collect();
-    if specs.len() <= 1 {
-      for spec in &specs {
-        match runtime::build_method(&rt.name) {
-          runtime::BuildMethod::Stdin => {
-            let build =
-              runtime::build_command_stdin(&rt.name, &spec.tag, &spec.target, uid, gid, &host_tz, &spec.fingerprint);
-            println!("--- build {} (Dockerfile streamed to stdin; agent uid={uid} gid={gid}) ---", spec.target);
-            println!("{}", runtime::shell_join(&build));
-          }
-          runtime::BuildMethod::ContextDir => {
-            let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
-            let build = runtime::build_command_context(
-              &rt.name,
-              &spec.tag,
-              &spec.target,
-              &ctx.to_string_lossy(),
-              uid,
-              gid,
-              &host_tz,
-              &spec.fingerprint,
-            );
-            println!("--- build {} (in-memory Dockerfile written to an ephemeral context dir) ---", spec.target);
-            println!("{}", runtime::shell_join(&build));
-          }
-        }
-      }
-    } else if runtime::runtime_supports_bake(&rt.name) {
-      let targets: Vec<String> = specs.iter().map(|s| s.target.clone()).collect();
-      let bake = runtime::build_command_bake(&rt.name, &targets);
-      let names: Vec<&str> = targets.iter().map(String::as_str).collect();
-      println!("--- build {} (one buildx bake; shared scsh-base; agent uid={uid} gid={gid}) ---", names.join(", "));
-      println!("{}", runtime::shell_join(&bake));
-      println!("{}", h_dim("# bake definition on stdin; Dockerfile in an ephemeral context dir"));
-    } else {
-      let names: Vec<&str> = specs.iter().map(|s| s.target.as_str()).collect();
-      println!(
-        "--- build {} (one sequential build; shared scsh-base; agent uid={uid} gid={gid}) ---",
-        names.join(", ")
-      );
-      match runtime::build_method(&rt.name) {
-        runtime::BuildMethod::Stdin => {
-          for spec in &specs {
-            let build =
-              runtime::build_command_stdin(&rt.name, &spec.tag, &spec.target, uid, gid, &host_tz, &spec.fingerprint);
-            println!("{}", runtime::shell_join(&build));
-          }
-        }
-        runtime::BuildMethod::ContextDir => {
-          let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
-          for spec in &specs {
-            let build = runtime::build_command_context(
-              &rt.name,
-              &spec.tag,
-              &spec.target,
-              &ctx.to_string_lossy(),
-              uid,
-              gid,
-              &host_tz,
-              &spec.fingerprint,
-            );
-            println!("{}", runtime::shell_join(&build));
-          }
-          println!("{}", h_dim("# same ephemeral context dir for every target above"));
-        }
-      }
+    for spec in &specs {
+      println!("--- build {} (harness layer on top of {}) ---", spec.target, runtime::BASE_IMAGE_TARGET);
+      print_build_command(&rt.name, &spec.tag, &spec.target, &df, uid, gid, &host_tz, &spec.fingerprint);
     }
     println!("\n{}", h_head("Per-skill commands"));
     for skill in skills {
@@ -1471,16 +1421,35 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     }
   }
   let rt_name = rt.name.clone();
-
-  // Image builds first (runtime setup), then skills in manifest order.
-  let mut build_procs = Vec::with_capacity(harness_list.len());
+  let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
+  let base_needs_build = !runtime::image_is_up_to_date(&rt_name, runtime::BASE_IMAGE_TAG, &base_fp);
+  let mut harness_builds: Vec<runtime::ImageBuildSpec> = Vec::new();
   for &h in &harness_list {
-    let label = format!("using {} · build {}", backend_name(&rt.name), h.as_str());
-    let build = ui.proc(label.clone(), true);
-    if let Some(c) = &daemon_client {
-      c.proc_add(build.index(), &label, daemon::ProcKind::Build, None, Some(h.as_str()), None);
+    let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
+    if !runtime::image_is_up_to_date(&rt_name, &spec.tag, &spec.fingerprint) {
+      harness_builds.push(spec);
     }
-    build_procs.push(build);
+  }
+  let any_image_build = base_needs_build || !harness_builds.is_empty();
+
+  // Base image first, then one build proc per harness that actually needs rebuilding.
+  let mut base_build = None;
+  if base_needs_build {
+    let base_label = format!("using {} · build base", backend_name(&rt.name));
+    let p = ui.proc(base_label.clone(), true);
+    if let Some(c) = &daemon_client {
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None);
+    }
+    base_build = Some(p);
+  }
+  let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
+  for spec in &harness_builds {
+    let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
+    let p = ui.proc(label.clone(), true);
+    if let Some(c) = &daemon_client {
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
+    }
+    harness_build_procs.push(p);
   }
   let mut skill_procs = Vec::with_capacity(skills.len());
   for skill in skills {
@@ -1496,48 +1465,42 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
         skill.model.as_deref(),
       );
     }
-    p.note("waiting for image build…");
+    if any_image_build {
+      p.note("waiting for image build…");
+    }
     skill_procs.push(p);
   }
   ui.pin_board_to_top();
 
-  let mut stale_specs: Vec<runtime::ImageBuildSpec> = Vec::new();
-  let mut stale_proc_indices: Vec<usize> = Vec::new();
-  for (i, &h) in harness_list.iter().enumerate() {
-    let build = &build_procs[i];
-    build.start();
-    let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
-    if runtime::image_is_up_to_date(&rt_name, &spec.tag, &spec.fingerprint) {
-      build.finish_ok(Some("up to date"));
-    } else {
-      stale_specs.push(spec);
-      stale_proc_indices.push(i);
-    }
-  }
-
-  let build_failed = if stale_specs.is_empty() {
-    None
-  } else {
-    for &i in stale_proc_indices.iter().skip(1) {
-      build_procs[i].note("sharing one build");
-    }
-    let lead = stale_proc_indices[0];
-    match run_builds(&build_procs[lead], &rt_name, &df, &stale_specs, uid, gid) {
+  let mut build_failed = if let Some(ref base) = base_build {
+    base.start();
+    match run_build(base, &rt_name, runtime::BASE_IMAGE_TAG, runtime::BASE_IMAGE_TARGET, &df, uid, gid, &base_fp) {
       Ok(()) => {
-        let detail = if stale_specs.len() > 1 { Some("shared build") } else { None };
-        for &i in &stale_proc_indices {
-          build_procs[i].finish_ok(detail);
-        }
+        base.finish_ok(None);
         None
       }
       Err(e) => {
-        for &i in &stale_proc_indices {
-          build_procs[i].finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
-        }
+        base.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
         Some(e)
       }
     }
+  } else {
+    None
   };
+
+  if build_failed.is_none() {
+    for (build, spec) in harness_build_procs.iter().zip(harness_builds.iter()) {
+      build.start();
+      match run_build(build, &rt_name, &spec.tag, &spec.target, &df, uid, gid, &spec.fingerprint) {
+        Ok(()) => build.finish_ok(None),
+        Err(e) => {
+          build.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+          build_failed = Some(e);
+          break;
+        }
+      }
+    }
+  }
   if let Some((msg, code)) = build_failed {
     ui.finish();
     fail(&msg);
@@ -2875,93 +2838,6 @@ fn now_secs() -> u64 {
   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Build one or more harness images through the live board's build proc. Multiple targets
-/// share one `buildx bake` (docker/podman) or one sequential build pass (Apple Container)
-/// so `scsh-base` is built once.
-fn run_builds(
-  build: &ui::screen::Proc, runtime_name: &str, dockerfile: &str, specs: &[runtime::ImageBuildSpec], uid: u32, gid: u32,
-) -> Result<(), (String, i32)> {
-  if specs.is_empty() {
-    return Ok(());
-  }
-  if specs.len() == 1 {
-    let s = &specs[0];
-    return run_build(build, runtime_name, &s.tag, &s.target, dockerfile, uid, gid, &s.fingerprint);
-  }
-
-  let tz = runtime::host_timezone();
-  let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
-
-  if runtime::runtime_supports_bake(runtime_name) {
-    let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
-    let path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
-    if let Err(e) = std::fs::write(&path, dockerfile) {
-      let _ = std::fs::remove_dir_all(&dir);
-      return Err((format!("could not write Dockerfile to build context: {e}"), 1));
-    }
-    let bake = runtime::bake_definition_json(&dir.to_string_lossy(), specs, uid, gid, &tz);
-    let targets: Vec<String> = specs.iter().map(|s| s.target.clone()).collect();
-    let cmd = runtime::build_command_bake(runtime_name, &targets);
-    let out = build.run_with_stdin(&cmd[0], &cmd[1..], bake.as_bytes()).map_err(started);
-    let _ = std::fs::remove_dir_all(&dir);
-    let context = format!("image build failed (runtime={runtime_name}, targets={})", targets.join(", "));
-    return finish_build_outcome(build, &context, out);
-  }
-
-  match runtime::build_method(runtime_name) {
-    runtime::BuildMethod::Stdin => {
-      for spec in specs {
-        let cmd = runtime::build_command_stdin(runtime_name, &spec.tag, &spec.target, uid, gid, &tz, &spec.fingerprint);
-        let context = format!("image build failed (runtime={runtime_name}, target={})", spec.target);
-        finish_build_outcome(
-          build,
-          &context,
-          build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started),
-        )?;
-      }
-      Ok(())
-    }
-    runtime::BuildMethod::ContextDir => {
-      let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
-      let path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
-      if let Err(e) = std::fs::write(&path, dockerfile) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err((format!("could not write Dockerfile to build context: {e}"), 1));
-      }
-      let dir_str = dir.to_string_lossy().into_owned();
-      for spec in specs {
-        let cmd = runtime::build_command_context(
-          runtime_name,
-          &spec.tag,
-          &spec.target,
-          &dir_str,
-          uid,
-          gid,
-          &tz,
-          &spec.fingerprint,
-        );
-        let context = format!("image build failed (runtime={runtime_name}, target={})", spec.target);
-        finish_build_outcome(build, &context, build.run(&cmd[0], &cmd[1..]).map_err(started))?;
-      }
-      let _ = std::fs::remove_dir_all(&dir);
-      Ok(())
-    }
-  }
-}
-
-fn finish_build_outcome(
-  build: &ui::screen::Proc, context: &str, out: Result<(bool, Option<String>), (String, i32)>,
-) -> Result<(), (String, i32)> {
-  let (ok, last) = out?;
-  if ok {
-    Ok(())
-  } else {
-    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
-    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
-    Err((format!("{context}: {excerpt}"), 1))
-  }
-}
-
 /// Build a single harness image through the live board's build proc (so its output streams into the
 /// collapsible build row, timestamped). docker/podman take the in-memory Dockerfile on stdin;
 /// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
@@ -3004,6 +2880,24 @@ fn make_temp_dir() -> std::io::Result<PathBuf> {
   let dir = std::env::temp_dir().join(format!("scsh-build-{}-{nanos}", std::process::id()));
   std::fs::create_dir_all(&dir)?;
   Ok(dir)
+}
+
+fn print_build_command(
+  runtime_name: &str, tag: &str, target: &str, _dockerfile: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
+) {
+  match runtime::build_method(runtime_name) {
+    runtime::BuildMethod::Stdin => {
+      let build = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, tz, fingerprint);
+      println!("{}", runtime::shell_join(&build));
+    }
+    runtime::BuildMethod::ContextDir => {
+      let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
+      let build =
+        runtime::build_command_context(runtime_name, tag, target, &ctx.to_string_lossy(), uid, gid, tz, fingerprint);
+      println!("{}", runtime::shell_join(&build));
+      println!("{}", h_dim("# in-memory Dockerfile written to an ephemeral context dir"));
+    }
+  }
 }
 
 fn init_demo() -> i32 {
@@ -3978,9 +3872,10 @@ fn print_help_internals() {
   println!();
   println!("{}", h_head("How a run works"));
   print!(
-    r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`, `scsh-codex`,
-  `scsh-grok`) from a shared base in one buildx bake or one sequential build pass (skipping any whose tag already matches
-  the embedded Dockerfile fingerprint), version-checking each CLI during the build. Then, for
+    r#"  scsh builds the shared base image (`scsh-base:latest`) first — or skips it when the tag
+  already matches the embedded Dockerfile fingerprint — then builds one image per harness
+  needed (`scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`) on top, skipping any
+  harness whose tag already matches. Each build is version-checked during the build. Then, for
   EVERY selected skill in parallel, it prepares a /tmp run dir (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman,
   or scsh-<nonce>-run-<invocation> on Apple container — ≤ 64 chars, middle-truncated with .. when
   needed) and runs the skill's harness in its own container. On docker/podman/Linux the host
