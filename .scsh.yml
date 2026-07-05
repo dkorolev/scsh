@@ -7,77 +7,106 @@ skills:
     timeout: 1200
     result: tmp/code-review-conventions-reviewer-{name}.json
     invocations:
-      opencode-gpt-5.5:
-        harness: opencode
-        model: openai/gpt-5.5
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: high
   justification-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-justification-reviewer-{name}.json
     invocations:
-      opencode-gpt-5.5:
-        harness: opencode
-        model: openai/gpt-5.5
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: high
   reviewability-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-reviewability-reviewer-{name}.json
     invocations:
-      opencode-gpt-5.5:
-        harness: opencode
-        model: openai/gpt-5.5
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: high
   sanity-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-sanity-reviewer-{name}.json
     invocations:
-      opencode-gpt-5.5:
-        harness: opencode
-        model: openai/gpt-5.5
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: high
   testing-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-testing-reviewer-{name}.json
     invocations:
-      opencode-gpt-5.5:
-        harness: opencode
-        model: openai/gpt-5.5
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: high
   big-beautiful-build:
-    harness: opencode
-    model: openai/gpt-5.5
+    harness: codex
+    model: gpt-5.5
+    effort: high
     timeout: 1200
     profile: big-beautiful-build
     result: tmp/big-beautiful-build.md
   fast-beautiful-forward:
-    harness: opencode
-    model: openai/gpt-5.5
+    harness: codex
+    model: gpt-5.5
+    effort: high
     timeout: 1200
     profile: fast-beautiful-forward
     result: tmp/fast-beautiful-forward.md
   code-beautiful-review:
-    harness: opencode
-    model: openai/gpt-5.5
+    harness: codex
+    model: gpt-5.5
+    effort: high
     timeout: 1200
     profile: code-beautiful-review
     result: tmp/code-beautiful-review.md
   prepare-beautiful-pr:
-    harness: opencode
-    model: openai/gpt-5.5
+    harness: codex
+    model: gpt-5.5
+    effort: high
     timeout: 1200
     profile: prepare-beautiful-pr
     result: tmp/prepare-beautiful-pr.md

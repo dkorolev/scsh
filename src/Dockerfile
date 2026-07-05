@@ -5,9 +5,10 @@
 # written to disk. PLATFORM-AGNOSTIC: every architecture-specific download resolves the
 # target arch at build time (dpkg --print-architecture -> amd64|arm64).
 #
-# Two final images share one base (`scsh-base`): `scsh-opencode` and `scsh-claude`. Each
-# installs its harness CLI last. scsh builds only the image(s) a run needs, in one buildx bake
-# or one sequential build pass when several harnesses are required (`--target` per image).
+# Four final images share one base (`scsh-base`): `scsh-opencode`, `scsh-claude`,
+# `scsh-codex`, and `scsh-grok`. Each installs its harness CLI last. scsh builds only the
+# image(s) a run needs, in one buildx bake or one sequential build pass when several
+# harnesses are required (`--target` per image).
 FROM debian:bookworm-slim AS scsh-base
 LABEL scsh.generated=true
 
@@ -148,4 +149,34 @@ RUN set -eux; \
     npm install -g @anthropic-ai/claude-code; \
     chmod -R a+rX "$(npm root -g)"; \
     claude --version
+USER agent
+
+# --- OpenAI Codex CLI harness image (install harness last) ---
+FROM scsh-base AS scsh-codex
+RUN set -eux; \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+    apt-get install -y --no-install-recommends nodejs; \
+    rm -rf /var/lib/apt/lists/*; \
+    npm install -g @openai/codex; \
+    chmod -R a+rX "$(npm root -g)"; \
+    codex --version
+# Codex reads auth/config from $CODEX_HOME (default ~/.codex). scsh points it at the
+# gitignored tmp/ of the repo mount, where forwarded host credentials are copied per run.
+ENV CODEX_HOME=/home/agent/repo/tmp/.codex
+USER agent
+
+# --- xAI Grok CLI harness image (install harness last) ---
+# @xai-official/grok is the npm distribution of Grok Build — no x.ai host or shell-script
+# installer needed, and it resolves the target arch itself.
+FROM scsh-base AS scsh-grok
+RUN set -eux; \
+    curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
+    apt-get install -y --no-install-recommends nodejs; \
+    rm -rf /var/lib/apt/lists/*; \
+    npm install -g @xai-official/grok; \
+    chmod -R a+rX "$(npm root -g)"; \
+    grok --version
+# Grok reads auth/config from $GROK_HOME (default ~/.grok). Same trick as codex: point it
+# at the gitignored tmp/ of the repo mount, where forwarded host credentials are copied.
+ENV GROK_HOME=/home/agent/repo/tmp/.grok
 USER agent
