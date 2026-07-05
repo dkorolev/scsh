@@ -320,6 +320,7 @@ function procMetaHtml(p) {
     if (harness) parts.push('<span><strong>harness</strong> ' + esc(harness) + '</span>');
     const model = p.model ? esc(p.model) : '<span class="dim">(harness default)</span>';
     parts.push('<span><strong>model</strong> ' + model + '</span>');
+    if (p.fail_reason) parts.push('<span><strong>fail reason</strong> <code>' + esc(p.fail_reason) + '</code></span>');
     return '<div class="proc-meta">' + parts.join(' · ') + '</div>';
   }
   return '';

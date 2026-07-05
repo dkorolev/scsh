@@ -96,7 +96,7 @@ fn live_demo() -> i32 {
     .map(|(ok, _)| ok)
     .unwrap_or(false);
   if !ok {
-    build.finish_fail(Some("build failed"));
+    build.finish_fail(crate::failure::reason::BUILD_FAILED, Some("build failed"));
     ui.finish();
     return 1;
   }
@@ -114,7 +114,7 @@ fn live_demo() -> i32 {
       mul.start();
       let _ =
         mul.run("sh", &sh("for i in 1 2 3 4; do echo \"multiply: scanning $i\"; sleep 0.6; done; echo 'boom' 1>&2"));
-      mul.finish_fail(Some("did not produce its result file"));
+      mul.finish_fail(crate::failure::reason::RESULT_MISSING, Some("did not produce its result file"));
     });
   });
 

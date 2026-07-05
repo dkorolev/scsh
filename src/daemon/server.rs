@@ -376,9 +376,16 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
             for p in &mut s.procs {
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
                 p.status = ProcStatus::Fail;
+                p.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
                 if p.detail.is_none() {
-                  p.detail = Some("run disconnected".into());
+                  p.detail = Some(deregister_incomplete_detail(p));
                 }
+                crate::failure::log_session_proc(
+                  &session_id,
+                  crate::failure::reason::SESSION_END_INCOMPLETE,
+                  &p.label,
+                  p.detail.as_deref().unwrap_or(""),
+                );
               }
             }
           }
@@ -424,6 +431,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
           started_at: None,
           note: None,
           detail: None,
+          fail_reason: None,
           elapsed: None,
           container_name: None,
           lines: Vec::new(),
@@ -492,10 +500,12 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
       let status =
         ProcStatus::parse(field_str(&obj, "status").as_deref().unwrap_or("fail")).unwrap_or(ProcStatus::Fail);
       let detail = field_str(&obj, "detail");
+      let fail_reason = field_str(&obj, "fail_reason");
       let elapsed = field_num(&obj, "elapsed");
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.status = status;
         p.detail = detail;
+        p.fail_reason = fail_reason;
         p.elapsed = elapsed;
         true
       } else {
@@ -520,6 +530,20 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
       }
     }
     _ => false,
+  }
+}
+
+fn deregister_incomplete_detail(p: &ProcRecord) -> String {
+  let last = p.lines.last().map(|l| l.text.as_str()).unwrap_or("");
+  let tail = if last.chars().count() > 200 {
+    format!("{}…", last.chars().take(200).collect::<String>())
+  } else {
+    last.to_string()
+  };
+  if tail.is_empty() {
+    "session ended before this proc reported finish (lost proc/finish event or crash)".into()
+  } else {
+    format!("session ended before this proc reported finish; last output: {tail}")
   }
 }
 
@@ -676,6 +700,7 @@ mod tests {
             started_at: Some(50),
             note: None,
             detail: None,
+            fail_reason: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -717,6 +742,7 @@ mod tests {
             started_at: Some(1),
             note: None,
             detail: None,
+            fail_reason: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -760,6 +786,7 @@ mod tests {
             started_at: Some(10),
             note: None,
             detail: None,
+            fail_reason: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -804,6 +831,7 @@ mod tests {
             started_at: Some(50),
             note: None,
             detail: None,
+            fail_reason: None,
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
@@ -819,7 +847,12 @@ mod tests {
     let session = guard.sessions.get("dereg01").unwrap();
     assert!(session.ended_at.is_some());
     assert_eq!(session.procs[0].status, ProcStatus::Fail);
-    assert_eq!(session.procs[0].detail.as_deref(), Some("run disconnected"));
+    assert_eq!(session.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::SESSION_END_INCOMPLETE));
+    assert!(session.procs[0]
+      .detail
+      .as_deref()
+      .unwrap_or("")
+      .contains("session ended before this proc reported finish"));
     assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
   }
 

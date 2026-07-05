@@ -228,6 +228,11 @@ impl Proc {
     Ok((ok, last))
   }
 
+  /// Last `max` lines captured for this proc (stdout/stderr pump output).
+  pub fn tail_lines(&self, max: usize) -> Vec<String> {
+    self.model.lock().unwrap().tail_lines(self.i, max)
+  }
+
   /// Like [`Proc::run`] but kills the child — reporting `timed_out` — past `timeout`
   /// (`None` waits forever). Returns `(success, timed_out, last_line)`.
   pub fn run_timed(
@@ -302,15 +307,17 @@ impl Proc {
   /// Finish green: set the proc ✓, freeze its clock, and attach an optional detail. Off-TTY,
   /// print the plain `✓ label  elapsed  detail` line now.
   pub fn finish_ok(&self, detail: Option<&str>) {
-    self.finish(Status::Ok, detail);
+    self.finish(Status::Ok, detail, None);
   }
 
   /// Finish red: as [`Proc::finish_ok`] but ✗ (the detail renders in red).
-  pub fn finish_fail(&self, detail: Option<&str>) {
-    self.finish(Status::Fail, detail);
+  pub fn finish_fail(&self, reason: &str, detail: Option<&str>) {
+    crate::failure::log_proc(reason, &self.label, detail);
+    let combined = detail.map(|d| crate::failure::format_detail(reason, d));
+    self.finish(Status::Fail, combined.as_deref(), Some(reason));
   }
 
-  fn finish(&self, status: Status, detail: Option<&str>) {
+  fn finish(&self, status: Status, detail: Option<&str>, fail_reason: Option<&str>) {
     let elapsed = self.start_instant().elapsed().as_secs_f64();
     {
       let mut m = self.model.lock().unwrap();
@@ -325,7 +332,7 @@ impl Proc {
         Status::Running => crate::daemon::ProcStatus::Running,
         Status::Queued => crate::daemon::ProcStatus::Waiting,
       };
-      s.proc_finish(self.i, ps, detail, elapsed);
+      s.proc_finish(self.i, ps, fail_reason, detail, elapsed);
     }
     if !self.attended {
       eprintln!("{}", summary_line(&self.label, status, elapsed, detail));

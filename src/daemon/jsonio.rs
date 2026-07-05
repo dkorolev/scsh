@@ -143,7 +143,7 @@ fn proc_json(p: &ProcRecord) -> String {
   };
   format!(
     "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
-\"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \
+\"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
 \"elapsed\": {}, \"container_name\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
@@ -154,6 +154,7 @@ fn proc_json(p: &ProcRecord) -> String {
     opt_str(&p.model),
     note,
     detail,
+    opt_str(&p.fail_reason),
     elapsed,
     container,
     lines.join(", ")
@@ -221,6 +222,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     ProcStatus::parse(field_str(obj, "status").as_deref().unwrap_or("waiting")).unwrap_or(ProcStatus::Waiting);
   let note = field_str(obj, "note");
   let detail = field_str(obj, "detail");
+  let fail_reason = field_str(obj, "fail_reason");
   let elapsed = field_num(obj, "elapsed");
   let container_name = field_str(obj, "container_name");
   let lines = match field_value(obj, "lines")? {
@@ -238,6 +240,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     started_at: field_num(obj, "started_at").map(|n| n as u64),
     note,
     detail,
+    fail_reason,
     elapsed,
     container_name,
     lines,
@@ -303,6 +306,7 @@ mod tests {
       started_at: None,
       note: None,
       detail: None,
+      fail_reason: None,
       elapsed: Some(f64::NAN),
       lines: vec![OutputLine { at: f64::INFINITY, text: "x".into() }],
       container_name: None,
@@ -346,6 +350,7 @@ mod tests {
         started_at: Some(99),
         note: None,
         detail: Some("up to date".into()),
+        fail_reason: None,
         elapsed: Some(1.5),
         container_name: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],

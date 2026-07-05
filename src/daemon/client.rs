@@ -2,7 +2,7 @@
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender, TryRecvError};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
@@ -14,6 +14,9 @@ use crate::json::quote;
 /// Batch proc output before POSTing — ~2 flushes/sec, up to half a megabyte per payload.
 const LINE_BATCH_INTERVAL: Duration = Duration::from_millis(500);
 const LINE_BATCH_MAX_BYTES: usize = 512 * 1024;
+/// Large parallel runs (e.g. code-review) can queue thousands of lines; wait long enough to drain.
+const FLUSH_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
+const POSTER_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 enum PostJob {
   ProcLine { proc: usize, at: f64, line: String },
@@ -77,12 +80,24 @@ impl Client {
   }
 
   pub fn deregister(&self) {
-    self.post_sync_after_flush("/api/v1/deregister", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
+    let body = format!("{{ \"session\": {} }}", quote(&self.inner.session_id));
+    if !self.post_sync("/api/v1/deregister", &body) {
+      log_post_failure("/api/v1/deregister", None);
+    }
   }
 
   /// Drain the poster, deregister synchronously, then stop the poster thread.
   pub fn finish_session(&self) {
+    let drained = self.flush_poster();
     self.deregister();
+    if !drained {
+      crate::failure::log_session_proc(
+        &self.inner.session_id,
+        crate::failure::reason::DAEMON_DRAIN_TIMEOUT,
+        "(session)",
+        "event poster did not drain before session end — some proc output or finish events may be missing from the browser UI",
+      );
+    }
     self.close_poster();
   }
 
@@ -97,7 +112,7 @@ impl Client {
         let _ = handle.join();
         let _ = done_tx.send(());
       });
-      let _ = done_rx.recv_timeout(Duration::from_secs(3));
+      let _ = done_rx.recv_timeout(POSTER_JOIN_TIMEOUT);
     }
   }
 
@@ -153,20 +168,37 @@ impl Client {
     }
   }
 
-  pub fn proc_finish(&self, proc_index: usize, status: ProcStatus, detail: Option<&str>, elapsed: f64) {
+  pub fn proc_finish(
+    &self, proc_index: usize, status: ProcStatus, fail_reason: Option<&str>, detail: Option<&str>, elapsed: f64,
+  ) {
     let detail_json = match detail {
       Some(d) => quote(d),
       None => "null".to_string(),
     };
+    let fail_reason_json = match fail_reason {
+      Some(r) => quote(r),
+      None => "null".to_string(),
+    };
     let body = format!(
-      "{{ \"session\": {}, \"proc\": {}, \"status\": {}, \"detail\": {}, \"elapsed\": {} }}",
+      "{{ \"session\": {}, \"proc\": {}, \"status\": {}, \"fail_reason\": {}, \"detail\": {}, \"elapsed\": {} }}",
       quote(&self.inner.session_id),
       proc_index,
       quote(status.as_str()),
+      fail_reason_json,
       detail_json,
       elapsed
     );
-    let _ = self.post("/api/v1/proc/finish", &body);
+    if !self.post_sync_after_flush("/api/v1/proc/finish", &body) {
+      log_post_failure("/api/v1/proc/finish", Some(proc_index));
+      if status == ProcStatus::Fail {
+        crate::failure::log_session_proc(
+          &self.inner.session_id,
+          crate::failure::reason::DAEMON_POST_FAILED,
+          &format!("proc {proc_index}"),
+          detail.unwrap_or("(proc/finish not accepted by daemon)"),
+        );
+      }
+    }
   }
 
   pub fn container_event(&self, proc_index: usize, action: &str, name: &str) {
@@ -177,7 +209,13 @@ impl Client {
       quote(action),
       quote(name)
     );
-    let _ = self.post("/api/v1/container", &body);
+    if action == "stop" {
+      if !self.post_sync_after_flush("/api/v1/container", &body) {
+        log_post_failure("/api/v1/container", Some(proc_index));
+      }
+    } else {
+      let _ = self.post("/api/v1/container", &body);
+    }
   }
 
   pub fn ping(&self) {
@@ -205,13 +243,25 @@ impl Client {
     self.post_sync(path, body)
   }
 
-  fn flush_poster(&self) {
+  fn flush_poster(&self) -> bool {
     if let Some(tx) = lock_post_tx(&self.inner) {
       let (done_tx, done_rx) = mpsc::channel();
       if tx.send(PostJob::Flush { done: done_tx }).is_ok() {
-        let _ = done_rx.recv_timeout(Duration::from_secs(3));
+        return done_rx.recv_timeout(FLUSH_DRAIN_TIMEOUT).is_ok();
       }
     }
+    true
+  }
+}
+
+fn log_daemon_warn(msg: &str) {
+  eprintln!("session browser: {msg}");
+}
+
+fn log_post_failure(path: &str, proc: Option<usize>) {
+  match proc {
+    Some(i) => log_daemon_warn(&format!("POST {path} for proc {i} failed (daemon unreachable or rejected request)")),
+    None => log_daemon_warn(&format!("POST {path} failed (daemon unreachable or rejected request)")),
   }
 }
 
@@ -233,10 +283,12 @@ fn poster_loop(port: u16, session_id: String, rx: mpsc::Receiver<PostJob>) {
       }
       Ok(PostJob::Send { path, body }) => {
         flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
-        let _ = send_post(port, &path, &body);
+        if !send_post(port, &path, &body) {
+          log_post_failure(&path, None);
+        }
       }
       Ok(PostJob::Flush { done }) => {
-        flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
+        drain_poster_burst(&rx, port, &session_id, &mut line_buf, &mut line_bytes);
         let _ = done.send(());
       }
       Err(RecvTimeoutError::Timeout) => {
@@ -248,6 +300,38 @@ fn poster_loop(port: u16, session_id: String, rx: mpsc::Receiver<PostJob>) {
       }
     }
   }
+}
+
+/// After the explicit flush marker, drain any jobs already queued behind it before acking.
+fn drain_poster_burst(
+  rx: &mpsc::Receiver<PostJob>, port: u16, session_id: &str, line_buf: &mut Vec<(usize, f64, String)>,
+  line_bytes: &mut usize,
+) {
+  flush_lines(port, session_id, line_buf, line_bytes);
+  loop {
+    match rx.try_recv() {
+      Ok(PostJob::ProcLine { proc, at, line }) => {
+        *line_bytes += line.len();
+        line_buf.push((proc, at, line));
+        if *line_bytes >= LINE_BATCH_MAX_BYTES {
+          flush_lines(port, session_id, line_buf, line_bytes);
+        }
+      }
+      Ok(PostJob::Send { path, body }) => {
+        flush_lines(port, session_id, line_buf, line_bytes);
+        if !send_post(port, &path, &body) {
+          log_post_failure(&path, None);
+        }
+      }
+      Ok(PostJob::Flush { done }) => {
+        flush_lines(port, session_id, line_buf, line_bytes);
+        let _ = done.send(());
+      }
+      Err(TryRecvError::Empty) => break,
+      Err(TryRecvError::Disconnected) => break,
+    }
+  }
+  flush_lines(port, session_id, line_buf, line_bytes);
 }
 
 fn group_line_buf(buf: &[(usize, f64, String)]) -> Vec<(usize, Vec<(f64, String)>)> {
@@ -271,7 +355,9 @@ fn flush_lines(port: u16, session_id: &str, buf: &mut Vec<(usize, f64, String)>,
     return;
   }
   for (proc, chunk) in group_line_buf(buf) {
-    let _ = send_lines_bulk(port, session_id, proc, &chunk);
+    if !send_lines_bulk(port, session_id, proc, &chunk) {
+      log_post_failure("/api/v1/proc/lines", Some(proc));
+    }
   }
   buf.clear();
   *bytes = 0;

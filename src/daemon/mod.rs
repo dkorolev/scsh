@@ -18,7 +18,7 @@ pub fn new_session_id() -> String {
 }
 
 pub use model::{DaemonMode, ProcKind, ProcStatus};
-pub use paths::{absolutize_repo_path, base_url, daemon_port, read_live_pid};
+pub use paths::{absolutize_repo_path, base_url, daemon_dir, daemon_port, now_unix_secs, read_live_pid};
 pub use server::Server;
 
 const ENSURE_ATTEMPTS: usize = 3;

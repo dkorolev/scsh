@@ -145,6 +145,15 @@ impl Model {
     }
   }
 
+  /// Last `max` captured lines for proc `i` (for failure messages).
+  pub fn tail_lines(&self, i: usize, max: usize) -> Vec<String> {
+    let Some(p) = self.procs.get(i) else {
+      return Vec::new();
+    };
+    let start = p.lines.len().saturating_sub(max);
+    p.lines[start..].iter().map(|l| l.text.clone()).collect()
+  }
+
   /// Toggle a proc's expanded state (what a mouse click on its header does). Expanding scrolls
   /// the viewport to that proc's header so you can read its output from the top; collapsing
   /// leaves the scroll position unchanged.

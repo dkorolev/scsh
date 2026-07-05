@@ -7,6 +7,7 @@
 
 mod config;
 mod daemon;
+mod failure;
 mod json;
 mod runtime;
 mod sha1;
@@ -65,6 +66,7 @@ fn run(args: &[String]) -> i32 {
     Mode::UiDemo { frames } => ui::demo::run(frames),
     Mode::Daemon { action } => daemon_cmd(action),
     Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
+    Mode::Failures => failures_cmd(&cli.failures),
   }
 }
 
@@ -89,6 +91,8 @@ enum Mode {
     mode: daemon::DaemonMode,
     port: u16,
   },
+  /// Browse the failure log (`scsh failures`), with filters and `--stats`.
+  Failures,
 }
 
 #[derive(Clone, Copy)]
@@ -130,6 +134,18 @@ struct Cli {
   sources: Vec<String>,
   verbose: bool,
   json: bool,
+  failures: FailuresOpts,
+}
+
+/// Filters and output flags for `scsh failures`.
+#[derive(Default)]
+struct FailuresOpts {
+  session: Option<String>,
+  skill: Option<String>,
+  reason: Option<String>,
+  stats: bool,
+  /// How many trailing events/rows to show (`--last N`; `--last 0` = all; default 50).
+  last: Option<usize>,
 }
 
 /// Parse cargo-style subcommands. The default (no command) is `help`, so a bare
@@ -143,6 +159,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut verbose = false;
   let mut json = false;
   let mut frames = false;
+  let mut failures = FailuresOpts::default();
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -199,6 +216,30 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // (one or more) install skills from those repos, in order, instead of scsh's bundled one.
       "installskills" => Some(Mode::InstallSkills),
       "updateskills" => Some(Mode::UpdateSkills),
+      // `failures [--session S] [--skill NAME] [--reason CODE] [--last N] [--stats]`:
+      // browse the append-only failure log (see `scsh run`'s "failure log:" hint).
+      "failures" => Some(Mode::Failures),
+      "--session" | "--skill" | "--reason" => {
+        let flag = args[i].clone();
+        i += 1;
+        let value = args.get(i).ok_or_else(|| format!("{flag} needs a value"))?.clone();
+        match flag.as_str() {
+          "--session" => failures.session = Some(value),
+          "--skill" => failures.skill = Some(value),
+          _ => failures.reason = Some(value),
+        }
+        None
+      }
+      "--stats" => {
+        failures.stats = true;
+        None
+      }
+      "--last" => {
+        i += 1;
+        let n = args.get(i).ok_or("--last needs a number (0 = all)")?;
+        failures.last = Some(n.parse().map_err(|_| format!("bad --last value '{n}'"))?);
+        None
+      }
       "daemon" => {
         i += 1;
         let sub = args.get(i).ok_or("daemon needs a subcommand: start, stop, restart, or status")?;
@@ -299,7 +340,14 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if json && !matches!(mode, Mode::List) {
     return Err("--json only applies to 'list' (e.g. `scsh list --json`)".into());
   }
-  Ok(Cli { mode, profile, sources, verbose, json })
+  if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
+    return Err("--reason/--stats only apply to 'failures'".into());
+  }
+  let shared_query_flags = failures.session.is_some() || failures.skill.is_some() || failures.last.is_some();
+  if shared_query_flags && !matches!(mode, Mode::Failures) {
+    return Err("--session/--skill/--last only apply to 'failures'".into());
+  }
+  Ok(Cli { mode, profile, sources, verbose, json, failures })
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -967,6 +1015,117 @@ fn daemon_serve(mode: daemon::DaemonMode, port: u16) -> i32 {
   }
 }
 
+/// `scsh failures`: render the JSONL failure log, filtered and optionally aggregated.
+fn failures_cmd(opts: &FailuresOpts) -> i32 {
+  let mut events = failure::read_events();
+  if let Some(s) = &opts.session {
+    events.retain(|e| e.session.as_deref() == Some(s.as_str()));
+  }
+  if let Some(s) = &opts.skill {
+    events.retain(|e| e.skill.as_deref() == Some(s.as_str()));
+  }
+  if let Some(r) = &opts.reason {
+    events.retain(|e| e.reason == *r);
+  }
+  if events.is_empty() {
+    println!("no recorded failures match");
+    hint(&format!("failure log: {}", failure::log_path().display()));
+    return 0;
+  }
+  if opts.stats {
+    print_failure_stats(&events);
+    return 0;
+  }
+  let keep = match opts.last {
+    Some(0) => events.len(),
+    Some(n) => n,
+    None => 50,
+  };
+  let start = events.len().saturating_sub(keep);
+  if start > 0 {
+    println!("… {start} earlier event(s) hidden — rerun with --last 0 for all");
+  }
+  for e in &events[start..] {
+    print_failure_event(e);
+  }
+  0
+}
+
+fn print_failure_event(e: &failure::FailureEvent) {
+  let when = runtime::format_utc_timestamp(e.ts);
+  if e.kind == "run_summary" {
+    let profile = e.profile.as_deref().unwrap_or("(no profile)");
+    let session = e.session.as_deref().unwrap_or("?");
+    println!(
+      "{when}  run failed: {}/{} skills (profile {profile}, session {session})",
+      e.failed.unwrap_or(0),
+      e.total.unwrap_or(0)
+    );
+    return;
+  }
+  let mut parts = Vec::new();
+  if let Some(s) = &e.session {
+    parts.push(format!("session={s}"));
+  }
+  if let Some(s) = &e.skill {
+    parts.push(format!("skill={s}"));
+  }
+  if let Some(s) = &e.subject {
+    parts.push(format!("proc={s}"));
+  }
+  if let Some(h) = &e.harness {
+    let model = e.model.as_deref().unwrap_or("(harness default)");
+    parts.push(format!("route={h}·{model}"));
+  }
+  let verb = if e.kind == "retry" { "retried" } else { "failed" };
+  println!("{when}  [{}] {verb}  {}", e.reason, parts.join(" "));
+  if let Some(d) = &e.detail {
+    for line in d.lines() {
+      println!("    {line}");
+    }
+  }
+}
+
+/// `scsh failures --stats`: failures and retries per harness·model route, then per reason.
+fn print_failure_stats(events: &[failure::FailureEvent]) {
+  use std::collections::BTreeMap;
+  // Route → (failure count, retry count, reason → count). Only events that carry a route.
+  let mut routes: BTreeMap<String, (usize, usize, BTreeMap<String, usize>)> = BTreeMap::new();
+  let mut reasons: BTreeMap<String, usize> = BTreeMap::new();
+  for e in events {
+    if e.kind == "run_summary" {
+      continue;
+    }
+    *reasons.entry(e.reason.clone()).or_default() += 1;
+    if let Some(h) = &e.harness {
+      let route = format!("{h} · {}", e.model.as_deref().unwrap_or("(harness default)"));
+      let entry = routes.entry(route).or_default();
+      if e.kind == "retry" {
+        entry.1 += 1;
+      } else {
+        entry.0 += 1;
+        *entry.2.entry(e.reason.clone()).or_default() += 1;
+      }
+    }
+  }
+  if routes.is_empty() {
+    println!("no route-attributed failures recorded yet (routes appear on failed skill events)");
+  } else {
+    println!("failures by route (harness · model):");
+    for (route, (fails, retries, by_reason)) in &routes {
+      let mut reason_bits: Vec<String> = by_reason.iter().map(|(r, n)| format!("{r} ×{n}")).collect();
+      reason_bits.sort();
+      let retry_note = if *retries > 0 { format!(", {retries} retried") } else { String::new() };
+      println!("  {route}: {fails} failure(s){retry_note} — {}", reason_bits.join(", "));
+    }
+  }
+  println!();
+  println!("failures by reason (all events):");
+  for (reason, n) in &reasons {
+    println!("  {reason}: {n}");
+  }
+}
+
 /// Absolute repo path for the session browser (canonical when possible).
 fn repo_path_for_session(root: &Path) -> String {
   daemon::absolutize_repo_path(root)
@@ -1140,7 +1299,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
       }
       Err(e) => {
         for &i in &stale_proc_indices {
-          build_procs[i].finish_fail(Some(&e.0));
+          build_procs[i].finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
         }
         Some(e)
       }
@@ -1158,15 +1317,56 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   }
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let dc = daemon_client.clone();
+    let ui_ref = &ui;
+    let session_ref = session_id.as_str();
     let handles: Vec<_> = skills
       .iter()
       .zip(skill_procs)
       .map(|(&skill, p)| {
         let dc = dc.clone();
-        scope.spawn(move || run_one_skill(skill, rt, root, secs, p, base_ref, dc))
+        scope.spawn(move || {
+          let first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone());
+          if first.ok {
+            return first;
+          }
+          // One automatic retry for transient infrastructure failures (fresh clone, fresh
+          // container, new live-board row). Deterministic failures return as-is.
+          let transient = first.fail_reason.as_deref().is_some_and(failure::is_transient);
+          if !transient || !failure::retry_enabled() {
+            return first;
+          }
+          let reason = first.fail_reason.as_deref().unwrap_or("unknown");
+          failure::log_retry(session_ref, &skill.name, skill.harness.as_str(), skill.model.as_deref(), reason);
+          let label = format!("{}: {} (retry)", skill.harness.as_str(), skill.name);
+          let p2 = ui_ref.proc(label.clone(), false);
+          if let Some(c) = &dc {
+            c.proc_add(
+              p2.index(),
+              &label,
+              daemon::ProcKind::Skill,
+              Some(skill.name.as_str()),
+              Some(skill.harness.as_str()),
+              skill.model.as_deref(),
+            );
+          }
+          run_one_skill(skill, rt, root, secs, p2, base_ref, dc)
+        })
       })
       .collect();
-    handles.into_iter().map(|h| h.join().unwrap_or_else(|_| SkillRun::failed(None, None, None))).collect()
+    handles
+      .into_iter()
+      .zip(skills)
+      .map(|(h, skill)| {
+        h.join().unwrap_or_else(|_| {
+          failure::log_skill(
+            failure::reason::THREAD_PANICKED,
+            &skill.name,
+            "skill thread panicked before reporting outcome",
+          );
+          SkillRun::failed(failure::reason::THREAD_PANICKED, None, None, None)
+        })
+      })
+      .collect()
   });
 
   // The run is over: restore the terminal and print the persistent ✓/✗ summary (attended; off a
@@ -1177,13 +1377,33 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   //    that failed, then the overall verdict.
   let n = outcomes.len();
   let failed = outcomes.iter().filter(|o| !o.ok).count();
-  for o in outcomes.iter().filter(|o| !o.ok) {
+  for (skill, o) in skills.iter().zip(outcomes.iter()).filter(|(_, o)| !o.ok) {
     if let Some(dir) = &o.run_dir {
       hint(&format!("run dir kept: {dir}"));
     }
     if let Some(log) = &o.log {
       hint(&format!("output log: {log}"));
     }
+    let reason = o.fail_reason.as_deref().unwrap_or("unknown");
+    let mut detail = String::new();
+    if let Some(d) = &o.run_dir {
+      detail.push_str(&format!("run dir: {d}\n"));
+    }
+    if let Some(l) = &o.log {
+      detail.push_str(&format!("output log: {l}"));
+    }
+    failure::log_failed_skill(
+      &session_id,
+      &skill.name,
+      skill.harness.as_str(),
+      skill.model.as_deref(),
+      reason,
+      detail.trim(),
+    );
+  }
+  if failed > 0 {
+    failure::log_run_summary(&session_id, profile, failed, n);
+    hint(&format!("failure log: {} (browse with `scsh failures`)", failure::log_path().display()));
   }
 
   // 4. Pull commits OUT from commit-enabled skills (host-only, after containers exit).
@@ -1250,6 +1470,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
 /// residue the orchestrator still needs afterward — run-dir/log pointers and commit replay.
 struct SkillRun {
   ok: bool,
+  /// Stable reason code when `ok == false`.
+  fail_reason: Option<String>,
   /// The `/tmp` run dir, kept for inspection when the skill failed.
   run_dir: Option<String>,
   /// Host path to the skill's output log, when its container actually ran.
@@ -1265,18 +1487,41 @@ struct SkillRun {
 }
 
 impl SkillRun {
-  fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
-    SkillRun { ok: true, run_dir: None, log: Some(log), clone_dir, cached_commits: None }
+  fn base() -> SkillRun {
+    SkillRun { ok: false, fail_reason: None, run_dir: None, log: None, clone_dir: None, cached_commits: None }
   }
-  fn failed(run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
-    SkillRun { ok: false, run_dir, log, clone_dir, cached_commits: None }
+  fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
+    SkillRun { ok: true, log: Some(log), clone_dir, ..SkillRun::base() }
+  }
+  fn failed(reason: &str, run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
+    SkillRun { fail_reason: Some(reason.into()), run_dir, log, clone_dir, ..SkillRun::base() }
   }
   /// A cache hit: the result was restored from the cache without running the skill (no
   /// clone, no container). `cached_commits` carries any journaled commits to replay, so a
   /// hit for a commit-enabled skill still reproduces the commit.
   fn cached(cached_commits: Option<String>) -> SkillRun {
-    SkillRun { ok: true, run_dir: None, log: None, clone_dir: None, cached_commits }
+    SkillRun { ok: true, cached_commits, ..SkillRun::base() }
   }
+}
+
+/// One detail string for a failed skill — shown in the terminal summary and session browser.
+fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>, log: Option<&str>) -> String {
+  let mut parts = vec![why.to_string()];
+  if let Some(d) = run_dir {
+    parts.push(format!("run dir: {d}"));
+  }
+  if let Some(l) = log {
+    parts.push(format!("output log: {l}"));
+    if runtime::harness_verbose_enabled() {
+      match harness {
+        config::Harness::Claude => parts.push(format!("claude debug log: {l}.debug")),
+        config::Harness::Codex => parts.push(format!("codex final message: {l}.last")),
+        config::Harness::Grok => parts.push(format!("grok debug log: {l}.debug")),
+        config::Harness::Opencode => {}
+      }
+    }
+  }
+  parts.join("\n")
 }
 
 /// Run a single skill end to end in its own clone and container, driving `spinner`
@@ -1295,8 +1540,8 @@ fn run_one_skill(
       e
     }
     Err(message) => {
-      spinner.finish_fail(Some(&message));
-      return SkillRun::failed(None, None, None);
+      spinner.finish_fail(failure::reason::ENV_UNRESOLVED, Some(&message));
+      return SkillRun::failed(failure::reason::ENV_UNRESOLVED, None, None, None);
     }
   };
 
@@ -1326,8 +1571,8 @@ fn run_one_skill(
   let run_dir = match prepare_run_dir(secs, &skill.name, &rt.name) {
     Ok(d) => d,
     Err(e) => {
-      spinner.finish_fail(Some(&e));
-      return SkillRun::failed(None, None, None);
+      spinner.finish_fail(failure::reason::RUN_DIR, Some(&e));
+      return SkillRun::failed(failure::reason::RUN_DIR, None, None, None);
     }
   };
   let run_dir_str = run_dir.to_string_lossy().into_owned();
@@ -1335,19 +1580,19 @@ fn run_one_skill(
   let mut git_daemon = None;
   if git_transport {
     if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, &spinner) {
-      spinner.finish_fail(Some(&e));
-      return SkillRun::failed(Some(run_dir_str), None, None);
+      spinner.finish_fail(failure::reason::GIT_TRANSPORT, Some(&e));
+      return SkillRun::failed(failure::reason::GIT_TRANSPORT, Some(run_dir_str), None, None);
     }
     match GitTransport::start(&run_dir) {
       Ok(d) => git_daemon = Some(d),
       Err(e) => {
-        spinner.finish_fail(Some(&e));
-        return SkillRun::failed(Some(run_dir_str), None, None);
+        spinner.finish_fail(failure::reason::GIT_DAEMON, Some(&e));
+        return SkillRun::failed(failure::reason::GIT_DAEMON, Some(run_dir_str), None, None);
       }
     }
   } else if let Err(e) = clone_into(root, &run_dir, &spinner) {
-    spinner.finish_fail(Some(&e));
-    return SkillRun::failed(Some(run_dir_str), None, None);
+    spinner.finish_fail(failure::reason::CLONE, Some(&e));
+    return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, None);
   }
   // From here the clone exists — carry it so a commit-enabled skill's commits can be
   // brought back even if a later step fails.
@@ -1463,21 +1708,22 @@ fn run_one_skill(
       // Timed out: the client was killed; stop the container too (best effort).
       ui::signals::stop_container(&rt.name, &name);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
-      spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
+      return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir);
     }
     Ok((false, false, last)) => {
-      let why = match last {
-        Some(l) if !l.is_empty() => format!("harness exited non-zero ({l})"),
-        _ => "harness exited non-zero".into(),
-      };
-      spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), Some(log), clone_dir);
+      let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
+      let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::HARNESS_NONZERO, Some(&detail));
+      return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir);
     }
     Err(e) => {
       let why = format!("could not run container: {e}");
-      spinner.finish_fail(Some(&why));
-      return SkillRun::failed(Some(run_dir_str), None, clone_dir);
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::CONTAINER_RUN, Some(&detail));
+      return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir);
     }
   }
 
@@ -1503,8 +1749,9 @@ fn run_one_skill(
       SkillRun::ok(log, clone_dir)
     }
     Err(e) => {
-      spinner.finish_fail(Some(&e));
-      SkillRun::failed(Some(run_dir_str), Some(log), clone_dir)
+      let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+      SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
     }
   }
 }
@@ -1974,7 +2221,8 @@ fn resolve_env(env: &[config::EnvVar]) -> Result<Vec<(String, String)>, String> 
 fn collect_skill_result(root: &Path, run_dir: &Path, result: &str, secs: u64) -> Result<String, String> {
   let produced = run_dir.join(result);
   if !produced.is_file() {
-    return Err(format!("did not produce its result file '{result}'"));
+    let ctx = failure::missing_result_context(run_dir, result);
+    return Err(format!("did not produce its result file '{result}'{ctx}"));
   }
   let dest = root.join(result);
   if let Some(parent) = dest.parent() {
@@ -2249,14 +2497,20 @@ fn run_builds(
     let cmd = runtime::build_command_bake(runtime_name, &targets);
     let out = build.run_with_stdin(&cmd[0], &cmd[1..], bake.as_bytes()).map_err(started);
     let _ = std::fs::remove_dir_all(&dir);
-    return finish_build_outcome(out);
+    let context = format!("image build failed (runtime={runtime_name}, targets={})", targets.join(", "));
+    return finish_build_outcome(build, &context, out);
   }
 
   match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
       for spec in specs {
         let cmd = runtime::build_command_stdin(runtime_name, &spec.tag, &spec.target, uid, gid, &tz, &spec.fingerprint);
-        finish_build_outcome(build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started))?;
+        let context = format!("image build failed (runtime={runtime_name}, target={})", spec.target);
+        finish_build_outcome(
+          build,
+          &context,
+          build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started),
+        )?;
       }
       Ok(())
     }
@@ -2279,7 +2533,8 @@ fn run_builds(
           &tz,
           &spec.fingerprint,
         );
-        finish_build_outcome(build.run(&cmd[0], &cmd[1..]).map_err(started))?;
+        let context = format!("image build failed (runtime={runtime_name}, target={})", spec.target);
+        finish_build_outcome(build, &context, build.run(&cmd[0], &cmd[1..]).map_err(started))?;
       }
       let _ = std::fs::remove_dir_all(&dir);
       Ok(())
@@ -2287,16 +2542,16 @@ fn run_builds(
   }
 }
 
-fn finish_build_outcome(out: Result<(bool, Option<String>), (String, i32)>) -> Result<(), (String, i32)> {
+fn finish_build_outcome(
+  build: &ui::screen::Proc, context: &str, out: Result<(bool, Option<String>), (String, i32)>,
+) -> Result<(), (String, i32)> {
   let (ok, last) = out?;
   if ok {
     Ok(())
   } else {
-    let msg = match last {
-      Some(l) if !l.is_empty() => format!("image build failed: {l}"),
-      _ => "image build failed".into(),
-    };
-    Err((msg, 1))
+    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
+    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
+    Err((format!("{context}: {excerpt}"), 1))
   }
 }
 
@@ -2331,11 +2586,9 @@ fn run_build(
   if ok {
     Ok(())
   } else {
-    let msg = match last {
-      Some(l) if !l.is_empty() => format!("image build failed: {l}"),
-      _ => "image build failed".into(),
-    };
-    Err((msg, 1))
+    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
+    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
+    Err((format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {excerpt}"), 1))
   }
 }
 
@@ -3095,6 +3348,7 @@ fn print_help_overview() {
   help_row("updateskills [url…]", "Reinstall skills, overwriting local copies.");
   help_row("daemon", "start | stop | restart | status");
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
+  help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -3352,6 +3606,8 @@ fn print_help_internals() {
   recommended native harness for Grok models.
   Harness runs pass `--verbose` (Claude) or `--print-logs --log-level INFO` (OpenCode) so
   the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
+  A transient infra failure (timeout, container/clone error) is retried once on a fresh
+  clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.
   Unavailable harnesses and opencode models are skipped; a run fails only when every selected skill is skipped.
   Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
@@ -3528,6 +3784,24 @@ mod tests {
     assert!(cli(&["foo"]).is_err(), "a bare token without `run` is an unknown command");
     assert!(cli(&["list", "foo"]).is_err(), "profiles don't apply to `list`");
     assert!(cli(&["run", "--nope"]).is_err(), "an unknown flag after `run` is not a profile");
+  }
+
+  #[test]
+  fn failures_command_parses_filters_and_stats() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["failures"]).unwrap();
+    assert!(matches!(c.mode, Mode::Failures));
+    assert!(!c.failures.stats);
+    let c = cli(&["failures", "--session", "abc123", "--skill", "add", "--reason", "clone_failed"]).unwrap();
+    assert_eq!(c.failures.session.as_deref(), Some("abc123"));
+    assert_eq!(c.failures.skill.as_deref(), Some("add"));
+    assert_eq!(c.failures.reason.as_deref(), Some("clone_failed"));
+    let c = cli(&["failures", "--stats", "--last", "0"]).unwrap();
+    assert!(c.failures.stats);
+    assert_eq!(c.failures.last, Some(0));
+    assert!(cli(&["failures", "--last", "many"]).is_err(), "--last needs a number");
+    assert!(cli(&["run", "--stats"]).is_err(), "failure filters don't apply to run");
+    assert!(cli(&["list", "--session", "abc"]).is_err(), "failure filters don't apply to list");
   }
 
   #[test]
