@@ -8,17 +8,20 @@ mod html;
 mod jsonio;
 mod model;
 mod paths;
+pub mod prune;
 mod server;
 mod websocket;
 
-pub use client::{spawn_daemon, Client};
+pub use client::{post_once, spawn_daemon, Client};
 /// Generate a session id: six lowercase letters (delegates to runtime nonce helper).
 pub fn new_session_id() -> String {
   crate::runtime::random_nonce_6()
 }
 
 pub use model::{DaemonMode, ProcKind, ProcStatus};
-pub use paths::{absolutize_repo_path, base_url, daemon_dir, daemon_port, now_unix_secs, read_live_pid};
+pub use paths::{
+  absolutize_repo_path, base_url, daemon_dir, daemon_port, daemon_port_reachable, now_unix_secs, read_live_pid,
+};
 pub use server::Server;
 
 const ENSURE_ATTEMPTS: usize = 3;

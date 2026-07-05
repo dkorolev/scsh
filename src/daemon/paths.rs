@@ -33,6 +33,10 @@ pub fn state_file(port: u16) -> PathBuf {
   daemon_dir().join(format!("daemon-{port}.json"))
 }
 
+pub fn prune_file(port: u16) -> PathBuf {
+  daemon_dir().join(format!("prune-{port}.json"))
+}
+
 /// True when TCP connects to the daemon's localhost port within a short timeout.
 pub fn daemon_port_reachable(port: u16) -> bool {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid localhost address");

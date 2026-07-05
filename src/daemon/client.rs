@@ -218,6 +218,19 @@ impl Client {
     }
   }
 
+  /// Backup schedule for a run dir — the client deletes first; the daemon retries if it still exists.
+  pub fn schedule_run_dir_prune(&self, run_dir: &str, container_name: &str, runtime: &str, outcome_ok: bool) {
+    let outcome = if outcome_ok { "ok" } else { "fail" };
+    let body = format!(
+      "{{ \"run_dir\": {}, \"container_name\": {}, \"runtime\": {}, \"outcome\": {} }}",
+      quote(run_dir),
+      quote(container_name),
+      quote(runtime),
+      quote(outcome),
+    );
+    let _ = self.post("/api/v1/prune/schedule", &body);
+  }
+
   pub fn ping(&self) {
     let _ = self.post("/api/v1/ping", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
   }
@@ -252,6 +265,11 @@ impl Client {
     }
     true
   }
+}
+
+/// One synchronous POST to a daemon on `port`, outside any session (e.g. `scsh prune --now`).
+pub fn post_once(port: u16, path: &str, body: &str) -> bool {
+  send_post(port, path, body)
 }
 
 fn log_daemon_warn(msg: &str) {
