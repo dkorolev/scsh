@@ -69,6 +69,7 @@ fn run(args: &[String]) -> i32 {
     Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
+    Mode::Prune => prune_cmd(cli.prune_now),
   }
 }
 
@@ -97,6 +98,8 @@ enum Mode {
   Failures,
   /// Browse durable run statistics (`scsh stats`): durations and workload per route.
   Stats,
+  /// Show the run-dir prune queue; `--now` forces a janitor pass.
+  Prune,
 }
 
 #[derive(Clone, Copy)]
@@ -139,6 +142,7 @@ struct Cli {
   verbose: bool,
   json: bool,
   failures: FailuresOpts,
+  prune_now: bool,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -169,6 +173,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut json = false;
   let mut frames = false;
   let mut failures = FailuresOpts::default();
+  let mut prune_now = false;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -256,6 +261,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         i += 1;
         let n = args.get(i).ok_or("--last needs a number (0 = all)")?;
         failures.last = Some(n.parse().map_err(|_| format!("bad --last value '{n}'"))?);
+        None
+      }
+      // `prune [--now]`: show the daemon's run-dir cleanup queue, or force a pass now.
+      "prune" => Some(Mode::Prune),
+      "--now" => {
+        prune_now = true;
         None
       }
       "daemon" => {
@@ -369,7 +380,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if shared_query_flags && !matches!(mode, Mode::Failures | Mode::Stats) {
     return Err("--session/--skill/--last only apply to 'failures' or 'stats'".into());
   }
-  Ok(Cli { mode, profile, sources, verbose, json, failures })
+  if prune_now && !matches!(mode, Mode::Prune) {
+    return Err("--now only applies to 'prune' (e.g. `scsh prune --now`)".into());
+  }
+  Ok(Cli { mode, profile, sources, verbose, json, failures, prune_now })
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -1296,6 +1310,44 @@ fn print_skill_aggregates(skill_rows: &[&stats::StatRecord]) {
   }
 }
 
+/// `scsh prune`: show the daemon's run-dir cleanup queue; `--now` forces a janitor pass
+/// (through the daemon when it is running, else directly on the persisted queue).
+fn prune_cmd(now_flag: bool) -> i32 {
+  let port = daemon::daemon_port();
+  let queue = daemon::prune::PruneQueue::load(port);
+  if !now_flag {
+    if queue.jobs.is_empty() {
+      ok("run-dir prune queue is empty");
+      return 0;
+    }
+    let now = daemon::now_unix_secs();
+    println!("{} pending run-dir prune job(s):", queue.jobs.len());
+    for j in &queue.jobs {
+      let outcome = if j.outcome_ok { "ok" } else { "failed" };
+      let when =
+        if now >= j.eligible_at { "eligible now".to_string() } else { format!("eligible in {}s", j.eligible_at - now) };
+      println!("  {}  ({outcome} run, {when})", j.run_dir);
+    }
+    hint("delete every eligible dir now with: scsh prune --now");
+    return 0;
+  }
+  let before = queue.jobs.len();
+  if daemon::daemon_port_reachable(port) {
+    if !daemon::post_once(port, "/api/v1/prune/tick", "{}") {
+      fail("session browser daemon is running but rejected the prune request");
+      return 1;
+    }
+  } else {
+    // No daemon: run one pass directly on the persisted queue.
+    let mut q = queue;
+    let _ = q.tick(daemon::now_unix_secs());
+    q.save(port);
+  }
+  let after = daemon::prune::PruneQueue::load(port).jobs.len();
+  ok(&format!("prune pass complete: {before} job(s) before, {after} remaining"));
+  0
+}
+
 /// Absolute repo path for the session browser (canonical when possible).
 fn repo_path_for_session(root: &Path) -> String {
   daemon::absolutize_repo_path(root)
@@ -1956,12 +2008,14 @@ fn run_one_skill(
     Ok((false, true, _)) => {
       // Timed out: the client was killed; stop the container too (best effort).
       ui::signals::stop_container(&rt.name, &name);
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir);
     }
     Ok((false, false, last)) => {
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
       let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
@@ -1969,6 +2023,7 @@ fn run_one_skill(
       return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir);
     }
     Err(e) => {
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("could not run container: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_RUN, Some(&detail));
@@ -1995,9 +2050,11 @@ fn run_one_skill(
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       spinner.finish_ok(Some(headline));
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
       SkillRun::ok(log, clone_dir)
     }
     Err(e) => {
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
       SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
@@ -2273,6 +2330,19 @@ fn grok_auth_enabled() -> bool {
 /// runs are swept at startup. Set `SCSH_KEEP_RUNS=1` to keep all clones and skip the sweep.
 fn keep_run_dirs() -> bool {
   matches!(std::env::var("SCSH_KEEP_RUNS").ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// Tell the session-browser daemon to retry run-dir cleanup later if the client did not remove it.
+fn schedule_run_dir_prune_backup(
+  daemon_client: Option<&std::sync::Arc<daemon::Client>>, run_dir: &str, container_name: &str, runtime: &str,
+  outcome_ok: bool,
+) {
+  if keep_run_dirs() {
+    return;
+  }
+  if let Some(c) = daemon_client {
+    c.schedule_run_dir_prune(run_dir, container_name, runtime, outcome_ok);
+  }
 }
 
 /// Copy the host's opencode auth and config into `run_dir` for the upcoming run.
@@ -3599,6 +3669,7 @@ fn print_help_overview() {
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
+  help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
@@ -4072,6 +4143,16 @@ mod tests {
     assert!(cli(&["run", "--raw"]).is_err(), "--raw only applies to stats");
     assert!(cli(&["failures", "--harness", "codex"]).is_err(), "--harness only applies to stats");
     assert!(cli(&["stats", "--reason", "clone_failed"]).is_err(), "--reason only applies to failures");
+  }
+
+  #[test]
+  fn prune_command_parses_now_flag() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["prune"]).unwrap();
+    assert!(matches!(c.mode, Mode::Prune));
+    assert!(!c.prune_now);
+    assert!(cli(&["prune", "--now"]).unwrap().prune_now);
+    assert!(cli(&["run", "--now"]).is_err(), "--now only applies to prune");
   }
 
   #[test]

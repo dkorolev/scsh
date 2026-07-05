@@ -11,11 +11,13 @@ use super::html;
 use super::jsonio::{field_num, field_str, load_store, save_store, tick_json, tick_json_light};
 use super::model::{DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
 use super::paths::{now_unix_secs, pid_file, state_file};
+use super::prune::{schedule_from_api, schedule_orphans_from_session, PruneQueue};
 use super::websocket::{self, Hub};
 use crate::json::{parse, quote, Value};
 
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const WS_TICK: Duration = Duration::from_millis(500);
+const PRUNE_TICK: Duration = Duration::from_secs(30);
 const MAX_PROC_LINES: usize = 5000;
 const MAX_HTTP_BODY: usize = 512 * 1024;
 const MAX_HTTP_HEADER: usize = 64 * 1024;
@@ -30,10 +32,12 @@ fn lock_last_persist(last: &Mutex<Option<Instant>>) -> MutexGuard<'_, Option<Ins
 
 pub struct Server {
   store: Arc<Mutex<Store>>,
+  prune: Arc<Mutex<PruneQueue>>,
   port: u16,
   dirty: Arc<AtomicBool>,
   ws_dirty: Arc<AtomicBool>,
   last_persist: Mutex<Option<Instant>>,
+  last_prune_tick: Mutex<Instant>,
   ws_hub: Arc<Hub>,
 }
 
@@ -56,10 +60,12 @@ impl Server {
     }
     Server {
       store: Arc::new(Mutex::new(store)),
+      prune: Arc::new(Mutex::new(PruneQueue::load(port))),
       port,
       dirty: Arc::new(AtomicBool::new(false)),
       ws_dirty: Arc::new(AtomicBool::new(false)),
       last_persist: Mutex::new(None),
+      last_prune_tick: Mutex::new(Instant::now()),
       ws_hub: Hub::new(),
     }
   }
@@ -67,6 +73,12 @@ impl Server {
   pub fn run(&self) -> std::io::Result<()> {
     std::fs::create_dir_all(crate::daemon::paths::daemon_dir())?;
     self.persist_now();
+    {
+      let now = now_unix_secs();
+      let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
+      let _ = queue.tick(now);
+      queue.save(self.port);
+    }
 
     let addr = format!("127.0.0.1:{}", self.port);
     let listener = TcpListener::bind(&addr)?;
@@ -80,12 +92,13 @@ impl Server {
       match listener.accept() {
         Ok((stream, _)) => {
           let store = Arc::clone(&self.store);
+          let prune = Arc::clone(&self.prune);
           let dirty = Arc::clone(&self.dirty);
           let ws_dirty = Arc::clone(&self.ws_dirty);
           let ws_hub = Arc::clone(&self.ws_hub);
           std::thread::spawn(move || {
             let mutated =
-              catch_unwind(AssertUnwindSafe(|| handle_connection(stream, &store, &ws_hub).unwrap_or(false)))
+              catch_unwind(AssertUnwindSafe(|| handle_connection(stream, &store, &prune, &ws_hub).unwrap_or(false)))
                 .unwrap_or(false);
             if mutated {
               dirty.store(true, Ordering::Relaxed);
@@ -98,6 +111,7 @@ impl Server {
       }
 
       self.persist_if_due();
+      self.prune_if_due();
 
       if last_ws_tick.elapsed() >= WS_TICK {
         let now = now_unix_secs();
@@ -158,9 +172,24 @@ impl Server {
     self.dirty.store(false, Ordering::Relaxed);
     *lock_last_persist(&self.last_persist) = Some(Instant::now());
   }
+
+  fn prune_if_due(&self) {
+    let mut last = self.last_prune_tick.lock().unwrap_or_else(|e| e.into_inner());
+    if last.elapsed() < PRUNE_TICK {
+      return;
+    }
+    *last = Instant::now();
+    drop(last);
+    let now = now_unix_secs();
+    let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = queue.tick(now);
+    queue.save(self.port);
+  }
 }
 
-fn handle_connection(mut stream: TcpStream, store: &Arc<Mutex<Store>>, ws_hub: &Arc<Hub>) -> std::io::Result<bool> {
+fn handle_connection(
+  mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
+) -> std::io::Result<bool> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
   stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -171,7 +200,7 @@ fn handle_connection(mut stream: TcpStream, store: &Arc<Mutex<Store>>, ws_hub: &
     websocket::serve(stream, rx);
     return Ok(false);
   }
-  let (status, body, content_type, mutated) = route(&req, store);
+  let (status, body, content_type, mutated) = route(&req, store, prune);
   write_response(&mut stream, status, &body, content_type)?;
   Ok(mutated)
 }
@@ -264,9 +293,11 @@ fn parse_content_length(header_bytes: &[u8]) -> usize {
   0
 }
 
-fn route(req: &HttpRequest, store: &Arc<Mutex<Store>>) -> (u16, String, &'static str, bool) {
+fn route(
+  req: &HttpRequest, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>,
+) -> (u16, String, &'static str, bool) {
   if req.method == "POST" && req.path.starts_with("/api/v1/") {
-    let ok = handle_api_post(&req.path, &req.body, store);
+    let ok = handle_api_post(&req.path, &req.body, store, prune);
     let body = if ok { "{\"ok\":true}" } else { "{\"ok\":false}" };
     return (if ok { 200 } else { 400 }, body.to_string(), "application/json", ok);
   }
@@ -306,16 +337,38 @@ fn route(req: &HttpRequest, store: &Arc<Mutex<Store>>) -> (u16, String, &'static
   }
 }
 
-fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
+fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>) -> bool {
   let obj = match parse(body).ok() {
     Some(Value::Object(o)) => o,
     _ => return false,
   };
   let now = now_unix_secs();
+
+  if path == "/api/v1/prune/schedule" {
+    let port = lock_store(store).port;
+    let mut queue = prune.lock().unwrap_or_else(|e| e.into_inner());
+    let ok = schedule_from_api(body, &mut queue, now);
+    if ok {
+      queue.save(port);
+    }
+    return ok;
+  }
+
+  // Forced janitor pass (`scsh prune --now`): delete every eligible run dir immediately.
+  if path == "/api/v1/prune/tick" {
+    let port = lock_store(store).port;
+    let mut queue = prune.lock().unwrap_or_else(|e| e.into_inner());
+    let _ = queue.tick(now);
+    queue.save(port);
+    return true;
+  }
+
   let mut store = lock_store(store);
   store.touch(now);
+  let port = store.port;
+  let mut orphan_containers: Vec<(String, String)> = Vec::new();
 
-  match path {
+  let ok = match path {
     "/api/v1/session/start" => {
       let id = field_str(&obj, "session").unwrap_or_default();
       let repo = super::paths::absolutize_repo_path(std::path::Path::new(&field_str(&obj, "repo").unwrap_or_default()));
@@ -369,6 +422,8 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
       let session_id = field_str(&obj, "session").unwrap_or_default();
       if !session_id.is_empty() {
         if let Some(s) = store.session_mut(&session_id) {
+          orphan_containers =
+            s.procs.iter().filter_map(|p| p.container_name.as_ref().map(|n| (n.clone(), String::new()))).collect();
           s.client_connected = false;
           s.last_seen_at = now;
           if s.ended_at.is_none() {
@@ -530,7 +585,15 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>) -> bool {
       }
     }
     _ => false,
+  };
+
+  drop(store);
+  if !orphan_containers.is_empty() {
+    let mut queue = prune.lock().unwrap_or_else(|e| e.into_inner());
+    schedule_orphans_from_session(&mut queue, &orphan_containers, now);
+    queue.save(port);
   }
+  ok
 }
 
 fn deregister_incomplete_detail(p: &ProcRecord) -> String {
@@ -677,6 +740,7 @@ mod tests {
   #[test]
   fn proc_line_updates_session_last_seen_at() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
       let mut s = store.lock().unwrap();
       s.insert_session(
@@ -711,7 +775,7 @@ mod tests {
       );
     }
     let body = r#"{"session":"xyzabc","proc":0,"at":1.0,"line":"step"}"#;
-    assert!(handle_api_post("/api/v1/proc/line", body, &store));
+    assert!(handle_api_post("/api/v1/proc/line", body, &store, &prune));
     let last = store.lock().unwrap().sessions.get("xyzabc").unwrap().last_seen_at;
     assert!(last > 50);
   }
@@ -719,6 +783,7 @@ mod tests {
   #[test]
   fn proc_line_caps_at_max_proc_lines() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 1)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
       let mut s = store.lock().unwrap();
       s.insert_session(
@@ -754,7 +819,7 @@ mod tests {
     }
     for i in 0..=MAX_PROC_LINES {
       let body = format!(r#"{{"session":"captest","proc":0,"at":{i}.0,"line":"L{i}"}}"#);
-      assert!(handle_api_post("/api/v1/proc/line", &body, &store));
+      assert!(handle_api_post("/api/v1/proc/line", &body, &store, &prune));
     }
     let len = store.lock().unwrap().sessions.get("captest").unwrap().procs[0].lines.len();
     assert_eq!(len, MAX_PROC_LINES);
@@ -763,6 +828,7 @@ mod tests {
   #[test]
   fn proc_lines_bulk_appends_all() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 10)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
       let mut s = store.lock().unwrap();
       s.insert_session(
@@ -797,7 +863,7 @@ mod tests {
       );
     }
     let body = r#"{"session":"bulk","proc":0,"lines":[{"at":1.0,"line":"a"},{"at":2.0,"line":"b"}]}"#;
-    assert!(handle_api_post("/api/v1/proc/lines", body, &store));
+    assert!(handle_api_post("/api/v1/proc/lines", body, &store, &prune));
     let guard = store.lock().unwrap();
     let lines = &guard.sessions.get("bulk").unwrap().procs[0].lines;
     assert_eq!(lines.len(), 2);
@@ -806,8 +872,28 @@ mod tests {
   }
 
   #[test]
+  fn prune_tick_endpoint_runs_janitor_pass() {
+    let name = "scsh-tickab-run-add";
+    let dir = std::env::temp_dir().join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 59999, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    {
+      let mut q = prune.lock().unwrap();
+      // Eligible immediately: scheduled far enough in the past that the grace period elapsed.
+      q.schedule(&dir.to_string_lossy(), name, "docker", true, 0);
+    }
+    assert!(handle_api_post("/api/v1/prune/tick", "{}", &store, &prune));
+    assert!(!dir.exists(), "eligible run dir should be deleted by the forced pass");
+    assert!(prune.lock().unwrap().jobs.is_empty());
+    let _ = std::fs::remove_file(super::super::paths::prune_file(59999));
+  }
+
+  #[test]
   fn deregister_marks_ended_and_fails_incomplete_procs() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
       let mut s = store.lock().unwrap();
       s.insert_session(
@@ -842,7 +928,7 @@ mod tests {
       );
     }
     let body = r#"{"session":"dereg01"}"#;
-    assert!(handle_api_post("/api/v1/deregister", body, &store));
+    assert!(handle_api_post("/api/v1/deregister", body, &store, &prune));
     let guard = store.lock().unwrap();
     let session = guard.sessions.get("dereg01").unwrap();
     assert!(session.ended_at.is_some());

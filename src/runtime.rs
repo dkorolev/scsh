@@ -636,6 +636,35 @@ pub fn run_command(
   v
 }
 
+/// True when a named container still exists (running or stopped) for the given runtime.
+/// docker, podman, and Apple `container` all support `inspect <name>`, but Apple's exits 0
+/// with an empty `[]` for a missing container — so require a non-empty JSON result too.
+pub fn container_named_exists(runtime: &str, name: &str) -> bool {
+  use std::process::{Command, Stdio};
+  if name.is_empty() {
+    return false;
+  }
+  let Ok(out) = Command::new(runtime).args(["inspect", name]).stderr(Stdio::null()).output() else {
+    return false;
+  };
+  if !out.status.success() {
+    return false;
+  }
+  let body = String::from_utf8_lossy(&out.stdout);
+  let body = body.trim();
+  !(body.is_empty() || body == "[]" || body == "null")
+}
+
+/// Probe every runtime scsh might use — for orphan prune jobs with no runtime recorded.
+pub fn container_named_exists_any(name: &str) -> bool {
+  for rt in runtime_candidates(cfg!(target_os = "macos")) {
+    if which(rt).is_some() && container_named_exists(rt, name) {
+      return true;
+    }
+  }
+  false
+}
+
 pub fn opencode_auth_in(xdg_data_home: Option<&OsStr>, home: Option<&OsStr>) -> Option<PathBuf> {
   let base = match xdg_data_home {
     Some(x) if !x.is_empty() => PathBuf::from(x),
