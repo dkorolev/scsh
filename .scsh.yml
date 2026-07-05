@@ -125,3 +125,25 @@ skills:
       cursor-composer-fast:
         harness: cursor
         model: composer-2.5-fast
+      # The local-agents-credentials profile (TEST-LOCAL-AGENTS-CREDENTIALS.md): the same
+      # smoke workload, but one route per subscription-first harness — claude, codex,
+      # cursor, grok — to prove host credentials reach every authenticated model. Routes
+      # whose harness is unavailable are skipped, not failed.
+      creds-claude-opus-4-8:
+        harness: claude
+        model: claude-opus-4-8
+        profile: local-agents-credentials
+      creds-codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        effort: low
+        profile: local-agents-credentials
+      creds-cursor-composer-fast:
+        harness: cursor
+        model: composer-2.5-fast
+        profile: local-agents-credentials
+      creds-grok-build:
+        harness: grok
+        model: grok-build
+        effort: low
+        profile: local-agents-credentials
