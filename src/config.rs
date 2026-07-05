@@ -30,6 +30,10 @@ pub struct Skill {
   /// `invocations` is set.
   pub harness: Option<Harness>,
   pub model: Option<String>,
+  /// Reasoning effort for harnesses with an effort knob (codex, grok). With
+  /// `invocations:` it is the default each route may override; routes whose harness
+  /// has no effort knob simply ignore an inherited value.
+  pub effort: Option<String>,
   pub timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
@@ -49,6 +53,8 @@ pub struct InvocationRoute {
   pub name: String,
   pub harness: Harness,
   pub model: Option<String>,
+  /// When set, overrides the skill-level `effort:` for this route only.
+  pub effort: Option<String>,
   /// When set, overrides the skill-level `profile:` for this route only.
   pub profile: Option<String>,
   /// When set, overrides the skill-level `commits:` for this route only.
@@ -62,6 +68,8 @@ pub struct ResolvedInvocation {
   pub skill_source: String,
   pub harness: Harness,
   pub model: Option<String>,
+  /// Reasoning effort; only ever set for harnesses with an effort knob.
+  pub effort: Option<String>,
   pub timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   pub profile: Option<String>,
@@ -75,6 +83,12 @@ pub fn expand_invocations(cfg: &Config) -> Vec<ResolvedInvocation> {
 }
 
 fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
+  // An inherited skill-level effort applies only where the harness has an effort knob,
+  // so one `effort:` can sit atop a mixed matrix (codex + claude) without erroring.
+  let effort_for = |harness: Harness, route_effort: Option<&String>| -> Option<String> {
+    let effort = route_effort.or(skill.effort.as_ref())?;
+    harness.supports_effort().then(|| effort.clone())
+  };
   if skill.invocations.is_empty() {
     let harness = skill.harness.expect("validated skills always have harness or invocations");
     return vec![ResolvedInvocation {
@@ -82,6 +96,7 @@ fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
       skill_source: skill.name.clone(),
       harness,
       model: skill.model.clone(),
+      effort: effort_for(harness, None),
       timeout: skill.timeout,
       env: skill.env.clone(),
       profile: skill.profile.clone(),
@@ -97,6 +112,7 @@ fn expand_skill(skill: &Skill) -> Vec<ResolvedInvocation> {
       skill_source: skill.name.clone(),
       harness: route.harness,
       model: route.model.clone(),
+      effort: effort_for(route.harness, route.effort.as_ref()),
       timeout: skill.timeout,
       env: skill.env.clone(),
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
@@ -133,12 +149,15 @@ pub enum EnvRule {
   Constant(String),
 }
 
-/// The built-in harness that runs a skill inside the container. Today only
-/// `opencode` exists; this enum is the extension point for more harnesses.
+/// The built-in harness that runs a skill inside the container: `opencode`, `claude`
+/// (Claude Code), `codex` (OpenAI Codex CLI — the native harness for GPT models), or
+/// `grok` (xAI Grok CLI — the native harness for Grok models).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Harness {
   Opencode,
   Claude,
+  Codex,
+  Grok,
 }
 
 impl Harness {
@@ -147,6 +166,8 @@ impl Harness {
     match s {
       "opencode" => Some(Harness::Opencode),
       "claude" => Some(Harness::Claude),
+      "codex" => Some(Harness::Codex),
+      "grok" => Some(Harness::Grok),
       _ => None,
     }
   }
@@ -156,12 +177,29 @@ impl Harness {
     match self {
       Harness::Opencode => "opencode",
       Harness::Claude => "claude",
+      Harness::Codex => "codex",
+      Harness::Grok => "grok",
     }
   }
 
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
-    &["opencode", "claude"]
+    &["opencode", "claude", "codex", "grok"]
+  }
+
+  /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
+  /// grok passes `--effort`, codex passes `-c model_reasoning_effort=`.
+  pub fn supports_effort(self) -> bool {
+    !self.effort_levels().is_empty()
+  }
+
+  /// The effort levels this harness's CLI accepts (empty = no effort knob).
+  pub fn effort_levels(self) -> &'static [&'static str] {
+    match self {
+      Harness::Codex => &["minimal", "low", "medium", "high", "xhigh"],
+      Harness::Grok => &["low", "medium", "high", "xhigh", "max"],
+      Harness::Opencode | Harness::Claude => &[],
+    }
   }
 }
 
@@ -329,11 +367,11 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     }
   }
   const SK: &[&str] =
-    &["harness", "model", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result"];
+    &["harness", "model", "effort", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result"];
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, timeout, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -379,6 +417,26 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     }
   };
 
+  // effort: optional reasoning-effort level; only harnesses with an effort knob accept
+  // an explicit direct-run value. With `invocations:` it is a default routes may override
+  // (routes whose harness has no effort knob ignore the inherited value).
+  let effort = match fm.get("effort").copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'skills.{name}.effort' must be a string, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => {
+      let s = s.trim();
+      if s.is_empty() {
+        errors.push(format!("'skills.{name}.effort' must not be empty (omit the key for the model default)"));
+        None
+      } else {
+        Some(s.to_string())
+      }
+    }
+  };
+
   // invocations: optional matrix — expands to `{name}-{route}` at run and install time.
   let invocations = match fm.get("invocations").copied() {
     None => Vec::new(),
@@ -391,8 +449,18 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     if model.is_some() {
       errors.push(format!("'skills.{name}.model' must not be set when 'invocations:' is used (set model per route)"));
     }
+    if let Some(e) = &effort {
+      // A skill-level default must at least be a level SOME harness accepts.
+      if !known_effort_level(e) {
+        errors.push(format!(
+          "'skills.{name}.effort' is '{e}', not a known effort level (known: minimal, low, medium, high, xhigh, max)"
+        ));
+      }
+    }
   } else if harness.is_none() {
     errors.push(format!("skill '{name}' is missing required key 'harness' (or declare 'invocations:')"));
+  } else if let (Some(h), Some(e)) = (harness, &effort) {
+    check_effort_for_harness(&format!("skills.{name}.effort"), h, e, errors);
   }
 
   // result: required, repo-relative safe path.
@@ -517,6 +585,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
         name: name.to_string(),
         harness,
         model,
+        effort,
         timeout,
         env,
         profile,
@@ -564,11 +633,11 @@ fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> V
         errors.push(format!("duplicate key 'skills.{skill}.invocations.{default_name}.{k}'"));
       }
     }
-    const IK: &[&str] = &["name", "harness", "model", "profile", "commits"];
+    const IK: &[&str] = &["name", "harness", "model", "effort", "profile", "commits"];
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, profile, commits)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits)"
         ));
       }
     }
@@ -620,6 +689,16 @@ fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> V
       errors,
       "omit the key for the harness default",
     );
+    let effort = parse_optional_string_field(
+      skill,
+      &format!("invocations.{default_name}.effort"),
+      fm.get("effort").copied(),
+      errors,
+      "omit the key for the model default",
+    );
+    if let (Some(h), Some(e)) = (harness, &effort) {
+      check_effort_for_harness(&format!("skills.{skill}.invocations.{default_name}.effort"), h, e, errors);
+    }
     let profile = parse_optional_string_field(
       skill,
       &format!("invocations.{default_name}.profile"),
@@ -645,10 +724,32 @@ fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> V
       },
     };
     if let Some(harness) = harness {
-      out.push(InvocationRoute { name: route_name, harness, model, profile, commits });
+      out.push(InvocationRoute { name: route_name, harness, model, effort, profile, commits });
     }
   }
   out
+}
+
+/// True when `level` is an effort level at least one harness accepts.
+fn known_effort_level(level: &str) -> bool {
+  matches!(level, "minimal" | "low" | "medium" | "high" | "xhigh" | "max")
+}
+
+/// An EXPLICIT effort on a specific harness must be a level that harness's CLI accepts.
+fn check_effort_for_harness(field: &str, harness: Harness, effort: &str, errors: &mut Vec<String>) {
+  let levels = harness.effort_levels();
+  if levels.is_empty() {
+    errors.push(format!(
+      "'{field}' is set, but harness '{}' has no effort knob (effort works with: codex, grok)",
+      harness.as_str()
+    ));
+  } else if !levels.contains(&effort) {
+    errors.push(format!(
+      "'{field}' is '{effort}', not a level {} accepts (accepted: {})",
+      harness.as_str(),
+      levels.join(", ")
+    ));
+  }
 }
 
 fn parse_optional_string_field(
@@ -961,6 +1062,99 @@ mod tests {
     result: tmp/x.json
 "#;
     assert_eq!(validate(yaml).unwrap().skills[0].harness, Some(Harness::Claude));
+  }
+
+  #[test]
+  fn effort_validates_per_harness_and_inherits_where_supported() {
+    // Direct grok skill with a valid effort.
+    let yaml = r#"skills:
+  x:
+    harness: grok
+    model: grok-build
+    effort: high
+    result: tmp/x.json
+"#;
+    let cfg = validate(yaml).unwrap();
+    assert_eq!(cfg.skills[0].effort.as_deref(), Some("high"));
+    assert_eq!(expand_invocations(&cfg)[0].effort.as_deref(), Some("high"));
+
+    // Effort on a harness without an effort knob is an error.
+    let yaml = r#"skills:
+  x:
+    harness: claude
+    effort: high
+    result: tmp/x.json
+"#;
+    assert!(validate(yaml).unwrap_err().iter().any(|e| e.contains("no effort knob")));
+
+    // A level the harness's CLI rejects is an error (grok has max; codex does not).
+    let yaml = r#"skills:
+  x:
+    harness: codex
+    effort: max
+    result: tmp/x.json
+"#;
+    assert!(validate(yaml).unwrap_err().iter().any(|e| e.contains("not a level codex accepts")));
+
+    // Skill-level default over a mixed matrix: applied to codex/grok, ignored for claude.
+    let yaml = r#"skills:
+  review:
+    effort: high
+    result: tmp/review-{name}.json
+    invocations:
+      codex:
+        harness: codex
+        model: gpt-5.5
+      grok:
+        harness: grok
+        model: grok-build
+        effort: xhigh
+      claude:
+        harness: claude
+        model: claude-opus-4-8
+"#;
+    let inv = expand_invocations(&validate(yaml).unwrap());
+    assert_eq!(inv[0].effort.as_deref(), Some("high"), "codex inherits the skill default");
+    assert_eq!(inv[1].effort.as_deref(), Some("xhigh"), "grok route override wins");
+    assert_eq!(inv[2].effort, None, "claude has no effort knob — inherited value ignored");
+  }
+
+  #[test]
+  fn grok_harness_is_valid() {
+    let yaml = r#"skills:
+  x:
+    harness: grok
+    model: grok-build
+    result: tmp/x.json
+"#;
+    assert_eq!(validate(yaml).unwrap().skills[0].harness, Some(Harness::Grok));
+    assert!(Harness::known().contains(&"grok"));
+  }
+
+  #[test]
+  fn codex_harness_is_valid_directly_and_in_invocations() {
+    let yaml = r#"skills:
+  x:
+    harness: codex
+    model: gpt-5.5
+    result: tmp/x.json
+"#;
+    let cfg = validate(yaml).unwrap();
+    assert_eq!(cfg.skills[0].harness, Some(Harness::Codex));
+    assert_eq!(cfg.skills[0].model.as_deref(), Some("gpt-5.5"));
+    let yaml = r#"skills:
+  review:
+    result: tmp/review-{name}.json
+    invocations:
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+"#;
+    let cfg = validate(yaml).unwrap();
+    let inv = expand_invocations(&cfg);
+    assert_eq!(inv[0].harness, Harness::Codex);
+    assert_eq!(inv[0].name, "review-codex-gpt-5.5");
+    assert!(Harness::known().contains(&"codex"));
   }
 
   #[test]

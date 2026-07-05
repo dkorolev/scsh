@@ -718,7 +718,13 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
-      let cmd = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
+      let cmd = runtime::harness_command(
+        skill.harness,
+        skill.model.as_deref(),
+        skill.effort.as_deref(),
+        &skill.skill_source,
+        &skill.result,
+      );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
       println!(
@@ -1041,6 +1047,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
 
   let needs_opencode = skills.iter().any(|s| s.harness == config::Harness::Opencode);
   let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
+  let needs_codex = skills.iter().any(|s| s.harness == config::Harness::Codex);
   if needs_opencode && opencode_auth_enabled() && runtime::opencode_auth_ready() {
     ok("opencode creds found (auth.json and opencode config bind-mounted when present)");
   }
@@ -1048,6 +1055,15 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
     let via =
       if runtime::claude_oauth_token().is_some() { "CLAUDE_CODE_OAUTH_TOKEN" } else { "~/.claude/.credentials.json" };
     ok(&format!("claude credentials found ({via} forwarded into claude skills)"));
+  }
+  if needs_codex && codex_auth_enabled() && runtime::codex_container_auth_ready() {
+    let via = if runtime::codex_auth_file_on_host().is_some() { "~/.codex/auth.json" } else { "OPENAI_API_KEY" };
+    ok(&format!("codex credentials found ({via} forwarded into codex skills)"));
+  }
+  let needs_grok = skills.iter().any(|s| s.harness == config::Harness::Grok);
+  if needs_grok && grok_auth_enabled() && runtime::grok_container_auth_ready() {
+    let via = if runtime::grok_auth_file_on_host().is_some() { "~/.grok/auth.json" } else { "XAI_API_KEY" };
+    ok(&format!("grok credentials found ({via} forwarded into grok skills)"));
   }
 
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
@@ -1370,6 +1386,10 @@ fn run_one_skill(
   } else {
     None
   };
+  let codex_auth =
+    if skill.harness == config::Harness::Codex && codex_auth_enabled() { forward_codex(&run_dir) } else { None };
+  let grok_auth =
+    if skill.harness == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
   let tag = runtime::image_tag(skill.harness);
   let vols: Vec<(String, String)> = if let Some(ref auth_root) = claude_auth {
     runtime::claude_auth_mounts(auth_root)
@@ -1385,10 +1405,30 @@ fn run_one_skill(
       container_env.push((runtime::CLAUDE_OAUTH_TOKEN_ENV.to_string(), token));
     }
   }
+  if skill.harness == config::Harness::Codex {
+    if let Ok(key) = std::env::var(runtime::OPENAI_API_KEY_ENV) {
+      if !key.is_empty() {
+        container_env.push((runtime::OPENAI_API_KEY_ENV.to_string(), key));
+      }
+    }
+  }
+  if skill.harness == config::Harness::Grok {
+    if let Ok(key) = std::env::var(runtime::XAI_API_KEY_ENV) {
+      if !key.is_empty() {
+        container_env.push((runtime::XAI_API_KEY_ENV.to_string(), key));
+      }
+    }
+  }
   if let Some(d) = &git_daemon {
     container_env.extend(d.env());
   }
-  let harness = runtime::harness_command(skill.harness, skill.model.as_deref(), &skill.skill_source, &skill.result);
+  let harness = runtime::harness_command(
+    skill.harness,
+    skill.model.as_deref(),
+    skill.effort.as_deref(),
+    &skill.skill_source,
+    &skill.result,
+  );
   let cmd = if git_transport {
     runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
   } else {
@@ -1410,6 +1450,12 @@ fn run_one_skill(
   }
   if let Some(p) = &opencode_forward {
     let _ = std::fs::remove_dir_all(p);
+  }
+  if let Some(p) = &codex_auth {
+    scrub_codex_credentials(p);
+  }
+  if let Some(p) = &grok_auth {
+    scrub_grok_credentials(p);
   }
   match result {
     Ok((true, _, _)) => {}
@@ -1715,6 +1761,16 @@ fn opencode_auth_enabled() -> bool {
   !matches!(std::env::var("SCSH_NO_OPENCODE_AUTH").ok().as_deref(), Some("1") | Some("true"))
 }
 
+/// Whether scsh forwards codex credentials into runs (on unless opted out).
+fn codex_auth_enabled() -> bool {
+  !matches!(std::env::var("SCSH_NO_CODEX_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// Whether scsh forwards grok credentials into runs (on unless opted out).
+fn grok_auth_enabled() -> bool {
+  !matches!(std::env::var("SCSH_NO_GROK_AUTH").ok().as_deref(), Some("1") | Some("true"))
+}
+
 /// Whether scsh keeps every skill's `/tmp` run-clone instead of cleaning up. By default a
 /// successful skill's clone is removed after the run (its result was collected and any commits
 /// integrated) while a failed skill's clone is kept for inspection, and stale clones from past
@@ -1790,6 +1846,72 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     }
   }
   Some(root)
+}
+
+/// Copy the host's Codex auth/config into the run clone's `tmp/.codex` (the image's
+/// `CODEX_HOME`), returning that dir so the caller can scrub the credentials afterward.
+/// No bind-mounts needed: the tree rides along with the repo/tmp mount in both mount modes.
+fn forward_codex(run_dir: &Path) -> Option<PathBuf> {
+  let host_home = runtime::codex_home_on_host()?;
+  let auth = host_home.join("auth.json");
+  let config = host_home.join("config.toml");
+  if !auth.is_file() && !config.is_file() {
+    return None;
+  }
+  let dest = run_dir.join(runtime::CODEX_FORWARD_REL);
+  std::fs::create_dir_all(&dest).ok()?;
+  for name in ["auth.json", "config.toml"] {
+    let src = host_home.join(name);
+    if src.is_file() {
+      std::fs::copy(&src, dest.join(name)).ok()?;
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest.join(name), std::fs::Permissions::from_mode(0o600));
+      }
+    }
+  }
+  Some(dest)
+}
+
+/// Remove forwarded Codex credentials from a run dir, keeping codex's session/log data
+/// (useful when a failed run dir is kept for inspection — tokens must not linger in /tmp).
+fn scrub_codex_credentials(codex_dir: &Path) {
+  for name in ["auth.json", "config.toml"] {
+    let _ = std::fs::remove_file(codex_dir.join(name));
+  }
+}
+
+/// Copy the host's Grok auth/config into the run clone's `tmp/.grok` (the image's
+/// `GROK_HOME`), returning that dir so the caller can scrub the credentials afterward.
+/// Same pattern as codex: no bind-mounts needed in either repo mount mode.
+fn forward_grok(run_dir: &Path) -> Option<PathBuf> {
+  let host_home = runtime::grok_home_on_host()?;
+  let auth = host_home.join("auth.json");
+  if !auth.is_file() {
+    return None;
+  }
+  let dest = run_dir.join(runtime::GROK_FORWARD_REL);
+  std::fs::create_dir_all(&dest).ok()?;
+  for name in ["auth.json", "config.toml", "user-settings.json"] {
+    let src = host_home.join(name);
+    if src.is_file() {
+      std::fs::copy(&src, dest.join(name)).ok()?;
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(dest.join(name), std::fs::Permissions::from_mode(0o600));
+      }
+    }
+  }
+  Some(dest)
+}
+
+/// Remove forwarded Grok credentials from a run dir, keeping grok's session/log data.
+fn scrub_grok_credentials(grok_dir: &Path) {
+  for name in ["auth.json", "config.toml", "user-settings.json"] {
+    let _ = std::fs::remove_file(grok_dir.join(name));
+  }
 }
 
 fn write_claude_credentials_file(claude_dir: &Path, token: &str) -> Option<()> {
@@ -1966,12 +2088,13 @@ fn cache_dir(root: &Path) -> PathBuf {
 fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) -> Option<String> {
   let tree = git_capture(root, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
   let mut blob = String::new();
-  blob.push_str("scsh-cache v1\n");
+  blob.push_str("scsh-cache v2\n");
   blob.push_str(&format!("repo-tree={tree}\n"));
   blob.push_str(&format!("invocation={}\n", skill.name));
   blob.push_str(&format!("skill={}\n", skill.skill_source));
   blob.push_str(&format!("harness={}\n", skill.harness.as_str()));
   blob.push_str(&format!("model={}\n", skill.model.as_deref().unwrap_or("")));
+  blob.push_str(&format!("effort={}\n", skill.effort.as_deref().unwrap_or("")));
   blob.push_str("skill-files:\n");
   for (rel, hash) in skill_file_hashes(root, &skill.skill_source) {
     blob.push_str(&format!("{rel} {hash}\n"));
@@ -3089,7 +3212,11 @@ fn print_help_config() {
     r#"  skills:                 # the only top-level key: one entry per .skills/<name>/ folder
     add:                    #   key must match the skill directory name
       harness: opencode     #     direct run — OR use invocations: for a matrix (below)
+                            #     harnesses: opencode | claude | codex | grok
       model: openai/...     #     optional; the model the harness passes to the tool
+      effort: high        #     optional; reasoning effort (codex: minimal..xhigh, grok:
+                          #       low..max). With invocations: a default routes may
+                          #       override; harnesses without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
@@ -3140,6 +3267,20 @@ fn print_help_config() {
 (CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json)",
     )
   );
+  println!(
+    "{}",
+    h_dim(
+      "  codex:    codex exec -m <model> \"Run .skills/<source>/SKILL.md …\" \
+(~/.codex/auth.json or OPENAI_API_KEY) — the native harness for GPT models",
+    )
+  );
+  println!(
+    "{}",
+    h_dim(
+      "  grok:     grok -p \"Run .skills/<source>/SKILL.md …\" -m <model> --effort <level> \
+(~/.grok/auth.json or XAI_API_KEY) — the native harness for Grok models",
+    )
+  );
   println!();
 }
 
@@ -3166,8 +3307,8 @@ fn print_help_internals() {
   println!();
   println!("{}", h_head("How a run works"));
   print!(
-    r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`) from a shared
-  base in one buildx bake or one sequential build pass (skipping any whose tag already matches
+    r#"  scsh builds one image per harness needed (`scsh-opencode`, `scsh-claude`, `scsh-codex`,
+  `scsh-grok`) from a shared base in one buildx bake or one sequential build pass (skipping any whose tag already matches
   the embedded Dockerfile fingerprint), version-checking each CLI during the build. Then, for
   EVERY selected skill in parallel, it prepares a /tmp run dir (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman,
   or scsh-<nonce>-run-<invocation> on Apple container — ≤ 64 chars, middle-truncated with .. when
@@ -3201,6 +3342,14 @@ fn print_help_internals() {
   Claude skills use host CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and/or
   ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container
   (opt out: SCSH_NO_CLAUDE_AUTH=1).
+  Codex skills copy the host ~/.codex/auth.json and config.toml (from `codex login`) into the
+  run clone's gitignored tmp/.codex — the image's CODEX_HOME — and forward OPENAI_API_KEY when
+  set; the credentials are scrubbed from the run dir after the container exits
+  (opt out: SCSH_NO_CODEX_AUTH=1). Codex is the recommended native harness for GPT models.
+  Grok skills work the same way: host ~/.grok/auth.json + config.toml (from `grok login`)
+  are copied into tmp/.grok — the image's GROK_HOME — XAI_API_KEY is forwarded when set,
+  and credentials are scrubbed after exit (opt out: SCSH_NO_GROK_AUTH=1). Grok is the
+  recommended native harness for Grok models.
   Harness runs pass `--verbose` (Claude) or `--print-logs --log-level INFO` (OpenCode) so
   the live board and tmp/scsh-run.log show turn-by-turn progress (opt out: SCSH_QUIET=1).
   Unavailable harnesses and opencode models are skipped; a run fails only when every selected skill is skipped.
@@ -3557,6 +3706,7 @@ mod tests {
       skill_source: name.into(),
       harness: config::Harness::Opencode,
       model: None,
+      effort: None,
       timeout: None,
       env: Vec::new(),
       profile: None,

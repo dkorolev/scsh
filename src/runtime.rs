@@ -114,6 +114,8 @@ pub fn image_tag(harness: Harness) -> String {
   match harness {
     Harness::Opencode => "scsh-opencode:latest".to_string(),
     Harness::Claude => "scsh-claude:latest".to_string(),
+    Harness::Codex => "scsh-codex:latest".to_string(),
+    Harness::Grok => "scsh-grok:latest".to_string(),
   }
 }
 
@@ -122,6 +124,8 @@ pub fn image_target(harness: Harness) -> &'static str {
   match harness {
     Harness::Opencode => "scsh-opencode",
     Harness::Claude => "scsh-claude",
+    Harness::Codex => "scsh-codex",
+    Harness::Grok => "scsh-grok",
   }
 }
 
@@ -152,6 +156,58 @@ pub const OPENCODE_CONFIG_JSONC_MOUNT: &str = "/home/agent/.config/opencode/open
 
 /// Host env var for long-lived Claude OAuth (`claude setup-token`).
 pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
+
+/// Run-dir-relative Codex home. The image sets `CODEX_HOME` to [`AGENT_REPO`]`/`this, so
+/// forwarding host credentials is just copying `auth.json`/`config.toml` here — the tree is
+/// under the gitignored `tmp/`, which is visible in-container in BOTH repo mount modes.
+/// Codex's own per-run session/log data lands here too (readable on the host afterwards).
+pub const CODEX_FORWARD_REL: &str = "tmp/.codex";
+
+/// Host env var for API-key Codex auth (works headless; ChatGPT-plan auth uses auth.json).
+pub const OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+
+/// The host's Codex home: `$CODEX_HOME` or `~/.codex`.
+pub fn codex_home_on_host() -> Option<PathBuf> {
+  if let Some(dir) = std::env::var_os("CODEX_HOME").filter(|d| !d.is_empty()) {
+    return Some(PathBuf::from(dir));
+  }
+  std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".codex"))
+}
+
+/// Host `auth.json` written by `codex login` (ChatGPT plan or API-key login).
+pub fn codex_auth_file_on_host() -> Option<PathBuf> {
+  codex_home_on_host().map(|d| d.join("auth.json")).filter(|p| p.is_file())
+}
+
+/// Whether the host has credentials codex containers can use: `auth.json` or `OPENAI_API_KEY`.
+pub fn codex_container_auth_ready() -> bool {
+  codex_auth_file_on_host().is_some() || std::env::var(OPENAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false)
+}
+
+/// Run-dir-relative Grok home (same pattern as codex): the image sets `GROK_HOME` to
+/// [`AGENT_REPO`]`/`this, so forwarding host credentials is just copying files here.
+pub const GROK_FORWARD_REL: &str = "tmp/.grok";
+
+/// Host env var for API-key Grok auth (xAI API key from console.x.ai; works headless).
+pub const XAI_API_KEY_ENV: &str = "XAI_API_KEY";
+
+/// The host's Grok home: `$GROK_HOME` or `~/.grok`.
+pub fn grok_home_on_host() -> Option<PathBuf> {
+  if let Some(dir) = std::env::var_os("GROK_HOME").filter(|d| !d.is_empty()) {
+    return Some(PathBuf::from(dir));
+  }
+  std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".grok"))
+}
+
+/// Host `auth.json` written by `grok login` (browser OIDC or device code).
+pub fn grok_auth_file_on_host() -> Option<PathBuf> {
+  grok_home_on_host().map(|d| d.join("auth.json")).filter(|p| p.is_file())
+}
+
+/// Whether the host has credentials grok containers can use: `auth.json` or `XAI_API_KEY`.
+pub fn grok_container_auth_ready() -> bool {
+  grok_auth_file_on_host().is_some() || std::env::var(XAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false)
+}
 
 /// Absolute path the repo clone is bind-mounted at, and the image's WORKDIR (where the harness
 /// starts). Deliberately a *subdirectory* of the agent user's home (`/home/agent`), not the
@@ -214,20 +270,25 @@ pub fn host_timezone() -> String {
   "UTC".to_string()
 }
 
-/// Whether harness commands include verbose/progress flags. On by default for scsh
-/// runs (headless — the live board and `tmp/scsh-run.log` need turn-by-turn output).
-/// Opt out with `SCSH_QUIET=1`.
+/// Whether harness commands run at full debug verbosity. On by default — the live board,
+/// `tmp/scsh-run.log`, and the session browser want turn-by-turn output. Opt out with
+/// `SCSH_QUIET=1`: harnesses then log at their default level (output is still teed to the log).
 pub fn harness_verbose_enabled() -> bool {
   !matches!(std::env::var("SCSH_QUIET").ok().as_deref(), Some("1") | Some("true"))
 }
 
 /// The shell command a harness runs *inside the container* for one skill.
-pub fn harness_command(harness: Harness, model: Option<&str>, skill_source: &str, result: &str) -> String {
-  harness_command_verbose(harness, model, skill_source, result, harness_verbose_enabled())
+/// Output is always teed to [`RUN_LOG_VAR`] for the daemon; `SCSH_QUIET=1` drops the debug flags.
+/// `effort` is the `.scsh.yml` reasoning-effort level (codex and grok only; expansion
+/// guarantees it is `None` for harnesses without an effort knob).
+pub fn harness_command(
+  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
+) -> String {
+  harness_command_verbose(harness, model, effort, skill_source, result, harness_verbose_enabled())
 }
 
 fn harness_command_verbose(
-  harness: Harness, model: Option<&str>, skill_source: &str, result: &str, verbose: bool,
+  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str, verbose: bool,
 ) -> String {
   match harness {
     Harness::Opencode => {
@@ -237,17 +298,16 @@ fn harness_command_verbose(
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       let mut cmd = String::from("opencode");
-      if let Some(m) = model {
-        cmd.push(' ');
-        cmd.push_str("-m ");
-        cmd.push_str(&shell_quote(m));
-      }
       if verbose {
-        cmd.push_str(" --print-logs --log-level INFO");
+        cmd.push_str(" --print-logs --log-level DEBUG");
+      }
+      if let Some(m) = model {
+        cmd.push_str(" -m ");
+        cmd.push_str(&shell_quote(m));
       }
       cmd.push_str(" run ");
       cmd.push_str(&shell_quote(&instruction));
-      format!("{cmd} 2>&1 | tee \"${RUN_LOG_VAR}\"")
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
     }
     Harness::Claude => {
       let prompt = format!(
@@ -259,15 +319,97 @@ fn harness_command_verbose(
       cmd.push_str(&shell_quote(&prompt));
       cmd.push_str(" --permission-mode bypassPermissions --no-session-persistence");
       if verbose {
-        cmd.push_str(" --verbose");
+        cmd.push_str(" --verbose --debug --debug-file \"${");
+        cmd.push_str(RUN_LOG_VAR);
+        cmd.push_str("}.debug\"");
       }
       if let Some(m) = model {
         cmd.push_str(" --model ");
         cmd.push_str(&shell_quote(m));
       }
-      format!("{cmd} 2>&1 | tee \"${RUN_LOG_VAR}\"")
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+    }
+    Harness::Codex => {
+      let prompt = format!(
+        "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
+      );
+      // The container IS the sandbox (ephemeral, --rm), so codex's own sandbox/approvals are
+      // bypassed — same posture as claude's bypassPermissions and opencode's YOLO env.
+      let mut cmd = String::from("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check");
+      if let Some(m) = model {
+        cmd.push_str(" -m ");
+        cmd.push_str(&shell_quote(m));
+      }
+      if let Some(e) = effort {
+        cmd.push_str(" -c ");
+        cmd.push_str(&shell_quote(&format!("model_reasoning_effort={e}")));
+      }
+      if verbose {
+        // The final assistant message lands next to the run log; appended below for the tee.
+        cmd.push_str(" --output-last-message \"${");
+        cmd.push_str(RUN_LOG_VAR);
+        cmd.push_str("}.last\"");
+      }
+      cmd.push(' ');
+      cmd.push_str(&shell_quote(&prompt));
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
+    }
+    Harness::Grok => {
+      let prompt = format!(
+        "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
+         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
+      );
+      // Single-turn headless run; the ephemeral container is the sandbox, so grok's own
+      // approvals are bypassed (same posture as the other harnesses).
+      let mut cmd = String::from("grok -p ");
+      cmd.push_str(&shell_quote(&prompt));
+      cmd.push_str(" --permission-mode bypassPermissions --always-approve");
+      if let Some(m) = model {
+        cmd.push_str(" -m ");
+        cmd.push_str(&shell_quote(m));
+      }
+      if let Some(e) = effort {
+        cmd.push_str(" --effort ");
+        cmd.push_str(&shell_quote(e));
+      }
+      if verbose {
+        cmd.push_str(" --debug --debug-file \"${");
+        cmd.push_str(RUN_LOG_VAR);
+        cmd.push_str("}.debug\"");
+      }
+      wrap_harness_shell(harness, skill_source, model, &cmd, verbose)
     }
   }
+}
+
+/// Run the harness under `/bin/sh -c`, banner on stderr, all output teed to [`RUN_LOG_VAR`].
+fn wrap_harness_shell(harness: Harness, skill_source: &str, model: Option<&str>, inner: &str, verbose: bool) -> String {
+  let model_label = model.unwrap_or("(harness default)");
+  // Verbose claude/grok write a separate --debug-file, and verbose codex a final-message
+  // file; append them to the teed stream at the end so the run log is self-contained.
+  let post = match harness {
+    Harness::Claude if verbose => format!(
+      "if [ -f \"${{{log_var}}}.debug\" ]; then echo \"scsh: --- claude debug log ---\" >&2; cat \"${{{log_var}}}.debug\" >&2; fi",
+      log_var = RUN_LOG_VAR,
+    ),
+    Harness::Codex if verbose => format!(
+      "if [ -f \"${{{log_var}}}.last\" ]; then echo \"scsh: --- codex final message ---\" >&2; cat \"${{{log_var}}}.last\" >&2; fi",
+      log_var = RUN_LOG_VAR,
+    ),
+    Harness::Grok if verbose => format!(
+      "if [ -f \"${{{log_var}}}.debug\" ]; then echo \"scsh: --- grok debug log ---\" >&2; cat \"${{{log_var}}}.debug\" >&2; fi",
+      log_var = RUN_LOG_VAR,
+    ),
+    _ => String::new(),
+  };
+  format!(
+    "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} log=${{{log_var}}}\" >&2; {inner}; {post} }} 2>&1 | tee \"${{{log_var}}}\"",
+    harness.as_str(),
+    log_var = RUN_LOG_VAR,
+  )
 }
 
 /// How a given runtime accepts the generated Dockerfile.
@@ -562,6 +704,28 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
         )
       }
     }
+    Harness::Codex => {
+      if codex_container_auth_ready() {
+        Ok(())
+      } else {
+        Err(
+          "codex harness unavailable (no ~/.codex/auth.json and OPENAI_API_KEY is not set \
+           — run `codex login`, or export OPENAI_API_KEY in your shell)"
+            .into(),
+        )
+      }
+    }
+    Harness::Grok => {
+      if grok_container_auth_ready() {
+        Ok(())
+      } else {
+        Err(
+          "grok harness unavailable (no ~/.grok/auth.json and XAI_API_KEY is not set \
+           — run `grok login` (or `grok login --device-auth`), or export XAI_API_KEY in your shell)"
+            .into(),
+        )
+      }
+    }
   }
 }
 
@@ -710,6 +874,9 @@ pub fn claude_auth_mounts(auth_root: &Path) -> Vec<(String, String)> {
 }
 
 /// Volume mounts shown by `scsh list --verbose` (host paths; real runs use the same bind-mounts).
+/// Codex and grok need no mounts: their auth is COPIED into the run clone's gitignored
+/// `tmp/.codex` / `tmp/.grok` (the images' `CODEX_HOME` / `GROK_HOME`), which rides along
+/// with the repo mount in both mount modes.
 pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
   match harness {
     Harness::Opencode => opencode_host_mounts(),
@@ -729,6 +896,7 @@ pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
       }
       out
     }
+    Harness::Codex | Harness::Grok => Vec::new(),
   }
 }
 
@@ -1215,19 +1383,38 @@ mod tests {
   fn image_tags_are_per_harness() {
     assert_eq!(image_tag(Harness::Opencode), "scsh-opencode:latest");
     assert_eq!(image_tag(Harness::Claude), "scsh-claude:latest");
+    assert_eq!(image_tag(Harness::Codex), "scsh-codex:latest");
   }
 
   #[test]
-  fn dockerfile_has_shared_base_and_two_harness_targets() {
+  fn dockerfile_has_shared_base_and_harness_targets() {
     let df = dockerfile();
     assert!(df.contains("FROM debian:bookworm-slim AS scsh-base"));
     assert!(df.contains("FROM scsh-base AS scsh-opencode"));
     assert!(df.contains("FROM scsh-base AS scsh-claude"));
+    assert!(df.contains("FROM scsh-base AS scsh-codex"));
     assert!(df.contains("npm install -g opencode-ai"));
     assert!(df.contains("npm install -g @anthropic-ai/claude-code"));
+    assert!(df.contains("npm install -g @openai/codex"));
     assert!(!df.contains("CMD ["));
     assert!(df.contains("ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log"));
     assert!(df.contains("ENV SCSH=1"));
+  }
+
+  #[test]
+  fn dockerfile_codex_stage_points_codex_home_into_repo_tmp() {
+    let df = dockerfile();
+    assert!(df.contains("ENV CODEX_HOME=/home/agent/repo/tmp/.codex"));
+    assert!(df.contains("codex --version"));
+  }
+
+  #[test]
+  fn dockerfile_grok_stage_points_grok_home_into_repo_tmp() {
+    let df = dockerfile();
+    assert!(df.contains("FROM scsh-base AS scsh-grok"));
+    assert!(df.contains("npm install -g @xai-official/grok"));
+    assert!(df.contains("ENV GROK_HOME=/home/agent/repo/tmp/.grok"));
+    assert!(df.contains("grok --version"));
   }
 
   #[test]
@@ -1357,31 +1544,91 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), "add", "tmp/add.json", true);
-    assert!(cmd.starts_with("opencode -m openai/gpt-5.5"));
-    assert!(cmd.contains(" --print-logs --log-level INFO run "));
+    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), None, "add", "tmp/add.json", true);
+    assert!(cmd.contains("scsh: harness=opencode"));
+    assert!(cmd.contains("opencode --print-logs --log-level DEBUG"));
+    assert!(cmd.contains("-m openai/gpt-5.5"));
+    assert!(cmd.contains(" run "));
     assert!(cmd.contains("run skill add"));
     assert!(cmd.contains("tmp/add.json"));
     assert!(cmd.contains("SCSH_RESULT"));
-    assert!(cmd.contains("preloaded"));
-    assert!(cmd.ends_with("2>&1 | tee \"$SCSH_RUN_LOG\""));
-    let cmd = harness_command_verbose(Harness::Opencode, None, "multiply", "tmp/mul.json", true);
-    assert!(cmd.starts_with("opencode --print-logs --log-level INFO run "));
-    assert!(cmd.contains("tmp/mul.json"));
-    let quiet = harness_command_verbose(Harness::Opencode, None, "multiply", "tmp/mul.json", false);
-    assert!(quiet.starts_with("opencode run "));
+    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    let cmd = harness_command_verbose(Harness::Opencode, None, None, "multiply", "tmp/mul.json", true);
+    assert!(cmd.contains("opencode --print-logs --log-level DEBUG run "));
+    let quiet = harness_command_verbose(Harness::Opencode, None, None, "multiply", "tmp/mul.json", false);
     assert!(!quiet.contains("--print-logs"));
+    assert!(quiet.contains("scsh: harness=opencode"));
+    assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
   }
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd =
-      harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add_claude_sonnet_4_6_result.json", true);
+    let cmd = harness_command_verbose(
+      Harness::Claude,
+      Some("sonnet"),
+      None,
+      "add",
+      "tmp/add_claude_sonnet_4_6_result.json",
+      true,
+    );
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    assert!(cmd.contains(" --verbose --model sonnet"));
-    assert!(cmd.contains("tee \"$SCSH_RUN_LOG\""));
-    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), "add", "tmp/add.json", false);
+    assert!(cmd.contains(" --verbose --debug --debug-file \"${SCSH_RUN_LOG}.debug\" --model sonnet"));
+    assert!(cmd.contains("scsh: --- claude debug log ---"));
+    assert!(cmd.contains("tee \"${SCSH_RUN_LOG}\""));
+    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", "tmp/add.json", false);
     assert!(!quiet.contains(" --verbose"));
+    assert!(!quiet.contains("--debug-file"));
+    assert!(!quiet.contains("claude debug log"));
+    assert!(quiet.contains("tee \"${SCSH_RUN_LOG}\""));
+  }
+
+  #[test]
+  fn harness_command_builds_codex_invocation() {
+    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add_codex_result.json", true);
+    assert!(cmd.contains("scsh: harness=codex"));
+    assert!(cmd.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
+    assert!(cmd.contains(" -m gpt-5.5"));
+    assert!(cmd.contains("--output-last-message \"${SCSH_RUN_LOG}.last\""));
+    assert!(cmd.contains("scsh: --- codex final message ---"));
+    assert!(cmd.contains(".skills/add/SKILL.md"));
+    assert!(cmd.contains("tmp/add_codex_result.json"));
+    assert!(cmd.contains("SCSH_RESULT"));
+    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    let quiet = harness_command_verbose(Harness::Codex, None, None, "multiply", "tmp/mul.json", false);
+    assert!(quiet.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
+    assert!(!quiet.contains("--output-last-message"));
+    assert!(!quiet.contains(" -m "));
+    assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+  }
+
+  #[test]
+  fn harness_command_builds_grok_invocation() {
+    let cmd =
+      harness_command_verbose(Harness::Grok, Some("grok-build"), Some("high"), "add", "tmp/add_grok.json", true);
+    assert!(cmd.contains("scsh: harness=grok"));
+    assert!(cmd.contains("grok -p "));
+    assert!(cmd.contains(" --permission-mode bypassPermissions --always-approve"));
+    assert!(cmd.contains(" -m grok-build"));
+    assert!(cmd.contains(" --effort high"));
+    assert!(cmd.contains(" --debug --debug-file \"${SCSH_RUN_LOG}.debug\""));
+    assert!(cmd.contains("scsh: --- grok debug log ---"));
+    assert!(cmd.contains(".skills/add/SKILL.md"));
+    assert!(cmd.contains("tmp/add_grok.json"));
+    assert!(cmd.contains("SCSH_RESULT"));
+    assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    let quiet = harness_command_verbose(Harness::Grok, None, None, "multiply", "tmp/mul.json", false);
+    assert!(quiet.contains("grok -p "));
+    assert!(!quiet.contains("--debug"));
+    assert!(!quiet.contains(" --effort "));
+    assert!(!quiet.contains(" -m "));
+  }
+
+  #[test]
+  fn harness_command_codex_passes_reasoning_effort() {
+    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), Some("xhigh"), "add", "tmp/add.json", true);
+    assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
+    let without = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add.json", true);
+    assert!(!without.contains("model_reasoning_effort"));
   }
 
   #[test]
@@ -1800,6 +2047,7 @@ mod tests {
         skill_source: "add".into(),
         harness: Harness::Opencode,
         model: Some("openai/gpt-5.5".into()),
+        effort: None,
         profile: None,
         commits: false,
         timeout: None,
@@ -1811,6 +2059,7 @@ mod tests {
         skill_source: "add".into(),
         harness: Harness::Claude,
         model: Some("sonnet".into()),
+        effort: None,
         profile: None,
         commits: false,
         timeout: None,
@@ -1822,6 +2071,7 @@ mod tests {
         skill_source: "add".into(),
         harness: Harness::Opencode,
         model: None,
+        effort: None,
         profile: None,
         commits: false,
         timeout: None,
@@ -1870,6 +2120,7 @@ mod tests {
       skill_source: "add".into(),
       harness: Harness::Opencode,
       model: None,
+      effort: None,
       profile: None,
       commits: false,
       timeout: None,
@@ -1896,7 +2147,12 @@ mod tests {
   fn check_claude_harness_errors_without_token_or_credentials_file() {
     let key = CLAUDE_OAUTH_TOKEN_ENV;
     let prev = std::env::var_os(key);
+    let prev_home = std::env::var_os("HOME");
+    let empty_home = std::env::temp_dir().join(format!("scsh-empty-home-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&empty_home);
+    std::fs::create_dir_all(&empty_home).unwrap();
     std::env::remove_var(key);
+    std::env::set_var("HOME", &empty_home);
     let err = check_harness_host(Harness::Claude).unwrap_err();
     assert!(err.contains("CLAUDE_CODE_OAUTH_TOKEN"));
     assert!(err.contains("setup-token"));
@@ -1904,6 +2160,11 @@ mod tests {
       Some(v) => std::env::set_var(key, v),
       None => std::env::remove_var(key),
     }
+    match prev_home {
+      Some(v) => std::env::set_var("HOME", v),
+      None => std::env::remove_var("HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&empty_home);
   }
 
   #[test]
