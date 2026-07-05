@@ -588,6 +588,41 @@ fn check_profile_treats_an_empty_default_as_absent() {
 }
 
 #[test]
+fn harness_smoke_profile_in_tool_repo() {
+  let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  let r = scsh(&root, &["check-profile", "harness-smoke"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("2 skills"), "got: {}", r.out);
+  let j = scsh(&root, &["list", "--json"]);
+  assert_eq!(j.code, 0, "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-grok-build"), "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-cursor-composer"), "got: {}", j.out);
+}
+
+/// Full grok + cursor container smoke (builds images, calls models). Requires a **clean** git
+/// tree, a running container runtime, and host grok/cursor auth. Run manually:
+///
+/// ```sh
+/// ./scripts/harness-smoke.sh
+/// ```
+///
+/// or: `cargo test harness_smoke_end_to_end -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn harness_smoke_end_to_end() {
+  let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+  if !git_clean(&root) {
+    panic!("harness-smoke e2e needs a clean git tree in {}", root.display());
+  }
+  let script = root.join("scripts/harness-smoke.sh");
+  let output = Command::new(&script).current_dir(&root).env("SCSH", bin()).output().expect("run harness-smoke.sh");
+  let mut out = String::from_utf8_lossy(&output.stdout).into_owned();
+  out.push_str(&String::from_utf8_lossy(&output.stderr));
+  assert_eq!(output.status.code(), Some(0), "harness-smoke.sh failed:\n{out}");
+  assert!(out.contains("harness-smoke: PASS"), "got:\n{out}");
+}
+
+#[test]
 fn init_demo_refuses_to_overwrite() {
   let d = unique_dir("nooverwrite");
   git_init(&d);

@@ -110,3 +110,16 @@ skills:
     timeout: 1200
     profile: prepare-beautiful-pr
     result: tmp/prepare-beautiful-pr.md
+  harness-smoke:
+    profile: harness-smoke
+    timeout: 600
+    result: tmp/harness-smoke-{name}.json
+    invocations:
+      grok-build:
+        harness: grok
+        model: grok-build
+        effort: low
+      cursor-composer:
+        harness: cursor
+        model: composer-2.5
+        effort: low
