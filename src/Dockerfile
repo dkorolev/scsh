@@ -158,11 +158,19 @@ log "result_exists_at_start=$([ -f "$result" ] && echo YES || echo NO)"
 # exit code (fires on normal exit AND catchable signals), and per-signal traps name the signal.
 # Only an uncatchable SIGKILL (OOM / force-stop) escapes — so an ABSENT .exit file is itself the
 # diagnosis. This replaces a bare `; echo $?`, which a signal would skip.
+#
+# The harness runs in a RELAUNCH LOOP (max 3 launches): external tools are fallible, and
+# cursor-agent has been observed dying to a stray SIGTERM ~1.5s into a run (pane_exit=143,
+# nothing on screen — recorded 2026-07-06). A harness that exits while the result file is
+# still missing is relaunched inside the same pane and recording; one that exits AFTER
+# writing the result (the normal quit path) ends the pane. `.exit` records the final launch.
 pane_cmd="trap 'ec=\$?; echo \$ec > \"$exit_file\"; echo pane_exit=\$ec >> \"$dbg\"' EXIT; \
 trap 'echo pane_signal=TERM >> \"$dbg\"' TERM; \
 trap 'echo pane_signal=INT  >> \"$dbg\"' INT; \
 trap 'echo pane_signal=HUP  >> \"$dbg\"' HUP; \
-$cmd"
+n=0; while :; do $cmd; ec=\$?; \
+if [ -f \"$result\" ] || [ \$n -ge 2 ]; then exit \$ec; fi; \
+n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"
 
 tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"
 log "tmux new-session rc=$?"
@@ -178,9 +186,27 @@ tmux set -t scsh status off >/dev/null 2>&1 || true
         slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
         double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
       esac
-      sleep 3
-      tmux kill-session -t scsh 2>/dev/null || true
-      log "watcher: killed session"
+      # Wait for the harness to exit on its own so the pane's EXIT trap runs and `.exit`
+      # gets written (killing the session skips the trap — codex used to lose its `.exit`
+      # this way). Re-send the quit keys once, force-kill only a harness that ignores both.
+      i=0
+      while tmux has-session -t scsh 2>/dev/null && [ "$i" -lt 12 ]; do
+        i=$((i+1))
+        if [ "$i" -eq 6 ]; then
+          log "watcher: quit ignored for 6s -> re-send $quit"
+          case "$quit" in
+            slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
+            double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
+          esac
+        fi
+        sleep 1
+      done
+      if tmux has-session -t scsh 2>/dev/null; then
+        tmux kill-session -t scsh 2>/dev/null || true
+        log "watcher: killed session (harness ignored quit)"
+      else
+        log "watcher: session ended after quit"
+      fi
       break
     fi
     sleep 2

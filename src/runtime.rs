@@ -1699,6 +1699,18 @@ mod tests {
   }
 
   #[test]
+  fn dockerfile_tui_recorder_relaunches_and_quits_gracefully() {
+    let df = dockerfile();
+    // A harness that dies without its result file is relaunched in the same pane (a stray
+    // SIGTERM has killed cursor-agent ~1.5s in); a harness that ignores its quit keys is
+    // waited on and re-asked before the session is force-killed, so `.exit` still gets written.
+    assert!(df.contains("pane_relaunch="), "relaunch loop missing from scsh-tui-record");
+    assert!(df.contains(r#"[ -f \"$result\" ] || [ \$n -ge 2 ]"#), "relaunch stop conditions missing");
+    assert!(df.contains("re-send $quit"), "graceful quit re-send missing");
+    assert!(df.contains("killed session (harness ignored quit)"), "force-kill fallback missing");
+  }
+
+  #[test]
   fn dockerfile_bakes_the_toolchain_and_excludes_java() {
     let df = dockerfile();
     for tool in [
