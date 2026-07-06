@@ -6,3 +6,6 @@
 *.swp
 *.swo
 .DS_Store
+
+# Coding-agent worktrees (local scratch, one checkout per background agent)
+.claude/worktrees/
