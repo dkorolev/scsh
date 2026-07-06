@@ -5,7 +5,11 @@
 //! itself from `/cast/<session>/<proc>` (truncated server-side to whole NDJSON lines, so
 //! an in-progress recording plays as far as it has gotten). Supports play/pause and
 //! timeline scrubbing (native player controls), `#t=<seconds>` / `#t=<mm:ss>` deep links,
-//! a copy-link-at-current-time button, and a reload button for live runs.
+//! a copy-link-at-current-time button, and a reload button for live runs. While the proc
+//! is still running, the page listens for the daemon's `cast_growth` WebSocket
+//! notifications: a cast with no frames yet shows a placeholder that upgrades in place,
+//! growth surfaces an unobtrusive "Recording grew … — reload" button, and a Live toggle
+//! follows the tail of the recording until the proc finishes.
 
 use super::escape::{esc, quote_js};
 use crate::daemon::model::{ProcStatus, Store};
@@ -44,6 +48,8 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 .controls a, .controls button {{ color: #7ab4ff; background: none; border: 1px solid #2a2d36;
   border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; text-decoration: none; }}
 .controls button:hover, .controls a:hover {{ border-color: #7ab4ff; }}
+.controls button.on {{ border-color: #ff6a6a; color: #ff6a6a; }}
+.controls button:disabled {{ opacity: 0.5; cursor: default; }}
 #copied {{ color: #7dd87d; visibility: hidden; }}
 #summary {{ padding: 0 16px 8px; font-size: 14px; max-width: 70ch; }}
 #summary:empty {{ display: none; }}
@@ -67,6 +73,7 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
 <button id="reload">↻ reload recording</button>
+<button id="live-toggle"{live_toggle_hidden}>● Live</button>
 <button id="grew" hidden></button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
@@ -109,7 +116,7 @@ function castEventStats(text) {{
 // calm placeholder instead of a player error on the empty/404 cast; the player mounts over
 // the inline text ({{ data }}) once frames exist, and never re-fetches what we just loaded.
 let loadedDuration = null;
-function create(startAt) {{
+function create(startAt, autoplay) {{
   if (player) {{ player.dispose(); player = null; }}
   hideGrew();
   const mount = document.getElementById('player');
@@ -123,9 +130,11 @@ function create(startAt) {{
     }}
     mount.innerHTML = '';
     const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema', markers: MARKERS }};
+    if (startAt === 'end') startAt = stats.duration;
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
     player = AsciinemaPlayer.create({{ data: text }}, mount, opts);
+    if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
   }});
 }}
 // Growth notifications for this proc's recording arrive over the daemon's WebSocket
@@ -145,9 +154,23 @@ function connectWs() {{
 function onWsMessage(msg) {{
   if (msg.type !== 'cast_growth' || msg.session !== SESSION || msg.proc !== PROC) return;
   if (msg.running === false) {{ finishCast(); return; }}
+  if (liveMode) {{ create(loadedDuration != null ? loadedDuration : 'end', true); return; }}
   if (loadedDuration == null) {{ create(hashStart()); return; }} // placeholder upgrades to a player
   showGrew(msg.duration);
 }}
+// Live mode mechanism, chosen deliberately: the vendored asciinema-player 3.9.0 build
+// does ship streaming drivers (a websocket driver speaking the v1.alis / v2.asciicast
+// subprotocols, and an eventsource driver), but they need a dedicated per-cast streaming
+// endpoint next to the daemon's single JSON broadcast hub. Live mode instead rides the
+// hub's cast_growth notifications: each one re-fetches the cast, re-creates the player
+// seeked to where the previous load ended, and plays the newly appended tail.
+let liveMode = false;
+function setLiveMode(on) {{
+  liveMode = !!on && castRunning;
+  document.getElementById('live-toggle').classList.toggle('on', liveMode);
+  if (liveMode) create('end');
+}}
+document.getElementById('live-toggle').addEventListener('click', () => setLiveMode(!liveMode));
 function showGrew(available) {{
   if (loadedDuration == null || !(available > loadedDuration + 0.05)) return;
   const btn = document.getElementById('grew');
@@ -158,10 +181,14 @@ function showGrew(available) {{
 }}
 function hideGrew() {{ document.getElementById('grew').hidden = true; }}
 // The proc finished: one last reload picks up the complete cast (keeping the current
-// position), the growth banner retires, and the WS is no longer needed.
+// position), live mode ends cleanly (toggle off + disabled), the growth banner retires,
+// and the WS is no longer needed.
 function finishCast() {{
   castRunning = false;
   if (ws) {{ try {{ ws.close(); }} catch (_) {{}} ws = null; }}
+  setLiveMode(false);
+  const toggle = document.getElementById('live-toggle');
+  toggle.disabled = true;
   const note = document.getElementById('live-note');
   if (note) note.innerHTML = '<span class="dim">recording finished</span>';
   create(player ? player.getCurrentTime() : hashStart());
@@ -210,5 +237,6 @@ document.getElementById('reload').addEventListener('click', () => {{
     sid_js = quote_js(session_id),
     proc_index = proc_index,
     live_js = if live { "true" } else { "false" },
+    live_toggle_hidden = if live { "" } else { " hidden" },
   ))
 }

@@ -34,9 +34,10 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
 }
 
 /// Inline asciinema-player embed for a proc's recording: a toolbar (fullscreen, timestamp
-/// deep-link, reload, download) above an empty `.cast-player` box the client JS mounts the
-/// player into. Works mid-run too — the cast endpoint serves the partial file. Replaces the
-/// text-line output for recorded procs.
+/// deep-link, reload, live toggle, download) above an empty `.cast-player` box the client
+/// JS mounts the player into. Works mid-run too — the cast endpoint serves the partial
+/// file, and the Live toggle (visible only while the proc runs) follows the growing tail.
+/// Replaces the text-line output for recorded procs.
 pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
   let idx = proc.index;
@@ -46,6 +47,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 <button type="button" data-cast-fs>⛶ Fullscreen</button>
 <button type="button" data-cast-link>🔗 Link at time</button>
 <button type="button" data-cast-reload>↻ Reload</button>
+<button type="button" data-cast-live{live_hidden}>● Live</button>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
 <span class="cast-copied">copied</span>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>
@@ -54,6 +56,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 </div>
 "#,
     status = proc.status.as_str(),
+    live_hidden = if proc.status == ProcStatus::Running { "" } else { " hidden" },
   )
 }
 

@@ -243,6 +243,26 @@ fn cast_growth_notifications_drive_the_reload_banner() {
 }
 
 #[test]
+fn live_toggle_renders_only_while_the_proc_runs() {
+  // Session-page embed: the Live toggle is in the toolbar, hidden unless the proc runs.
+  let running = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Running).sessions["castab"].procs[0]);
+  assert!(running.contains(r#"<button type="button" data-cast-live>● Live</button>"#));
+  let done = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Ok).sessions["castab"].procs[0]);
+  assert!(done.contains(r#"<button type="button" data-cast-live hidden>● Live</button>"#));
+  // The client JS follows the tail via cast_growth reloads (see the mechanism comment).
+  let js = live_client_js();
+  assert!(js.contains("function setCastLive(box, on)"));
+  assert!(js.contains("if (box._live) { createCastPlayer(box, box._loadedDuration ?? 'end', true); return; }"));
+  // Standalone page: toggle present while running, hidden for finished procs, and the
+  // finish notice disables it after the final reload.
+  let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
+  assert!(page.contains(r#"<button id="live-toggle">● Live</button>"#));
+  assert!(page.contains("toggle.disabled = true;"));
+  let finished = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(finished.contains(r#"<button id="live-toggle" hidden>● Live</button>"#));
+}
+
+#[test]
 fn live_client_js_counts_alive_clients_and_shutdown() {
   let js = live_client_js();
   assert!(js.contains("alive_clients"));
