@@ -435,10 +435,16 @@ function updateProcFields(det, p, nowUnix) {
     det.querySelector('.output')?.remove();
     det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
   } else if (castEl && castEl.dataset.status !== p.status) {
-    // On finish, reload once so the player has the complete recording, not the partial one.
-    const wasLive = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
+    // On finish, reload once so the player has the complete recording, not the partial
+    // one; keep the viewer's position, end live mode cleanly, and hide the Live toggle.
+    const wasRunning = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
     castEl.dataset.status = p.status;
-    if (wasLive && (p.status === 'ok' || p.status === 'fail')) createCastPlayer(castEl);
+    const liveBtn = castEl.querySelector('[data-cast-live]');
+    if (liveBtn) liveBtn.hidden = p.status !== 'running';
+    if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
+      if (castEl._live) setCastLive(castEl, false);
+      createCastPlayer(castEl, castEl._player ? castEl._player.getCurrentTime() : null);
+    }
   }
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
@@ -460,6 +466,7 @@ function castEmbedHtml(p) {
     '<button type="button" data-cast-fs>⛶ Fullscreen</button>' +
     '<button type="button" data-cast-link>🔗 Link at time</button>' +
     '<button type="button" data-cast-reload>↻ Reload</button>' +
+    '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<span class="cast-copied">copied</span>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>' +
@@ -479,6 +486,7 @@ function initCasts(root) {
       else box.requestFullscreen && box.requestFullscreen();
     });
     box.querySelector('[data-cast-reload]').addEventListener('click', () => createCastPlayer(box));
+    box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
     box.querySelector('[data-cast-link]').addEventListener('click', () => {
       const t = box._player ? Math.floor(box._player.getCurrentTime() * 10) / 10 : 0;
       const url = playUrl() + '#t=' + t;
@@ -519,7 +527,7 @@ function castPlaceholderHtml(status) {
 // cast with no complete event lines yet (a run that just started) — show a calm placeholder
 // instead of letting the player error on the empty/404 cast. The placeholder upgrades to a
 // real player on the next reload (a WS cast_growth notification, or the finish reload).
-function createCastPlayer(box, startAt) {
+function createCastPlayer(box, startAt, autoplay) {
   if (typeof AsciinemaPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
@@ -549,14 +557,33 @@ function createCastPlayer(box, startAt) {
     box._chapters = chapters;
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
     const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers };
+    if (startAt === 'end') startAt = stats.duration;
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
     // vs player, so the player must not fetch it a second time.
     box._player = AsciinemaPlayer.create({ data: text }, mount, opts);
+    if (autoplay) { try { box._player.play(); } catch (_) {} }
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
     buildFsSidebar(box, meta.summary, chapters);
   });
+}
+// Live mode: while the proc runs, follow the tail of the recording as it grows.
+//
+// Mechanism, chosen deliberately: the vendored asciinema-player 3.9.0 build DOES ship
+// streaming drivers — a `websocket` driver speaking the v1.alis / v2.asciicast
+// subprotocols and an `eventsource` driver — but using them would require the daemon to
+// grow a second, per-cast streaming WS endpoint speaking those subprotocols next to its
+// single JSON broadcast hub. Instead, live mode rides the hub's existing cast_growth
+// notifications: each one re-fetches the cast (cheap; the bytes are local), re-creates
+// the player seeked to where the previous load ended, and plays the newly appended tail.
+// When the proc finishes, the status-change reload loads the complete cast and the
+// toggle turns off and hides.
+function setCastLive(box, on) {
+  box._live = !!on;
+  const btn = box.querySelector('[data-cast-live]');
+  if (btn) btn.classList.toggle('on', box._live);
+  if (box._live) createCastPlayer(box, 'end');
 }
 // A server-pushed cast_growth notification for this session: upgrade a placeholder to a
 // player as soon as the first frames exist, otherwise offer an unobtrusive reload banner.
@@ -568,6 +595,7 @@ function onCastGrowth(msg) {
   const box = det && det.querySelector('.cast[data-ready]');
   if (!box || box._loading) return;
   if (msg.running === false) { hideCastGrowth(box); return; }
+  if (box._live) { createCastPlayer(box, box._loadedDuration ?? 'end', true); return; }
   if (box._loadedDuration == null) { createCastPlayer(box); return; }
   showCastGrowth(box, msg.duration);
 }

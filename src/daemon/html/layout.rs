@@ -77,6 +77,7 @@ const PAGE_CSS: &str = r#"
     border-radius: 5px; padding: 0.1rem 0.5rem; cursor: pointer; text-decoration: none;
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: #7ab4ff; }
+  .cast-toolbar button.on { border-color: #ff6a6a; color: #ff6a6a; }
   .cast-copied { color: #3a8; visibility: hidden; }
   .cast-keys { margin-left: auto; font-size: 0.72rem; }
   .cast-summary {
