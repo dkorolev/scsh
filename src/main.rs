@@ -1427,7 +1427,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   }
   let any_image_build = base_needs_build || !harness_builds.is_empty();
 
-  // Base image first, then one build proc per harness that actually needs rebuilding.
+  // Base image first, then one build proc per harness that actually needs rebuilding;
+  // the harness images only depend on the base, so they build in parallel.
   let mut base_build = None;
   if base_needs_build {
     let base_label = format!("using {} · build base", backend_name(&rt.name));
@@ -1484,17 +1485,36 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   };
 
   if build_failed.is_none() {
-    for (build, spec) in harness_build_procs.iter().zip(harness_builds.iter()) {
-      build.start();
-      match run_build(build, &rt_name, &spec.tag, &spec.target, &df, uid, gid, &spec.fingerprint) {
-        Ok(()) => build.finish_ok(None),
-        Err(e) => {
-          build.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
-          build_failed = Some(e);
-          break;
-        }
-      }
-    }
+    // Harness images depend only on the freshly built base, so they build in parallel
+    // (one thread per image, same scoped-thread idiom as the skill runs below). All
+    // builds run to completion; the first failure is the one reported.
+    build_failed = std::thread::scope(|scope| {
+      let handles: Vec<_> = harness_build_procs
+        .iter()
+        .zip(harness_builds.iter())
+        .map(|(build, spec)| {
+          let rt_name = &rt_name;
+          let df = &df;
+          scope.spawn(move || {
+            build.start();
+            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint) {
+              Ok(()) => {
+                build.finish_ok(None);
+                None
+              }
+              Err(e) => {
+                build.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+                Some(e)
+              }
+            }
+          })
+        })
+        .collect();
+      handles
+        .into_iter()
+        .filter_map(|h| h.join().unwrap_or_else(|_| Some(("image build thread panicked".to_string(), 1))))
+        .next()
+    });
   }
   if let Some((msg, code)) = build_failed {
     ui.finish();
@@ -3863,9 +3883,9 @@ fn print_help_internals() {
   println!("{}", h_head("How a run works"));
   print!(
     r#"  scsh builds the shared base image (`scsh-base:latest`) first — or skips it when the tag
-  already matches the embedded Dockerfile fingerprint — then builds one image per harness
-  needed (`scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`) on top, skipping any
-  harness whose tag already matches. Each build is version-checked during the build. Then, for
+  already matches the embedded Dockerfile fingerprint — then builds the needed per-harness
+  images (`scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`) on top IN PARALLEL,
+  skipping any whose tag already matches. Each build is version-checked during the build. Then, for
   EVERY selected skill in parallel, it prepares a /tmp run dir (scsh-YYYYMMDD-HHMMSS-utc-run-<invocation> on docker/podman,
   or scsh-<nonce>-run-<invocation> on Apple container — ≤ 64 chars, middle-truncated with .. when
   needed) and runs the skill's harness in its own container. On docker/podman/Linux the host
