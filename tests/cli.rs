@@ -168,6 +168,8 @@ fn help_covers_every_command_and_exit_codes() {
     ("daemon", "scsh daemon"),
     ("ls", "scsh list"),                // alias resolves to `list`
     ("annotate", "scsh annotate-cast"), // alias resolves to `annotate-cast`
+    ("export-cast", "scsh export-cast"),
+    ("export", "scsh export-cast"), // alias resolves to `export-cast`
   ] {
     let r = scsh(&d, &["help", topic]);
     assert_eq!(r.code, 0, "help {topic} exit: {}", r.out);
@@ -1048,4 +1050,121 @@ fn daemon_http_get(path: &str, port: u16) -> Option<String> {
   let mut resp = String::new();
   stream.read_to_string(&mut resp).ok()?;
   Some(resp)
+}
+
+// --- export-cast -------------------------------------------------------------
+// `scsh export-cast` renders a recording (+ its `.chapters.json` sidecar) into ONE
+// self-contained offline HTML player page. These tests need no container and no network:
+// the fixture cast is synthesized right here.
+
+/// A tiny synthetic asciicast v2 recording.
+const EXPORT_CAST: &str =
+  "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello from scsh\\r\\n\"]\n[2.0,\"o\",\"all done\\r\\n\"]\n";
+
+/// The matching `annotate-cast`-style sidecar: a summary plus two chapters.
+const EXPORT_SIDECAR: &str = "{\n  \"summary\": \"A tiny demo run.\",\n  \"chapters\": \
+[{ \"t\": 0, \"title\": \"Greeting\" }, { \"t\": 1.5, \"title\": \"Wrap-up\" }]\n}\n";
+
+/// Like [`scsh`], but keeps stdout and stderr apart — `export-cast -o -` puts the page
+/// itself on stdout, so the streams must be told apart to assert on them.
+fn scsh_split(dir: &Path, args: &[&str]) -> (i32, String, String) {
+  let output = Command::new(bin()).args(args).current_dir(dir).output().expect("run scsh");
+  (
+    output.status.code().unwrap_or(-1),
+    String::from_utf8_lossy(&output.stdout).into_owned(),
+    String::from_utf8_lossy(&output.stderr).into_owned(),
+  )
+}
+
+#[test]
+fn export_cast_renders_a_self_contained_page_with_sidecar_chapters() {
+  let d = unique_dir("exportcast");
+  std::fs::write(d.join("rec.cast"), EXPORT_CAST).unwrap();
+  std::fs::write(d.join("rec.chapters.json"), EXPORT_SIDECAR).unwrap();
+  let r = scsh(&d, &["export-cast", "rec.cast"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  let html = std::fs::read_to_string(d.join("rec.html")).expect("rec.html next to the cast");
+  // The player boots and the recording's own text is embedded (as escaped script data).
+  assert!(html.contains("AsciinemaPlayer.create"), "player boot missing");
+  assert!(html.contains("hello from scsh"), "cast data not embedded");
+  // Self-contained: no external scripts, stylesheets, or http(s) resource references
+  // (the same inline-safety bar beecast holds its own pages to).
+  assert!(!html.contains("<script src"), "no external scripts");
+  assert!(!html.contains("<link rel=\"stylesheet\""), "no external stylesheets");
+  assert!(!html.contains("src=\"http") && !html.contains("href=\"http"), "no http(s) resource references");
+  // The sidecar's summary + chapters render into the page; the cast's stem is the title.
+  assert!(html.contains("<title>rec</title>"), "stem should be the title");
+  assert!(html.contains("A tiny demo run."), "summary missing");
+  assert!(html.contains("Greeting") && html.contains("Wrap-up"), "chapters missing");
+  // The vendored asciinema-player's Apache-2.0 attribution must survive in every page —
+  // a beecast-page upgrade that drops the inline @license notice has to fail here.
+  assert!(html.contains("@license") && html.contains("Apache-2.0"), "Apache-2.0 @license notice missing");
+  // stdout was piped → the machine document, one entry with the per-cast facts.
+  assert!(r.out.contains("\"exported\""), "got: {}", r.out);
+  assert!(r.out.contains("\"chapters\": 2") && r.out.contains("rec.html"), "got: {}", r.out);
+}
+
+#[test]
+fn export_cast_without_a_sidecar_uses_the_stem_title() {
+  let d = unique_dir("exportnosidecar");
+  std::fs::write(d.join("bare.cast"), EXPORT_CAST).unwrap();
+  let r = scsh(&d, &["export-cast", "bare.cast"]);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  let html = std::fs::read_to_string(d.join("bare.html")).expect("bare.html next to the cast");
+  assert!(html.contains("<title>bare</title>"), "stem title fallback");
+  assert!(r.out.contains("\"chapters\": 0"), "got: {}", r.out);
+}
+
+#[test]
+fn export_cast_streams_the_page_to_stdout_with_dash() {
+  let d = unique_dir("exportstdout");
+  std::fs::write(d.join("rec.cast"), EXPORT_CAST).unwrap();
+  std::fs::write(d.join("rec.chapters.json"), EXPORT_SIDECAR).unwrap();
+  let (code, stdout, _stderr) = scsh_split(&d, &["export-cast", "rec.cast", "-o", "-"]);
+  assert_eq!(code, 0, "got: {stdout}");
+  // stdout IS the page — nothing else: no report document mixed into the HTML.
+  assert!(stdout.starts_with("<!DOCTYPE html>"), "got: {}", &stdout[..stdout.len().min(80)]);
+  assert!(stdout.contains("AsciinemaPlayer.create") && stdout.contains("Greeting"), "page content on stdout");
+  assert!(!stdout.contains("\"exported\""), "no JSON report in the streamed page");
+  assert!(!d.join("rec.html").exists(), "-o - must not also write a file");
+}
+
+#[test]
+fn export_cast_rejects_a_non_cast_but_exports_the_rest() {
+  let d = unique_dir("exportbadcast");
+  std::fs::write(d.join("junk.cast"), "definitely not an asciicast\n").unwrap();
+  std::fs::write(d.join("rec.cast"), EXPORT_CAST).unwrap();
+  let r = scsh(&d, &["export-cast", "junk.cast", "rec.cast"]);
+  // The bad cast is an actionable failure (✗ what's wrong / → how to fix, exit 1)…
+  assert_eq!(r.code, 1, "got: {}", r.out);
+  assert!(r.out.contains("\u{2717}") && r.out.contains("not an asciicast"), "got: {}", r.out);
+  assert!(r.out.contains("\u{2192}") && r.out.contains("asciinema recording"), "got: {}", r.out);
+  // …but the good cast in the same invocation still exports.
+  assert!(d.join("rec.html").exists(), "the good cast should still export");
+  assert!(!d.join("junk.html").exists(), "the bad cast must not produce a page");
+}
+
+#[test]
+fn export_cast_o_with_two_casts_is_a_usage_error() {
+  let d = unique_dir("exporttwocasts");
+  std::fs::write(d.join("a.cast"), EXPORT_CAST).unwrap();
+  std::fs::write(d.join("b.cast"), EXPORT_CAST).unwrap();
+  let r = scsh(&d, &["export-cast", "a.cast", "b.cast", "-o", "out.html"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("-o applies to exactly one cast"), "got: {}", r.out);
+  assert!(!d.join("out.html").exists() && !d.join("a.html").exists(), "a usage error must export nothing");
+}
+
+#[test]
+fn export_cast_malformed_sidecar_warns_but_exports() {
+  let d = unique_dir("exportbadsidecar");
+  std::fs::write(d.join("rec.cast"), EXPORT_CAST).unwrap();
+  std::fs::write(d.join("rec.chapters.json"), "{ not json at all").unwrap();
+  let r = scsh(&d, &["export-cast", "rec.cast"]);
+  // A malformed sidecar is a warning on stderr AND in the machine document — never a failure.
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("malformed sidecar"), "got: {}", r.out);
+  assert!(r.out.contains("\"warning\""), "the JSON entry should carry the warning; got: {}", r.out);
+  let html = std::fs::read_to_string(d.join("rec.html")).expect("export proceeds without the sidecar");
+  assert!(html.contains("<title>rec</title>") && !html.contains("\"chapters\":["), "no chapters from junk");
 }
