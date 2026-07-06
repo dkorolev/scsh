@@ -57,6 +57,20 @@ fn tick_json_with_sessions(store: &Store, now: u64, include_sessions: bool) -> S
   )
 }
 
+/// WebSocket push when a running proc's recording grew — or, with `"running": false`, the
+/// final notice when the proc stops (so clients end live mode and load the complete cast).
+/// `duration` is the cast's available duration in seconds, derived server-side from the
+/// asciicast NDJSON tail (see `castprobe`).
+pub fn cast_growth_json(session: &str, proc: usize, duration: f64, running: bool) -> String {
+  format!(
+    "{{ \"type\": \"cast_growth\", \"session\": {}, \"proc\": {proc}, \"duration\": {}, \"running\": {} }}",
+    quote(session),
+    // `max` would swallow a NaN (NaN.max(0.0) == 0.0), so clamp only finite values.
+    format_f64_json(if duration.is_finite() { duration.max(0.0) } else { duration }),
+    if running { "true" } else { "false" },
+  )
+}
+
 fn session_json(s: &Session) -> String {
   let profile = match &s.profile {
     Some(p) => quote(p),
@@ -329,6 +343,21 @@ mod tests {
     assert!(json.contains("\"shutdown_in_secs\""));
     assert!(json.contains("\"scsh_version\""));
     assert!(json.contains(crate::version::pkg_version()));
+  }
+
+  #[test]
+  fn cast_growth_json_shape_matches_ws_schema() {
+    assert_eq!(
+      cast_growth_json("abcdef", 2, 12.5, true),
+      r#"{ "type": "cast_growth", "session": "abcdef", "proc": 2, "duration": 12.5, "running": true }"#
+    );
+    assert_eq!(
+      cast_growth_json("abcdef", 0, 0.0, false),
+      r#"{ "type": "cast_growth", "session": "abcdef", "proc": 0, "duration": 0, "running": false }"#
+    );
+    // Escaping and non-finite durations follow the same rules as the tick payload.
+    assert!(cast_growth_json("a\"b", 1, f64::NAN, true).contains("\"duration\": null"));
+    assert!(cast_growth_json("a\"b", 1, 1.0, true).contains(r#""session": "a\"b""#));
   }
 
   #[test]
