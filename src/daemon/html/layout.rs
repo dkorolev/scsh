@@ -148,6 +148,12 @@ const PAGE_CSS: &str = r#"
   .cast-fs-chapters .fs-t { color: #7ab4ff; margin-right: 0.4rem; font-variant-numeric: tabular-nums; }
   .cast .ap-player { width: 100%; height: 100%; }
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; }
+  .session-export {
+    display: inline-block; font-size: 0.85rem; color: #7ab4ff; background: none;
+    border: 1px solid #8886; border-radius: 5px; padding: 0.15rem 0.6rem;
+    text-decoration: none; margin: 0 0 0.75rem;
+  }
+  .session-export:hover { border-color: #7ab4ff; }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
     grid-template-columns: max-content minmax(0, 1fr); gap: 0.2rem 1rem;
