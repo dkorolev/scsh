@@ -91,6 +91,15 @@ const PAGE_CSS: &str = r#"
   .cast-chapters button:hover { border-color: #7ab4ff; color: #fff; }
   .cast-player { width: 100%; height: 42vh; max-height: 460px; }
   .cast-placeholder { padding: 1.5rem 1rem; color: #cdd; }
+  .cast-grew {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
+    padding: 0.3rem 0.5rem; background: #1116; font-size: 0.8rem; color: #cdd;
+  }
+  .cast-grew button {
+    font: inherit; color: #7ab4ff; background: none; border: 1px solid #8886;
+    border-radius: 5px; padding: 0.1rem 0.5rem; cursor: pointer;
+  }
+  .cast-grew button:hover { border-color: #7ab4ff; }
   /* Brief fading chapter-name toast, bottom-centre of the player (screen, in fullscreen). */
   .cast-toast {
     position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);

@@ -523,6 +523,8 @@ function createCastPlayer(box, startAt) {
   if (typeof AsciinemaPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
+  box._loading = true;
+  hideCastGrowth(box);
   const proc = box.dataset.proc;
   const chaptersUrl = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/chapters';
   Promise.all([
@@ -532,6 +534,7 @@ function createCastPlayer(box, startAt) {
     // (YouTube-style highlights; [ / ] jump between them).
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).catch(() => ({})),
   ]).then(([text, meta]) => {
+    box._loading = false;
     const stats = text == null ? { events: 0, duration: 0 } : castEventStats(text);
     box._loadedDuration = stats.events ? stats.duration : null;
     if (!stats.events) {
@@ -554,6 +557,43 @@ function createCastPlayer(box, startAt) {
     renderChapterChips(box, chapters);
     buildFsSidebar(box, meta.summary, chapters);
   });
+}
+// A server-pushed cast_growth notification for this session: upgrade a placeholder to a
+// player as soon as the first frames exist, otherwise offer an unobtrusive reload banner.
+// The final running:false notice just retires the banner — the finish reload is already
+// driven by the proc's status change in the tick payload.
+function onCastGrowth(msg) {
+  if (!SESSION_ID || msg.session !== SESSION_ID) return;
+  const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(msg.proc)) + '"]');
+  const box = det && det.querySelector('.cast[data-ready]');
+  if (!box || box._loading) return;
+  if (msg.running === false) { hideCastGrowth(box); return; }
+  if (box._loadedDuration == null) { createCastPlayer(box); return; }
+  showCastGrowth(box, msg.duration);
+}
+function growthLabel(loaded, available) {
+  const delta = Math.max(1, Math.round(available - loaded));
+  return 'Recording grew: +' + delta + 's (loaded ' + fmtClock(loaded) + ', available ' + fmtClock(available) + ')';
+}
+function showCastGrowth(box, available) {
+  const loaded = box._loadedDuration;
+  if (loaded == null || !(available > loaded + 0.05)) return;
+  let bar = box.querySelector('.cast-grew');
+  if (!bar) {
+    bar = document.createElement('div');
+    bar.className = 'cast-grew';
+    bar.innerHTML = '<span class="cast-grew-text"></span> <button type="button" data-cast-grew>↻ Reload</button>';
+    // Reload preserves the viewer's current position in the recording.
+    bar.querySelector('[data-cast-grew]').addEventListener('click', () => {
+      createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
+    });
+    box.querySelector('.cast-toolbar').insertAdjacentElement('afterend', bar);
+  }
+  setTextUnlessSelecting(bar.querySelector('.cast-grew-text'), growthLabel(loaded, available));
+}
+function hideCastGrowth(box) {
+  const bar = box.querySelector('.cast-grew');
+  if (bar) bar.remove();
 }
 // Seek the player to a chapter and flash its title (shared by chips, sidebar, and [ ] keys).
 function seekToChapter(box, c) {
@@ -738,6 +778,10 @@ function renderSession(session, nowUnix) {
   });
   initCasts(root);
 }
+function onWsMessage(msg) {
+  if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }
+  onTick(msg);
+}
 function onTick(msg) {
   if (msg.type !== 'tick') return;
   const alive = msg.alive_clients ?? msg.active_clients ?? 0;
@@ -768,7 +812,7 @@ function connectWs() {
   setDaemonStatus('connecting', 'connecting…', null);
   ws = new WebSocket('ws://127.0.0.1:' + WS_PORT + '/ws');
   ws.onopen = () => { reconnectMs = 400; setDaemonStatus('connecting', 'connecting…', null); };
-  ws.onmessage = (ev) => { try { onTick(JSON.parse(ev.data)); } catch (_) {} };
+  ws.onmessage = (ev) => { try { onWsMessage(JSON.parse(ev.data)); } catch (_) {} };
   ws.onclose = () => {
     setDaemonStatus('connecting', 'connecting…', null);
     setTimeout(connectWs, reconnectMs);
