@@ -8,7 +8,20 @@ const PAGE_CSS: &str = r#"
   html, body { box-sizing: border-box; width: 100%; margin: 0; }
   body { padding: 1rem 1.25rem; max-width: none; }
   h1 { font-size: 1.25rem; font-weight: 600; }
+  h2 { font-size: 1.05rem; font-weight: 600; margin: 1.5rem 0 0.25rem; }
   .dim { opacity: 0.65; }
+  .images-controls {
+    display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+    margin: 0 0 1.25rem; font-size: 0.85rem;
+  }
+  .images-controls button {
+    font: inherit; color: #7ab4ff; background: none; border: 1px solid #8886;
+    border-radius: 5px; padding: 0.15rem 0.6rem; cursor: pointer;
+  }
+  .images-controls button:hover:not(:disabled) { border-color: #7ab4ff; }
+  .images-controls button:disabled { opacity: 0.45; cursor: default; }
+  .images-controls label { cursor: pointer; user-select: none; }
+  .image-select-cell { width: 1.5rem; }
   .daemon-status {
     display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
     font-size: 0.85rem; margin-bottom: 1rem; padding: 0.35rem 0.6rem;

@@ -739,11 +739,128 @@ fn parse_label_from_container_inspect(json: &str, key: &str) -> Option<String> {
   Some(rest[..end].to_string())
 }
 
-/// Build argv for the stdin method: the Dockerfile is sent on stdin (`-`).
+/// The host user's numeric UID/GID (via `id -u` / `id -g`), so the container's
+/// `agent` user can own the files it writes into the mount. Falls back to
+/// 1000:1000 if `id` is unavailable.
+pub fn host_ids() -> (u32, u32) {
+  (id_value("-u").unwrap_or(1000), id_value("-g").unwrap_or(1000))
+}
+
+fn id_value(flag: &str) -> Option<u32> {
+  let out = std::process::Command::new("id").arg(flag).output().ok()?;
+  out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
+}
+
+/// Status of one scsh image on the host runtime — for `scsh build-images` and the
+/// dashboard's images panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImageStatus {
+  /// Display name: `base`, or the harness name (`opencode`, `claude`, …).
+  pub name: String,
+  pub tag: String,
+  /// The image exists on the runtime, whatever its fingerprint.
+  pub exists: bool,
+  /// The image exists AND its fingerprint label matches the embedded Dockerfile.
+  pub up_to_date: bool,
+  /// Creation time (shortened RFC3339), when the runtime reports one (docker/podman).
+  pub created: Option<String>,
+  /// Human-readable size, when the runtime reports one (docker/podman).
+  pub size: Option<String>,
+}
+
+/// One status row per scsh image: the shared base first, then every harness image,
+/// each compared against the fingerprint the embedded Dockerfile would produce today.
+pub fn image_statuses(runtime: &str) -> Vec<ImageStatus> {
+  let df = dockerfile();
+  let (uid, gid) = host_ids();
+  let tz = host_timezone();
+  let base_fp = base_image_fingerprint(&df, uid, gid, &tz);
+  let mut out = vec![image_status_of(runtime, "base", BASE_IMAGE_TAG, &base_fp)];
+  for h in crate::config::Harness::ALL {
+    let spec = image_build_spec(h, &df, uid, gid, &tz);
+    out.push(image_status_of(runtime, h.as_str(), &spec.tag, &spec.fingerprint));
+  }
+  out
+}
+
+fn image_status_of(runtime: &str, name: &str, tag: &str, expected_fp: &str) -> ImageStatus {
+  let actual = image_inspect_fingerprint(runtime, tag);
+  // A labelless (pre-scsh or hand-built) image answers inspect but yields no fingerprint —
+  // it exists, it is just never up to date.
+  let exists = actual.is_some() || image_exists(runtime, tag);
+  let up_to_date = actual.as_deref() == Some(expected_fp);
+  let (created, size) = if exists { image_created_size(runtime, tag) } else { (None, None) };
+  ImageStatus { name: name.into(), tag: tag.into(), exists, up_to_date, created, size }
+}
+
+fn image_exists(runtime: &str, tag: &str) -> bool {
+  std::process::Command::new(runtime)
+    .args(["image", "inspect", tag])
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+/// Creation time + human size for an image. docker/podman report both via `--format`;
+/// Apple `container` has no such formatter, so both stay `None` there.
+fn image_created_size(runtime: &str, tag: &str) -> (Option<String>, Option<String>) {
+  if runtime == "container" {
+    return (None, None);
+  }
+  let out =
+    std::process::Command::new(runtime).args(["image", "inspect", tag, "--format", "{{.Created}}\t{{.Size}}"]).output();
+  let Ok(out) = out else { return (None, None) };
+  if !out.status.success() {
+    return (None, None);
+  }
+  parse_created_size(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// Parse one `{{.Created}}\t{{.Size}}` inspect line into (short timestamp, human size).
+fn parse_created_size(line: &str) -> (Option<String>, Option<String>) {
+  let mut parts = line.trim().splitn(2, '\t');
+  let created = parts.next().filter(|s| !s.is_empty()).map(short_created);
+  let size = parts.next().and_then(|s| s.trim().parse::<u64>().ok()).map(format_image_size);
+  (created, size)
+}
+
+/// Trim an RFC3339 timestamp to whole seconds: `2026-07-05T01:02:03.123456789Z` →
+/// `2026-07-05 01:02:03 UTC`. Anything shorter passes through unchanged.
+fn short_created(ts: &str) -> String {
+  if ts.len() >= 19 && ts.as_bytes()[10] == b'T' {
+    format!("{} {} UTC", &ts[..10], &ts[11..19])
+  } else {
+    ts.to_string()
+  }
+}
+
+/// Human-readable image size (base-1000, one decimal — matching `docker images` output).
+fn format_image_size(bytes: u64) -> String {
+  const UNITS: [&str; 4] = ["B", "kB", "MB", "GB"];
+  let mut value = bytes as f64;
+  let mut unit = 0;
+  while value >= 1000.0 && unit + 1 < UNITS.len() {
+    value /= 1000.0;
+    unit += 1;
+  }
+  if unit == 0 {
+    format!("{bytes}B")
+  } else {
+    format!("{value:.1}{}", UNITS[unit])
+  }
+}
+
+/// Build argv for the stdin method: the Dockerfile is sent on stdin (`-`). `no_cache` adds
+/// `--no-cache` so a forced rebuild re-runs every layer instead of no-op'ing on the cache.
 pub fn build_command_stdin(
-  runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
+  runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str, no_cache: bool,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
+  if no_cache {
+    v.push("--no-cache".into());
+  }
   v.extend(build_args(uid, gid, tz));
   v.extend(build_labels(fingerprint));
   v.push("-".into());
@@ -752,8 +869,12 @@ pub fn build_command_stdin(
 
 pub fn build_command_context(
   runtime: &str, tag: &str, target: &str, context_dir: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
+  no_cache: bool,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "build".into(), "-t".into(), tag.into(), "--target".into(), target.into()];
+  if no_cache {
+    v.push("--no-cache".into());
+  }
   v.extend(build_args(uid, gid, tz));
   v.extend(build_labels(fingerprint));
   v.push(context_dir.into());
@@ -2145,11 +2266,28 @@ mod tests {
   }
 
   #[test]
+  fn image_created_size_parses_inspect_output() {
+    let (created, size) = parse_created_size("2026-07-05T01:02:03.123456789Z\t3222111000\n");
+    assert_eq!(created.as_deref(), Some("2026-07-05 01:02:03 UTC"));
+    assert_eq!(size.as_deref(), Some("3.2GB"));
+    // A missing size (or a runtime printing only Created) degrades, never panics.
+    let (created, size) = parse_created_size("2026-07-05T01:02:03Z");
+    assert_eq!(created.as_deref(), Some("2026-07-05 01:02:03 UTC"));
+    assert_eq!(size, None);
+    assert_eq!(parse_created_size(""), (None, None));
+    // Non-RFC3339 timestamps pass through unchanged.
+    assert_eq!(short_created("yesterday"), "yesterday");
+    assert_eq!(format_image_size(999), "999B");
+    assert_eq!(format_image_size(482_000), "482.0kB");
+    assert_eq!(format_image_size(1_500_000), "1.5MB");
+  }
+
+  #[test]
   fn commands_have_expected_shape() {
     let fp = image_build_fingerprint("FROM scratch", "scsh-opencode", 1006, 1007, "Europe/Berlin");
     let label = format!("{BUILD_FINGERPRINT_LABEL}={fp}");
     assert_eq!(
-      build_command_stdin("docker", "scsh-opencode:latest", "scsh-opencode", 1006, 1007, "Europe/Berlin", &fp),
+      build_command_stdin("docker", "scsh-opencode:latest", "scsh-opencode", 1006, 1007, "Europe/Berlin", &fp, false),
       vec![
         "docker".into(),
         "build".into(),
@@ -2168,6 +2306,13 @@ mod tests {
         "-".into(),
       ]
     );
+    // A forced rebuild inserts --no-cache right after the target, in both build methods.
+    let forced = build_command_stdin("docker", "t:l", "t", 1, 1, "UTC", "fp", true);
+    assert_eq!(forced[6], "--no-cache");
+    let forced_ctx = build_command_context("docker", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", true);
+    assert!(forced_ctx.contains(&"--no-cache".to_string()));
+    assert!(!build_command_context("docker", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", false)
+      .contains(&"--no-cache".to_string()));
     assert_eq!(
       run_command(
         "docker",

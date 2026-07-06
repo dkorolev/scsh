@@ -75,6 +75,9 @@ fn run(args: &[String]) -> i32 {
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
+    Mode::BuildImages => {
+      build_images_cmd(&cli.build_harnesses, cli.build_force, cli.build_rebuild_base, cli.failures.session.clone())
+    }
   }
 }
 
@@ -190,6 +193,9 @@ enum Mode {
   Prune,
   /// Summarize + chapter cast recordings with cursor/Composer (`annotate-cast <cast>…`).
   AnnotateCasts,
+  /// Build the base and/or harness images outside a run (`build-images [harness…]`), streaming
+  /// into the session browser — the daemon's images panel spawns this command.
+  BuildImages,
 }
 
 #[derive(Clone, Copy)]
@@ -220,6 +226,7 @@ enum HelpTopic {
 const COMMAND_NAMES: &[&str] = &[
   "run",
   "list",
+  "build-images",
   "check-profile",
   "init-demo-project",
   "installskills",
@@ -238,6 +245,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
   let canonical = match token {
     "run" => "run",
     "list" | "ls" => "list",
+    "build-images" | "build-image" | "buildimages" => "build-images",
     "check-profile" | "checkprofile" => "check-profile",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
     "installskills" | "install-skills" => "installskills",
@@ -276,6 +284,12 @@ struct Cli {
   json: bool,
   failures: FailuresOpts,
   prune_now: bool,
+  /// Harness names for `build-images` (positional; empty = every harness).
+  build_harnesses: Vec<String>,
+  /// `build-images --force`: rebuild the selected harness images even when up to date.
+  build_force: bool,
+  /// `build-images --rebuild-base`: force-rebuild the shared base (`--no-cache`) first.
+  build_rebuild_base: bool,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -308,6 +322,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut frames = false;
   let mut failures = FailuresOpts::default();
   let mut prune_now = false;
+  let mut build_harnesses: Vec<String> = Vec::new();
+  let mut build_force = false;
+  let mut build_rebuild_base = false;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -412,6 +429,17 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `annotate-cast <cast>…`: summarize each recording and detect chapters with
       // cursor-agent on the Composer model, writing a `<cast>.chapters.json` sidecar.
       "annotate-cast" | "annotate-casts" => Some(Mode::AnnotateCasts),
+      // `build-images [harness…] [--force] [--rebuild-base] [--session <id>]`: build the
+      // shared base + harness images outside any run (the dashboard's images panel spawns this).
+      "build-images" => Some(Mode::BuildImages),
+      "--force" => {
+        build_force = true;
+        None
+      }
+      "--rebuild-base" => {
+        build_rebuild_base = true;
+        None
+      }
       // `prune [--now]`: show the daemon's run-dir cleanup queue, or force a pass now.
       "prune" => Some(Mode::Prune),
       "--now" => {
@@ -490,6 +518,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         annotate_paths.push(other.to_string());
         None
       }
+      // After `build-images`, each bare token is a harness name (empty = every harness).
+      other if matches!(mode, Some(Mode::BuildImages)) && !other.starts_with('-') => {
+        build_harnesses.push(other.to_string());
+        None
+      }
       other => return Err(format!("unknown command or option '{other}' (try 'scsh help')")),
     };
     if let Some(m) = m {
@@ -530,9 +563,17 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if (failures.harness.is_some() || failures.model.is_some() || failures.raw) && !matches!(mode, Mode::Stats) {
     return Err("--harness/--model/--raw only apply to 'stats'".into());
   }
+  // `build-images` shares `--session` (the session id to report into) with failures/stats,
+  // but none of their other query flags.
   let shared_query_flags = failures.session.is_some() || failures.skill.is_some() || failures.last.is_some();
-  if shared_query_flags && !matches!(mode, Mode::Failures | Mode::Stats) {
+  if shared_query_flags && !matches!(mode, Mode::Failures | Mode::Stats | Mode::BuildImages) {
     return Err("--session/--skill/--last only apply to 'failures' or 'stats'".into());
+  }
+  if matches!(mode, Mode::BuildImages) && (failures.skill.is_some() || failures.last.is_some()) {
+    return Err("--skill/--last do not apply to 'build-images'".into());
+  }
+  if (build_force || build_rebuild_base) && !matches!(mode, Mode::BuildImages) {
+    return Err("--force/--rebuild-base only apply to 'build-images'".into());
   }
   if prune_now && !matches!(mode, Mode::Prune) {
     return Err("--now only applies to 'prune' (e.g. `scsh prune --now`)".into());
@@ -540,7 +581,19 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if !annotate_paths.is_empty() && !matches!(mode, Mode::AnnotateCasts) {
     return Err("cast paths only apply to 'annotate-cast'".into());
   }
-  Ok(Cli { mode, profile, sources, annotate_paths, verbose, json, failures, prune_now })
+  Ok(Cli {
+    mode,
+    profile,
+    sources,
+    annotate_paths,
+    verbose,
+    json,
+    failures,
+    prune_now,
+    build_harnesses,
+    build_force,
+    build_rebuild_base,
+  })
 }
 
 /// The profiles requested on the command line, as a set. No `--profile` is the reserved
@@ -899,7 +952,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
 
   if verbose {
     let skills = &expanded[..];
-    let (uid, gid) = host_ids();
+    let (uid, gid) = runtime::host_ids();
     let df = runtime::dockerfile();
     let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
     for s in skills.iter() {
@@ -1547,7 +1600,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
   }
   let daemon_client = daemon_session.client.clone();
 
-  let (uid, gid) = host_ids();
+  let (uid, gid) = runtime::host_ids();
   let secs = now_secs();
   if !keep_run_dirs() {
     let swept = sweep_stale_run_dirs(secs);
@@ -1656,7 +1709,8 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
 
   let mut build_failed = if let Some(ref base) = base_build {
     base.start();
-    match run_build(base, &rt_name, runtime::BASE_IMAGE_TAG, runtime::BASE_IMAGE_TARGET, &df, uid, gid, &base_fp) {
+    match run_build(base, &rt_name, runtime::BASE_IMAGE_TAG, runtime::BASE_IMAGE_TARGET, &df, uid, gid, &base_fp, false)
+    {
       Ok(()) => {
         base.finish_ok(None);
         None
@@ -1683,7 +1737,7 @@ fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvoca
           let df = &df;
           scope.spawn(move || {
             build.start();
-            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint) {
+            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint, false) {
               Ok(()) => {
                 build.finish_ok(None);
                 None
@@ -3151,18 +3205,6 @@ fn apply_cached_commits(root: &Path, patch: &str, skill: &str, stamp: &str) -> R
   ))
 }
 
-/// The host user's numeric UID/GID (via `id -u` / `id -g`), so the container's
-/// `agent` user can own the files it writes into the mount. Falls back to
-/// 1000:1000 if `id` is unavailable.
-fn host_ids() -> (u32, u32) {
-  (id_value("-u").unwrap_or(1000), id_value("-g").unwrap_or(1000))
-}
-
-fn id_value(flag: &str) -> Option<u32> {
-  let out = Command::new("id").arg(flag).output().ok()?;
-  out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().parse().ok()).flatten()
-}
-
 /// Seconds since the Unix epoch (UTC), for run-dir and backup timestamps.
 fn now_secs() -> u64 {
   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
@@ -3171,15 +3213,16 @@ fn now_secs() -> u64 {
 /// Build a single harness image through the live board's build proc (so its output streams into the
 /// collapsible build row, timestamped). docker/podman take the in-memory Dockerfile on stdin;
 /// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
+/// `no_cache` forces every layer to rebuild (`build-images --force` / `--rebuild-base`).
 fn run_build(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
-  fingerprint: &str,
+  fingerprint: &str, no_cache: bool,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
   let (ok, last) = match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
-      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint);
+      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint, no_cache);
       build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started)?
     }
     runtime::BuildMethod::ContextDir => {
@@ -3189,8 +3232,17 @@ fn run_build(
         let _ = std::fs::remove_dir_all(&dir);
         return Err((format!("could not write Dockerfile to build context: {e}"), 1));
       }
-      let cmd =
-        runtime::build_command_context(runtime_name, tag, target, &dir.to_string_lossy(), uid, gid, &tz, fingerprint);
+      let cmd = runtime::build_command_context(
+        runtime_name,
+        tag,
+        target,
+        &dir.to_string_lossy(),
+        uid,
+        gid,
+        &tz,
+        fingerprint,
+        no_cache,
+      );
       let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
       let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
       out?
@@ -3212,18 +3264,212 @@ fn make_temp_dir() -> std::io::Result<PathBuf> {
   Ok(dir)
 }
 
+/// `scsh build-images [harness…] [--force] [--rebuild-base] [--session <id>]` — build the shared
+/// base image and the selected harness images outside any run, streaming into the live board and
+/// the session browser exactly like a run's build rows. No git repo or `.scsh.yml` is needed —
+/// the Dockerfile is embedded. The daemon's images panel spawns this command on its Build
+/// buttons, passing `--session` so the browser can deep-link the pre-created session.
+///
+/// Semantics: stale images (fingerprint mismatch) always rebuild. `--force` rebuilds the
+/// selected harness images even when up to date (`--no-cache`). `--rebuild-base` force-rebuilds
+/// the base with `--no-cache` and then rebuilds every selected harness image on top of it
+/// (cached — their layers chain from the fresh base, so they re-run where it matters).
+fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: Option<String>) -> i32 {
+  ui::signals::install();
+  let mut selected: Vec<config::Harness> = Vec::new();
+  if names.is_empty() {
+    selected.extend(config::Harness::ALL);
+  } else {
+    for n in names {
+      match config::Harness::parse(n) {
+        Some(h) if selected.contains(&h) => {}
+        Some(h) => selected.push(h),
+        None => {
+          fail(&format!("unknown harness '{n}' (known: {})", config::Harness::known().join(", ")));
+          return 2;
+        }
+      }
+    }
+  }
+
+  let rt = match runtime::detect_runtime() {
+    Some(rt) => rt,
+    None => {
+      fail("no container runtime found (docker, podman, or Apple `container`)");
+      return 1;
+    }
+  };
+  if !ui::engine::is_running(&rt.name) {
+    fail(&format!("{} is installed but not running", ui::engine::display_name(&rt.name)));
+    if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
+      hint(&format!("start it with: {}", bold(&cmd)));
+    }
+    return 1;
+  }
+
+  // Session browser wiring — same shape as a run; `--session` reuses the id the daemon
+  // pre-created so its Build button can link to the session before this process starts.
+  let session_id = session.filter(|s| !s.is_empty()).unwrap_or_else(daemon::new_session_id);
+  let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
+  match daemon::ensure_for_run() {
+    Ok(()) => {
+      let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
+      if client.register_session("(image builds)", "", Some("build-images"), &[]) {
+        ok(&format!("track progress at {}", client.session_url()));
+        let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ping_flag = std::sync::Arc::clone(&ping_active);
+        let ping_client = std::sync::Arc::clone(&client);
+        std::thread::spawn(move || {
+          while ping_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            ping_client.ping();
+            std::thread::sleep(Duration::from_secs(2));
+          }
+        });
+        daemon_session.client = Some(client);
+        daemon_session.ping_active = Some(ping_active);
+        daemon_session.registered = true;
+      }
+    }
+    Err(e) => hint(&format!("session browser daemon unavailable ({e}); continuing without live browser UI")),
+  }
+  let daemon_client = daemon_session.client.clone();
+  let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
+
+  let df = runtime::dockerfile();
+  let (uid, gid) = runtime::host_ids();
+  let tz = runtime::host_timezone();
+  let rt_name = rt.name.clone();
+
+  let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
+  let base_stale = !runtime::image_is_up_to_date(&rt_name, runtime::BASE_IMAGE_TAG, &base_fp);
+  let build_base = base_stale || rebuild_base;
+  let mut harness_builds: Vec<runtime::ImageBuildSpec> = Vec::new();
+  for &h in &selected {
+    let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
+    if force || rebuild_base || !runtime::image_is_up_to_date(&rt_name, &spec.tag, &spec.fingerprint) {
+      harness_builds.push(spec);
+    } else {
+      ok(&format!("{} up to date", spec.tag));
+    }
+  }
+  if !build_base {
+    ok(&format!("{} up to date", runtime::BASE_IMAGE_TAG));
+  }
+  if !build_base && harness_builds.is_empty() {
+    ui.finish();
+    ok("nothing to build — every selected image is up to date (use --force to rebuild anyway)");
+    return 0;
+  }
+
+  let mut base_build = None;
+  if build_base {
+    let label = format!("using {} · build base", backend_name(&rt_name));
+    let p = ui.proc(label.clone(), true);
+    if let Some(c) = &daemon_client {
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None);
+    }
+    base_build = Some(p);
+  }
+  let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
+  for spec in &harness_builds {
+    let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
+    let p = ui.proc(label.clone(), true);
+    if let Some(c) = &daemon_client {
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
+    }
+    harness_build_procs.push(p);
+  }
+  ui.pin_board_to_top();
+
+  let mut build_failed = if let Some(ref base) = base_build {
+    base.start();
+    match run_build(
+      base,
+      &rt_name,
+      runtime::BASE_IMAGE_TAG,
+      runtime::BASE_IMAGE_TARGET,
+      &df,
+      uid,
+      gid,
+      &base_fp,
+      rebuild_base,
+    ) {
+      Ok(()) => {
+        base.finish_ok(None);
+        None
+      }
+      Err(e) => {
+        base.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+        Some(e)
+      }
+    }
+  } else {
+    None
+  };
+
+  if build_failed.is_none() {
+    // Same parallel idiom as a run's image builds: the harness images depend only on the
+    // (now fresh) base, so one thread each. All builds run to completion; the first
+    // failure is the one reported.
+    build_failed = std::thread::scope(|scope| {
+      let handles: Vec<_> = harness_build_procs
+        .iter()
+        .zip(harness_builds.iter())
+        .map(|(build, spec)| {
+          let rt_name = &rt_name;
+          let df = &df;
+          scope.spawn(move || {
+            build.start();
+            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint, force) {
+              Ok(()) => {
+                build.finish_ok(None);
+                None
+              }
+              Err(e) => {
+                build.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+                Some(e)
+              }
+            }
+          })
+        })
+        .collect();
+      handles
+        .into_iter()
+        .filter_map(|h| h.join().unwrap_or_else(|_| Some(("image build thread panicked".to_string(), 1))))
+        .next()
+    });
+  }
+  ui.finish();
+  if let Some((msg, code)) = build_failed {
+    fail(&msg);
+    return code;
+  }
+  let built = harness_builds.len() + usize::from(build_base);
+  ok(&format!("built {built} image{}", plural(built)));
+  0
+}
+
 fn print_build_command(
   runtime_name: &str, tag: &str, target: &str, _dockerfile: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
 ) {
   match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
-      let build = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, tz, fingerprint);
+      let build = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, tz, fingerprint, false);
       println!("{}", runtime::shell_join(&build));
     }
     runtime::BuildMethod::ContextDir => {
       let ctx = std::env::temp_dir().join("scsh-build-XXXXXX");
-      let build =
-        runtime::build_command_context(runtime_name, tag, target, &ctx.to_string_lossy(), uid, gid, tz, fingerprint);
+      let build = runtime::build_command_context(
+        runtime_name,
+        tag,
+        target,
+        &ctx.to_string_lossy(),
+        uid,
+        gid,
+        tz,
+        fingerprint,
+        false,
+      );
       println!("{}", runtime::shell_join(&build));
       println!("{}", h_dim("# in-memory Dockerfile written to an ephemeral context dir"));
     }
@@ -4036,6 +4282,16 @@ fn print_help_command(name: &str) {
       "scsh prune [--now]",
       &[("--now", "Force a janitor pass now instead of just showing the queue.")],
     ),
+    "build-images" => (
+      "build the container images outside a run",
+      "scsh build-images [harness…] [--force] [--rebuild-base] [--session <id>]",
+      &[
+        ("[harness…]", "Harness images to build (opencode, claude, codex, grok, cursor); none = all."),
+        ("--force", "Rebuild the selected harness images even when up to date (--no-cache)."),
+        ("--rebuild-base", "Force-rebuild the shared base image first (--no-cache), then the selection."),
+        ("--session <id>", "Report into this session id (used by the dashboard's Build buttons)."),
+      ],
+    ),
     "annotate-cast" => (
       "summarize + chapter recordings",
       "scsh annotate-cast <cast…> [--json]",
@@ -4090,6 +4346,7 @@ fn print_help_overview() {
   help_row("run [profile…]", "Build the image; run skills in parallel.");
   help_cont("See `scsh help run` for profiles, preflight, and exit codes.");
   help_row("list (ls)", "List skills by profile (--verbose, --json).");
+  help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs).");

@@ -186,6 +186,9 @@ pub enum Harness {
 }
 
 impl Harness {
+  /// Every harness, in `.scsh.yml` declaration order — one scsh image each.
+  pub const ALL: [Harness; 5] = [Harness::Opencode, Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor];
+
   /// Parse a `harness:` value; `None` for an unknown harness.
   pub fn parse(s: &str) -> Option<Harness> {
     match s {

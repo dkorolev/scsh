@@ -24,12 +24,35 @@ pub fn index_page(store: &Store) -> String {
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
-<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>",
+<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n{images}",
     url = base_url(port),
     mode = store.mode.as_str(),
-    rows = rows
+    rows = rows,
+    images = images_panel()
   );
   wrap_page("scsh sessions", port, None, &body)
+}
+
+/// The images panel: a table of every scsh image (populated by the client from
+/// `GET /api/v1/images`) plus the Build buttons that POST `/api/v1/images/build` and
+/// deep-link into the spawned `scsh build-images` session.
+fn images_panel() -> &'static str {
+  r##"<h2>images</h2>
+<p class="dim">The container images scsh builds: the shared base, plus one per harness.
+Stale means the image exists but no longer matches this scsh build's embedded Dockerfile.</p>
+<div class="table-scroll"><table>
+<thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th></tr></thead>
+<tbody id="images-body"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
+</table></div>
+<div class="images-controls">
+<button id="images-build-selected" disabled>Build selected</button>
+<button id="images-build-all">Build all</button>
+<label><input type="checkbox" id="images-rebuild-base"> also rebuild the base image (--no-cache)</label>
+<label><input type="checkbox" id="images-force"> force rebuild even when up to date</label>
+<a href="#" id="images-refresh">refresh</a>
+<span id="images-note" class="dim"></span>
+</div>
+"##
 }
 
 fn index_session_row(session: &Session, now: u64) -> String {
