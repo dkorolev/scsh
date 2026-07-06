@@ -175,6 +175,10 @@ fn scsh_version_html() -> String {
   }
 }
 
+/// Inline SVG favicon — a `❯` prompt chevron on a dark rounded tile, as a `data:` URI so
+/// every page (the live dashboard AND the downloaded offline exports) stays request-free.
+pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%23181a20'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2333aa88'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
+
 pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: &str) -> String {
   let session_js = match session_id {
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
@@ -195,6 +199,7 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{favicon}
 <title>{title}</title>
 {player_css}
 <style>{css}</style>
@@ -214,6 +219,7 @@ const WS_PORT = {port};
 </html>
 "#,
     title = esc(title),
+    favicon = FAVICON_LINK,
     player_css = player_css,
     css = PAGE_CSS,
     scsh_version = scsh_version_html(),

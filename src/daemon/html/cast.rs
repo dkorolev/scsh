@@ -14,6 +14,7 @@
 //! follows the tail of the recording until the proc finishes.
 
 use super::escape::{esc, quote_js};
+use super::layout::FAVICON_LINK;
 use crate::daemon::model::{ProcStatus, Store};
 
 /// Vendored asciinema-player (see `vendor/README.md`), served at `/assets/…`.
@@ -36,6 +37,7 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{favicon}
 <title>cast · {label} · {sid}</title>
 <link rel="stylesheet" href="/assets/asciinema-player.css">
 <style>
@@ -235,6 +237,7 @@ document.getElementById('reload').addEventListener('click', () => {{
 </body>
 </html>
 "#,
+    favicon = FAVICON_LINK,
     label = esc(&proc.label),
     sid = esc(session_id),
     live_note = live_note,

@@ -339,6 +339,16 @@ fn wrap_page_connecting_status_uses_blue() {
 }
 
 #[test]
+fn every_daemon_page_carries_the_inline_favicon() {
+  use super::layout::wrap_page;
+  // A data: URI, so the dashboard and the standalone player page stay request-free.
+  let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
+  assert!(html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "dashboard favicon");
+  let player = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(player.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "player-page favicon");
+}
+
+#[test]
 fn wrap_page_serves_valid_css_braces() {
   use super::layout::wrap_page;
   let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
