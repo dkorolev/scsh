@@ -3,6 +3,12 @@
 version = 4
 
 [[package]]
+name = "beecast-page"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40d5b23ec572922010787d4fea86a02d6e5f32855755cd294371eaa27b47fbf9"
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -173,8 +179,9 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "scsh"
-version = "1.9.6"
+version = "1.9.7"
 dependencies = [
+ "beecast-page",
  "console",
  "crossterm",
  "redb",

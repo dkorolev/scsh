@@ -1,6 +1,6 @@
 [package]
 name = "scsh"
-version = "1.9.6"
+version = "1.9.7"
 edition = "2021"
 description = "Scoped Skills Helper — preflight a git repo and run its scoped skills in ephemeral containers."
 license = "MIT"
@@ -26,6 +26,12 @@ crossterm = { version = "0.29.0", default-features = false, features = ["events"
 # DB (`~/.scsh/daemon-<port>.redb`), written per-session rather than rewriting one growing
 # JSON file every tick. redb is single-purpose, dependency-light, and needs no server.
 redb = "4.1"
+# `beecast-page` turns a recorded cast (+ chapters) into one self-contained offline HTML
+# player page (`scsh export-cast`). It earns its place: zero transitive dependencies (a
+# one-line `cargo tree`), it *is* the page pipeline scsh would otherwise have to duplicate
+# — the page template, the vendored asciinema-player, and the strict `<script>`-safe
+# escaping — and its pages are byte-identical to the ones `beecast` itself exports.
+beecast-page = "0.2"
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.

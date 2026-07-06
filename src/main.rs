@@ -8,6 +8,7 @@
 mod annotate;
 mod config;
 mod daemon;
+mod export;
 mod failure;
 mod json;
 mod runtime;
@@ -75,6 +76,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
+    Mode::ExportCasts => export_casts_cmd(&cli.export_paths, cli.output.as_deref(), cli.json),
     Mode::BuildImages => {
       build_images_cmd(&cli.build_harnesses, cli.build_force, cli.build_rebuild_base, cli.failures.session.clone())
     }
@@ -141,6 +143,110 @@ fn annotate_error(as_json: bool, code: i32, message: &str) -> i32 {
   code
 }
 
+/// `export-cast <cast>… [-o <file>]`: render each recording (plus its `.chapters.json`
+/// sidecar, when present) into one self-contained offline HTML player page via `beecast-page`.
+/// Each cast exports to `<stem>.html` next to it; `-o` overrides the path for a single cast,
+/// and `-o -` streams the page to stdout. Human mode prints one ✓/✗ line per cast; with
+/// `--json` (or when stdout is not a TTY) a per-cast machine document is emitted instead —
+/// except under `-o -`, where stdout IS the page, so the report is the stderr note only.
+/// A cast that is not an asciicast fails (exit 1) but the other casts still export.
+fn export_casts_cmd(paths: &[String], output: Option<&str>, json_flag: bool) -> i32 {
+  use std::io::IsTerminal;
+  let streaming = output == Some("-");
+  let as_json = !streaming && (json_flag || !std::io::stdout().is_terminal());
+  if paths.is_empty() {
+    return export_error(as_json, 2, "give one or more .cast files, e.g. scsh export-cast tmp/casts/foo.cast");
+  }
+  if output.is_some() && paths.len() != 1 {
+    return export_error(as_json, 2, &format!("-o applies to exactly one cast ({} given)", paths.len()));
+  }
+  let mut entries: Vec<String> = Vec::new(); // per-cast JSON: {input, output, bytes, chapters} or an error
+  let mut worst = 0;
+  for path in paths {
+    let cast_path = std::path::Path::new(path);
+    match export_one_cast(cast_path, output) {
+      Ok((out_name, bytes, chapters, warning)) => {
+        if !as_json && !streaming {
+          ok(&format!("{path} → {out_name} ({bytes} bytes, {chapters} chapters)"));
+        } else if streaming && !json_flag {
+          eprintln!("✓ {path} → stdout ({bytes} bytes, {chapters} chapters)");
+        }
+        let warn_field = warning.map(|w| format!(", \"warning\": {}", json::quote(&w))).unwrap_or_default();
+        entries.push(format!(
+          "    {{ \"input\": {}, \"output\": {}, \"bytes\": {bytes}, \"chapters\": {chapters}{warn_field} }}",
+          json::quote(path),
+          json::quote(&out_name),
+        ));
+      }
+      Err((problem, fix)) => {
+        fail(&format!("{path}: {problem}"));
+        hint(&fix);
+        entries.push(format!("    {{ \"input\": {}, \"error\": {} }}", json::quote(path), json::quote(&problem)));
+        worst = worst.max(1);
+      }
+    }
+  }
+  if as_json {
+    println!("{{\n  \"exported\": [\n{}\n  ]\n}}", entries.join(",\n"));
+  }
+  worst
+}
+
+/// Export one cast: read it, pick up its sidecar (a malformed one warns on stderr and is
+/// reported in the JSON entry — both channels — but never fails the export), render, and
+/// write (or stream, for `-o -`). Returns `(output name, page bytes, chapter count,
+/// sidecar warning)` on success, or an actionable `(✗ problem, → fix)` pair on failure.
+fn export_one_cast(
+  cast_path: &Path, output: Option<&str>,
+) -> Result<(String, usize, usize, Option<String>), (String, String)> {
+  let ndjson = std::fs::read_to_string(cast_path).map_err(|e| {
+    (format!("cannot read the cast: {e}"), format!("check the path — is {} a recording file?", cast_path.display()))
+  })?;
+  let (annotation, warning) = match export::load_sidecar(cast_path) {
+    export::Sidecar::Found(a) => (Some(a), None),
+    export::Sidecar::Absent => (None, None),
+    export::Sidecar::Malformed(p) => {
+      let w = format!("malformed sidecar {} — exporting without summary/chapters", p.display());
+      warn(&w);
+      (None, Some(w))
+    }
+  };
+  let stem = export::cast_stem(cast_path);
+  let page = export::render_page(&ndjson, &stem, annotation.as_ref()).map_err(|e| {
+    (e.to_string(), "give an asciinema recording (asciicast v1/v2/v3), e.g. one under tmp/casts/".to_string())
+  })?;
+  let chapters = annotation.as_ref().map(|a| a.chapters.len()).unwrap_or(0);
+  let out_name = if output == Some("-") {
+    use std::io::Write;
+    let mut stdout = std::io::stdout();
+    stdout.write_all(page.as_bytes()).and_then(|()| stdout.flush()).map_err(|e| {
+      (format!("cannot stream the page: {e}"), "check what stdout is connected to and retry".to_string())
+    })?;
+    "stdout".to_string()
+  } else {
+    let out_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| export::default_output_path(cast_path));
+    std::fs::write(&out_path, &page).map_err(|e| {
+      (
+        format!("cannot write {}: {e}", out_path.display()),
+        "pick a writable output path with -o <file> (or fix the directory permissions)".to_string(),
+      )
+    })?;
+    out_path.display().to_string()
+  };
+  Ok((out_name, page.len(), chapters, warning))
+}
+
+/// Report an `export-cast` failure in the active mode: a single-key `{"Error": …}` JSON
+/// object on stdout when machine-facing, a plain note on stderr for a human. Returns `code`.
+fn export_error(as_json: bool, code: i32, message: &str) -> i32 {
+  if as_json {
+    println!("{{ \"Error\": {{ \"message\": {} }} }}", json::quote(message));
+  } else {
+    eprintln!("export-cast: {message}");
+  }
+  code
+}
+
 /// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
 /// and summaries appear in the session browser. No-op when cursor/Composer is unavailable.
 fn annotate_run_casts(cast_paths: Vec<std::path::PathBuf>) {
@@ -193,6 +299,9 @@ enum Mode {
   Prune,
   /// Summarize + chapter cast recordings with cursor/Composer (`annotate-cast <cast>…`).
   AnnotateCasts,
+  /// Render cast recordings into self-contained offline HTML player pages
+  /// (`export-cast <cast>… [-o <file>]`).
+  ExportCasts,
   /// Build the base and/or harness images outside a run (`build-images [harness…]`), streaming
   /// into the session browser — the daemon's images panel spawns this command.
   BuildImages,
@@ -236,6 +345,7 @@ const COMMAND_NAMES: &[&str] = &[
   "stats",
   "prune",
   "annotate-cast",
+  "export-cast",
   "version",
 ];
 
@@ -255,6 +365,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "stats" => "stats",
     "prune" => "prune",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
+    "export-cast" | "export-casts" | "export" => "export-cast",
     "version" => "version",
     _ => return None,
   };
@@ -280,6 +391,10 @@ struct Cli {
   sources: Vec<String>,
   /// Cast files for `annotate-cast` (positional).
   annotate_paths: Vec<String>,
+  /// Cast files for `export-cast` (positional).
+  export_paths: Vec<String>,
+  /// `export-cast -o <file>`: the output path for the (single) cast; `-` streams to stdout.
+  output: Option<String>,
   verbose: bool,
   json: bool,
   failures: FailuresOpts,
@@ -317,6 +432,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut profiles: Vec<String> = Vec::new();
   let mut sources: Vec<String> = Vec::new();
   let mut annotate_paths: Vec<String> = Vec::new();
+  let mut export_paths: Vec<String> = Vec::new();
+  let mut output: Option<String> = None;
   let mut verbose = false;
   let mut json = false;
   let mut frames = false;
@@ -429,6 +546,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `annotate-cast <cast>…`: summarize each recording and detect chapters with
       // cursor-agent on the Composer model, writing a `<cast>.chapters.json` sidecar.
       "annotate-cast" | "annotate-casts" => Some(Mode::AnnotateCasts),
+      // `export-cast <cast>… [-o <file>]`: render each recording (+ its chapters sidecar)
+      // into one self-contained offline HTML player page next to it.
+      "export-cast" | "export-casts" => Some(Mode::ExportCasts),
+      "-o" | "--output" => {
+        i += 1;
+        let value = args.get(i).ok_or("-o needs a path (or `-` for stdout), e.g. scsh export-cast foo.cast -o -")?;
+        output = Some(value.clone());
+        None
+      }
       // `build-images [harness…] [--force] [--rebuild-base] [--session <id>]`: build the
       // shared base + harness images outside any run (the dashboard's images panel spawns this).
       "build-images" => Some(Mode::BuildImages),
@@ -518,6 +644,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         annotate_paths.push(other.to_string());
         None
       }
+      // After `export-cast`, each bare token is a cast file to export.
+      other if matches!(mode, Some(Mode::ExportCasts)) && !other.starts_with('-') => {
+        export_paths.push(other.to_string());
+        None
+      }
       // After `build-images`, each bare token is a harness name (empty = every harness).
       other if matches!(mode, Some(Mode::BuildImages)) && !other.starts_with('-') => {
         build_harnesses.push(other.to_string());
@@ -554,8 +685,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  if json && !matches!(mode, Mode::List | Mode::AnnotateCasts) {
-    return Err("--json only applies to 'list' and 'annotate-cast'".into());
+  if json && !matches!(mode, Mode::List | Mode::AnnotateCasts | Mode::ExportCasts) {
+    return Err("--json only applies to 'list', 'annotate-cast', and 'export-cast'".into());
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -581,11 +712,16 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if !annotate_paths.is_empty() && !matches!(mode, Mode::AnnotateCasts) {
     return Err("cast paths only apply to 'annotate-cast'".into());
   }
+  if output.is_some() && !matches!(mode, Mode::ExportCasts) {
+    return Err("-o only applies to 'export-cast' (e.g. `scsh export-cast foo.cast -o -`)".into());
+  }
   Ok(Cli {
     mode,
     profile,
     sources,
     annotate_paths,
+    export_paths,
+    output,
     verbose,
     json,
     failures,
@@ -4301,6 +4437,19 @@ fn print_help_command(name: &str) {
         ("SCSH_ANNOTATE_MODEL", "Override the model (default composer-2.5-fast)."),
       ],
     ),
+    "export-cast" => (
+      "render casts to offline HTML pages",
+      "scsh export-cast <cast…> [-o <file>] [--json]",
+      &[
+        ("<cast…>", "One or more .cast files; each renders to <stem>.html next to it."),
+        ("-o <file>", "Output path (exactly one cast); `-o -` streams the page to stdout."),
+        ("--json", "Per-cast {input, output, bytes, chapters} JSON; on by default when stdout is not a TTY."),
+        ("<stem>.chapters.json", "A summary+chapters sidecar next to the cast renders into the page when present;"),
+        ("", "a malformed sidecar is a warning — the cast still exports without it."),
+        ("(license)", "Generated pages embed the vendored asciinema-player (Apache-2.0, redistributed"),
+        ("", "unmodified; each page keeps its inline @license notice) — see LICENSE.md."),
+      ],
+    ),
     "version" => {
       ("print the version", "scsh version", &[("(no flags)", "Print the version with the build's git hash.")])
     }
@@ -4357,6 +4506,7 @@ fn print_help_overview() {
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("annotate-cast <cast…>", "Summarize + chapter recordings via cursor/Composer (--json).");
+  help_row("export-cast <cast…>", "Render recordings to self-contained offline HTML pages (-o, --json).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
