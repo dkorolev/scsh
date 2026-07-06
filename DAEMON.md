@@ -83,6 +83,11 @@ their text log). The player (vendored asciinema-player, `fit:'both'`) has:
   (the same rendering `scsh export-cast` does, chapters sidecar folded in when present),
   named `<cast stem>.html`. Hidden until the recording has at least one complete frame —
   the export endpoint 404s on a frameless cast.
+- **⬇ session .html** — in the session-page header: downloads **the entire session as one
+  self-contained offline page** (`scsh-session-<id>.html`) — a summary header plus every
+  recording embedded as its own per-cast export page (annotated casts keep their summary
+  and chapters; procs without a recording become note rows). Shown whenever any proc has a
+  registered cast.
 
 ## In-progress recordings
 
@@ -201,6 +206,11 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
   folded in when present, and a malformed sidecar exports without chapters). Served as a
   download attachment named `<cast stem>.html`; 404 with an actionable body until the
   recording has at least one complete frame
+- `GET /session/{id}/export.html` — the ENTIRE session as one self-contained offline HTML
+  page: a summary header plus every recording embedded as its per-cast export page (iframe
+  `srcdoc` composition; procs without a recording become note rows). Served as a download
+  attachment named `scsh-session-{id}.html`; 404 with an actionable body when the session
+  has no exportable recording yet
 - `GET /assets/asciinema-player.{js,css}` — vendored player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail

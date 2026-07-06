@@ -84,9 +84,17 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let id = esc(&session.id);
   let permalink = esc(&session_url(port, &session.id));
   let session_meta = session_meta_placeholder(session);
+  // Whole-session download: every recording assembled into one offline page. Decided
+  // server-side — the button renders whenever any proc has a registered cast, and the
+  // endpoint's actionable 404 speaks for the edge cases (e.g. casts still frameless).
+  let export_link = if session.procs.iter().any(proc_has_cast) {
+    format!("<a class=\"session-export\" href=\"/session/{id}/export.html\" download>⬇ session .html</a>\n", id = id)
+  } else {
+    String::new()
+  };
   let body = format!(
     "<h1><a href=\"/\">scsh</a> › session <code>{id}</code></h1>\n\
-<p class=\"dim\">profile {profile}</p>\n{session_meta}\n{skills}\
+<p class=\"dim\">profile {profile}</p>\n{export_link}{session_meta}\n{skills}\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
 <p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
     id = id,

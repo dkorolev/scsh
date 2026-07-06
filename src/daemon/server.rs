@@ -275,6 +275,11 @@ fn handle_connection(
     write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
     return Ok((false, None));
   }
+  if req.method == "GET" && req.path.starts_with("/session/") && bare_path.ends_with("/export.html") {
+    let (status, body, disposition) = session_export_response(bare_path, store);
+    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
+    return Ok((false, None));
+  }
   if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
     let (status, body, disposition) = cast_response(&req.path, store);
     write_download_response(
@@ -382,6 +387,58 @@ fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
   match crate::export::render_page_from_texts(&ndjson, sidecar.as_deref(), &stem) {
     Ok(page) => (200, page, Some(format!("attachment; filename=\"{stem}.html\""))),
     Err(e) => (404, format!("cannot export this recording: {e}"), None),
+  }
+}
+
+/// `GET /session/<id>/export.html` — EVERY recording of the session assembled into ONE
+/// self-contained offline HTML page, served as a download attachment named
+/// `scsh-session-<id>.html`. Each recording embeds as the exact per-cast export page
+/// ([`crate::export::render_page_from_texts`]) in an attribute-escaped `<iframe srcdoc>`
+/// — see [`html::session_export_page`] for the composition rationale. Procs with no cast
+/// or no frames become note rows, never errors; a session with ZERO exportable casts is a
+/// 404 with an actionable body (only a hand-typed URL sees it — the session-page button
+/// renders only when a proc has a registered cast).
+fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+  let id = bare_path.strip_prefix("/session/").unwrap_or("").strip_suffix("/export.html").unwrap_or("");
+  // Clone the session under the lock, then do all file I/O (casts + sidecars) unlocked.
+  let Some(session) = lock_store(store).sessions.get(id).cloned() else {
+    return (404, "session not found".into(), None);
+  };
+  let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
+  if !exports.iter().any(|e| matches!(e, html::CastExport::Page { .. })) {
+    return (404, "no exportable recordings in this session — retry once a skill's recording has output".into(), None);
+  }
+  let page = html::session_export_page(&session, &exports);
+  (200, page, Some(format!("attachment; filename=\"scsh-session-{id}.html\"")))
+}
+
+/// One proc's contribution to the session export: the rendered per-cast page (frames on
+/// disk → the same rendering `/cast/…/export.html` serves, sidecar summary alongside), or
+/// the note explaining why there is nothing to embed. Never an error — a vanished file, a
+/// frameless cast, and a proc that was never recorded all degrade to notes.
+fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
+  const NO_RECORDING: &str = "no recording — skipped/failed before output";
+  let Some(cast_path) = proc.cast_path.as_deref() else {
+    let note = match proc.kind {
+      ProcKind::Build => "no recording — image-build step (text log only)",
+      ProcKind::Skill => NO_RECORDING,
+    };
+    return html::CastExport::Note(note.into());
+  };
+  let Ok(ndjson) = read_complete_cast_lines(cast_path) else {
+    return html::CastExport::Note(NO_RECORDING.into());
+  };
+  if !ndjson.lines().any(|l| l.trim_start().starts_with('[')) {
+    return html::CastExport::Note(NO_RECORDING.into());
+  }
+  let sidecar = chapters_sidecar_path(cast_path).and_then(|p| std::fs::read_to_string(p).ok());
+  let stem = crate::export::cast_stem(std::path::Path::new(cast_path));
+  match crate::export::render_page_from_texts(&ndjson, sidecar.as_deref(), &stem) {
+    Ok(page) => {
+      let summary = sidecar.as_deref().and_then(crate::annotate::parse_annotation).map(|a| a.summary);
+      html::CastExport::Page { page, summary }
+    }
+    Err(_) => html::CastExport::Note(NO_RECORDING.into()),
   }
 }
 
@@ -1567,6 +1624,152 @@ mod tests {
     let (status, page, _) = export_response("/cast/expabc/0/export.html", &store);
     assert_eq!(status, 200);
     assert!(!page.contains("\"chapters\":["), "malformed sidecar → chapterless export");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  /// A skill proc for the session-export tests, recorded (`cast_path`) or not.
+  fn export_test_proc(index: usize, label: &str, cast_path: Option<String>) -> ProcRecord {
+    ProcRecord {
+      index,
+      label: label.into(),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Ok,
+      skill_name: None,
+      harness: None,
+      model: None,
+      started_at: Some(50),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: Some(2.0),
+      lines: Vec::new(),
+      container_name: None,
+      cast_path,
+    }
+  }
+
+  fn store_with_export_session(id: &str, procs: Vec<ProcRecord>) -> Arc<Mutex<Store>> {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    store.lock().unwrap().insert_session(
+      id.into(),
+      Session {
+        id: id.into(),
+        started_at: 50,
+        ended_at: Some(60),
+        profile: Some("default".into()),
+        repo: "/r".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs,
+        last_seen_at: 60,
+        client_connected: false,
+      },
+    );
+    store
+  }
+
+  /// Every `srcdoc="…"` attribute value in the page. `esc` turns every embedded `"` into
+  /// `&quot;`, so the first literal quote after `srcdoc="` is the attribute terminator.
+  fn srcdoc_values(page: &str) -> Vec<&str> {
+    page.split("srcdoc=\"").skip(1).map(|tail| tail.split('"').next().unwrap()).collect()
+  }
+
+  #[test]
+  fn session_export_assembles_every_recording_into_one_page() {
+    let dir = std::env::temp_dir().join(format!("scsh-session-export-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // Proc 0: a recording WITH a chapters sidecar. Proc 1: a bare recording. Proc 2: no cast.
+    let cast0 = dir.join("rec0.cast");
+    std::fs::write(&cast0, "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(
+      dir.join("rec0.chapters.json"),
+      r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
+    )
+    .unwrap();
+    let cast1 = dir.join("rec1.cast");
+    std::fs::write(&cast1, "{\"version\":2,\"width\":80,\"height\":24}\n[1.0,\"o\",\"done\\r\\n\"]\n").unwrap();
+    let store = store_with_export_session(
+      "sexabc",
+      vec![
+        export_test_proc(0, "claude: add", Some(cast0.to_string_lossy().into_owned())),
+        export_test_proc(1, "codex: multiply", Some(cast1.to_string_lossy().into_owned())),
+        export_test_proc(2, "cursor: skipped", None),
+      ],
+    );
+    let (status, page, disposition) = session_export_response("/session/sexabc/export.html", &store);
+    assert_eq!(status, 200);
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-session-sexabc.html\""));
+    // The header: session id, repo, profile, and the per-proc summary table in board order.
+    assert!(page.contains("scsh session <code>sexabc</code>"), "header session id");
+    assert!(page.contains("<code>/r</code>"), "repo label");
+    assert!(page.contains("<strong>profile</strong> default"), "profile");
+    for label in ["claude: add", "codex: multiply", "cursor: skipped"] {
+      assert!(page.contains(label), "summary table + section for {label}");
+    }
+    // Both recordings embed as iframes, each carrying its own full player copy (the
+    // deliberate srcdoc-composition tradeoff), and the vendored player's license marker
+    // survives the assembly at least once.
+    assert_eq!(page.matches("<iframe").count(), 2, "one iframe per exportable cast");
+    assert!(page.matches("loading=\"lazy\"").count() >= 2, "iframes load lazily");
+    assert!(page.matches("@license").count() >= 2, "each embedded page keeps the player license");
+    // The annotated cast contributes its chapter title and its one-sentence summary (the
+    // latter both in the section head and inside the embedded page).
+    assert!(page.contains("Start"), "chapter title folded in");
+    assert!(page.contains(r#"<div class="proc-summary">Ran the demo.</div>"#), "sidecar summary shown");
+    // The cast-less proc degrades to a styled note row, never an error.
+    assert!(page.contains(r#"<div class="proc-note">no recording — skipped/failed before output</div>"#));
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn session_export_escapes_hostile_cast_payloads() {
+    let dir = std::env::temp_dir().join(format!("scsh-session-export-esc-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    // A recording whose output tries `"` `&` `<` and a literal `</iframe>` breakout.
+    let cast = dir.join("evil.cast");
+    std::fs::write(
+      &cast,
+      "{\"version\":2,\"width\":80,\"height\":24}\n[0.1,\"o\",\"x\\\" & <b> </iframe><script>alert(1)</script>\"]\n",
+    )
+    .unwrap();
+    let store = store_with_export_session(
+      "hostil",
+      vec![export_test_proc(0, "claude: evil", Some(cast.to_string_lossy().into_owned()))],
+    );
+    let (status, page, _) = session_export_response("/session/hostil/export.html", &store);
+    assert_eq!(status, 200);
+    // The attribute-escaped srcdoc can neither terminate early nor open a tag: no raw `<`
+    // (or `"` — by construction of the extraction) survives inside the attribute value.
+    let srcdocs = srcdoc_values(&page);
+    assert_eq!(srcdocs.len(), 1);
+    assert!(!srcdocs[0].contains('<'), "no raw '<' inside srcdoc");
+    assert!(srcdocs[0].contains("&lt;"), "embedded page markup is entity-escaped");
+    // The payload never becomes live markup in the outer page.
+    assert!(!page.contains("<script>alert(1)</script>"), "script payload must not go live");
+    assert_eq!(page.matches("<iframe").count(), page.matches("</iframe>").count(), "iframes stay balanced");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn session_export_without_exportable_casts_is_an_actionable_404() {
+    // A frameless cast (header only) and a cast-less proc: nothing to export yet.
+    let dir = std::env::temp_dir().join(format!("scsh-session-export-404-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("frameless.cast");
+    std::fs::write(&cast, "{\"version\":2,\"width\":80,\"height\":24}\n").unwrap();
+    let store = store_with_export_session(
+      "nocast",
+      vec![
+        export_test_proc(0, "claude: add", Some(cast.to_string_lossy().into_owned())),
+        export_test_proc(1, "codex: multiply", None),
+      ],
+    );
+    let (status, body, disposition) = session_export_response("/session/nocast/export.html", &store);
+    assert_eq!(status, 404);
+    assert!(body.contains("no exportable recordings"), "body: {body}");
+    assert!(disposition.is_none());
+    // Unknown session: the existing 404 style.
+    assert_eq!(session_export_response("/session/nosuch/export.html", &store).0, 404);
     let _ = std::fs::remove_dir_all(&dir);
   }
 

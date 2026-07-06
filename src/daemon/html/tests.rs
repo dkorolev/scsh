@@ -293,6 +293,23 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
 }
 
 #[test]
+fn session_page_header_offers_the_session_export_download() {
+  // A session with a recorded proc gets the whole-session download button in the header
+  // (decided server-side: any proc with a registered cast; the endpoint 404s edge cases).
+  let html = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
+  assert!(
+    html.contains(r#"<a class="session-export" href="/session/castab/export.html" download>⬇ session .html</a>"#),
+    "session export button"
+  );
+  // No recorded proc anywhere → no button (nothing to export; the 404 would only confuse).
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  store.sessions.get_mut("castab").unwrap().procs[0].cast_path = None;
+  let bare = session_page(&store, "castab").expect("session page");
+  // (The `.session-export` CSS rule is in the shared shell, so match the anchor itself.)
+  assert!(!bare.contains("<a class=\"session-export\""), "no export button without any registered cast");
+}
+
+#[test]
 fn live_client_js_counts_alive_clients_and_shutdown() {
   let js = live_client_js();
   assert!(js.contains("alive_clients"));
