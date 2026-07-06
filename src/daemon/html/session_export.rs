@@ -16,6 +16,7 @@
 
 use super::escape::esc;
 use super::format::format_elapsed_clock;
+use super::layout::FAVICON_LINK;
 use super::proc::status_glyph;
 use crate::daemon::model::{ProcRecord, Session};
 
@@ -47,8 +48,10 @@ const EXPORT_CSS: &str = r#"
   .glyph { font-weight: 600; }
   .ok .glyph { color: #3a8; }
   .fail .glyph { color: #e55; }
-  section.proc { margin: 0 20px 1.5rem; border: 1px solid #2a2d36; border-radius: 6px; overflow: hidden; }
-  section.proc > .proc-head { padding: 0.5rem 0.75rem; background: #1d1f26; display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; }
+  details.proc { margin: 0 20px 1.5rem; border: 1px solid #2a2d36; border-radius: 6px; overflow: hidden; }
+  details.proc > .proc-head { padding: 0.5rem 0.75rem; background: #1d1f26; display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; cursor: pointer; }
+  details.proc > .proc-head::marker { color: #8a8d97; }
+  details.proc[open] > .proc-head { border-bottom: 1px solid #2a2d36; }
   .proc-summary { padding: 0.4rem 0.75rem; font-size: 0.9rem; background: #1a1c22; border-bottom: 1px solid #2a2d36; }
   .proc-note { padding: 1rem 0.75rem; color: #8a8d97; border-top: 1px dashed #2a2d36; }
   iframe.cast-page { display: block; width: 100%; height: 560px; border: 0; background: #000; }
@@ -74,6 +77,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{favicon}
 <title>scsh session {id}</title>
 <style>{css}</style>
 </head>
@@ -94,6 +98,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
 {sections}</body>
 </html>
 "#,
+    favicon = FAVICON_LINK,
     css = EXPORT_CSS,
   )
 }
@@ -112,15 +117,17 @@ fn summary_row(proc: &ProcRecord) -> String {
   )
 }
 
-/// One per-proc section: the labelled head, then either the embedded per-cast page or the
-/// note row. The `srcdoc` value is the whole per-cast page passed through [`esc`] — its
-/// `&`/`<`/`>`/`"` escaping is exactly what a double-quoted HTML attribute needs, so a
-/// hostile recording (`"`, `&`, `<`, even a literal `</iframe>`) can neither terminate the
-/// attribute nor leak markup into the outer page.
+/// One per-proc section: a native `<details>` block — collapsible with zero JavaScript, so
+/// the page stays pure self-contained HTML. The `<summary>` is the labelled head (glyph,
+/// label, duration), informative while collapsed; sections default to open. The `srcdoc`
+/// value is the whole per-cast page passed through [`esc`] — its `&`/`<`/`>`/`"` escaping
+/// is exactly what a double-quoted HTML attribute needs, so a hostile recording (`"`, `&`,
+/// `<`, even a literal `</iframe>`) can neither terminate the attribute nor leak markup
+/// into the outer page.
 fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
   let head = format!(
-    "<div class=\"proc-head\"><span class=\"glyph\">{glyph}</span> <strong>{label}</strong> \
-<span class=\"dim\">{duration}</span></div>\n",
+    "<summary class=\"proc-head\"><span class=\"glyph\">{glyph}</span> <strong>{label}</strong> \
+<span class=\"dim\">{duration}</span></summary>\n",
     glyph = status_glyph(proc.status),
     label = esc(&proc.label),
     duration = esc(&duration_label(proc)),
@@ -135,5 +142,5 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
     }
     CastExport::Note(note) => format!("<div class=\"proc-note\">{}</div>\n", esc(note)),
   };
-  format!("<section class=\"proc {status}\">\n{head}{body}</section>\n", status = proc.status.as_str())
+  format!("<details open class=\"proc {status}\">\n{head}{body}</details>\n", status = proc.status.as_str())
 }

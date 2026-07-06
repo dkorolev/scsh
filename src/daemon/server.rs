@@ -1712,6 +1712,11 @@ mod tests {
     assert_eq!(page.matches("<iframe").count(), 2, "one iframe per exportable cast");
     assert!(page.matches("loading=\"lazy\"").count() >= 2, "iframes load lazily");
     assert!(page.matches("@license").count() >= 2, "each embedded page keeps the player license");
+    // Every proc section is a native <details> block — collapsible offline, no JS — open
+    // by default with the informative head as its <summary>; and the page has the favicon.
+    assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible section per proc");
+    assert_eq!(page.matches("<summary class=\"proc-head\"").count(), 3, "each section head is the summary");
+    assert!(page.contains("data:image/svg+xml"), "inline favicon");
     // The annotated cast contributes its chapter title and its one-sentence summary (the
     // latter both in the section head and inside the embedded page).
     assert!(page.contains("Start"), "chapter title folded in");
