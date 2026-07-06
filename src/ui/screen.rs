@@ -578,7 +578,12 @@ fn sty(s: Sty) -> Style {
 
 /// One `✓ label  elapsed  detail` (or ✗) line, matching the old board's finished line. Used both
 /// for the post-run summary (attended) and for the live plain-line path (off-TTY).
+/// A proc still `Queued` at summary time never ran (the run aborted first, e.g. on a failed
+/// image build) — it renders as the board's dim `·` with "not started", never as a ✓.
 fn summary_line(label: &str, status: Status, elapsed: f64, detail: Option<&str>) -> String {
+  if status == Status::Queued {
+    return format!("{} {}  {}", style("·").dim(), style(label).bold(), style("not started").dim());
+  }
   let (glyph, ok) = match status {
     Status::Fail => (style("✗").red().bold(), false),
     _ => (style("✓").green().bold(), true),
@@ -608,6 +613,8 @@ mod tests {
     assert_eq!(bad, "✗ multiply  0.0s  X required");
     let bare = console::strip_ansi_codes(&summary_line("build", Status::Ok, 4.0, None)).into_owned();
     assert_eq!(bare, "✓ build  4s");
+    let queued = console::strip_ansi_codes(&summary_line("claude: add", Status::Queued, 0.0, None)).into_owned();
+    assert_eq!(queued, "· claude: add  not started");
   }
 
   #[test]
