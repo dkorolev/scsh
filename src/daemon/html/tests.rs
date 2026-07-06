@@ -276,6 +276,23 @@ fn live_toggle_renders_only_while_the_proc_runs() {
 }
 
 #[test]
+fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
+  // Standalone player page: the download link points at the export endpoint, starts
+  // hidden, and rides the same no-frames state as the placeholder.
+  let page = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(page.contains(r#"<a id="dl-html" href="/cast/castab/0/export.html" download hidden>⬇ download .html</a>"#));
+  assert!(page.contains("document.getElementById('dl-html').hidden = !stats.events;"));
+  // Session-page embed: same link, same hide-until-frames wiring — both in the
+  // server-rendered snippet and in the client JS that regenerates it.
+  let session = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
+  let procs = session_procs_html(&session);
+  assert!(procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ .html</a>"#));
+  let js = live_client_js();
+  assert!(js.contains("/export.html\" data-cast-export download hidden>⬇ .html</a>"));
+  assert!(js.contains("exportLink.hidden = !stats.events;"));
+}
+
+#[test]
 fn live_client_js_counts_alive_clients_and_shutdown() {
   let js = live_client_js();
   assert!(js.contains("alive_clients"));

@@ -5,7 +5,9 @@
 //! itself from `/cast/<session>/<proc>` (truncated server-side to whole NDJSON lines, so
 //! an in-progress recording plays as far as it has gotten). Supports play/pause and
 //! timeline scrubbing (native player controls), `#t=<seconds>` / `#t=<mm:ss>` deep links,
-//! a copy-link-at-current-time button, and a reload button for live runs. While the proc
+//! a copy-link-at-current-time button, download links for the raw `.cast` and the
+//! self-contained offline `.html` export (hidden until the recording has frames — the
+//! export endpoint 404s on a frameless cast), and a reload button for live runs. While the proc
 //! is still running, the page listens for the daemon's `cast_growth` WebSocket
 //! notifications: a cast with no frames yet shows a placeholder that upgrades in place,
 //! growth surfaces an unobtrusive "Recording grew … — reload" button, and a Live toggle
@@ -71,6 +73,7 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 </header>
 <div class="controls">
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
+<a id="dl-html" href="{cast_url}/export.html" download hidden>⬇ download .html</a>
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
 <button id="reload">↻ reload recording</button>
 <button id="live-toggle"{live_toggle_hidden}>● Live</button>
@@ -123,6 +126,9 @@ function create(startAt, autoplay) {{
   fetch(CAST_URL + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null).then(text => {{
     const stats = text == null ? {{ events: 0, duration: 0 }} : castEventStats(text);
     loadedDuration = stats.events ? stats.duration : null;
+    // The .html export needs at least one complete frame (the server 404s otherwise), so
+    // the download link rides the same no-frames state as the placeholder.
+    document.getElementById('dl-html').hidden = !stats.events;
     if (!stats.events) {{
       mount.innerHTML = '<div class="cast-placeholder dim">' +
         (LIVE ? 'Recording in progress — no frames yet.' : 'No recorded frames.') + '</div>';

@@ -34,9 +34,11 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
 }
 
 /// Inline asciinema-player embed for a proc's recording: a toolbar (fullscreen, timestamp
-/// deep-link, reload, live toggle, download) above an empty `.cast-player` box the client
-/// JS mounts the player into. Works mid-run too — the cast endpoint serves the partial
-/// file, and the Live toggle (visible only while the proc runs) follows the growing tail.
+/// deep-link, reload, live toggle, `.cast` + self-contained `.html` downloads) above an
+/// empty `.cast-player` box the client JS mounts the player into. Works mid-run too — the
+/// cast endpoint serves the partial file, and the Live toggle (visible only while the proc
+/// runs) follows the growing tail. The `.html` export link starts hidden; the client JS
+/// unhides it once the recording has frames (the export endpoint 404s on a frameless cast).
 /// Replaces the text-line output for recorded procs.
 pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
@@ -49,6 +51,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 <button type="button" data-cast-reload>↻ Reload</button>
 <button type="button" data-cast-live{live_hidden}>● Live</button>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
+<a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>⬇ .html</a>
 <span class="cast-copied">copied</span>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>
 </div>

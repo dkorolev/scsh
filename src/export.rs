@@ -69,6 +69,14 @@ pub fn render_page(cast_ndjson: &str, stem: &str, annotation: Option<&CastAnnota
   Ok(build_page(cast_ndjson, &meta, stem))
 }
 
+/// [`render_page`] from raw texts, for callers holding the sidecar's bytes rather than a
+/// parsed [`CastAnnotation`] (the daemon's `/export.html` endpoint). An absent or malformed
+/// sidecar exports without summary/chapters — the same never-a-failure behavior as the CLI.
+pub fn render_page_from_texts(cast_ndjson: &str, sidecar_json: Option<&str>, stem: &str) -> Result<String, CastError> {
+  let annotation = sidecar_json.and_then(crate::annotate::parse_annotation);
+  render_page(cast_ndjson, stem, annotation.as_ref())
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -104,6 +112,18 @@ mod tests {
   #[test]
   fn render_page_rejects_a_non_asciicast() {
     assert_eq!(render_page("not a recording at all", "x", None), Err(CastError::NotAsciicast));
+  }
+
+  #[test]
+  fn render_page_from_texts_parses_the_sidecar_and_shrugs_off_junk() {
+    // A valid sidecar text contributes its chapters; junk (or none) exports chapterless.
+    let page = render_page_from_texts(CAST, Some(&annotation().to_sidecar_json()), "rec-042").unwrap();
+    assert!(page.contains("\"chapters\":[{\"t\":0.0,\"title\":\"Start\"},{\"t\":1.5,\"title\":\"Finish\"}]"));
+    for sidecar in [Some("{ not json"), None] {
+      let page = render_page_from_texts(CAST, sidecar, "rec-042").unwrap();
+      assert!(page.contains("<title>rec-042</title>"));
+      assert!(!page.contains("\"chapters\":["), "malformed/absent sidecar exports without chapters");
+    }
   }
 
   #[test]

@@ -270,9 +270,20 @@ fn handle_connection(
     write_response(&mut stream, status, &body, "application/json")?;
     return Ok((false, None));
   }
+  if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/export.html") {
+    let (status, body, disposition) = export_response(bare_path, store);
+    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
+    return Ok((false, None));
+  }
   if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
     let (status, body, disposition) = cast_response(&req.path, store);
-    write_cast_response(&mut stream, status, &body, disposition.as_deref())?;
+    write_download_response(
+      &mut stream,
+      status,
+      &body,
+      "application/x-asciicast; charset=utf-8",
+      disposition.as_deref(),
+    )?;
     return Ok((false, None));
   }
   let (status, body, content_type, mutated) = route(&req, store, prune);
@@ -294,43 +305,84 @@ fn mutated_session_id(req: &HttpRequest) -> Option<String> {
   }
 }
 
+/// The `<session>/<proc>` tail of a `/cast/…` path, parsed. `None` on a malformed path.
+fn parse_cast_route(rest: &str) -> Option<(&str, usize)> {
+  let (session_id, proc_str) = rest.split_once('/')?;
+  Some((session_id, proc_str.parse::<usize>().ok()?))
+}
+
+/// The registered cast path of a session's proc, shared by the cast, chapters, and export
+/// endpoints. `None` covers unknown session/proc and a proc without a recording alike.
+fn proc_cast_path(store: &Arc<Mutex<Store>>, session_id: &str, proc_index: usize) -> Option<String> {
+  let store = lock_store(store);
+  store.sessions.get(session_id)?.procs.iter().find(|p| p.index == proc_index).and_then(|p| p.cast_path.clone())
+}
+
+/// Read a cast file truncated to its last complete line (a cast still being written by a
+/// live container stays a valid partial asciicast), or the 404 the caller serves as-is.
+fn read_complete_cast_lines(cast_path: &str) -> Result<String, (u16, String)> {
+  let Ok(bytes) = std::fs::read(cast_path) else {
+    return Err((404, "cast file not available (not started yet, or pruned)".into()));
+  };
+  let end = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
+  if end == 0 {
+    return Err((404, "no recorded output yet".into()));
+  }
+  Ok(String::from_utf8_lossy(&bytes[..end]).into_owned())
+}
+
 /// `GET /cast/<session>/<proc>[?dl=1]` — the proc's asciinema recording. The file is read
 /// at request time and truncated to its last complete line, so a cast still being written
 /// by a live container downloads and replays as a valid (partial) asciicast. `dl=1` adds a
 /// Content-Disposition attachment header for a browser "download" link.
 fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
   let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
-  let rest = path.strip_prefix("/cast/").unwrap_or("");
-  let Some((session_id, proc_str)) = rest.split_once('/') else {
+  let Some((session_id, proc_index)) = parse_cast_route(path.strip_prefix("/cast/").unwrap_or("")) else {
     return (404, "not found".into(), None);
   };
-  let Ok(proc_index) = proc_str.parse::<usize>() else {
-    return (404, "not found".into(), None);
-  };
-  let cast_path = {
-    let store = lock_store(store);
-    store
-      .sessions
-      .get(session_id)
-      .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
-      .and_then(|p| p.cast_path.clone())
-  };
-  let Some(cast_path) = cast_path else {
+  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
     return (404, "no cast recorded for this proc".into(), None);
   };
-  let Ok(bytes) = std::fs::read(&cast_path) else {
-    return (404, "cast file not available (not started yet, or pruned)".into(), None);
+  let body = match read_complete_cast_lines(&cast_path) {
+    Ok(body) => body,
+    Err((status, message)) => return (status, message, None),
   };
-  let end = bytes.iter().rposition(|&b| b == b'\n').map(|i| i + 1).unwrap_or(0);
-  if end == 0 {
-    return (404, "no recorded output yet".into(), None);
-  }
-  let body = String::from_utf8_lossy(&bytes[..end]).into_owned();
   let disposition = query
     .split('&')
     .any(|kv| kv == "dl=1")
     .then(|| format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.cast\""));
   (200, body, disposition)
+}
+
+/// `GET /cast/<session>/<proc>/export.html` — the recording rendered into one
+/// self-contained offline HTML player page: the exact rendering `scsh export-cast` does
+/// ([`crate::export::render_page_from_texts`]), served as a download attachment named
+/// `<cast stem>.html`. The chapters sidecar is folded in when present; an absent or
+/// malformed sidecar exports without summary/chapters, never an error. A recording with no
+/// complete frames yet is a 404 with an actionable body — the UI hides the button until
+/// frames exist, so only a hand-typed URL sees it.
+fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+  let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/export.html").unwrap_or("");
+  let Some((session_id, proc_index)) = parse_cast_route(rest) else {
+    return (404, "not found".into(), None);
+  };
+  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
+    return (404, "no cast recorded for this proc".into(), None);
+  };
+  let ndjson = match read_complete_cast_lines(&cast_path) {
+    Ok(ndjson) => ndjson,
+    Err((status, message)) => return (status, message, None),
+  };
+  // The header alone is not exportable — the offline player errors on a zero-frame cast.
+  if !ndjson.lines().any(|l| l.trim_start().starts_with('[')) {
+    return (404, "no recorded frames yet — retry once the recording has output".into(), None);
+  }
+  let sidecar = chapters_sidecar_path(&cast_path).and_then(|p| std::fs::read_to_string(p).ok());
+  let stem = crate::export::cast_stem(std::path::Path::new(&cast_path));
+  match crate::export::render_page_from_texts(&ndjson, sidecar.as_deref(), &stem) {
+    Ok(page) => (200, page, Some(format!("attachment; filename=\"{stem}.html\""))),
+    Err(e) => (404, format!("cannot export this recording: {e}"), None),
+  }
 }
 
 /// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar
@@ -339,21 +391,10 @@ fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
 /// no sidecar exists yet, so the player can ask unconditionally.
 fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
   let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/chapters").unwrap_or("");
-  let Some((session_id, proc_str)) = rest.split_once('/') else {
+  let Some((session_id, proc_index)) = parse_cast_route(rest) else {
     return (404, "{}".into());
   };
-  let Ok(proc_index) = proc_str.parse::<usize>() else {
-    return (404, "{}".into());
-  };
-  let cast_path = {
-    let store = lock_store(store);
-    store
-      .sessions
-      .get(session_id)
-      .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
-      .and_then(|p| p.cast_path.clone())
-  };
-  let sidecar = cast_path.and_then(|c| chapters_sidecar_path(&c));
+  let sidecar = proc_cast_path(store, session_id, proc_index).and_then(|c| chapters_sidecar_path(&c));
   match sidecar.and_then(|p| std::fs::read_to_string(p).ok()) {
     Some(json) => (200, json),
     None => (200, "{}".into()),
@@ -1011,13 +1052,14 @@ Connection: close\r\n\r\n\
   Ok(())
 }
 
-/// Like [`write_response`] but for `.cast` payloads: asciicast content type plus an
-/// optional Content-Disposition (the `?dl=1` download variant). 404 bodies are text.
-fn write_cast_response(
-  stream: &mut TcpStream, status: u16, body: &str, disposition: Option<&str>,
+/// Like [`write_response`] but for downloadable payloads (`.cast` bytes, `/export.html`
+/// pages): the given content type on 200 plus an optional Content-Disposition (the
+/// attachment variants). 404 bodies are text.
+fn write_download_response(
+  stream: &mut TcpStream, status: u16, body: &str, ok_content_type: &str, disposition: Option<&str>,
 ) -> std::io::Result<()> {
   let status_text = if status == 200 { "OK" } else { "Not Found" };
-  let content_type = if status == 200 { "application/x-asciicast; charset=utf-8" } else { "text/plain" };
+  let content_type = if status == 200 { ok_content_type } else { "text/plain" };
   let disposition_header = match disposition {
     Some(d) => format!("Content-Disposition: {d}\r\n"),
     None => String::new(),
@@ -1454,6 +1496,78 @@ mod tests {
     assert_eq!(cast_response("/cast/castab/9", &store).0, 404);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(cast_response("/cast/castab/0", &store).0, 404);
+  }
+
+  #[test]
+  fn export_endpoint_serves_the_offline_page_as_an_attachment() {
+    let dir = std::env::temp_dir().join(format!("scsh-export-endpoint-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast_path = dir.join("rec.cast");
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "expabc".into(),
+        Session {
+          id: "expabc".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: None,
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: vec![ProcRecord {
+            index: 0,
+            label: "claude: add".into(),
+            kind: ProcKind::Skill,
+            status: ProcStatus::Ok,
+            skill_name: None,
+            harness: None,
+            model: None,
+            started_at: Some(50),
+            note: None,
+            detail: None,
+            fail_reason: None,
+            elapsed: Some(2.0),
+            lines: Vec::new(),
+            container_name: None,
+            cast_path: Some(cast_path.to_string_lossy().into_owned()),
+          }],
+          last_seen_at: 50,
+          client_connected: false,
+        },
+      );
+    }
+    // Unknown session/proc → the existing 404 style.
+    assert_eq!(export_response("/cast/nosuch/0/export.html", &store).0, 404);
+    assert_eq!(export_response("/cast/expabc/9/export.html", &store).0, 404);
+    // A registered cast whose file is not on disk yet → 404.
+    assert_eq!(export_response("/cast/expabc/0/export.html", &store).0, 404);
+    // A header with no complete frames yet → 404 with an actionable body.
+    std::fs::write(&cast_path, "{\"version\":2,\"width\":80,\"height\":24}\n").unwrap();
+    let (status, body, disposition) = export_response("/cast/expabc/0/export.html", &store);
+    assert_eq!(status, 404);
+    assert!(body.contains("no recorded frames yet"), "body: {body}");
+    assert!(disposition.is_none());
+    // Frames + a sidecar → the self-contained page, served as `<stem>.html`.
+    std::fs::write(&cast_path, "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(
+      dir.join("rec.chapters.json"),
+      r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
+    )
+    .unwrap();
+    let (status, page, disposition) = export_response("/cast/expabc/0/export.html", &store);
+    assert_eq!(status, 200);
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"rec.html\""));
+    assert!(page.contains("<title>rec</title>"), "cast stem is the title");
+    assert!(page.contains("@license"), "vendored player attribution survives the export");
+    assert!(page.contains("\"title\":\"Start\""), "sidecar chapter folded in");
+    // A malformed sidecar exports without chapters — a warning path, never an error.
+    std::fs::write(dir.join("rec.chapters.json"), "{ not json").unwrap();
+    let (status, page, _) = export_response("/cast/expabc/0/export.html", &store);
+    assert_eq!(status, 200);
+    assert!(!page.contains("\"chapters\":["), "malformed sidecar → chapterless export");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]
