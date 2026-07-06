@@ -20,7 +20,7 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
   proc.cast_path.as_ref()?;
   let live = proc.status == ProcStatus::Running;
   let live_note = if live {
-    "<span class=\"live\">● live</span> <span class=\"dim\">recording still in progress — Reload picks up the latest output</span>"
+    "<span id=\"live-note\"><span class=\"live\">● live</span> <span class=\"dim\">recording still in progress — growth notifications arrive over the WebSocket</span></span>"
   } else {
     ""
   };
@@ -67,6 +67,7 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
 <button id="reload">↻ reload recording</button>
+<button id="grew" hidden></button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
 <div id="summary" class="dim"></div>
@@ -75,6 +76,8 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 <script src="/assets/asciinema-player.js"></script>
 <script>
 const CAST_URL = {cast_url_js};
+const SESSION = {sid_js};
+const PROC = {proc_index};
 const LIVE = {live_js};
 let player = null;
 let MARKERS = [];
@@ -108,6 +111,7 @@ function castEventStats(text) {{
 let loadedDuration = null;
 function create(startAt) {{
   if (player) {{ player.dispose(); player = null; }}
+  hideGrew();
   const mount = document.getElementById('player');
   fetch(CAST_URL + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null).then(text => {{
     const stats = text == null ? {{ events: 0, duration: 0 }} : castEventStats(text);
@@ -124,6 +128,48 @@ function create(startAt) {{
     player = AsciinemaPlayer.create({{ data: text }}, mount, opts);
   }});
 }}
+// Growth notifications for this proc's recording arrive over the daemon's WebSocket
+// (server-pushed — no JS polling loop). Without the WS the page degrades gracefully:
+// finished casts play as always and the manual ↻ reload button still works.
+let castRunning = LIVE;
+let ws = null;
+let wsDelay = 400;
+function connectWs() {{
+  if (!castRunning) return;
+  try {{ ws = new WebSocket('ws://' + location.host + '/ws'); }} catch (_) {{ return; }}
+  ws.onopen = () => {{ wsDelay = 400; }};
+  ws.onmessage = (ev) => {{ try {{ onWsMessage(JSON.parse(ev.data)); }} catch (_) {{}} }};
+  ws.onclose = () => {{ if (castRunning) {{ setTimeout(connectWs, wsDelay); wsDelay = Math.min(wsDelay * 2, 5000); }} }};
+  ws.onerror = () => {{ try {{ ws.close(); }} catch (_) {{}} }};
+}}
+function onWsMessage(msg) {{
+  if (msg.type !== 'cast_growth' || msg.session !== SESSION || msg.proc !== PROC) return;
+  if (msg.running === false) {{ finishCast(); return; }}
+  if (loadedDuration == null) {{ create(hashStart()); return; }} // placeholder upgrades to a player
+  showGrew(msg.duration);
+}}
+function showGrew(available) {{
+  if (loadedDuration == null || !(available > loadedDuration + 0.05)) return;
+  const btn = document.getElementById('grew');
+  const delta = Math.max(1, Math.round(available - loadedDuration));
+  btn.textContent = 'Recording grew: +' + delta + 's (loaded ' + fmtClock(loadedDuration) +
+    ', available ' + fmtClock(available) + ') — reload';
+  btn.hidden = false;
+}}
+function hideGrew() {{ document.getElementById('grew').hidden = true; }}
+// The proc finished: one last reload picks up the complete cast (keeping the current
+// position), the growth banner retires, and the WS is no longer needed.
+function finishCast() {{
+  castRunning = false;
+  if (ws) {{ try {{ ws.close(); }} catch (_) {{}} ws = null; }}
+  const note = document.getElementById('live-note');
+  if (note) note.innerHTML = '<span class="dim">recording finished</span>';
+  create(player ? player.getCurrentTime() : hashStart());
+}}
+document.getElementById('grew').addEventListener('click', () => {{
+  create(player ? player.getCurrentTime() : hashStart());
+}});
+connectWs();
 // Load the summary + chapters sidecar, then build the player with chapter markers.
 fetch(CAST_URL + '/chapters').then(r => r.ok ? r.json() : {{}}).catch(() => ({{}})).then(meta => {{
   const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
@@ -161,6 +207,8 @@ document.getElementById('reload').addEventListener('click', () => {{
     live_note = live_note,
     cast_url = format!("/cast/{}/{}", esc(session_id), proc_index),
     cast_url_js = quote_js(&format!("/cast/{session_id}/{proc_index}")),
+    sid_js = quote_js(session_id),
+    proc_index = proc_index,
     live_js = if live { "true" } else { "false" },
   ))
 }

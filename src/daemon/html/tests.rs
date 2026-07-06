@@ -223,6 +223,26 @@ fn empty_cast_shows_placeholder_instead_of_player_error() {
 }
 
 #[test]
+fn cast_growth_notifications_drive_the_reload_banner() {
+  // The session page routes WS messages by type: cast_growth feeds the banner, everything
+  // else stays on the tick path.
+  let js = live_client_js();
+  assert!(js.contains("if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }"));
+  assert!(js.contains("onWsMessage(JSON.parse(ev.data))"));
+  assert!(js.contains("Recording grew: +"));
+  assert!(js.contains("data-cast-grew"));
+  // The standalone player page listens on its own WS connection — but only while the proc
+  // runs, and it degrades to the manual reload button when the WS is unavailable.
+  let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
+  assert!(page.contains("'cast_growth'"));
+  assert!(page.contains("const SESSION = 'castab';"));
+  assert!(page.contains("const PROC = 0;"));
+  assert!(page.contains(r#"<button id="grew" hidden></button>"#));
+  assert!(page.contains("Recording grew: +"));
+  assert!(page.contains("if (!castRunning) return;"), "no WS connect once the proc finished");
+}
+
+#[test]
 fn live_client_js_counts_alive_clients_and_shutdown() {
   let js = live_client_js();
   assert!(js.contains("alive_clients"));
