@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
+use super::castprobe::{cast_probe_snapshot, probe_growth_messages, CastProbe};
 use super::db::StoreDb;
 use super::html;
 use super::jsonio::{field_num, field_str, tick_json, tick_json_light};
@@ -113,6 +114,8 @@ impl Server {
     std::fs::write(&pid_path, std::process::id().to_string())?;
 
     let mut last_ws_tick = Instant::now();
+    // Per-proc incremental cast probes (parse offsets cached across ticks) — see `castprobe`.
+    let mut cast_probes: std::collections::HashMap<(String, usize), CastProbe> = std::collections::HashMap::new();
 
     loop {
       match listener.accept() {
@@ -147,16 +150,21 @@ impl Server {
       if last_ws_tick.elapsed() >= WS_TICK {
         let now = now_unix_secs();
         let include_sessions = self.ws_dirty.load(Ordering::Relaxed);
-        let json = {
+        // The snapshot of casts to probe is taken under the store lock; the file stats and
+        // tail-parses below run with the lock released, and only when someone is listening.
+        let probe_casts = self.ws_hub.client_count() > 0;
+        let (json, casts) = {
           let mut store = lock_store(&self.store);
           store.reconcile(now);
-          if include_sessions {
-            tick_json(&*store, now)
-          } else {
-            tick_json_light(&*store, now)
-          }
+          let json = if include_sessions { tick_json(&*store, now) } else { tick_json_light(&*store, now) };
+          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() })
         };
         self.ws_hub.broadcast(json);
+        if probe_casts {
+          for msg in probe_growth_messages(&casts, &mut cast_probes) {
+            self.ws_hub.broadcast(msg);
+          }
+        }
         if include_sessions {
           self.ws_dirty.store(false, Ordering::Relaxed);
         }

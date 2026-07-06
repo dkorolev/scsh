@@ -3,6 +3,7 @@
 //! Serves a small web UI on `127.0.0.1:7274` (default) that collects events from
 //! `scsh run` — image builds, container starts, and harness output — grouped by session id.
 
+mod castprobe;
 mod client;
 mod db;
 mod html;

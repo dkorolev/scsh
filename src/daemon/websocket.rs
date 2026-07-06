@@ -29,6 +29,12 @@ impl Hub {
     let mut clients = self.clients.lock().unwrap();
     clients.retain(|tx| tx.send(msg.clone()).is_ok());
   }
+
+  /// How many subscribers are (or recently were) connected — dead ones linger only until
+  /// the next broadcast prunes them. Lets the tick loop skip work nobody would receive.
+  pub fn client_count(&self) -> usize {
+    self.clients.lock().unwrap().len()
+  }
 }
 
 pub fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
