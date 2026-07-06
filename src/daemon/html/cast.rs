@@ -54,6 +54,7 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 /* Fill the viewport below the header/controls so fit:'both' fits vertically too. */
 #player-wrap {{ padding: 0 16px 16px; height: calc(100vh - 200px); min-height: 300px; }}
 #player, .ap-player {{ width: 100%; height: 100%; max-width: 100%; }}
+.cast-placeholder {{ padding: 24px 16px; border: 1px dashed #2a2d36; border-radius: 6px; }}
 </style>
 </head>
 <body>
@@ -74,6 +75,7 @@ header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
 <script src="/assets/asciinema-player.js"></script>
 <script>
 const CAST_URL = {cast_url_js};
+const LIVE = {live_js};
 let player = null;
 let MARKERS = [];
 function hashStart() {{
@@ -81,11 +83,46 @@ function hashStart() {{
   return m ? m[1] : null;
 }}
 function fmtClock(t) {{ t = Math.max(0, Math.floor(t)); const m = Math.floor(t/60), s = t%60; return m + ':' + (s<10?'0':'') + s; }}
+// Available duration + event count of the fetched asciicast text (complete lines only).
+// scsh records asciicast v2 (absolute times → max); a v3 header (intervals) sums.
+function castEventStats(text) {{
+  let version = 2, duration = 0, events = 0;
+  for (const raw of String(text || '').split('\n')) {{
+    const line = raw.trim();
+    if (!line) continue;
+    if (line[0] === '{{') {{
+      try {{ version = Number(JSON.parse(line).version) || 2; }} catch (_) {{}}
+      continue;
+    }}
+    if (line[0] !== '[') continue;
+    const t = parseFloat(line.slice(1));
+    if (!isFinite(t)) continue;
+    events++;
+    duration = version === 3 ? duration + t : Math.max(duration, t);
+  }}
+  return {{ events, duration }};
+}}
+// Fetch the cast first, so an in-progress recording with no complete frames yet shows a
+// calm placeholder instead of a player error on the empty/404 cast; the player mounts over
+// the inline text ({{ data }}) once frames exist, and never re-fetches what we just loaded.
+let loadedDuration = null;
 function create(startAt) {{
   if (player) {{ player.dispose(); player = null; }}
-  const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema', markers: MARKERS }};
-  if (startAt != null) opts.startAt = startAt;
-  player = AsciinemaPlayer.create(CAST_URL + '?ts=' + Date.now(), document.getElementById('player'), opts);
+  const mount = document.getElementById('player');
+  fetch(CAST_URL + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null).then(text => {{
+    const stats = text == null ? {{ events: 0, duration: 0 }} : castEventStats(text);
+    loadedDuration = stats.events ? stats.duration : null;
+    if (!stats.events) {{
+      mount.innerHTML = '<div class="cast-placeholder dim">' +
+        (LIVE ? 'Recording in progress — no frames yet.' : 'No recorded frames.') + '</div>';
+      return;
+    }}
+    mount.innerHTML = '';
+    const opts = {{ fit: 'both', idleTimeLimit: 2, preload: true, theme: 'asciinema', markers: MARKERS }};
+    // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
+    if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
+    player = AsciinemaPlayer.create({{ data: text }}, mount, opts);
+  }});
 }}
 // Load the summary + chapters sidecar, then build the player with chapter markers.
 fetch(CAST_URL + '/chapters').then(r => r.ok ? r.json() : {{}}).catch(() => ({{}})).then(meta => {{
@@ -124,5 +161,6 @@ document.getElementById('reload').addEventListener('click', () => {{
     live_note = live_note,
     cast_url = format!("/cast/{}/{}", esc(session_id), proc_index),
     cast_url_js = quote_js(&format!("/cast/{session_id}/{proc_index}")),
+    live_js = if live { "true" } else { "false" },
   ))
 }

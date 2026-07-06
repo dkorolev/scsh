@@ -90,6 +90,7 @@ const PAGE_CSS: &str = r#"
   }
   .cast-chapters button:hover { border-color: #7ab4ff; color: #fff; }
   .cast-player { width: 100%; height: 42vh; max-height: 460px; }
+  .cast-placeholder { padding: 1.5rem 1rem; color: #cdd; }
   /* Brief fading chapter-name toast, bottom-centre of the player (screen, in fullscreen). */
   .cast-toast {
     position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);

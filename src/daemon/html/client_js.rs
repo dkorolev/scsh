@@ -489,35 +489,71 @@ function initCasts(root) {
     });
   });
 }
-function createCastPlayer(box) {
+// The available duration and event count of loaded asciicast text (complete lines only —
+// the cast endpoint truncates to whole lines). scsh records asciicast v2, where event
+// times are absolute (duration = max); a v3 header (interval times) is honored by summing.
+function castEventStats(text) {
+  let version = 2, duration = 0, events = 0;
+  for (const raw of String(text || '').split('\n')) {
+    const line = raw.trim();
+    if (!line) continue;
+    if (line[0] === '{') {
+      try { version = Number(JSON.parse(line).version) || 2; } catch (_) {}
+      continue;
+    }
+    if (line[0] !== '[') continue;
+    const t = parseFloat(line.slice(1));
+    if (!isFinite(t)) continue;
+    events++;
+    duration = version === 3 ? duration + t : Math.max(duration, t);
+  }
+  return { events, duration };
+}
+function castPlaceholderHtml(status) {
+  const live = status === 'running' || status === 'waiting';
+  return '<div class="cast-placeholder dim">' +
+    (live ? 'Recording in progress — no frames yet.' : 'No recorded frames.') + '</div>';
+}
+// (Re-)create the player for a .cast box: fetch the cast text (cache-busted) and the
+// chapters sidecar together, then either mount the player over the inline data or — for a
+// cast with no complete event lines yet (a run that just started) — show a calm placeholder
+// instead of letting the player error on the empty/404 cast. The placeholder upgrades to a
+// real player on the next reload (a WS cast_growth notification, or the finish reload).
+function createCastPlayer(box, startAt) {
   if (typeof AsciinemaPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
-  mount.innerHTML = '';
   const proc = box.dataset.proc;
   const chaptersUrl = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/chapters';
-  // Load the analysis sidecar (summary + chapters) if present, then build the player with
-  // the chapters as markers (YouTube-style timeline highlights; [ / ] jump between them).
-  fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).catch(() => ({})).then(meta => {
+  Promise.all([
+    // ?ts= busts any HTTP cache so a reload of a still-growing cast fetches fresh bytes.
+    fetch(box.dataset.castUrl + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null),
+    // The analysis sidecar (summary + chapters): chapters become markers on the timeline
+    // (YouTube-style highlights; [ / ] jump between them).
+    fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).catch(() => ({})),
+  ]).then(([text, meta]) => {
+    const stats = text == null ? { events: 0, duration: 0 } : castEventStats(text);
+    box._loadedDuration = stats.events ? stats.duration : null;
+    if (!stats.events) {
+      mount.innerHTML = castPlaceholderHtml(box.dataset.status);
+      return;
+    }
+    // The cast header carries the terminal size; its aspect decides whether fullscreen has
+    // horizontal room for the chapters sidebar (monospace cell ≈ 0.6 wide as tall).
+    try { const h = JSON.parse(text.split('\n', 1)[0]); if (h.width && h.height) box._termAspect = (h.width * 0.6) / h.height; } catch (_) {}
+    mount.innerHTML = '';
     const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
     box._chapters = chapters;
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
-    // ?ts= busts any HTTP cache so a reload of a still-growing cast fetches fresh bytes.
-    box._player = AsciinemaPlayer.create(
-      box.dataset.castUrl + '?ts=' + Date.now(), mount,
-      { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers }
-    );
+    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers };
+    if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
+    // The text is passed inline ({ data }) — it was already fetched to decide placeholder
+    // vs player, so the player must not fetch it a second time.
+    box._player = AsciinemaPlayer.create({ data: text }, mount, opts);
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
     buildFsSidebar(box, meta.summary, chapters);
   });
-  // The cast header carries the terminal size; its aspect decides whether fullscreen has
-  // horizontal room for the chapters sidebar (monospace cell ≈ 0.6 wide as tall).
-  if (!box._termAspect) {
-    fetch(box.dataset.castUrl).then(r => r.text()).then(txt => {
-      try { const h = JSON.parse(txt.split('\n', 1)[0]); if (h.width && h.height) box._termAspect = (h.width * 0.6) / h.height; } catch (_) {}
-    }).catch(() => {});
-  }
 }
 // Seek the player to a chapter and flash its title (shared by chips, sidebar, and [ ] keys).
 function seekToChapter(box, c) {
