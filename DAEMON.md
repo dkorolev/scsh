@@ -79,6 +79,10 @@ their text log). The player (vendored asciinema-player, `fit:'both'`) has:
   (`/cast/{session}/{proc}/play#t=<seconds>`).
 - **⬇ .cast** — downloads the raw asciicast v2. Works **mid-run**: the recording is NDJSON,
   so the daemon serves the bytes written so far (truncated to the last complete line).
+- **⬇ .html** — downloads the recording as **one self-contained offline HTML player page**
+  (the same rendering `scsh export-cast` does, chapters sidecar folded in when present),
+  named `<cast stem>.html`. Hidden until the recording has at least one complete frame —
+  the export endpoint 404s on a frameless cast.
 
 ## In-progress recordings
 
@@ -192,6 +196,11 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
 - `GET /cast/{session}/{proc}` — asciicast v2 recording (valid partial file mid-run);
   `?dl=1` for a download attachment
 - `GET /cast/{session}/{proc}/play` — HTML player page (scrub, pause, `#t=…` deep links)
+- `GET /cast/{session}/{proc}/export.html` — the recording rendered as one self-contained
+  offline HTML player page (identical to `scsh export-cast` output; the chapters sidecar is
+  folded in when present, and a malformed sidecar exports without chapters). Served as a
+  download attachment named `<cast stem>.html`; 404 with an actionable body until the
+  recording has at least one complete frame
 - `GET /assets/asciinema-player.{js,css}` — vendored player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail

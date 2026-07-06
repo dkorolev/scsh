@@ -468,6 +468,7 @@ function castEmbedHtml(p) {
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
+    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ .html</a>' +
     '<span class="cast-copied">copied</span>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>' +
     '</div><div class="cast-player"></div></div>';
@@ -545,6 +546,10 @@ function createCastPlayer(box, startAt, autoplay) {
     box._loading = false;
     const stats = text == null ? { events: 0, duration: 0 } : castEventStats(text);
     box._loadedDuration = stats.events ? stats.duration : null;
+    // The .html export needs at least one complete frame (the server 404s otherwise), so
+    // the download link rides the same no-frames state as the placeholder.
+    const exportLink = box.querySelector('[data-cast-export]');
+    if (exportLink) exportLink.hidden = !stats.events;
     if (!stats.events) {
       mount.innerHTML = castPlaceholderHtml(box.dataset.status);
       return;
