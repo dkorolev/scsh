@@ -9,7 +9,7 @@ This is a **smoke test**, not a product feature. Your only job is to prove the h
 
 ## Steps
 
-1. Write **exactly** this JSON to `$SCSH_RESULT` (the path is also named in the run prompt, e.g. `tmp/harness-smoke-codex-gpt-5.5.json`):
+1. Write **exactly** this JSON to the path in the `SCSH_RESULT` environment variable (always under the repo's gitignored `tmp/`):
 
 ```json
 {

@@ -388,20 +388,18 @@ fn harness_container_env_verbose(harness: Harness, verbose: bool) -> Vec<(String
 /// Output is always teed to [`RUN_LOG_VAR`] for the daemon; `SCSH_QUIET=1` drops the debug flags.
 /// `effort` is the `.scsh.yml` reasoning-effort level (codex and grok only; expansion
 /// guarantees it is `None` for harnesses without an effort knob).
-pub fn harness_command(
-  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
-) -> String {
-  harness_command_verbose(harness, model, effort, skill_source, result, harness_verbose_enabled())
+pub fn harness_command(harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str) -> String {
+  harness_command_verbose(harness, model, effort, skill_source, harness_verbose_enabled())
 }
 
 fn harness_command_verbose(
-  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str, verbose: bool,
+  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, verbose: bool,
 ) -> String {
   match harness {
     Harness::Opencode => {
       let instruction = format!(
         "run skill {skill_source}. Follow .skills/{skill_source}/SKILL.md exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       let mut cmd = String::from("opencode");
@@ -419,7 +417,7 @@ fn harness_command_verbose(
     Harness::Claude => {
       let prompt = format!(
         "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       let mut cmd = String::from("claude -p ");
@@ -439,7 +437,7 @@ fn harness_command_verbose(
     Harness::Codex => {
       let prompt = format!(
         "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // The container IS the sandbox (ephemeral, --rm), so codex's own sandbox/approvals are
@@ -466,7 +464,7 @@ fn harness_command_verbose(
     Harness::Grok => {
       let prompt = format!(
         "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Single-turn headless run; the ephemeral container is the sandbox, so grok's own
@@ -492,7 +490,7 @@ fn harness_command_verbose(
     Harness::Cursor => {
       let prompt = format!(
         "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
-         Write the required result file to {result} (also available as the SCSH_RESULT environment variable). \
+         Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
       // Headless agent run; the ephemeral container is the sandbox (--force --trust).
@@ -1752,18 +1750,17 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), None, "add", "tmp/add.json", true);
+    let cmd = harness_command_verbose(Harness::Opencode, Some("openai/gpt-5.5"), None, "add", true);
     assert!(cmd.contains("scsh: harness=opencode"));
     assert!(cmd.contains("opencode --print-logs --log-level DEBUG"));
     assert!(cmd.contains("-m openai/gpt-5.5"));
     assert!(cmd.contains(" run "));
     assert!(cmd.contains("run skill add"));
-    assert!(cmd.contains("tmp/add.json"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let cmd = harness_command_verbose(Harness::Opencode, None, None, "multiply", "tmp/mul.json", true);
+    let cmd = harness_command_verbose(Harness::Opencode, None, None, "multiply", true);
     assert!(cmd.contains("opencode --print-logs --log-level DEBUG run "));
-    let quiet = harness_command_verbose(Harness::Opencode, None, None, "multiply", "tmp/mul.json", false);
+    let quiet = harness_command_verbose(Harness::Opencode, None, None, "multiply", false);
     assert!(!quiet.contains("--print-logs"));
     assert!(quiet.contains("scsh: harness=opencode"));
     assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
@@ -1771,19 +1768,12 @@ mod tests {
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command_verbose(
-      Harness::Claude,
-      Some("sonnet"),
-      None,
-      "add",
-      "tmp/add_claude_sonnet_4_6_result.json",
-      true,
-    );
+    let cmd = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", true);
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains(" --verbose --debug --debug-file \"${SCSH_RUN_LOG}.debug\" --model sonnet"));
     assert!(cmd.contains("scsh: --- claude debug log ---"));
     assert!(cmd.contains("tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", "tmp/add.json", false);
+    let quiet = harness_command_verbose(Harness::Claude, Some("sonnet"), None, "add", false);
     assert!(!quiet.contains(" --verbose"));
     assert!(!quiet.contains("--debug-file"));
     assert!(!quiet.contains("claude debug log"));
@@ -1792,17 +1782,16 @@ mod tests {
 
   #[test]
   fn harness_command_builds_codex_invocation() {
-    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add_codex_result.json", true);
+    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true);
     assert!(cmd.contains("scsh: harness=codex"));
     assert!(cmd.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
     assert!(cmd.contains(" -m gpt-5.5"));
     assert!(cmd.contains("--output-last-message \"${SCSH_RUN_LOG}.last\""));
     assert!(cmd.contains("scsh: --- codex final message ---"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    assert!(cmd.contains("tmp/add_codex_result.json"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Codex, None, None, "multiply", "tmp/mul.json", false);
+    let quiet = harness_command_verbose(Harness::Codex, None, None, "multiply", false);
     assert!(quiet.contains("codex exec --dangerously-bypass-approvals-and-sandbox --skip-git-repo-check"));
     assert!(!quiet.contains("--output-last-message"));
     assert!(!quiet.contains(" -m "));
@@ -1811,8 +1800,7 @@ mod tests {
 
   #[test]
   fn harness_command_builds_grok_invocation() {
-    let cmd =
-      harness_command_verbose(Harness::Grok, Some("grok-build"), Some("high"), "add", "tmp/add_grok.json", true);
+    let cmd = harness_command_verbose(Harness::Grok, Some("grok-build"), Some("high"), "add", true);
     assert!(cmd.contains("scsh: harness=grok"));
     assert!(cmd.contains("grok -p "));
     assert!(cmd.contains(" --permission-mode bypassPermissions --always-approve"));
@@ -1821,10 +1809,9 @@ mod tests {
     assert!(cmd.contains(" --debug --debug-file \"${SCSH_RUN_LOG}.debug\""));
     assert!(cmd.contains("scsh: --- grok debug log ---"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    assert!(cmd.contains("tmp/add_grok.json"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Grok, None, None, "multiply", "tmp/mul.json", false);
+    let quiet = harness_command_verbose(Harness::Grok, None, None, "multiply", false);
     assert!(quiet.contains("grok -p "));
     assert!(!quiet.contains("--debug"));
     assert!(!quiet.contains(" --effort "));
@@ -1833,16 +1820,14 @@ mod tests {
 
   #[test]
   fn harness_command_builds_cursor_invocation() {
-    let cmd =
-      harness_command_verbose(Harness::Cursor, Some("composer-2.5"), Some("high"), "add", "tmp/add_cursor.json", true);
+    let cmd = harness_command_verbose(Harness::Cursor, Some("composer-2.5"), Some("high"), "add", true);
     assert!(cmd.contains("scsh: harness=cursor"));
     assert!(cmd.contains("cursor-agent -p --force --trust --sandbox disabled"));
     assert!(cmd.contains(" --model composer-2.5-fast"));
     assert!(cmd.contains(" --output-format stream-json --stream-partial-output"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
-    assert!(cmd.contains("tmp/add_cursor.json"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(Harness::Cursor, None, None, "multiply", "tmp/mul.json", false);
+    let quiet = harness_command_verbose(Harness::Cursor, None, None, "multiply", false);
     assert!(quiet.contains("cursor-agent -p --force --trust --sandbox disabled"));
     assert!(!quiet.contains("--output-format"));
     assert!(!quiet.contains(" --model "));
@@ -1859,9 +1844,9 @@ mod tests {
 
   #[test]
   fn harness_command_codex_passes_reasoning_effort() {
-    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), Some("xhigh"), "add", "tmp/add.json", true);
+    let cmd = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), Some("xhigh"), "add", true);
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
-    let without = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add.json", true);
+    let without = harness_command_verbose(Harness::Codex, Some("gpt-5.5"), None, "add", true);
     assert!(!without.contains("model_reasoning_effort"));
   }
 
