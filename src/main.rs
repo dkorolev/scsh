@@ -752,13 +752,8 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
       let name = runtime::run_dir_name(now_secs(), &skill.name, &rt.name);
       let run_dir = format!("/tmp/{name}");
       let tag = runtime::image_tag(skill.harness);
-      let cmd = runtime::harness_command(
-        skill.harness,
-        skill.model.as_deref(),
-        skill.effort.as_deref(),
-        &skill.skill_source,
-        &skill.result,
-      );
+      let cmd =
+        runtime::harness_command(skill.harness, skill.model.as_deref(), skill.effort.as_deref(), &skill.skill_source);
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
       println!(
@@ -1951,13 +1946,8 @@ fn run_one_skill(
   if let Some(d) = &git_daemon {
     container_env.extend(d.env());
   }
-  let harness = runtime::harness_command(
-    skill.harness,
-    skill.model.as_deref(),
-    skill.effort.as_deref(),
-    &skill.skill_source,
-    &skill.result,
-  );
+  let harness =
+    runtime::harness_command(skill.harness, skill.model.as_deref(), skill.effort.as_deref(), &skill.skill_source);
   let cmd = if git_transport {
     runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
   } else {
