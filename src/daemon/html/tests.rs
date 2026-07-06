@@ -1,8 +1,47 @@
+use super::cast::cast_player_page;
 use super::client_js::live_client_js;
 use super::escape::esc;
 use super::proc::{empty_output_html, empty_output_label};
 use super::session::session_page;
 use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, Store};
+
+/// A one-proc store for the cast player page tests: the proc has a registered cast and
+/// the given status.
+fn store_with_cast_proc(status: ProcStatus) -> Store {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "castab".into(),
+    Session {
+      id: "castab".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("default".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 1,
+      client_connected: true,
+      skills: vec![],
+      procs: vec![ProcRecord {
+        index: 0,
+        kind: ProcKind::Skill,
+        label: "claude: add".into(),
+        status,
+        note: None,
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: Some("/tmp/x.cast".into()),
+        harness: Some("claude".into()),
+        skill_name: Some("add".into()),
+        model: None,
+        started_at: Some(1),
+        elapsed: None,
+        lines: vec![],
+      }],
+    },
+  );
+  store
+}
 
 fn session_procs_html(html: &str) -> &str {
   let needle = r#"<div class="procs" id="session-procs">"#;
@@ -163,6 +202,24 @@ fn session_proc_html_shows_autoscroll_while_running() {
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
+}
+
+#[test]
+fn empty_cast_shows_placeholder_instead_of_player_error() {
+  // Both the session-page embed and the standalone player page fetch the cast text first
+  // and render a calm placeholder when it has no complete event lines yet, instead of
+  // handing the player an empty/404 cast (which errors).
+  let js = live_client_js();
+  assert!(js.contains("Recording in progress — no frames yet."));
+  assert!(js.contains("No recorded frames."));
+  assert!(js.contains("cast-placeholder"));
+  assert!(js.contains("{ data: text }"), "player mounts over the already-fetched text");
+  let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
+  assert!(page.contains("Recording in progress — no frames yet."));
+  assert!(page.contains("cast-placeholder"));
+  assert!(page.contains("const LIVE = true;"));
+  let done = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(done.contains("const LIVE = false;"));
 }
 
 #[test]
