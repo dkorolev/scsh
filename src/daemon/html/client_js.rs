@@ -863,5 +863,70 @@ startProcClock();
   applyAutoScrollAll(root);
   initCasts(root);
 })();
+// ---- images panel (index page only) ----
+function imageStatusBadge(img) {
+  if (!img.exists) return '<span class="session-status failed">missing</span>';
+  if (!img.up_to_date) return '<span class="session-status cancelled">stale</span>';
+  return '<span class="session-status completed">up to date</span>';
+}
+function renderImages(data) {
+  const body = document.getElementById('images-body');
+  if (!body) return;
+  if (data.error) {
+    body.innerHTML = '<tr><td colspan="5" class="dim">' + esc(data.error) + '</td></tr>';
+    return;
+  }
+  body.innerHTML = (data.images || []).map(img => {
+    const checkbox = img.name === 'base' ? '' :
+      '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
+    return '<tr><td class="image-select-cell">' + checkbox + '</td>' +
+      '<td><code>' + esc(img.tag) + '</code></td>' +
+      '<td>' + imageStatusBadge(img) + '</td>' +
+      '<td>' + esc(img.created || '—') + '</td>' +
+      '<td>' + esc(img.size || '—') + '</td></tr>';
+  }).join('');
+  const btn = document.getElementById('images-build-selected');
+  if (btn) {
+    body.querySelectorAll('.image-select').forEach(cb => cb.addEventListener('change', () => {
+      btn.disabled = body.querySelectorAll('.image-select:checked').length === 0;
+    }));
+  }
+}
+function refreshImages() {
+  const body = document.getElementById('images-body');
+  if (body) body.innerHTML = '<tr><td colspan="5" class="dim">loading…</td></tr>';
+  fetch('/api/v1/images').then(r => r.json()).then(renderImages).catch(() => {
+    if (body) body.innerHTML = '<tr><td colspan="5" class="dim">images unavailable (daemon error)</td></tr>';
+  });
+}
+function startImagesBuild(all) {
+  const note = document.getElementById('images-note');
+  const harnesses = all ? [] :
+    Array.from(document.querySelectorAll('.image-select:checked')).map(cb => cb.value);
+  const req = {
+    harnesses: harnesses,
+    rebuild_base: !!document.getElementById('images-rebuild-base')?.checked,
+    force: !!document.getElementById('images-force')?.checked,
+  };
+  if (note) note.textContent = 'starting build…';
+  fetch('/api/v1/images/build', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  }).then(r => r.json()).then(resp => {
+    if (resp.ok && resp.session) {
+      window.location.href = '/session/' + resp.session;
+    } else if (note) {
+      note.textContent = resp.error || 'build request failed';
+    }
+  }).catch(() => { if (note) note.textContent = 'build request failed'; });
+}
+(function initImagesPanel() {
+  if (!document.getElementById('images-body')) return;
+  refreshImages();
+  document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild(false));
+  document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
+  document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshImages(); });
+})();
 "#
 }

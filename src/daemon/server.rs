@@ -11,8 +11,10 @@ use std::time::{Duration, Instant};
 use super::castprobe::{cast_probe_snapshot, probe_growth_messages, CastProbe};
 use super::db::StoreDb;
 use super::html;
-use super::jsonio::{field_num, field_str, tick_json, tick_json_light};
-use super::model::{DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
+use super::jsonio::{field_bool, field_num, field_str, tick_json, tick_json_light};
+use super::model::{
+  DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SessionLifecycle, SkillMeta, Store,
+};
 use super::paths::{now_unix_secs, pid_file};
 use super::prune::{schedule_from_api, schedule_orphans_from_session, PruneQueue};
 use super::websocket::{self, Hub};
@@ -457,6 +459,12 @@ fn parse_content_length(header_bytes: &[u8]) -> usize {
 fn route(
   req: &HttpRequest, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>,
 ) -> (u16, String, &'static str, bool) {
+  // The images-build endpoint returns a custom body (the spawned session id), so it does not
+  // go through the generic `{"ok":…}` POST handler.
+  if req.method == "POST" && req.path == "/api/v1/images/build" {
+    let (status, body, mutated) = images_build_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path.starts_with("/api/v1/") {
     let ok = handle_api_post(&req.path, &req.body, store, prune);
     let body = if ok { "{\"ok\":true}" } else { "{\"ok\":false}" };
@@ -498,6 +506,7 @@ fn route(
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
+    "/api/v1/images" => (200, images_json(), "application/json", false),
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
       let store = lock_store(store);
@@ -545,7 +554,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
   let ok = match path {
     "/api/v1/session/start" => {
       let id = field_str(&obj, "session").unwrap_or_default();
-      let repo = super::paths::absolutize_repo_path(std::path::Path::new(&field_str(&obj, "repo").unwrap_or_default()));
+      let repo = display_or_absolute_repo(&field_str(&obj, "repo").unwrap_or_default());
       let branch = field_str(&obj, "branch").unwrap_or_default();
       let profile = field_str(&obj, "profile");
       let skills = parse_skills_array(&obj);
@@ -781,6 +790,143 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
     queue.save(port);
   }
   ok
+}
+
+/// Canonicalize path-like repo values; pass display labels (empty, or non-path strings such as
+/// `build-images`' "(image builds)") through untouched. Clients already absolutize real paths;
+/// the server-side pass is only the defensive second canonicalization for those.
+fn display_or_absolute_repo(repo: &str) -> String {
+  if repo.starts_with('/') {
+    super::paths::absolutize_repo_path(std::path::Path::new(repo))
+  } else {
+    repo.to_string()
+  }
+}
+
+/// `GET /api/v1/images` — status of every scsh image (base + one per harness) on the detected
+/// container runtime, for the dashboard's images panel. No runtime degrades to an `error` field
+/// rather than an HTTP failure, so the panel can render the reason.
+fn images_json() -> String {
+  let Some(rt) = crate::runtime::detect_runtime() else {
+    return r#"{ "error": "no container runtime found (docker, podman, or Apple container)" }"#.to_string();
+  };
+  let rows: Vec<String> = crate::runtime::image_statuses(&rt.name)
+    .iter()
+    .map(|s| {
+      format!(
+        "{{ \"name\": {}, \"tag\": {}, \"exists\": {}, \"up_to_date\": {}, \"created\": {}, \"size\": {} }}",
+        quote(&s.name),
+        quote(&s.tag),
+        s.exists,
+        s.up_to_date,
+        s.created.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
+        s.size.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
+      )
+    })
+    .collect();
+  format!("{{ \"runtime\": {}, \"images\": [{}] }}", quote(&rt.name), rows.join(", "))
+}
+
+/// `POST /api/v1/images/build` — body `{"harnesses": [name…], "rebuild_base": bool, "force":
+/// bool}` (all fields optional; no harnesses = all). Spawns a detached `scsh build-images
+/// --session <id>` and pre-creates that session in the store, so the returned
+/// `{"ok":true,"session":id}` deep-links to a live page before the child registers. One image
+/// build at a time; a concurrent request gets 409.
+fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => Vec::new(), // an empty/absent body means "build everything with defaults"
+  };
+  let harnesses = parse_string_array(&obj, "harnesses");
+  for h in &harnesses {
+    if crate::config::Harness::parse(h).is_none() {
+      let msg = format!("unknown harness '{h}' (known: {})", crate::config::Harness::known().join(", "));
+      return (400, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false);
+    }
+  }
+  let rebuild_base = field_bool(&obj, "rebuild_base").unwrap_or(false);
+  let force = field_bool(&obj, "force").unwrap_or(false);
+  let now = now_unix_secs();
+  let port = {
+    let store = lock_store(store);
+    let build_running = store.sessions.values().any(|s| {
+      s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) && s.lifecycle_status(now) == SessionLifecycle::Running
+    });
+    if build_running {
+      return (409, "{\"ok\":false,\"error\":\"an image build is already running\"}".to_string(), false);
+    }
+    store.port
+  };
+  let exe = match super::client::scsh_executable() {
+    Ok(exe) => exe,
+    Err(e) => {
+      let msg = format!("cannot locate the scsh binary to spawn: {e}");
+      return (500, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false);
+    }
+  };
+  let session_id = crate::runtime::random_nonce_6();
+  let mut cmd = std::process::Command::new(exe);
+  cmd.arg("build-images");
+  cmd.args(&harnesses);
+  if force {
+    cmd.arg("--force");
+  }
+  if rebuild_base {
+    cmd.arg("--rebuild-base");
+  }
+  cmd.args(["--session", &session_id]);
+  cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.stdin(std::process::Stdio::null());
+  cmd.stdout(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::null());
+  match cmd.spawn() {
+    Ok(mut child) => {
+      // Reap the child when it exits so it never lingers as a zombie under the daemon.
+      std::thread::spawn(move || {
+        let _ = child.wait();
+      });
+      let mut store = lock_store(store);
+      store.touch(now);
+      store.insert_session(
+        session_id.clone(),
+        Session {
+          id: session_id.clone(),
+          started_at: now,
+          ended_at: None,
+          profile: Some(BUILD_IMAGES_PROFILE.to_string()),
+          repo: "(image builds)".to_string(),
+          branch: String::new(),
+          skills: Vec::new(),
+          procs: Vec::new(),
+          last_seen_at: now,
+          client_connected: false,
+        },
+      );
+      (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
+    }
+    Err(e) => {
+      let msg = format!("failed to spawn scsh build-images: {e}");
+      (500, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false)
+    }
+  }
+}
+
+/// The `profile` label `scsh build-images` registers its sessions under; the build guard and
+/// the spawn above must agree on it.
+const BUILD_IMAGES_PROFILE: &str = "build-images";
+
+/// A JSON string array field (e.g. `"harnesses": ["claude", "codex"]`); non-strings are skipped.
+fn parse_string_array(obj: &[(String, Value)], key: &str) -> Vec<String> {
+  let Some(Value::Array(arr)) = obj.iter().find(|(k, _)| k == key).map(|(_, v)| v) else {
+    return Vec::new();
+  };
+  arr
+    .iter()
+    .filter_map(|item| match item {
+      Value::String(s) => Some(s.clone()),
+      _ => None,
+    })
+    .collect()
 }
 
 fn deregister_incomplete_detail(p: &ProcRecord) -> String {
@@ -1154,6 +1300,82 @@ mod tests {
       .unwrap_or("")
       .contains("session ended before this proc reported finish"));
     assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn display_or_absolute_repo_keeps_labels_and_absolutizes_paths() {
+    assert_eq!(display_or_absolute_repo(""), "");
+    assert_eq!(display_or_absolute_repo("(image builds)"), "(image builds)");
+    // An absolute path survives (canonicalization is best-effort; /tmp may resolve to a symlink
+    // target, so assert it is still absolute rather than byte-equal).
+    assert!(display_or_absolute_repo("/tmp").starts_with('/'));
+  }
+
+  #[test]
+  fn parse_string_array_reads_strings_and_skips_junk() {
+    let obj = match parse(r#"{"harnesses":["claude","codex",7,null,"grok"]}"#).unwrap() {
+      Value::Object(o) => o,
+      _ => panic!("object"),
+    };
+    assert_eq!(parse_string_array(&obj, "harnesses"), vec!["claude", "codex", "grok"]);
+    assert!(parse_string_array(&obj, "missing").is_empty());
+  }
+
+  #[test]
+  fn images_build_rejects_unknown_harness() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let (status, body, mutated) = images_build_response(r#"{"harnesses":["fancyharness"]}"#, &store);
+    assert_eq!(status, 400);
+    assert!(body.contains("unknown harness 'fancyharness'"), "body: {body}");
+    assert!(!mutated);
+    assert!(store.lock().unwrap().sessions.is_empty(), "no session pre-created on rejection");
+  }
+
+  #[test]
+  fn images_build_rejects_concurrent_build_session() {
+    let now = now_unix_secs();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, now)));
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "bldabc".into(),
+        Session {
+          id: "bldabc".into(),
+          started_at: now,
+          ended_at: None,
+          profile: Some(BUILD_IMAGES_PROFILE.into()),
+          repo: "(image builds)".into(),
+          branch: String::new(),
+          skills: Vec::new(),
+          procs: Vec::new(),
+          last_seen_at: now,
+          client_connected: true,
+        },
+      );
+    }
+    let (status, body, mutated) = images_build_response("{}", &store);
+    assert_eq!(status, 409);
+    assert!(body.contains("already running"), "body: {body}");
+    assert!(!mutated);
+  }
+
+  #[test]
+  fn images_build_spawns_and_precreates_session() {
+    // SCSH_BIN points the spawn at /usr/bin/true, so the "child" exits instantly and the
+    // test never builds anything. The env var is process-global; no other test sets it.
+    std::env::set_var("SCSH_BIN", "/usr/bin/true");
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let (status, body, mutated) =
+      images_build_response(r#"{"harnesses":["claude"],"rebuild_base":true,"force":true}"#, &store);
+    std::env::remove_var("SCSH_BIN");
+    assert_eq!(status, 200, "body: {body}");
+    assert!(mutated);
+    let session_id = body.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+    let guard = store.lock().unwrap();
+    let session = guard.sessions.get(&session_id).expect("session pre-created");
+    assert_eq!(session.profile.as_deref(), Some(BUILD_IMAGES_PROFILE));
+    assert_eq!(session.repo, "(image builds)");
+    assert!(session.ended_at.is_none());
   }
 
   #[test]

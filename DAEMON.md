@@ -195,8 +195,26 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
 - `GET /assets/asciinema-player.{js,css}` — vendored player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
+- `GET /api/v1/images` — JSON status of every scsh image (base + one per harness) on the
+  detected runtime: exists, up-to-date (fingerprint match), created, size (created/size are
+  `null` on Apple `container`, which has no inspect formatter)
+- `POST /api/v1/images/build` — body `{"harnesses": [name…], "rebuild_base": bool, "force":
+  bool}` (all optional; no harnesses = all). Spawns a detached `scsh build-images --session
+  <id>`, pre-creates that session, and returns `{"ok":true,"session":id}` so the caller can
+  deep-link it. One build at a time — a concurrent request gets 409.
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
   — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path
+
+## Images panel
+
+The session index page ends with an **images** table: one row per scsh image (`scsh-base`
+plus one per harness), with its status — **up to date** (fingerprint matches this scsh
+build's embedded Dockerfile), **stale** (exists but fingerprint differs, e.g. after an scsh
+upgrade), or **missing**. Select rows and press **Build selected** (or **Build all**);
+optional toggles force-rebuild the base image (`--no-cache`) or rebuild images that are
+already up to date. The buttons call `POST /api/v1/images/build` and navigate straight to
+the spawned `scsh build-images` session, where each image build streams as a proc row —
+the same view a run's build rows get.
 
 ## Assumptions
 

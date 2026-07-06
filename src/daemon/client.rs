@@ -431,7 +431,8 @@ Connection: close\r\n\r\n\
   resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")
 }
 
-fn scsh_executable() -> std::io::Result<std::path::PathBuf> {
+/// The real scsh binary to re-exec (`__daemon-serve`, and the daemon's `build-images` spawn).
+pub(crate) fn scsh_executable() -> std::io::Result<std::path::PathBuf> {
   if let Ok(path) = std::env::var("SCSH_BIN") {
     return Ok(std::path::PathBuf::from(path));
   }

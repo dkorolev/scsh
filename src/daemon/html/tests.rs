@@ -57,6 +57,19 @@ fn esc_handles_basic_html() {
 }
 
 #[test]
+fn index_page_carries_the_images_panel_and_its_client_wiring() {
+  let store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let html = super::index_page(&store);
+  // The panel skeleton: status table body plus every control the client script binds to.
+  for id in ["images-body", "images-build-selected", "images-build-all", "images-rebuild-base", "images-force"] {
+    assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
+  }
+  // The embedded client script populates the panel from the images API.
+  assert!(live_client_js().contains("/api/v1/images"), "client js should fetch the images API");
+  assert!(live_client_js().contains("/api/v1/images/build"), "client js should post builds");
+}
+
+#[test]
 fn empty_output_label_depends_on_proc_status() {
   assert_eq!(empty_output_label(ProcStatus::Running), "No output yet.");
   assert_eq!(empty_output_label(ProcStatus::Waiting), "No output yet.");
