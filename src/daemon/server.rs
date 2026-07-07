@@ -13,7 +13,7 @@ use super::db::StoreDb;
 use super::html;
 use super::jsonio::{field_bool, field_num, field_str, tick_json, tick_json_light};
 use super::model::{
-  DaemonMode, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SessionLifecycle, SkillMeta, Store,
+  DaemonMode, OpenRepo, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SessionLifecycle, SkillMeta, Store,
 };
 use super::paths::{now_unix_secs, pid_file};
 use super::prune::{schedule_from_api, schedule_orphans_from_session, PruneQueue};
@@ -563,6 +563,20 @@ fn route(
     let (status, body, mutated) = images_build_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  // The "open a repository" + "start a job" endpoints return custom bodies (validation result,
+  // discovered definitions, the spawned session id), so they bypass the generic POST handler.
+  if req.method == "POST" && req.path == "/api/v1/repos/open" {
+    let (status, body, mutated) = repos_open_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
+  if req.method == "POST" && req.path == "/api/v1/harness-defs" {
+    let (status, body) = harness_defs_response(&req.body);
+    return (status, body, "application/json", false);
+  }
+  if req.method == "POST" && req.path == "/api/v1/jobs/start" {
+    let (status, body, mutated) = jobs_start_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path.starts_with("/api/v1/") {
     let ok = handle_api_post(&req.path, &req.body, store, prune);
     let body = if ok { "{\"ok\":true}" } else { "{\"ok\":false}" };
@@ -605,6 +619,7 @@ fn route(
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
     "/api/v1/images" => (200, images_json(), "application/json", false),
+    "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
       let store = lock_store(store);
@@ -992,7 +1007,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           started_at: now,
           ended_at: None,
           profile: Some(BUILD_IMAGES_PROFILE.to_string()),
-          repo: "(image builds)".to_string(),
+          repo: IMAGE_BUILDS_REPO.to_string(),
           branch: String::new(),
           skills: Vec::new(),
           procs: Vec::new(),
@@ -1012,6 +1027,274 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
 /// The `profile` label `scsh build-images` registers its sessions under; the build guard and
 /// the spawn above must agree on it.
 const BUILD_IMAGES_PROFILE: &str = "build-images";
+
+/// The synthetic `repo` label image-build sessions carry, so they never appear as a real
+/// repository in the jobs-per-directory view or block a repo's one-job guard.
+const IMAGE_BUILDS_REPO: &str = "(image builds)";
+
+// ---------------------------------------------------------------------------
+// Harness definitions: open a repo, list its definitions, start a job in it.
+// ---------------------------------------------------------------------------
+
+/// A `{"ok":false,"error":…}` body for a client-side problem.
+fn err_body(msg: &str) -> String {
+  format!("{{\"ok\":false,\"error\":{}}}", quote(msg))
+}
+
+/// `POST /api/v1/repos/open` — body `{"path":"…"}`. Validate the path is a git repo, report
+/// whether it is clean, discover the harness definitions available to it, and remember it as an
+/// open repo. `{ok:true,repo,clean,dirty:[…],defs:[…]}`, or `{ok:false,error}` (still HTTP 200
+/// for a "not a repo" so the UI can show the message inline).
+fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object with a 'path'"), false),
+  };
+  let path = match field_str(&obj, "path") {
+    Some(p) if !p.trim().is_empty() => p.trim().to_string(),
+    _ => return (400, err_body("give a repository path"), false),
+  };
+  let abs = super::paths::absolutize_repo_path(std::path::Path::new(&path));
+  let Some(root) = crate::git_root_of(std::path::Path::new(&abs)) else {
+    return (200, err_body(&format!("not a git repository: {abs}")), false);
+  };
+  let dirty = crate::uncommitted_changes(&root);
+  let clean = dirty.is_empty();
+  let discovery = crate::harness_def::discover(&root);
+  let repo = root.to_string_lossy().into_owned();
+  let now = now_unix_secs();
+  {
+    let mut s = lock_store(store);
+    s.touch(now);
+    s.open_repo(OpenRepo { path: repo.clone(), opened_at: now, clean });
+  }
+  let dirty_arr: Vec<String> = dirty.iter().take(20).map(|p| quote(p)).collect();
+  let body = format!(
+    "{{\"ok\":true,\"repo\":{},\"clean\":{},\"dirty\":[{}],\"defs\":[{}]}}",
+    quote(&repo),
+    clean,
+    dirty_arr.join(","),
+    defs_json(&discovery.defs).join(",")
+  );
+  (200, body, true)
+}
+
+/// `POST /api/v1/harness-defs` — body `{"repo":"…"}`. Re-discover the definitions for an
+/// already-open repo (a refresh). `{defs:[…]}`.
+fn harness_defs_response(body: &str) -> (u16, String) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object with a 'repo'")),
+  };
+  let repo = match field_str(&obj, "repo") {
+    Some(r) if !r.trim().is_empty() => r.trim().to_string(),
+    _ => return (400, err_body("give a repository path")),
+  };
+  let discovery = crate::harness_def::discover(std::path::Path::new(&repo));
+  (200, format!("{{\"defs\":[{}]}}", defs_json(&discovery.defs).join(",")))
+}
+
+/// `POST /api/v1/jobs/start` — body `{"repo":"…","def":"…","params":{…}}`. Enforce one job per
+/// repo, validate the definition + params, then spawn `scsh run --def <name>` in the repo with
+/// the params as environment and the pre-created session id. `{ok:true,session}`, or 409/400.
+fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let def_name = match field_str(&obj, "def") {
+    Some(d) if !d.trim().is_empty() => d.trim().to_string(),
+    _ => return (400, err_body("give a definition name"), false),
+  };
+  let repo_in = match field_str(&obj, "repo") {
+    Some(r) if !r.trim().is_empty() => r.trim().to_string(),
+    _ => return (400, err_body("give a repository path"), false),
+  };
+  let params = read_params(&obj);
+
+  // Re-validate the repo at start time: still a git repo, still clean.
+  let Some(root) = crate::git_root_of(std::path::Path::new(&repo_in)) else {
+    return (400, err_body(&format!("not a git repository: {repo_in}")), false);
+  };
+  if !crate::uncommitted_changes(&root).is_empty() {
+    return (409, err_body("the working tree has uncommitted changes — commit or stash them first"), false);
+  }
+  let repo = root.to_string_lossy().into_owned();
+
+  // The definition must exist and its params must validate.
+  let discovery = crate::harness_def::discover(&root);
+  let Some(def) = discovery.find(&def_name) else {
+    return (400, err_body(&format!("no harness definition named '{def_name}'")), false);
+  };
+  if let Err(msg) = validate_job_params(def, &params) {
+    return (400, err_body(&msg), false);
+  }
+
+  // One job per directory.
+  let now = now_unix_secs();
+  let port = {
+    let store = lock_store(store);
+    if store.job_running_in(&repo, now) {
+      return (409, err_body("a job is already running in this repository"), false);
+    }
+    store.port
+  };
+
+  let exe = match super::client::scsh_executable() {
+    Ok(exe) => exe,
+    Err(e) => return (500, err_body(&format!("cannot locate the scsh binary to spawn: {e}")), false),
+  };
+  let branch = crate::current_branch(&root);
+  let session_id = crate::runtime::random_nonce_6();
+  let mut cmd = std::process::Command::new(exe);
+  cmd.arg("run").args(["--def", &def_name]);
+  cmd.current_dir(&root);
+  for (k, v) in &params {
+    cmd.env(k, v);
+  }
+  cmd.args(["--session", &session_id]);
+  cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.stdin(std::process::Stdio::null());
+  cmd.stdout(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::null());
+  match cmd.spawn() {
+    Ok(mut child) => {
+      // Reap the child so it never lingers as a zombie under the daemon.
+      std::thread::spawn(move || {
+        let _ = child.wait();
+      });
+      let mut store = lock_store(store);
+      store.touch(now);
+      store.insert_session(
+        session_id.clone(),
+        Session {
+          id: session_id.clone(),
+          started_at: now,
+          ended_at: None,
+          profile: Some(def_name.clone()),
+          repo: repo.clone(),
+          branch,
+          skills: Vec::new(),
+          procs: Vec::new(),
+          last_seen_at: now,
+          client_connected: false,
+        },
+      );
+      (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
+    }
+    Err(e) => (500, err_body(&format!("failed to spawn scsh run: {e}")), false),
+  }
+}
+
+/// `GET /api/v1/repos` — the opened repositories and any repos that have jobs, each with its
+/// jobs (sessions) grouped underneath. Powers the browser's jobs-per-directory view.
+fn repos_json(store: &Store, now: u64) -> String {
+  let mut paths: std::collections::BTreeSet<String> = store.open_repos.keys().cloned().collect();
+  for s in store.sessions.values() {
+    if s.repo != IMAGE_BUILDS_REPO {
+      paths.insert(s.repo.clone());
+    }
+  }
+  let repos: Vec<String> = paths
+    .iter()
+    .map(|path| {
+      let jobs: Vec<String> = store
+        .sessions
+        .values()
+        .filter(|s| &s.repo == path)
+        .map(|s| {
+          format!(
+            "{{\"session\":{},\"profile\":{},\"status\":{},\"started_at\":{}}}",
+            quote(&s.id),
+            s.profile.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+            quote(s.lifecycle_status(now).label()),
+            s.started_at
+          )
+        })
+        .collect();
+      let clean = store.open_repos.get(path).map(|r| r.clean.to_string()).unwrap_or_else(|| "null".into());
+      format!("{{\"path\":{},\"clean\":{},\"jobs\":[{}]}}", quote(path), clean, jobs.join(","))
+    })
+    .collect();
+  format!("{{\"repos\":[{}]}}", repos.join(","))
+}
+
+/// Check job params against a definition: every required param present, every value well-typed.
+fn validate_job_params(def: &crate::harness_def::HarnessDef, params: &[(String, String)]) -> Result<(), String> {
+  for p in &def.params {
+    match params.iter().find(|(k, _)| k == &p.name) {
+      Some((_, v)) => p.validate_value(v)?,
+      None => {
+        if p.required && p.default.is_none() {
+          return Err(format!("param '{}' is required", p.name));
+        }
+      }
+    }
+  }
+  Ok(())
+}
+
+/// Extract the `params` object as `(name, value-as-string)` pairs (strings, numbers, and bools
+/// are accepted; other JSON shapes are skipped).
+fn read_params(obj: &[(String, Value)]) -> Vec<(String, String)> {
+  let Some(Value::Object(entries)) = obj.iter().find(|(k, _)| k == "params").map(|(_, v)| v) else {
+    return Vec::new();
+  };
+  entries.iter().filter_map(|(k, v)| value_to_string(v).map(|s| (k.clone(), s))).collect()
+}
+
+fn value_to_string(v: &Value) -> Option<String> {
+  match v {
+    Value::String(s) => Some(s.clone()),
+    Value::Bool(b) => Some(b.to_string()),
+    Value::Number(n) => Some(if n.fract() == 0.0 { format!("{}", *n as i64) } else { n.to_string() }),
+    _ => None,
+  }
+}
+
+/// One JSON object per definition (name, description, source, params, agent routes).
+fn defs_json(defs: &[crate::harness_def::HarnessDef]) -> Vec<String> {
+  defs.iter().map(def_json).collect()
+}
+
+fn def_json(def: &crate::harness_def::HarnessDef) -> String {
+  let params: Vec<String> = def.params.iter().map(param_json).collect();
+  let agents: Vec<String> = def
+    .invocations
+    .iter()
+    .map(|r| {
+      format!(
+        "{{\"route\":{},\"agent\":{},\"model\":{}}}",
+        quote(&r.name),
+        quote(r.harness.as_str()),
+        r.model.as_deref().map(quote).unwrap_or_else(|| "null".into())
+      )
+    })
+    .collect();
+  format!(
+    "{{\"name\":{},\"description\":{},\"source\":{},\"params\":[{}],\"agents\":[{}]}}",
+    quote(&def.name),
+    quote(&def.description),
+    quote(def.source.as_str()),
+    params.join(","),
+    agents.join(",")
+  )
+}
+
+fn param_json(p: &crate::harness_def::Param) -> String {
+  let default = p.default.as_deref().map(quote).unwrap_or_else(|| "null".into());
+  let description = p.description.as_deref().map(quote).unwrap_or_else(|| "null".into());
+  let choices: Vec<String> = p.choices.iter().map(|c| quote(c)).collect();
+  format!(
+    "{{\"name\":{},\"type\":{},\"default\":{},\"required\":{},\"description\":{},\"choices\":[{}]}}",
+    quote(&p.name),
+    quote(p.ty.as_str()),
+    default,
+    p.required,
+    description,
+    choices.join(",")
+  )
+}
 
 /// A JSON string array field (e.g. `"harnesses": ["claude", "codex"]`); non-strings are skipped.
 fn parse_string_array(obj: &[(String, Value)], key: &str) -> Vec<String> {
@@ -1841,5 +2124,127 @@ mod tests {
       .unwrap();
     drop(client);
     assert!(handle.join().unwrap().is_err());
+  }
+
+  // ---- harness-definition endpoints ---------------------------------------------------
+
+  /// A fresh temp dir that is a clean git repo (one empty commit) with a local identity.
+  fn clean_repo(tag: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("scsh-repos-{tag}-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+      assert!(std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap().success());
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "user.email", "t@example.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    dir
+  }
+
+  #[test]
+  fn repos_open_rejects_a_non_repo() {
+    let dir = std::env::temp_dir().join(format!("scsh-nonrepo-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"path":{}}}"#, quote(&dir.to_string_lossy()));
+    let (status, out, _) = repos_open_response(&body, &store);
+    assert_eq!(status, 200);
+    assert!(out.contains("\"ok\":false") && out.contains("not a git repository"), "got: {out}");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn repos_open_lists_builtin_defs_for_a_clean_repo() {
+    let dir = clean_repo("open");
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"path":{}}}"#, quote(&dir.to_string_lossy()));
+    let (status, out, mutated) = repos_open_response(&body, &store);
+    assert_eq!(status, 200, "got: {out}");
+    assert!(mutated);
+    assert!(out.contains("\"ok\":true") && out.contains("\"clean\":true"), "got: {out}");
+    assert!(out.contains("doctor") && out.contains("add") && out.contains("research"), "built-ins listed; got: {out}");
+    // The repo is remembered as open.
+    assert_eq!(store.lock().unwrap().open_repos.len(), 1);
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_spawns_and_guards_one_per_repo() {
+    // /usr/bin/true stands in for the scsh binary, so nothing is actually built or run.
+    std::env::set_var("SCSH_BIN", "/usr/bin/true");
+    let dir = clean_repo("start");
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"repo":{},"def":"add","params":{{"A":"2","B":"3"}}}}"#, quote(&repo));
+
+    let (status, out, mutated) = jobs_start_response(&body, &store);
+    assert_eq!(status, 200, "got: {out}");
+    assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
+    let session_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get(&session_id).expect("session pre-created");
+      assert_eq!(session.profile.as_deref(), Some("add"), "session labeled with the definition name");
+      assert!(!session.repo.is_empty(), "session carries the repo path");
+    }
+
+    // A second start in the same repo is refused while the first job is still running.
+    let (status2, out2, _) = jobs_start_response(&body, &store);
+    assert_eq!(status2, 409, "got: {out2}");
+    assert!(out2.contains("already running"), "got: {out2}");
+
+    std::env::remove_var("SCSH_BIN");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_rejects_a_missing_required_param() {
+    let dir = clean_repo("reqparam");
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    // `research` requires CITY; omitting it is a 400 before anything spawns.
+    let body = format!(r#"{{"repo":{},"def":"research","params":{{}}}}"#, quote(&repo));
+    let (status, out, mutated) = jobs_start_response(&body, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(!mutated && out.contains("CITY"), "got: {out}");
+    assert!(store.lock().unwrap().sessions.is_empty(), "nothing spawned");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_rejects_a_dirty_repo() {
+    let dir = clean_repo("dirty");
+    std::fs::write(dir.join("scratch.txt"), "uncommitted").unwrap();
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"repo":{},"def":"add","params":{{}}}}"#, quote(&repo));
+    let (status, out, _) = jobs_start_response(&body, &store);
+    assert_eq!(status, 409, "got: {out}");
+    assert!(out.contains("uncommitted changes"), "got: {out}");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn repos_json_groups_sessions_by_directory() {
+    let mut store = Store::new(DaemonMode::Persistent, 7274, 50);
+    store.open_repo(OpenRepo { path: "/work/a".into(), opened_at: 50, clean: true });
+    store.insert_session(
+      "aaaaaa".into(),
+      Session {
+        id: "aaaaaa".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("add".into()),
+        repo: "/work/a".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 50,
+        client_connected: false,
+      },
+    );
+    let out = repos_json(&store, 51);
+    assert!(out.contains("/work/a") && out.contains("aaaaaa") && out.contains("\"running\""), "got: {out}");
   }
 }
