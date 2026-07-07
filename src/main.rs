@@ -67,7 +67,9 @@ fn run(args: &[String]) -> i32 {
     }
     Mode::CheckProfile => check_profile_cmd(profile),
     Mode::Run => match cli.def.as_deref() {
-      Some(name) => preflight_then_def(name),
+      // The daemon's "start a job" passes the session id it pre-created so its deep link and
+      // the one-job-per-repo guard are authoritative before this child registers.
+      Some(name) => preflight_then_def(name, cli.failures.session.as_deref()),
       None => preflight_then(Action::Run, profile, cli.verbose),
     },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
@@ -717,14 +719,14 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if (failures.harness.is_some() || failures.model.is_some() || failures.raw) && !matches!(mode, Mode::Stats) {
     return Err("--harness/--model/--raw only apply to 'stats'".into());
   }
-  // `build-images` shares `--session` (the session id to report into) with failures/stats,
-  // but none of their other query flags.
-  let shared_query_flags = failures.session.is_some() || failures.skill.is_some() || failures.last.is_some();
-  if shared_query_flags && !matches!(mode, Mode::Failures | Mode::Stats | Mode::BuildImages) {
-    return Err("--session/--skill/--last only apply to 'failures' or 'stats'".into());
+  // `--session` (the session id to report into) is shared by failures/stats and by
+  // `build-images`/`run`, which the daemon spawns with a pre-created session id; `--skill`
+  // and `--last` are query flags that stay on failures/stats only.
+  if failures.session.is_some() && !matches!(mode, Mode::Failures | Mode::Stats | Mode::BuildImages | Mode::Run) {
+    return Err("--session only applies to 'failures', 'stats', 'build-images', or 'run'".into());
   }
-  if matches!(mode, Mode::BuildImages) && (failures.skill.is_some() || failures.last.is_some()) {
-    return Err("--skill/--last do not apply to 'build-images'".into());
+  if (failures.skill.is_some() || failures.last.is_some()) && !matches!(mode, Mode::Failures | Mode::Stats) {
+    return Err("--skill/--last only apply to 'failures' or 'stats'".into());
   }
   if (build_force || build_rebuild_base) && !matches!(mode, Mode::BuildImages) {
     return Err("--force/--rebuild-base only apply to 'build-images'".into());
@@ -896,7 +898,7 @@ fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
 /// same repo-hygiene + runtime preflight applies, but the config steps are replaced by
 /// definition discovery and env-parameter validation. The definition's `task` body is
 /// materialized into each run clone as `.skills/<name>/SKILL.md`, so the repo stays clean.
-fn preflight_then_def(name: &str) -> i32 {
+fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let root = match preflight_git_repo_clean(true) {
     Ok(r) => r,
     Err(code) => return code,
@@ -984,7 +986,7 @@ fn preflight_then_def(name: &str) -> i32 {
 
   let cast_dir = root.join("tmp").join("casts");
   let before = casts_snapshot(&cast_dir);
-  let code = build_and_run(&rt, &root, &runnable, Some(name));
+  let code = build_and_run(&rt, &root, &runnable, Some(name), session);
   annotate_run_casts(new_casts_since(&cast_dir, &before));
   code
 }
@@ -1111,7 +1113,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       }
       let cast_dir = root.join("tmp").join("casts");
       let before = casts_snapshot(&cast_dir);
-      let code = build_and_run(&rt, &root, &runnable, profile);
+      let code = build_and_run(&rt, &root, &runnable, profile, None);
       // Annotate the recordings this run just produced (best-effort; no-op without cursor).
       annotate_run_casts(new_casts_since(&cast_dir, &before));
       code
@@ -1872,11 +1874,15 @@ impl Drop for DaemonSession {
   }
 }
 
-fn build_and_run(rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>) -> i32 {
+fn build_and_run(
+  rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>, session: Option<&str>,
+) -> i32 {
   ui::signals::install();
 
   // Session browser daemon — `scsh run` always tries to attach; ephemeral auto-start when needed.
-  let session_id = daemon::new_session_id();
+  // Honor a daemon-assigned session id (so its pre-created session and deep link line up),
+  // else mint a fresh one.
+  let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   match daemon::ensure_for_run() {
     Ok(()) => {
@@ -4453,6 +4459,15 @@ fn git_root() -> Result<PathBuf, String> {
     return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
   }
   Ok(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+}
+
+/// The git top-level of an arbitrary directory (not the process cwd), or `None` when `dir`
+/// is not inside a git work tree. Shared with the daemon's "open a repository" validation
+/// (a bare `uncommitted_changes` reports a non-repo as clean, so callers resolve the root first).
+fn git_root_of(dir: &Path) -> Option<PathBuf> {
+  let path = git_capture(dir, &["rev-parse", "--show-toplevel"])?;
+  let path = path.trim();
+  (!path.is_empty()).then(|| PathBuf::from(path))
 }
 
 fn ok(msg: &str) {

@@ -40,6 +40,17 @@ pub enum DefSource {
   Repo,
 }
 
+impl DefSource {
+  /// A stable lowercase tag for JSON/UI (`"builtin"`, `"home"`, `"repo"`).
+  pub fn as_str(self) -> &'static str {
+    match self {
+      DefSource::Builtin => "builtin",
+      DefSource::Home => "home",
+      DefSource::Repo => "repo",
+    }
+  }
+}
+
 /// A parameter's value type. Determines the control the UI renders and how a supplied value
 /// is validated before a run starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,6 +73,16 @@ impl ParamType {
       "bool" => Some(ParamType::Bool),
       "enum" => Some(ParamType::Enum),
       _ => None,
+    }
+  }
+
+  /// A stable lowercase tag for JSON/UI (`"string"`, `"int"`, `"bool"`, `"enum"`).
+  pub fn as_str(self) -> &'static str {
+    match self {
+      ParamType::String => "string",
+      ParamType::Int => "int",
+      ParamType::Bool => "bool",
+      ParamType::Enum => "enum",
     }
   }
 }

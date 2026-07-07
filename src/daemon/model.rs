@@ -187,6 +187,18 @@ pub struct Session {
   pub client_connected: bool,
 }
 
+/// A repository opened from the daemon UI, ready to start jobs in. Kept in memory only (a
+/// convenience list for the browser; the jobs themselves are [`Session`]s keyed on `repo`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenRepo {
+  /// Absolute git top-level of the repository.
+  pub path: String,
+  /// Unix seconds when it was opened.
+  pub opened_at: u64,
+  /// Whether the working tree was clean (no uncommitted changes) when last opened.
+  pub clean: bool,
+}
+
 /// Full daemon state persisted to disk and served over HTTP.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Store {
@@ -199,6 +211,9 @@ pub struct Store {
   /// When `alive_clients` last dropped to zero (unix seconds); drives ephemeral shutdown.
   pub no_alive_since: Option<u64>,
   pub sessions: BTreeMap<String, Session>,
+  /// Repositories opened from the web UI, keyed by absolute path. In-memory only (rebuilt
+  /// empty on restart via `..Store::new(..)`); persistence stays session-scoped in `db`.
+  pub open_repos: BTreeMap<String, OpenRepo>,
 }
 
 impl Store {
@@ -211,11 +226,23 @@ impl Store {
       last_activity: now,
       no_alive_since: Some(now),
       sessions: BTreeMap::new(),
+      open_repos: BTreeMap::new(),
     }
   }
 
   pub fn touch(&mut self, now: u64) {
     self.last_activity = now;
+  }
+
+  /// Remember a repository opened from the web UI (replacing any prior entry for that path).
+  pub fn open_repo(&mut self, repo: OpenRepo) {
+    self.open_repos.insert(repo.path.clone(), repo);
+  }
+
+  /// The one-job-per-directory guard: true while a job (session) is still running in `repo`.
+  /// Image-build sessions use a synthetic repo label, so they never block a real repo.
+  pub fn job_running_in(&self, repo: &str, now: u64) -> bool {
+    self.sessions.values().any(|s| s.repo == repo && s.lifecycle_status(now) == SessionLifecycle::Running)
   }
 
   /// Registered `scsh run` clients that are still sending pings (not stale / terminated).
