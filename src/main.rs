@@ -1015,7 +1015,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
     return 1;
   }
 
-  let cast_dir = root.join("tmp").join("casts");
+  let cast_dir = repo_casts_dir(&root);
   let before = casts_snapshot(&cast_dir);
   let code = build_and_run(&rt, &root, &runnable, Some(name), session);
   annotate_run_casts(new_casts_since(&cast_dir, &before));
@@ -1040,6 +1040,18 @@ fn scratch_root(root: &Path) -> Option<&'static str> {
   } else {
     None
   }
+}
+
+/// Where scsh writes a run's durable cast recordings, under the gitignored scratch root so they
+/// never dirty the tracked tree (for a repo that gitignores only `.harness/tmp`, that is where
+/// they land; a normal `tmp/`-gitignored repo is unchanged).
+fn repo_casts_dir(root: &Path) -> PathBuf {
+  root.join(scratch_root(root).unwrap_or("tmp")).join("casts")
+}
+
+/// Where scsh writes a run's durable logs — under the gitignored scratch root (see [`repo_casts_dir`]).
+fn repo_logs_dir(root: &Path) -> PathBuf {
+  root.join(scratch_root(root).unwrap_or("tmp")).join("logs")
 }
 
 /// Reasons a `scsh run --def` would refuse in `root` (empty ⇒ runnable): no commit to clone, a
@@ -1493,7 +1505,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      let cast_dir = root.join("tmp").join("casts");
+      let cast_dir = repo_casts_dir(&root);
       let before = casts_snapshot(&cast_dir);
       let code = build_and_run(&rt, &root, &runnable, profile, None);
       // Annotate the recordings this run just produced (best-effort; no-op without cursor).
@@ -2884,11 +2896,18 @@ fn run_one_skill(
   // tmp/.claude-auth (the image's CLAUDE_CONFIG_DIR), riding along with the repo mount —
   // and stays WRITABLE, which the interactive TUI requires (single-file bind mounts are
   // read-only under Apple containers, and an unwritable config re-triggers onboarding).
-  let vols: Vec<(String, String)> = if let Some(ref forward) = opencode_forward {
+  let mut vols: Vec<(String, String)> = if let Some(ref forward) = opencode_forward {
     runtime::opencode_forward_mounts(forward)
   } else {
     runtime::harness_volumes(skill.harness)
   };
+  // Git transport bind-mounts back only `tmp/`. When this skill writes its result under the
+  // alternate `.harness/tmp` scratch, mount that too so the result round-trips to the host.
+  if git_transport && skill.result.starts_with(".harness/tmp/") {
+    let host = run_dir.join(".harness").join("tmp");
+    let _ = std::fs::create_dir_all(&host);
+    vols.push((host.to_string_lossy().into_owned(), format!("{}/.harness/tmp", runtime::AGENT_REPO)));
+  }
   let vol_refs: Vec<(&str, &str)> = vols.iter().map(|(h, m)| (h.as_str(), m.as_str())).collect();
   let mut container_env = env.clone();
   if skill.harness == config::Harness::Claude {
@@ -3039,7 +3058,7 @@ fn persist_run_artifacts(root: &Path, run_dir: &Path, skill_name: &str, epoch_se
 
   // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
   // teed harness output; `.debug` (claude/grok) and `.last` (codex) appear only in verbose runs.
-  let logs_dir = root.join("tmp").join("logs");
+  let logs_dir = repo_logs_dir(root);
   if std::fs::create_dir_all(&logs_dir).is_ok() {
     for (rel, ext) in [
       (runtime::RUN_LOG_REL.to_string(), "log"),
@@ -3060,7 +3079,7 @@ fn persist_run_artifacts(root: &Path, run_dir: &Path, skill_name: &str, epoch_se
   if !cast_src.is_file() {
     return None;
   }
-  let casts_dir = root.join("tmp").join("casts");
+  let casts_dir = repo_casts_dir(root);
   std::fs::create_dir_all(&casts_dir).ok()?;
   let dest = casts_dir.join(format!("{stem}.cast"));
   std::fs::copy(&cast_src, &dest).ok()?;
@@ -3804,9 +3823,10 @@ fn incoming_branch_name(skill: &str, stamp: &str, tip: &str) -> String {
 // Result cache (content-addressed, under the repo's gitignored tmp/.sccache/)
 // ---------------------------------------------------------------------------
 
-/// Where cached results live: the repo's gitignored `tmp/.sccache/`.
+/// Where cached results live: `.sccache/` under the repo's gitignored scratch root (`tmp/`, or
+/// `.harness/tmp` when that is the gitignored one).
 fn cache_dir(root: &Path) -> PathBuf {
-  root.join("tmp").join(".sccache")
+  root.join(scratch_root(root).unwrap_or("tmp")).join(".sccache")
 }
 
 /// The cache key for a skill run: a sha256 over a deterministic blob of the repo's
