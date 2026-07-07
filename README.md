@@ -170,6 +170,7 @@ reported together, so you fix them in one pass.
 ```
 scsh                       Show help (the default — a bare scsh is safe and never runs).
 scsh run [--profile X]     Preflight, then build the image & run the selected skills in parallel.
+scsh run --def <name>      Run a harness definition (built-in, ~/.harness/, or repo .harness/).
 scsh list  (alias: ls)     List every skill by profile — result, commits, env (--verbose: + internals).
 scsh init-demo-project     Scaffold AND commit a demo: .scsh.yml + example skills + tmp/ ignore.
 scsh installskills [url]   Install skills — bundled, or a git repo's (merges its .scsh.yml).
@@ -182,6 +183,16 @@ scsh daemon start|stop|restart|status
 ```
 
 See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
+
+**Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
+runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
+`~/.harness/`) plus three built-ins (`doctor`, `add`, `research`). Each declares a
+`description`, typed `params` (which become environment variables), a `task` body, and an
+`invocations:` agent matrix. Run one from the console with `scsh run --def <name>` (params come
+from the environment), or, when the daemon is up, open a repository in the browser and start a
+job from a rendered parameter form — the daemon runs at most one job per directory. Here the
+word "harness" means the runnable definition; the CLI it dispatches to (claude/codex/opencode/…)
+is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
 
 **Installing skills.** With no arguments, `scsh installskills` drops scsh's one bundled skill —
 `scsh-harness-demo-and-selftest`, a demo-and-self-test you run with `/scsh-harness-demo-and-selftest`

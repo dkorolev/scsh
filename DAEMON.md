@@ -223,6 +223,58 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
   deep-link it. One build at a time — a concurrent request gets 409.
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
   — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path
+- `POST /api/v1/repos/open` — body `{"path": "…"}`. Validate the path is a git repo, report
+  whether it is clean, discover the harness definitions available to it, and remember it as an
+  open repo. `{"ok":true,"repo":…,"clean":bool,"dirty":[…],"defs":[…]}`, or `{"ok":false,"error":…}`
+- `POST /api/v1/harness-defs` — body `{"repo": "…"}`. Re-discover an open repo's definitions
+  (a refresh). `{"defs":[…]}`
+- `POST /api/v1/jobs/start` — body `{"repo": "…", "def": "…", "params": {…}}`. Enforce one job
+  per directory, validate the definition + params, then spawn a detached `scsh run --def <name>`
+  in the repo with the params as environment and a pre-created session id.
+  `{"ok":true,"session":id}`; a second job in the same repo (or a dirty tree) gets 409
+- `GET /api/v1/repos` — the opened repositories and any repos that have jobs, each with its
+  jobs (sessions) grouped underneath
+
+## Harness definitions
+
+A **harness definition** is a parameterized, runnable job — the unit the "start a job from the
+browser" flow (and `scsh run --def <name>`) runs. Definitions come from three places, later
+sources shadowing earlier ones by name (repo > home > built-in):
+
+- **built-in** (embedded in the binary, always available): `doctor` (report which agent images
+  and credentials are present, then run a trivial end-to-end confirm task), `add` (an a+b math
+  self-test), and `research` (a trivial tool-calling demo).
+- `~/.harness/<name>.yml` — the running user's personal definitions.
+- `<repo>/.harness/<name>.yml` — definitions that ship with a repository.
+
+Each `.harness/<name>.yml` is:
+
+```yaml
+description: "Add two integers A and B and verify the sum."   # one line, shown in the list
+params:                                                       # each forwards as an env var
+  A: { type: int, default: "2", description: "First addend" }
+  B: { type: int, default: "3", description: "Second addend" }
+task: |                                                       # becomes .skills/<name>/SKILL.md
+  Read A and B from the environment, compute A+B, write {"sum": …} to $SCSH_RESULT, and assert.
+invocations:                                                  # the agent matrix (as in .scsh.yml)
+  opencode-gpt: { harness: opencode, model: openai/gpt-5.4-mini-fast }
+  claude-sonnet: { harness: claude, model: sonnet }
+```
+
+Param types are `string`, `int`, `bool`, and `enum` (with a comma-separated `choices:`). A param
+with a `default:` is optional; without one it is required unless `required: false` is set. The
+`task` body is materialized into the run clone (or the git-transport bare on Apple Container),
+so the caller's working tree stays clean — `scsh run --def` requires a clean repo just like a
+normal run.
+
+## Start a job from the browser
+
+The session index page has a **repositories** panel: enter a path and **Open** (which validates
+the repo and lists its definitions with their agent routes and a clean/dirty note), pick a
+definition to render its params as a control form, fill it in, and **Start job**. That posts
+`/api/v1/jobs/start` and deep-links to the spawned session — the same live board a console run
+gets, because the job *is* an ordinary `scsh run --def`. The daemon runs **at most one job per
+directory** at a time; a **jobs by repository** table lists each repo's jobs and updates live.
 
 ## Images panel
 
@@ -286,7 +338,9 @@ cargo test
 ```
 
 Integration tests cover `daemon start` / `status` / `restart` / `stop` on localhost. Unit tests cover
-the event model, JSON roundtrip, and session id format.
+the event model, JSON roundtrip, session id format, the harness-definition schema/discovery, and
+the open-repo / start-job / one-job-per-directory endpoints. [`DAEMON-JOBS.md`](DAEMON-JOBS.md) is
+a followable harness for the "open a repo & start a job from the browser" path.
 
 ## Manual verification (`scsh run` → browser)
 
