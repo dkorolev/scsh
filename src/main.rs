@@ -899,10 +899,32 @@ fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
 /// definition discovery and env-parameter validation. The definition's `task` body is
 /// materialized into each run clone as `.skills/<name>/SKILL.md`, so the repo stays clean.
 fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
-  let root = match preflight_git_repo_clean(true) {
+  // git installed → inside a repo → runnable (committed, clean, a gitignored scratch dir). A def
+  // run accepts either `tmp/` or `.harness/tmp` as the scratch root, so it does not reuse the
+  // `.scsh.yml` preflight (which requires `tmp/` specifically).
+  if runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH");
+    hint(install_git_hint());
+    return 1;
+  }
+  let root = match git_root() {
     Ok(r) => r,
-    Err(code) => return code,
+    Err(_) => {
+      fail("not inside a git repository");
+      hint(&format!("create one here with: {}", bold("git init .")));
+      return 1;
+    }
   };
+  let blockers = def_run_blockers(&root);
+  if !blockers.is_empty() {
+    fail("this repository is not ready to run a harness definition");
+    for b in &blockers {
+      hint(b);
+    }
+    hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
+    return 1;
+  }
+  let scratch = scratch_root(&root).unwrap_or("tmp");
 
   let discovery = harness_def::discover(&root);
   for w in &discovery.warnings {
@@ -970,6 +992,9 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let mut invocations = config::expand_invocations(&cfg);
   for inv in &mut invocations {
     inv.body = def.task.clone();
+    // Route the result under the gitignored scratch root (which may be `.harness/tmp`), so the
+    // run never writes an untracked file into the working tree.
+    inv.result = format!("{scratch}/{}.json", inv.name);
   }
 
   ok(&format!("git · repo {} · clean · /tmp ignored · def {name}", display_path(&root)));
@@ -1004,14 +1029,36 @@ struct StepState {
   outputs: std::collections::HashMap<String, String>,
 }
 
-/// The gitignored scratch root a workflow's session directory lives under: `.harness/tmp` when
-/// that is gitignored (some repos prefer it), else `tmp` (which the preflight already required).
-fn workflow_scratch_root(root: &Path) -> &'static str {
+/// The gitignored scratch root a harness-definition run uses for its result/session files:
+/// `.harness/tmp` when gitignored (some repos prefer it), else `tmp` when gitignored, else
+/// `None` — a def run has no gitignored scratch and must refuse.
+fn scratch_root(root: &Path) -> Option<&'static str> {
   if git_status_ok(root, &["check-ignore", "-q", ".harness/tmp"]) {
-    ".harness/tmp"
+    Some(".harness/tmp")
+  } else if git_status_ok(root, &["check-ignore", "-q", "tmp"]) {
+    Some("tmp")
   } else {
-    "tmp"
+    None
   }
+}
+
+/// Reasons a `scsh run --def` would refuse in `root` (empty ⇒ runnable): no commit to clone, a
+/// dirty working tree, or no gitignored scratch dir. Shared by the CLI preflight and the daemon
+/// so the browser never accepts — or starts — a job the run itself would reject. Assumes `root`
+/// is a git repository root.
+pub(crate) fn def_run_blockers(root: &Path) -> Vec<String> {
+  let mut out = Vec::new();
+  if git_capture(root, &["rev-parse", "--verify", "HEAD"]).is_none() {
+    out.push("the repository has no commits yet (scsh runs a clone of committed state)".into());
+  }
+  let dirty = uncommitted_changes(root);
+  if !dirty.is_empty() {
+    out.push(format!("the working tree has {} uncommitted change{}", dirty.len(), plural(dirty.len())));
+  }
+  if scratch_root(root).is_none() {
+    out.push("neither tmp/ nor .harness/tmp is gitignored (scsh needs a gitignored scratch dir)".into());
+  }
+  out
 }
 
 /// Resolve a workflow reference to its current string value: a run parameter (from the
@@ -1210,7 +1257,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
 
   let secs = now_secs();
   let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
-  let session_dir_rel = format!("{}/scsh/{session_id}", workflow_scratch_root(root));
+  let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
 
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
   let mut state: HashMap<String, StepState> = HashMap::new();

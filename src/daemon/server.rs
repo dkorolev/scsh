@@ -1061,22 +1061,26 @@ fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   let Some(root) = crate::git_root_of(std::path::Path::new(&abs)) else {
     return (200, err_body(&format!("not a git repository: {abs}")), false);
   };
-  let dirty = crate::uncommitted_changes(&root);
-  let clean = dirty.is_empty();
+  // A repo is runnable only if the run itself would accept it (committed, clean, gitignored
+  // scratch) — the UI uses this to disable Start and say why, so no doomed job is ever started.
+  let blockers = crate::def_run_blockers(&root);
+  let runnable = blockers.is_empty();
+  let clean = !blockers.iter().any(|b| b.contains("uncommitted"));
   let discovery = crate::harness_def::discover(&root);
   let repo = root.to_string_lossy().into_owned();
   let now = now_unix_secs();
   {
     let mut s = lock_store(store);
     s.touch(now);
-    s.open_repo(OpenRepo { path: repo.clone(), opened_at: now, clean });
+    s.open_repo(OpenRepo { path: repo.clone(), opened_at: now, clean: runnable });
   }
-  let dirty_arr: Vec<String> = dirty.iter().take(20).map(|p| quote(p)).collect();
+  let blockers_arr: Vec<String> = blockers.iter().map(|b| quote(b)).collect();
   let body = format!(
-    "{{\"ok\":true,\"repo\":{},\"clean\":{},\"dirty\":[{}],\"defs\":[{}]}}",
+    "{{\"ok\":true,\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}]}}",
     quote(&repo),
+    runnable,
     clean,
-    dirty_arr.join(","),
+    blockers_arr.join(","),
     defs_json(&discovery.defs).join(",")
   );
   (200, body, true)
@@ -1165,12 +1169,15 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   };
   let params = read_params(&obj);
 
-  // Re-validate the repo at start time: still a git repo, still clean.
+  // Re-validate at start time with the SAME checks the run itself makes — a git repo that is
+  // committed, clean, and has a gitignored scratch dir — so the daemon never starts a job the
+  // run would refuse (the browser should already have disabled Start, but never trust the client).
   let Some(root) = crate::git_root_of(std::path::Path::new(&repo_in)) else {
     return (400, err_body(&format!("not a git repository: {repo_in}")), false);
   };
-  if !crate::uncommitted_changes(&root).is_empty() {
-    return (409, err_body("the working tree has uncommitted changes — commit or stash them first"), false);
+  let blockers = crate::def_run_blockers(&root);
+  if !blockers.is_empty() {
+    return (400, err_body(&format!("repository not ready: {}", blockers.join("; "))), false);
   }
   let repo = root.to_string_lossy().into_owned();
 
@@ -1207,14 +1214,25 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   }
   cmd.args(["--session", &session_id]);
   cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.env("NO_COLOR", "1"); // plain stderr, so a captured error reads cleanly on the session page
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
   match cmd.spawn() {
     Ok(mut child) => {
-      // Reap the child so it never lingers as a zombie under the daemon.
+      // Bind the session's fate to the process: drain its stderr, wait, then reconcile — so a job
+      // that dies before it ever registers becomes a *failed* session (with the error), never a
+      // hidden "running" one.
+      let store_reap = Arc::clone(store);
+      let sid = session_id.clone();
+      let stderr = child.stderr.take();
       std::thread::spawn(move || {
-        let _ = child.wait();
+        let mut tail = String::new();
+        if let Some(mut e) = stderr {
+          let _ = e.read_to_string(&mut tail);
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
       let mut store = lock_store(store);
       store.touch(now);
@@ -1237,6 +1255,53 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     }
     Err(e) => (500, err_body(&format!("failed to spawn scsh run: {e}")), false),
   }
+}
+
+/// When a spawned job's process exits, reconcile its session so no job is ever left hidden: a run
+/// that deregistered normally already has an end time and is left alone; one that died without
+/// finishing is ended, and — if it never produced a single proc (a refusal/crash before it
+/// registered) — the captured error is surfaced as a failed row instead of a silent "running".
+fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Option<i32>, stderr_tail: &str) {
+  let now = now_unix_secs();
+  let mut store = lock_store(store);
+  let Some(s) = store.sessions.get_mut(session_id) else { return };
+  if s.ended_at.is_some() {
+    return; // finished and deregistered normally
+  }
+  s.ended_at = Some(now);
+  s.client_connected = false;
+  if s.procs.is_empty() {
+    s.procs.push(ProcRecord {
+      index: 0,
+      label: "run failed to start".into(),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Fail,
+      skill_name: None,
+      harness: None,
+      model: None,
+      started_at: Some(now),
+      note: None,
+      detail: Some(startup_error_detail(stderr_tail, code)),
+      fail_reason: Some("startup_failed".into()),
+      elapsed: Some(0.0),
+      lines: Vec::new(),
+      container_name: None,
+      cast_path: None,
+    });
+  }
+}
+
+/// The tail of a failed run's stderr as a human detail (with an exit-code fallback if it was silent).
+fn startup_error_detail(stderr_tail: &str, code: Option<i32>) -> String {
+  let lines: Vec<&str> = stderr_tail.lines().map(str::trim_end).filter(|l| !l.trim().is_empty()).collect();
+  if lines.is_empty() {
+    return match code {
+      Some(c) => format!("the run exited with status {c} before starting (no output)"),
+      None => "the run was killed before starting (no output)".into(),
+    };
+  }
+  let start = lines.len().saturating_sub(6);
+  lines[start..].join("\n")
 }
 
 /// `GET /api/v1/repos` — the opened repositories and any repos that have jobs, each with its
@@ -2185,7 +2250,7 @@ mod tests {
 
   // ---- harness-definition endpoints ---------------------------------------------------
 
-  /// A fresh temp dir that is a clean git repo (one empty commit) with a local identity.
+  /// A fresh temp dir that is a *runnable* git repo: committed, clean, and with `tmp/` gitignored.
   fn clean_repo(tag: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("scsh-repos-{tag}-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -2195,7 +2260,9 @@ mod tests {
     git(&["init", "-q", "."]);
     git(&["config", "user.email", "t@example.com"]);
     git(&["config", "user.name", "t"]);
-    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    std::fs::write(dir.join(".gitignore"), "/tmp\n").unwrap();
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "init"]);
     dir
   }
 
@@ -2277,9 +2344,84 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let body = format!(r#"{{"repo":{},"def":"add","params":{{}}}}"#, quote(&repo));
     let (status, out, _) = jobs_start_response(&body, &store);
-    assert_eq!(status, 409, "got: {out}");
-    assert!(out.contains("uncommitted changes"), "got: {out}");
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("not ready") && out.contains("uncommitted"), "got: {out}");
     std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_rejects_a_repo_without_a_gitignored_scratch() {
+    // A committed, clean repo that does NOT gitignore tmp/ or .harness/tmp — the exact case that
+    // used to spawn a doomed run and leave a hidden "running" session.
+    let dir = std::env::temp_dir().join(format!("scsh-noscratch-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let git = |args: &[&str]| {
+      assert!(std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap().success())
+    };
+    git(&["init", "-q", "."]);
+    git(&["config", "user.email", "t@e.com"]);
+    git(&["config", "user.name", "t"]);
+    git(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"repo":{},"def":"add","params":{{}}}}"#, quote(&repo));
+    let (status, out, _) = jobs_start_response(&body, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("gitignored scratch"), "got: {out}");
+    assert!(store.lock().unwrap().sessions.is_empty(), "no session created for a doomed job");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn reconcile_marks_an_orphaned_job_failed_with_its_error() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    // A pre-created session whose spawned run died before it registered any proc.
+    store.lock().unwrap().insert_session(
+      "orphan".into(),
+      Session {
+        id: "orphan".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("add".into()),
+        repo: "/r".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 50,
+        client_connected: false,
+      },
+    );
+    reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
+    let guard = store.lock().unwrap();
+    let s = guard.sessions.get("orphan").unwrap();
+    assert!(s.ended_at.is_some(), "the orphaned job is ended, not left running");
+    assert_eq!(s.procs.len(), 1, "a failure row is surfaced");
+    assert_eq!(s.procs[0].status, ProcStatus::Fail);
+    assert!(s.procs[0].detail.as_deref().unwrap().contains("gitignored"), "the real error is shown");
+    assert_eq!(s.lifecycle_status(60), SessionLifecycle::Failed, "shows as failed, never hidden");
+  }
+
+  #[test]
+  fn reconcile_leaves_a_cleanly_finished_job_alone() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    store.lock().unwrap().insert_session(
+      "done".into(),
+      Session {
+        id: "done".into(),
+        started_at: 50,
+        ended_at: Some(55), // already deregistered
+        profile: Some("add".into()),
+        repo: "/r".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 55,
+        client_connected: false,
+      },
+    );
+    reconcile_finished_job(&store, "done", Some(0), "");
+    let guard = store.lock().unwrap();
+    assert!(guard.sessions.get("done").unwrap().procs.is_empty(), "no synthetic row added to a finished job");
   }
 
   #[test]

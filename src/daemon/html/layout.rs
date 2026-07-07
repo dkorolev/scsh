@@ -22,6 +22,20 @@ const PAGE_CSS: &str = r#"
   .images-controls button:disabled { opacity: 0.45; cursor: default; }
   .images-controls label { cursor: pointer; user-select: none; }
   .image-select-cell { width: 1.5rem; }
+  .tabs { display: flex; gap: 0.25rem; border-bottom: 1px solid #8884; margin-bottom: 1rem; flex-wrap: wrap; }
+  .tab {
+    font: inherit; color: inherit; background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 0.4rem 0.8rem; cursor: pointer; opacity: 0.7;
+  }
+  .tab:hover { opacity: 1; }
+  .tab.active { opacity: 1; border-bottom-color: #7ab4ff; color: #7ab4ff; font-weight: 600; }
+  .tab-panel { display: none; }
+  .tab-panel.active { display: block; }
+  .blockers {
+    border: 1px solid #e5566; border-radius: 6px; padding: 0.5rem 0.8rem; margin-bottom: 1rem;
+    background: #e5511;
+  }
+  .blockers ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
   .def-card {
     border: 1px solid #8884; border-radius: 6px; padding: 0.5rem 0.7rem; margin-bottom: 0.5rem;
   }
