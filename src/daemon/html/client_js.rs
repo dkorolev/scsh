@@ -938,8 +938,20 @@ function startImagesBuild(all) {
 })();
 // ---- repositories panel (index page only) ----
 let OPEN_REPO = null;
+let OPEN_REPO_RUNNABLE = false;
 const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
+// ---- tabs ----
+(function initTabs() {
+  const tabs = document.querySelectorAll('.tab');
+  if (!tabs.length) return;
+  tabs.forEach(t => t.addEventListener('click', () => {
+    const id = t.dataset.tab;
+    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
+    if (id === 'images' && typeof refreshImages === 'function') refreshImages();
+  }));
+})();
 function defSourceBadge(src) {
   const cls = src === 'repo' ? 'completed' : (src === 'home' ? 'cancelled' : 'running');
   return '<span class="session-status ' + cls + '">' + esc(src) + '</span>';
@@ -973,13 +985,26 @@ function openRepo() {
   }).then(r => r.json()).then(resp => {
     if (!resp.ok) { if (note) note.textContent = resp.error || 'could not open'; return; }
     OPEN_REPO = resp.repo;
-    OPEN_REPOS[resp.repo] = { clean: resp.clean };
+    OPEN_REPO_RUNNABLE = !!resp.runnable;
+    OPEN_REPOS[resp.repo] = { clean: resp.runnable };
     const panel = document.getElementById('defs-panel');
     if (panel) panel.hidden = false;
     const label = document.getElementById('open-repo-path');
     if (label) label.textContent = resp.repo;
-    if (note) note.textContent = resp.clean ? 'opened (clean)'
-      : 'opened, but the working tree is dirty — commit or stash before starting a job';
+    // Show any blockers prominently; Start stays disabled until they are cleared.
+    const bl = document.getElementById('repo-blockers');
+    if (bl) {
+      const list = resp.blockers || [];
+      if (list.length) {
+        bl.hidden = false;
+        bl.innerHTML = '<strong>Not ready to run:</strong><ul>' +
+          list.map(b => '<li>' + esc(b) + '</li>').join('') + '</ul>';
+      } else {
+        bl.hidden = true;
+        bl.innerHTML = '';
+      }
+    }
+    if (note) note.textContent = resp.runnable ? 'opened — ready to run' : 'opened, but not ready to run (see below)';
     renderDefs(resp.defs || []);
     const form = document.getElementById('def-form');
     if (form) form.innerHTML = '';
@@ -1024,9 +1049,11 @@ function selectDef(name) {
       (p.required ? ' <span class="param-req">*</span>' : '') + '</label> ' + input +
       (p.description ? ' <span class="dim">' + esc(p.description) + '</span>' : '') + '</div>';
   }).join('');
+  const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
+  const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
   form.innerHTML = '<h4>run <code>' + esc(name) + '</code></h4>' + fields +
-    '<div class="images-controls"><button id="def-start">Start job</button>' +
-    '<span id="def-note" class="dim"></span></div>';
+    '<div class="images-controls"><button id="def-start"' + disabled + '>Start job</button>' +
+    '<span id="def-note" class="dim">' + hint + '</span></div>';
   document.getElementById('def-start')?.addEventListener('click', () => startJob(name));
 }
 function collectParams(def) {
@@ -1042,6 +1069,7 @@ function startJob(name) {
   const def = DEFS_BY_NAME[name];
   const note = document.getElementById('def-note');
   if (!def || !OPEN_REPO) return;
+  if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
   const req = { repo: OPEN_REPO, def: name, params: collectParams(def) };
   if (note) note.textContent = 'starting…';
   fetch('/api/v1/jobs/start', {

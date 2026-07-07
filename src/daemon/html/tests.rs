@@ -73,14 +73,21 @@ fn index_page_carries_the_images_panel_and_its_client_wiring() {
 fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
-  for id in ["repo-path", "repo-pick", "repo-open", "defs-panel", "defs-list", "def-form", "repos-body"] {
+  for id in ["repo-path", "repo-pick", "repo-open", "repo-blockers", "defs-panel", "defs-list", "def-form", "repos-body"] {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
+  }
+  // The four tabs, and their panels.
+  for (tab, panel) in [("jobs", "tab-jobs"), ("dirs", "tab-dirs"), ("start", "tab-start"), ("images", "tab-images")] {
+    assert!(html.contains(&format!("data-tab=\"{tab}\"")), "index page should have the {tab} tab");
+    assert!(html.contains(&format!("id=\"{panel}\"")), "index page should have panel #{panel}");
   }
   let js = live_client_js();
   assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
   assert!(js.contains("/api/v1/repos/pick"), "client js pops the folder picker");
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
+  assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
+  assert!(js.contains("function initTabs"), "client js wires the tabs");
 }
 
 #[test]

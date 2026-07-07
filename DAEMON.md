@@ -347,13 +347,23 @@ run never dirties the tracked tree.
 
 ## Start a job from the browser
 
-The session index page has a **repositories** panel: type or paste a path (or click **Pick…**
-for the native folder chooser) and **Open**, which validates the repo and lists its definitions —
-each with its agent routes, a clean/dirty note, and a badge if it is a workflow. Pick a
-definition to render its params as a control form, fill it in, and **Start job**. That posts
-`/api/v1/jobs/start` and deep-links to the spawned session — the same live board a console run
-gets, because the job *is* an ordinary `scsh run --def`. The daemon runs **at most one job per
-directory** at a time; a **jobs by repository** table lists each repo's jobs and updates live.
+The session index page is organized into tabs: **Jobs** (every run), **Directories** (opened
+repos and their jobs), **Start a job**, and **Containers** (the images panel).
+
+Under **Start a job**: type or paste a path (or click **Pick…** for the native folder chooser)
+and **Open**. The daemon validates the repo with the *same* checks the run makes — it must be a
+git repo that is **committed, clean, and has a gitignored scratch dir** (`tmp/` or `.harness/tmp`)
+— and reports `runnable` plus any **blockers**. If it is not runnable, the blockers are shown and
+**Start** stays disabled, so a doomed job is never started. Otherwise, pick a definition (its
+agent routes and a workflow badge are shown), fill its param form, and **Start job** — which
+posts `/api/v1/jobs/start` and deep-links to the spawned session, the same live board a console
+run gets, because the job *is* an ordinary `scsh run --def`. The daemon runs **at most one job
+per directory** at a time.
+
+**No hidden jobs, no silent failures.** A started job's session is bound to its process: the
+daemon captures the spawned run's output and, when the process exits, reconciles the session — a
+run that finished normally is left alone, but one that died before it ever registered becomes a
+**failed** session showing the captured error, never a stranded "running" one.
 
 Two built-in definitions make good demos: **`doctor`** (no params — confirms the agent images
 are built and each agent's credentials proxy through, then runs a trivial end-to-end task) and

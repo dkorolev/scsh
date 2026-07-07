@@ -1000,7 +1000,7 @@ fn daemon_start_status_stop() {
   };
   assert!(status.status.success(), "daemon status: {}", String::from_utf8_lossy(&status.stderr));
   let html = daemon_http_get("/", port).expect("GET /");
-  assert!(html.contains("scsh session browser"), "got: {}", html);
+  assert!(html.contains("data-tab=\"jobs\""), "got: {}", html);
   let stop = daemon_cmd(&d, &home, port, "stop");
   assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
 }
@@ -1016,7 +1016,7 @@ fn daemon_restart() {
   let restart = daemon_cmd(&d, &home, port, "restart");
   assert!(restart.status.success(), "daemon restart: {}", String::from_utf8_lossy(&restart.stderr));
   let html = daemon_http_get("/", port).expect("GET / after restart");
-  assert!(html.contains("scsh session browser"), "got: {}", html);
+  assert!(html.contains("data-tab=\"jobs\""), "got: {}", html);
   let stop = daemon_cmd(&d, &home, port, "stop");
   assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
 }

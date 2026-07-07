@@ -19,28 +19,40 @@ pub fn index_page(store: &Store) -> String {
       .to_string();
   }
   let body = format!(
-    "<h1>scsh session browser</h1>\n\
+    "<h1>scsh</h1>\n\
 <p class=\"dim\">Daemon on {url} · mode {mode}</p>\n\
+<nav class=\"tabs\">\
+<button class=\"tab active\" data-tab=\"jobs\">Jobs</button>\
+<button class=\"tab\" data-tab=\"dirs\">Directories</button>\
+<button class=\"tab\" data-tab=\"start\">Start a job</button>\
+<button class=\"tab\" data-tab=\"images\">Containers</button>\
+</nav>\n\
+<section class=\"tab-panel active\" id=\"tab-jobs\">\n\
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
-<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n{repos}{images}",
+<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
+</section>\n\
+<section class=\"tab-panel\" id=\"tab-dirs\">\n{dirs}</section>\n\
+<section class=\"tab-panel\" id=\"tab-start\">\n{start}</section>\n\
+<section class=\"tab-panel\" id=\"tab-images\">\n{images}</section>\n",
     url = base_url(port),
     mode = store.mode.as_str(),
     rows = rows,
-    repos = repos_panel(),
+    dirs = dirs_panel(),
+    start = start_panel(),
     images = images_panel()
   );
-  wrap_page("scsh sessions", port, None, &body)
+  wrap_page("scsh", port, None, &body)
 }
 
 /// The images panel: a table of every scsh image (populated by the client from
 /// `GET /api/v1/images`) plus the Build buttons that POST `/api/v1/images/build` and
 /// deep-link into the spawned `scsh build-images` session.
 fn images_panel() -> &'static str {
-  r##"<h2>images</h2>
-<p class="dim">The container images scsh builds: the shared base, plus one per harness.
-Stale means the image exists but no longer matches this scsh build's embedded Dockerfile.</p>
+  r##"<p class="dim">The base container images scsh builds: the shared base, plus one per harness.
+Stale means the image exists but no longer matches this scsh build's embedded Dockerfile —
+rebuild it here.</p>
 <div class="table-scroll"><table>
 <thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th></tr></thead>
 <tbody id="images-body"><tr><td colspan="5" class="dim">loading…</td></tr></tbody>
@@ -56,29 +68,36 @@ Stale means the image exists but no longer matches this scsh build's embedded Do
 "##
 }
 
-/// The repositories panel: open a clean git repo (POST `/api/v1/repos/open`), pick one of the
-/// harness definitions it returns, fill the rendered param form, and start a job (POST
-/// `/api/v1/jobs/start`, deep-linking to the spawned session). The jobs-by-repository table is
-/// grouped client-side from the live WebSocket session snapshot.
-fn repos_panel() -> &'static str {
-  r##"<h2>repositories</h2>
-<p class="dim">Open a clean git repository to configure and start a harness-definition job in it —
-the daemon runs it just like <code>scsh run</code>. One job per repository at a time.</p>
+/// The "Start a job" tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
+/// runnable and why not), pick a harness definition, fill the rendered param form, and start a
+/// job (POST `/api/v1/jobs/start`, deep-linking to the spawned session). Start is disabled until
+/// the repo is runnable.
+fn start_panel() -> &'static str {
+  r##"<p class="dim">Open a git repository to configure and start a harness-definition job in it —
+the daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a
+gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job per repository at a time.</p>
 <div class="images-controls">
-<input type="text" id="repo-path" placeholder="/path/to/a/git/repo" size="44">
+<input type="text" id="repo-path" placeholder="/path/to/a/git/repo (type, paste, or Pick…)" size="46">
 <button id="repo-pick">Pick…</button>
 <button id="repo-open">Open</button>
 <span id="repo-note" class="dim"></span>
 </div>
+<div id="repo-blockers" class="blockers" hidden></div>
 <div id="defs-panel" hidden>
 <p class="dim">definitions in <code id="open-repo-path"></code></p>
 <div id="defs-list"></div>
 <div id="def-form"></div>
 </div>
-<h3>jobs by repository</h3>
+"##
+}
+
+/// The "Directories" tab: a table of every opened repository and any repo with jobs, its jobs
+/// grouped underneath — built client-side from the live WebSocket session snapshot.
+fn dirs_panel() -> &'static str {
+  r##"<p class="dim">Repositories you have opened, and every repository that has jobs, with their jobs.</p>
 <div class="table-scroll"><table>
 <thead><tr><th>Repository</th><th>Jobs</th></tr></thead>
-<tbody id="repos-body"><tr><td colspan="2" class="dim">No repositories open yet.</td></tr></tbody>
+<tbody id="repos-body"><tr><td colspan="2" class="dim">No repositories open yet — open one under “Start a job”.</td></tr></tbody>
 </table></div>
 "##
 }
