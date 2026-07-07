@@ -1168,3 +1168,49 @@ fn export_cast_malformed_sidecar_warns_but_exports() {
   let html = std::fs::read_to_string(d.join("rec.html")).expect("export proceeds without the sidecar");
   assert!(html.contains("<title>rec</title>") && !html.contains("\"chapters\":["), "no chapters from junk");
 }
+
+// ---- run --def <name> (harness definitions) ------------------------------------------
+
+#[test]
+fn run_def_needs_a_name() {
+  let d = unique_dir("defnoname"); // parse error happens before any preflight
+  let r = scsh(&d, &["run", "--def"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("--def needs a harness-definition name"), "got: {}", r.out);
+}
+
+#[test]
+fn run_def_rejects_a_profile() {
+  let d = unique_dir("defprofile");
+  let r = scsh(&d, &["run", "--def", "add", "--profile", "x"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("--def selects a harness definition, not a profile"), "got: {}", r.out);
+}
+
+#[test]
+fn def_only_applies_to_run() {
+  let d = unique_dir("deflist");
+  let r = scsh(&d, &["list", "--def", "add"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("--def only applies to 'run'"), "got: {}", r.out);
+}
+
+#[test]
+fn run_def_unknown_definition_lists_available() {
+  // A clean repo with /tmp gitignored gets past the repo-hygiene preflight to definition
+  // discovery, where an unknown name is reported with the available (built-in) definitions.
+  let d = unique_dir("defunknown");
+  git_init(&d);
+  std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-qm", "init"]);
+  assert!(git_clean(&d));
+  let r = scsh(&d, &["run", "--def", "nonesuch"]);
+  assert_eq!(r.code, 1, "got: {}", r.out);
+  assert!(r.out.contains("no harness definition named 'nonesuch'"), "got: {}", r.out);
+  assert!(
+    r.out.contains("add") && r.out.contains("doctor") && r.out.contains("research"),
+    "lists built-ins; got: {}",
+    r.out
+  );
+}

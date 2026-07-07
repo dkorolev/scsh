@@ -10,6 +10,7 @@ mod config;
 mod daemon;
 mod export;
 mod failure;
+mod harness_def;
 mod json;
 mod runtime;
 mod sha1;
@@ -65,7 +66,10 @@ fn run(args: &[String]) -> i32 {
       }
     }
     Mode::CheckProfile => check_profile_cmd(profile),
-    Mode::Run => preflight_then(Action::Run, profile, cli.verbose),
+    Mode::Run => match cli.def.as_deref() {
+      Some(name) => preflight_then_def(name),
+      None => preflight_then(Action::Run, profile, cli.verbose),
+    },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
     // the real interactive board over a few scripted subprocesses.
@@ -405,6 +409,9 @@ struct Cli {
   build_force: bool,
   /// `build-images --rebuild-base`: force-rebuild the shared base (`--no-cache`) first.
   build_rebuild_base: bool,
+  /// `run --def <name>`: run the named harness definition (a `.harness/<name>.yml` or a
+  /// built-in) instead of the repo's `.scsh.yml` skills. Its params come from the environment.
+  def: Option<String>,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -442,6 +449,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_harnesses: Vec<String> = Vec::new();
   let mut build_force = false;
   let mut build_rebuild_base = false;
+  let mut def: Option<String> = None;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -618,6 +626,21 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         profiles.push(name.clone());
         None
       }
+      // `run --def <name>`: run a harness definition instead of the .scsh.yml skills. A bare
+      // `scsh --def <name>` is shorthand for `scsh run --def <name>`.
+      "--def" => {
+        i += 1;
+        let name = args.get(i).ok_or("--def needs a harness-definition name, e.g. scsh run --def add")?;
+        if name.trim().is_empty() {
+          return Err("--def name must not be empty".into());
+        }
+        def = Some(name.clone());
+        if mode.is_none() {
+          Some(Mode::Run)
+        } else {
+          None
+        }
+      }
       "--verbose" | "-v" => {
         verbose = true;
         None
@@ -715,6 +738,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if output.is_some() && !matches!(mode, Mode::ExportCasts) {
     return Err("-o only applies to 'export-cast' (e.g. `scsh export-cast foo.cast -o -`)".into());
   }
+  if def.is_some() && !matches!(mode, Mode::Run) {
+    return Err("--def only applies to 'run' (e.g. `scsh run --def add`)".into());
+  }
+  if def.is_some() && profile.is_some() {
+    return Err("--def selects a harness definition, not a profile — don't combine them".into());
+  }
   Ok(Cli {
     mode,
     profile,
@@ -729,6 +758,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_harnesses,
     build_force,
     build_rebuild_base,
+    def,
   })
 }
 
@@ -768,18 +798,15 @@ fn declared_profiles(cfg: &config::Config) -> Vec<String> {
 // Preflight + actions
 // ---------------------------------------------------------------------------
 
-fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
-  // The preflight checks run quietly on success and collapse into one compact
-  // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
-  // with an actionable ✗/→. A real run is ordered repo-hygiene-first:
-  // git → repo → clean → /tmp → config present → config valid → runtime → engine.
-  let is_run = matches!(action, Action::Run);
-
+/// The repo-hygiene half of the preflight, shared by `scsh run` and `scsh run --def`: git
+/// installed → inside a git repo → (for a run) a clean working tree and a gitignored `/tmp`.
+/// Returns the repo root, or the exit code to return on the first failing check.
+fn preflight_git_repo_clean(is_run: bool) -> Result<PathBuf, i32> {
   // 1. git installed.
   if runtime::which("git").is_none() {
     fail("git is not installed or not on PATH");
     hint(install_git_hint());
-    return 1;
+    return Err(1);
   }
 
   // 2. inside a git repository.
@@ -788,13 +815,12 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
     Err(_) => {
       fail("not inside a git repository");
       hint(&format!("create one here with: {}", bold("git init .")));
-      return 1;
+      return Err(1);
     }
   };
 
-  // For a real run, the repo must be runnable BEFORE we look at the config: a clean
-  // working tree (the container gets a clone of COMMITTED state) and a gitignored
-  // /tmp (build scratch + the collected result stay untracked).
+  // For a real run, the repo must be runnable: a clean working tree (the container gets a
+  // clone of COMMITTED state) and a gitignored /tmp (build scratch + result stay untracked).
   if is_run {
     let dirty = uncommitted_changes(&root);
     if !dirty.is_empty() {
@@ -813,7 +839,7 @@ so they would not be in the container",
         "commit or stash them first, then re-run:  {}",
         bold("git add -A && git commit -m \"Committing unstaged changes to run scsh.\"")
       ));
-      return 1;
+      return Err(1);
     }
     if !tmp_is_gitignored(&root) {
       fail("/tmp is not gitignored in this repository");
@@ -825,11 +851,178 @@ so they would not be in the container",
         // Has a config already: scsh still fixes the .gitignore and commits for you.
         hint(&format!("let scsh add /tmp to .gitignore and commit it: {}", bold("scsh init-demo-project")));
       }
-      return 1;
+      return Err(1);
     }
   }
+  Ok(root)
+}
 
-  // 3. .scsh.yml present at the repo root.
+/// The runtime half of the preflight, shared by `scsh run` and `scsh run --def`: a container
+/// runtime is available and (for a run) its engine is up. Returns the runtime or the exit code.
+fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
+  // a container runtime is available.
+  let rt = match runtime::detect_runtime() {
+    Some(rt) => rt,
+    None => {
+      let cands = runtime::runtime_candidates(cfg!(target_os = "macos")).join(", ");
+      fail(&format!("no container runtime found (looked for: {cands})"));
+      hint(install_runtime_hint());
+      return Err(1);
+    }
+  };
+
+  // A snap-packaged Docker can't bind-mount the system temp dir where each clone lives (the
+  // container would see an empty home and the skill would crash). Auto-detection already
+  // prefers another runtime; warn if it's the only/forced one.
+  if rt.name == "docker" && runtime::is_snap_confined(&rt.path) {
+    hint("this is snap-packaged Docker, which can't bind-mount the system temp dir;");
+    hint("if skills fail to start, use Podman instead (e.g. SCSH_RUNTIME=podman)");
+  }
+
+  // For a real run, the runtime's engine must actually be up.
+  if is_run && !ui::engine::is_running(&rt.name) {
+    fail(&format!("{} is installed but not running", ui::engine::display_name(&rt.name)));
+    if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
+      hint(&format!("start it with: {}", bold(&cmd)));
+    }
+    hint("then re-run 'scsh run'");
+    return Err(1);
+  }
+  Ok(rt)
+}
+
+/// `scsh run --def <name>`: run a harness definition (a `.harness/<name>.yml`, a
+/// `~/.harness/<name>.yml`, or a built-in) instead of the repo's `.scsh.yml` skills. The
+/// same repo-hygiene + runtime preflight applies, but the config steps are replaced by
+/// definition discovery and env-parameter validation. The definition's `task` body is
+/// materialized into each run clone as `.skills/<name>/SKILL.md`, so the repo stays clean.
+fn preflight_then_def(name: &str) -> i32 {
+  let root = match preflight_git_repo_clean(true) {
+    Ok(r) => r,
+    Err(code) => return code,
+  };
+
+  let discovery = harness_def::discover(&root);
+  for w in &discovery.warnings {
+    warn(&format!("harness definition: {w}"));
+  }
+  let def = match discovery.find(name) {
+    Some(d) => d.clone(),
+    None => {
+      fail(&format!("no harness definition named '{name}'"));
+      let names: Vec<&str> = discovery.defs.iter().map(|d| d.name.as_str()).collect();
+      if names.is_empty() {
+        hint("no definitions found — add one under .harness/ or ~/.harness/");
+      } else {
+        hint(&format!("available: {}", names.join(", ")));
+      }
+      return 1;
+    }
+  };
+
+  // Validate the parameters from the environment before touching the runtime: a required
+  // param must be set, and every supplied value must match its declared type.
+  let mut problems = Vec::new();
+  for p in &def.params {
+    match std::env::var(&p.name) {
+      Ok(v) => {
+        if let Err(e) = p.validate_value(&v) {
+          problems.push(e);
+        }
+      }
+      Err(_) => {
+        if p.required && p.default.is_none() {
+          problems.push(format!("param '{}' is required — set it in the environment", p.name));
+        }
+      }
+    }
+  }
+  if !problems.is_empty() {
+    fail(&format!("harness definition '{name}' has {} parameter problem{}", problems.len(), plural(problems.len())));
+    for e in &problems {
+      hint(e);
+    }
+    return 1;
+  }
+
+  let rt = match preflight_runtime_engine(true) {
+    Ok(rt) => rt,
+    Err(code) => return code,
+  };
+
+  // `doctor` additionally reports which agent images are built and whose credentials are
+  // present, before handing an agent the trivial end-to-end confirm task.
+  if name == "doctor" {
+    doctor_preflight(&rt);
+  }
+
+  // Compile the definition to invocations through the existing matrix expander, then attach
+  // the task body so each run clone gets its `.skills/<name>/SKILL.md`.
+  let cfg = config::Config { skills: vec![def.to_skill()], terminal: config::Terminal::default() };
+  let mut invocations = config::expand_invocations(&cfg);
+  for inv in &mut invocations {
+    inv.body = Some(def.task.clone());
+  }
+
+  ok(&format!("git · repo {} · clean · /tmp ignored · def {name}", display_path(&root)));
+
+  // Skip routes whose agent or explicit opencode model is unavailable; fail only when none remain.
+  let model_probe = runtime::OpencodeModelProbe::for_selected(&invocations);
+  let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
+  for inv in &invocations {
+    if let Err(msg) = runtime::check_skill_host(inv.harness, inv.model.as_deref(), &model_probe) {
+      warn(&format!("skipping '{}' — {msg}", inv.name));
+      continue;
+    }
+    runnable.push(inv);
+  }
+  if runnable.is_empty() {
+    fail("no routes to run — every agent was unavailable on this host");
+    hint("check the agent CLIs and credentials (try: scsh run --def doctor)");
+    return 1;
+  }
+
+  let cast_dir = root.join("tmp").join("casts");
+  let before = casts_snapshot(&cast_dir);
+  let code = build_and_run(&rt, &root, &runnable, Some(name));
+  annotate_run_casts(new_casts_since(&cast_dir, &before));
+  code
+}
+
+/// The extra `doctor` preflight: report, as ok/hint lines, which agent images are built and
+/// which agents have credentials on this host — a quick "is my setup ready" read before the
+/// trivial confirm task runs end to end. Best-effort and non-fatal (the run then proceeds and
+/// skips any unavailable route like a normal run).
+fn doctor_preflight(rt: &Runtime) {
+  let statuses = runtime::image_statuses(&rt.name);
+  for agent in config::Harness::ALL {
+    let built = statuses.iter().any(|s| s.name == agent.as_str() && s.exists);
+    let creds = runtime::check_harness_host(agent).is_ok();
+    let img = if built { "image built" } else { "image missing (build it: scsh build-images)" };
+    let cred = if creds { "creds present" } else { "creds missing" };
+    let line = format!("{}: {img}, {cred}", agent.as_str());
+    if built && creds {
+      ok(&line);
+    } else {
+      hint(&line);
+    }
+  }
+}
+
+fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
+  // The preflight checks run quietly on success and collapse into one compact
+  // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
+  // with an actionable ✗/→. A real run is ordered repo-hygiene-first:
+  // git → repo → clean → /tmp → config present → config valid → runtime → engine.
+  let is_run = matches!(action, Action::Run);
+
+  // git installed → inside a repo → (for a run) clean working tree + gitignored /tmp.
+  let root = match preflight_git_repo_clean(is_run) {
+    Ok(r) => r,
+    Err(code) => return code,
+  };
+
+  // .scsh.yml present at the repo root.
   let cfg_path = root.join(".scsh.yml");
   if !cfg_path.is_file() {
     fail(".scsh.yml not found — this repository isn't set up for scsh yet");
@@ -859,34 +1052,11 @@ so they would not be in the container",
     }
   };
 
-  // 5. a container runtime is available.
-  let rt = match runtime::detect_runtime() {
-    Some(rt) => rt,
-    None => {
-      let cands = runtime::runtime_candidates(cfg!(target_os = "macos")).join(", ");
-      fail(&format!("no container runtime found (looked for: {cands})"));
-      hint(install_runtime_hint());
-      return 1;
-    }
+  // a container runtime is available and, for a run, its engine is up.
+  let rt = match preflight_runtime_engine(is_run) {
+    Ok(rt) => rt,
+    Err(code) => return code,
   };
-
-  // A snap-packaged Docker can't bind-mount the system temp dir where each clone
-  // lives (the container would see an empty home and the skill would crash).
-  // Auto-detection already prefers another runtime; warn if it's the only/forced one.
-  if rt.name == "docker" && runtime::is_snap_confined(&rt.path) {
-    hint("this is snap-packaged Docker, which can't bind-mount the system temp dir;");
-    hint("if skills fail to start, use Podman instead (e.g. SCSH_RUNTIME=podman)");
-  }
-
-  // 6. For a real run, the runtime's engine must actually be up.
-  if is_run && !ui::engine::is_running(&rt.name) {
-    fail(&format!("{} is installed but not running", ui::engine::display_name(&rt.name)));
-    if let Some(cmd) = ui::engine::start_command(&rt.name, ui::Os::current()) {
-      hint(&format!("start it with: {}", bold(&cmd)));
-    }
-    hint("then re-run 'scsh run'");
-    return 1;
-  }
 
   match action {
     Action::List => {
@@ -2269,6 +2439,14 @@ fn run_one_skill(
   // brought back even if a later step fails.
   let clone_dir = Some(run_dir.clone());
 
+  // A harness-definition run (`scsh run --def`) carries its SKILL.md body; write it into the
+  // clone so the agent finds it at `.skills/<name>/SKILL.md`. The caller's working tree stays
+  // clean. A normal `.scsh.yml` skill has no body and this is a no-op.
+  if let Err(e) = materialize_def_body(&run_dir, git_transport, skill) {
+    spinner.finish_fail(failure::reason::CLONE, Some(&e));
+    return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, clone_dir);
+  }
+
   // Ensure the result's parent dir exists in the clone so the skill can write it
   // even if the harness's tool does not `mkdir -p`.
   if let Some(parent) = Path::new(&skill.result).parent() {
@@ -2622,6 +2800,26 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
     });
   }
   Ok(())
+}
+
+/// Materialize a harness definition's `SKILL.md` body into the run clone so the agent finds it
+/// at `.skills/<skill_source>/SKILL.md`. A full-mount runtime gets the file written into the
+/// bind-mounted clone; the Apple Container git transport gets it committed into the bare repo
+/// the container clones from. A normal `.scsh.yml` skill (no `body`) is a no-op — the committed
+/// `.skills/<name>/SKILL.md` already rides along in the clone.
+fn materialize_def_body(run_dir: &Path, git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
+  let Some(body) = &skill.body else { return Ok(()) };
+  let rel = format!(".skills/{}/SKILL.md", skill.skill_source);
+  if git_transport {
+    let bare = run_dir.join(runtime::TRANSPORT_BARE);
+    runtime::inject_file_into_bare(&bare, &rel, body, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
+  } else {
+    let path = run_dir.join(&rel);
+    if let Some(parent) = path.parent() {
+      std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
+    }
+    std::fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))
+  }
 }
 
 /// macOS Apple Container push IN: host `git push` into a bare transport repo; the container
@@ -5220,6 +5418,7 @@ mod tests {
       commits: false,
       result: "tmp/r.json".into(),
       terminal: config::Terminal::default(),
+      body: None,
     }
   }
 

@@ -96,6 +96,11 @@ pub struct ResolvedInvocation {
   pub result: String,
   /// PTY size the harness runs (and is recorded) in — the config's top-level `terminal:`.
   pub terminal: Terminal,
+  /// For a harness-definition run (`scsh run --def`), the `SKILL.md` body to materialize
+  /// into the run clone as `.skills/<skill_source>/SKILL.md` (the repo is clean, so the body
+  /// cannot live in the working tree). `None` for a normal `.scsh.yml` skill, whose body is
+  /// the committed `.skills/<name>/SKILL.md`.
+  pub body: Option<String>,
 }
 
 /// Expand every manifest skill into the invocation(s) `scsh run` would execute, in file order.
@@ -124,6 +129,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       commits: skill.commits,
       result: skill.result.clone(),
       terminal,
+      body: None,
     }];
   }
   skill
@@ -141,6 +147,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       commits: route.commits.unwrap_or(skill.commits),
       result: skill.result.replace("{name}", &route.name),
       terminal,
+      body: None,
     })
     .collect()
 }
@@ -245,7 +252,7 @@ impl Harness {
 
 /// A node in the tiny YAML tree: either a scalar string or a mapping.
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Node {
+pub(crate) enum Node {
   Scalar(String),
   Map(Vec<(String, Node)>),
 }
@@ -678,8 +685,9 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   }
 }
 
-/// Validate a skill's `invocations:` block.
-fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> Vec<InvocationRoute> {
+/// Validate a skill's `invocations:` block. Shared with the harness-definition
+/// parser (`.harness/<name>.yml`), whose `invocations:` uses the identical schema.
+pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<String>) -> Vec<InvocationRoute> {
   let entries = match node {
     Node::Map(m) => m,
     Node::Scalar(_) => {
@@ -943,7 +951,9 @@ fn required_message(name: &str) -> String {
 }
 
 /// Whether `s` is a valid POSIX-ish environment variable name (`[A-Za-z_][A-Za-z0-9_]*`).
-fn is_env_name(s: &str) -> bool {
+/// Shared with the harness-definition parser: a param name must be a valid env var
+/// name, because each param is forwarded to the container as an environment variable.
+pub(crate) fn is_env_name(s: &str) -> bool {
   let mut chars = s.chars();
   match chars.next() {
     Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
@@ -966,13 +976,16 @@ pub fn is_safe_relative(p: &str) -> bool {
 // The minimal YAML reader
 // ---------------------------------------------------------------------------
 
-fn parse_yaml(src: &str) -> Result<Vec<(String, Node)>, String> {
+pub(crate) fn parse_yaml(src: &str) -> Result<Vec<(String, Node)>, String> {
+  let raw: Vec<&str> = src.lines().collect();
   let mut lines = Vec::new();
-  for (i, raw) in src.lines().enumerate() {
+  let mut i = 0;
+  while i < raw.len() {
     let lineno = i + 1;
-    let content = strip_comment(raw);
+    let content = strip_comment(raw[i]);
     let trimmed = content.trim_end();
     if trimmed.trim().is_empty() {
+      i += 1;
       continue;
     }
     let indent = trimmed.len() - trimmed.trim_start().len();
@@ -986,8 +999,19 @@ fn parse_yaml(src: &str) -> Result<Vec<(String, Node)>, String> {
       return Err(format!("line {lineno}: empty key"));
     }
     let rest = body[colon + 1..].trim();
+    // A literal block scalar — `key: |` (keep one trailing newline) or `key: |-` (strip
+    // trailing blank lines). Its content is taken verbatim from the raw lines, with no
+    // comment stripping and no colon parsing, so a `task:` prompt may contain prose, `#`,
+    // and `:` freely. Content lines are those indented deeper than the introducer.
+    if rest == "|" || rest == "|-" {
+      let (text, next) = read_block_scalar(&raw, i + 1, indent, rest == "|");
+      lines.push(Line { indent, key, inline: Some(text), lineno });
+      i = next;
+      continue;
+    }
     let inline = if rest.is_empty() { None } else { Some(unquote(rest)) };
     lines.push(Line { indent, key, inline, lineno });
+    i += 1;
   }
 
   let mut idx = 0;
@@ -996,6 +1020,43 @@ fn parse_yaml(src: &str) -> Result<Vec<(String, Node)>, String> {
     return Err(format!("line {}: unexpected indentation", lines[idx].lineno));
   }
   Ok(entries)
+}
+
+/// Read a literal block scalar. `start` is the first raw line after the `key: |`
+/// introducer, which itself sat at `parent_indent`. Content is every following line
+/// indented deeper than the parent (blank lines included); the block's base indent is
+/// that of its first non-blank line and is stripped from each line (a deeper line keeps
+/// its extra indentation). Returns the joined text and the index of the first line past
+/// the block. `keep_trailing` (`|`) leaves one trailing newline; `|-` leaves none.
+fn read_block_scalar(raw: &[&str], start: usize, parent_indent: usize, keep_trailing: bool) -> (String, usize) {
+  let mut base: Option<usize> = None;
+  let mut collected: Vec<String> = Vec::new();
+  let mut j = start;
+  while j < raw.len() {
+    let line = raw[j];
+    if line.trim().is_empty() {
+      collected.push(String::new());
+      j += 1;
+      continue;
+    }
+    let ind = line.len() - line.trim_start().len();
+    if ind <= parent_indent {
+      break;
+    }
+    let b = *base.get_or_insert(ind);
+    // Leading indentation is ASCII spaces, so the byte offset equals the column.
+    collected.push(if ind >= b { line[b..].to_string() } else { line.trim_start().to_string() });
+    j += 1;
+  }
+  // Blank lines captured past the real content (block-to-sibling separators, EOF) are dropped.
+  while collected.last().is_some_and(|s| s.is_empty()) {
+    collected.pop();
+  }
+  let mut text = collected.join("\n");
+  if keep_trailing && !text.is_empty() {
+    text.push('\n');
+  }
+  (text, j)
 }
 
 fn parse_block(lines: &[Line], idx: &mut usize, indent: usize) -> Result<Vec<(String, Node)>, String> {
@@ -1120,6 +1181,23 @@ mod tests {
   s:
 {body}"#
     )
+  }
+
+  #[test]
+  fn block_scalar_preserves_multiline_text() {
+    let src = "task: |\n  line one\n  line two\n\n  after blank\nnext: x\n";
+    let entries = parse_yaml(src).unwrap();
+    let task = &entries.iter().find(|(k, _)| k == "task").unwrap().1;
+    assert_eq!(*task, Node::Scalar("line one\nline two\n\nafter blank\n".into()));
+    // A sibling key after the block is still parsed normally.
+    let next = &entries.iter().find(|(k, _)| k == "next").unwrap().1;
+    assert_eq!(*next, Node::Scalar("x".into()));
+  }
+
+  #[test]
+  fn block_scalar_strip_variant_drops_trailing_newline() {
+    let entries = parse_yaml("task: |-\n  only line\n").unwrap();
+    assert_eq!(entries[0].1, Node::Scalar("only line".into()));
   }
 
   #[test]

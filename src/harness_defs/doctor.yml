@@ -1,0 +1,23 @@
+# Built-in harness definition: an end-to-end confirm task. scsh gates a `doctor` run
+# with extra pre-checks (agent images built + credentials present) before it starts;
+# the task itself just proves an agent can run to completion and write its result.
+description: "Verify the agent images are built and credentials work, then run a trivial confirm-task end to end."
+task: |
+  You are running inside an scsh container for the built-in `doctor` check.
+
+  Confirm you are executing inside the container, then write the JSON object
+  {"ok": true, "confirmed": "doctor end-to-end path works"} to the file named by
+  the `SCSH_RESULT` environment variable, and stop.
+
+  Do nothing else — no commits, no network, no other files.
+invocations:
+  claude-opus-4-8:
+    harness: claude
+    model: claude-opus-4-8
+  codex-gpt-5.5:
+    harness: codex
+    model: gpt-5.5
+    effort: low
+  cursor-composer-fast:
+    harness: cursor
+    model: composer-2.5-fast

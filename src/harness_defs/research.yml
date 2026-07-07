@@ -1,0 +1,31 @@
+# Built-in harness definition: a trivial tool-calling smoke test.
+description: "Find good hikes near a city/area over the next few days (tool-calling demo)."
+params:
+  CITY:
+    type: string
+    required: true
+    description: "City to search near"
+  AREA:
+    type: string
+    default: ""
+    description: "Optional sub-area or region to narrow the search"
+task: |
+  You are running inside an scsh container for the built-in `research` demo. This
+  exercises basic tool-calling; keep it short.
+
+  1. Read `CITY` (required) and `AREA` (optional) from the environment.
+  2. Using whatever web/search tools are available, find a few good hikes near
+     `CITY` (narrowed by `AREA` when set) for the next few days.
+  3. Write the JSON object
+     {"city": "<CITY>", "area": "<AREA>", "hikes": [{"name": "", "why": "",
+     "distance_km": 0}]} to the file named by the `SCSH_RESULT` environment variable.
+
+  Do nothing else — no commits, no other files.
+invocations:
+  claude-sonnet-4-6:
+    harness: claude
+    model: sonnet
+  codex-gpt-5.5:
+    harness: codex
+    model: gpt-5.5
+    effort: low

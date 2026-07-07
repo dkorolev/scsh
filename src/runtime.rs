@@ -1545,6 +1545,99 @@ pub fn push_transport_refs(root: &Path, bare: &Path) -> Result<(), String> {
   Ok(())
 }
 
+/// Commit a single file into a bare repo's checked-out branch, on top of HEAD, so a container
+/// that clones the transport sees it in its working tree. scsh uses this to place a harness
+/// definition's `SKILL.md` into the Apple Container git-transport clone without dirtying the
+/// caller's repo. `commit_name`/`commit_email` identify the scaffolding commit (it lives only
+/// in the throwaway transport repo and is never returned to the caller).
+pub fn inject_file_into_bare(
+  bare: &Path, rel_path: &str, content: &str, commit_name: &str, commit_email: &str,
+) -> Result<(), String> {
+  use std::io::Write;
+  use std::process::{Command, Stdio};
+
+  // Commits land on the branch HEAD points at, so the default clone checkout includes the file.
+  let head_ref = git_stdout(bare, &["symbolic-ref", "HEAD"])
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .ok_or_else(|| format!("could not read HEAD of {}", bare.display()))?;
+
+  // 1. Write the file content as a blob.
+  let mut child = Command::new("git")
+    .arg("-C")
+    .arg(bare)
+    .args(["hash-object", "-w", "--stdin"])
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .spawn()
+    .map_err(|e| format!("git hash-object: {e}"))?;
+  child
+    .stdin
+    .take()
+    .ok_or("git hash-object: no stdin")?
+    .write_all(content.as_bytes())
+    .map_err(|e| format!("git hash-object write: {e}"))?;
+  let out = child.wait_with_output().map_err(|e| format!("git hash-object: {e}"))?;
+  if !out.status.success() {
+    return Err("git hash-object failed".into());
+  }
+  let blob = String::from_utf8_lossy(&out.stdout).trim().to_string();
+
+  // 2. Build a tree = HEAD's tree + the new file, using a throwaway index (a bare repo has none).
+  let index = bare.join("scsh-inject.index");
+  let git_index = |args: &[&str]| -> Result<std::process::Output, String> {
+    Command::new("git")
+      .arg("-C")
+      .arg(bare)
+      .env("GIT_INDEX_FILE", &index)
+      .args(args)
+      .output()
+      .map_err(|e| format!("git {}: {e}", args.join(" ")))
+  };
+  let build_tree = || -> Result<String, String> {
+    let read = git_index(&["read-tree", &head_ref])?;
+    if !read.status.success() {
+      return Err("git read-tree failed".into());
+    }
+    let cacheinfo = format!("100644,{blob},{rel_path}");
+    let add = git_index(&["update-index", "--add", "--cacheinfo", &cacheinfo])?;
+    if !add.status.success() {
+      return Err("git update-index failed".into());
+    }
+    let tree = git_index(&["write-tree"])?;
+    if !tree.status.success() {
+      return Err("git write-tree failed".into());
+    }
+    Ok(String::from_utf8_lossy(&tree.stdout).trim().to_string())
+  };
+  let tree = build_tree();
+  let _ = std::fs::remove_file(&index); // clean up the throwaway index whatever happened
+  let tree = tree?;
+
+  // 3. Commit the tree on top of HEAD and move the branch to it. commit-tree needs an identity,
+  // which the bare repo lacks, so pass it explicitly.
+  let commit_out = Command::new("git")
+    .arg("-C")
+    .arg(bare)
+    .args(["commit-tree", &tree, "-p", &head_ref, "-m", "scsh: add harness-definition skill body"])
+    .env("GIT_AUTHOR_NAME", commit_name)
+    .env("GIT_AUTHOR_EMAIL", commit_email)
+    .env("GIT_COMMITTER_NAME", commit_name)
+    .env("GIT_COMMITTER_EMAIL", commit_email)
+    .output()
+    .map_err(|e| format!("git commit-tree: {e}"))?;
+  if !commit_out.status.success() {
+    return Err("git commit-tree failed".into());
+  }
+  let commit = String::from_utf8_lossy(&commit_out.stdout).trim().to_string();
+
+  if !git_ok(bare, &["update-ref", &head_ref, &commit]) {
+    return Err(format!("could not update {head_ref} in {}", bare.display()));
+  }
+  Ok(())
+}
+
 /// Path scsh fetches commits from after a run: the run clone, or `pull.git` when git transport
 /// moved the repo only inside the container.
 pub fn commits_fetch_path(run_dir: &Path) -> PathBuf {
@@ -2643,6 +2736,7 @@ mod tests {
         env: vec![],
         result: "tmp/a.json".into(),
         terminal: crate::config::Terminal::default(),
+        body: None,
       },
       crate::config::ResolvedInvocation {
         name: "b".into(),
@@ -2656,6 +2750,7 @@ mod tests {
         env: vec![],
         result: "tmp/b.json".into(),
         terminal: crate::config::Terminal::default(),
+        body: None,
       },
       crate::config::ResolvedInvocation {
         name: "c".into(),
@@ -2669,6 +2764,7 @@ mod tests {
         env: vec![],
         result: "tmp/c.json".into(),
         terminal: crate::config::Terminal::default(),
+        body: None,
       },
     ];
     let set = requested_opencode_models(&skills);
@@ -2719,6 +2815,7 @@ mod tests {
       env: vec![],
       result: "tmp/add.json".into(),
       terminal: crate::config::Terminal::default(),
+      body: None,
     }];
     let probe = OpencodeModelProbe::for_selected(&skills);
     assert!(probe.check_model("openai/anything").is_ok());

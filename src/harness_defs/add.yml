@@ -1,0 +1,28 @@
+# Built-in harness definition: a self-checking a+b arithmetic smoke test.
+description: "Add two integers A and B and verify the sum."
+params:
+  A:
+    type: int
+    default: "2"
+    description: "First addend"
+  B:
+    type: int
+    default: "3"
+    description: "Second addend"
+task: |
+  You are running inside an scsh container for the built-in `add` self-test.
+
+  1. Read the integers `A` and `B` from the environment.
+  2. Compute `S = A + B`.
+  3. Write the JSON object {"ok": true, "a": A, "b": B, "sum": S} to the file
+     named by the `SCSH_RESULT` environment variable.
+  4. Re-read that file and assert that `sum == A + B`. If it does not match, fail.
+
+  Do nothing else — no commits, no network, no other files.
+invocations:
+  opencode-gpt-5.4-mini-fast:
+    harness: opencode
+    model: openai/gpt-5.4-mini-fast
+  claude-sonnet-4-6:
+    harness: claude
+    model: sonnet
