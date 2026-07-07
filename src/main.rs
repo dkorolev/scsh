@@ -952,6 +952,12 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
     Err(code) => return code,
   };
 
+  // A workflow definition runs through the DAG orchestrator; a flat one goes through the
+  // existing matrix expander below.
+  if def.is_workflow() {
+    return run_workflow(&rt, &root, &def, session);
+  }
+
   // `doctor` additionally reports which agent images are built and whose credentials are
   // present, before handing an agent the trivial end-to-end confirm task.
   if name == "doctor" {
@@ -963,7 +969,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let cfg = config::Config { skills: vec![def.to_skill()], terminal: config::Terminal::default() };
   let mut invocations = config::expand_invocations(&cfg);
   for inv in &mut invocations {
-    inv.body = Some(def.task.clone());
+    inv.body = def.task.clone();
   }
 
   ok(&format!("git · repo {} · clean · /tmp ignored · def {name}", display_path(&root)));
@@ -989,6 +995,335 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let code = build_and_run(&rt, &root, &runnable, Some(name), session);
   annotate_run_casts(new_casts_since(&cast_dir, &before));
   code
+}
+
+/// One step's state once it has been decided: either skipped (its `when` was false, or a step it
+/// needs was skipped) or run with its validated output fields.
+struct StepState {
+  skipped: bool,
+  outputs: std::collections::HashMap<String, String>,
+}
+
+/// The gitignored scratch root a workflow's session directory lives under: `.harness/tmp` when
+/// that is gitignored (some repos prefer it), else `tmp` (which the preflight already required).
+fn workflow_scratch_root(root: &Path) -> &'static str {
+  if git_status_ok(root, &["check-ignore", "-q", ".harness/tmp"]) {
+    ".harness/tmp"
+  } else {
+    "tmp"
+  }
+}
+
+/// Resolve a workflow reference to its current string value: a run parameter (from the
+/// environment, else its declared default), or a field of an already-run step's output.
+fn resolve_ref(
+  reference: &harness_def::Ref, def: &harness_def::HarnessDef, state: &std::collections::HashMap<String, StepState>,
+) -> Option<String> {
+  match reference {
+    harness_def::Ref::Param(n) => {
+      std::env::var(n).ok().or_else(|| def.params.iter().find(|p| &p.name == n).and_then(|p| p.default.clone()))
+    }
+    harness_def::Ref::StepField { step, field } => state.get(step).and_then(|s| s.outputs.get(field).cloned()),
+  }
+}
+
+/// Parse a step's result JSON into `field -> scalar-as-string` (non-scalar values are dropped;
+/// the schema check reports any that are then missing).
+fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String, String>, String> {
+  let value = json::parse(content).map_err(|e| format!("result is not valid JSON: {e}"))?;
+  let json::Value::Object(obj) = value else {
+    return Err("result is not a JSON object".into());
+  };
+  let mut out = std::collections::HashMap::new();
+  for (k, v) in obj {
+    let scalar = match v {
+      json::Value::String(s) => Some(s),
+      json::Value::Bool(b) => Some(b.to_string()),
+      json::Value::Number(n) => Some(if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }),
+      _ => None,
+    };
+    if let Some(s) = scalar {
+      out.insert(k, s);
+    }
+  }
+  Ok(out)
+}
+
+/// Extract and type-check a step's declared output fields from its result JSON.
+fn extract_step_outputs(
+  content: &str, outputs: &[harness_def::OutputField],
+) -> Result<std::collections::HashMap<String, String>, String> {
+  let obj = match parse_result_object(content) {
+    Ok(o) => o,
+    Err(e) => return Err(e),
+  };
+  let mut out = std::collections::HashMap::new();
+  for f in outputs {
+    let Some(value) = obj.get(&f.name) else {
+      return Err(format!("result is missing the '{}' field", f.name));
+    };
+    match f.ty {
+      harness_def::ParamType::Int => {
+        if value.trim().parse::<i64>().is_err() {
+          return Err(format!("output '{}' must be an integer (got '{value}')", f.name));
+        }
+      }
+      harness_def::ParamType::Bool => {
+        if !matches!(value.trim(), "true" | "false") {
+          return Err(format!("output '{}' must be true or false (got '{value}')", f.name));
+        }
+      }
+      harness_def::ParamType::Enum => {
+        if !f.choices.iter().any(|c| c == value.trim()) {
+          return Err(format!("output '{}' must be one of: {} (got '{value}')", f.name, f.choices.join(", ")));
+        }
+      }
+      harness_def::ParamType::String => {}
+    }
+    out.insert(f.name.clone(), value.clone());
+  }
+  Ok(out)
+}
+
+/// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body (prompt
+/// + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step result file
+/// under the session scratch dir.
+fn step_invocation(
+  step: &harness_def::Step, session_dir_rel: &str, inputs: Vec<(String, String)>,
+) -> ResolvedInvocation {
+  ResolvedInvocation {
+    name: step.id.clone(),
+    skill_source: step.id.clone(),
+    harness: step.agent.harness,
+    model: step.agent.model.clone(),
+    effort: step.agent.effort.clone(),
+    timeout: None,
+    env: inputs
+      .into_iter()
+      .map(|(key, value)| config::EnvVar { key, rule: config::EnvRule::Constant(value) })
+      .collect(),
+    profile: None,
+    commits: false,
+    result: format!("{session_dir_rel}/{}.json", step.id),
+    terminal: config::Terminal::default(),
+    body: Some(step.render_skill_body()),
+  }
+}
+
+/// Build (or reuse) the base + per-harness images a workflow's steps need, reporting each as a
+/// build proc row. Returns the first build failure, if any.
+fn ensure_workflow_images(
+  rt: &Runtime, ui: &ui::screen::LiveUi, daemon_client: &Option<std::sync::Arc<daemon::Client>>,
+  harnesses: &[config::Harness],
+) -> Result<(), (String, i32)> {
+  let (uid, gid) = runtime::host_ids();
+  let df = runtime::dockerfile();
+  let tz = runtime::host_timezone();
+  let build_one =
+    |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
+      let p = ui.proc(label.clone(), true);
+      if let Some(c) = daemon_client {
+        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None);
+      }
+      p.start();
+      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false) {
+        Ok(()) => {
+          p.finish_ok(None);
+          Ok(())
+        }
+        Err(e) => {
+          p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+          Err(e)
+        }
+      }
+    };
+  let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
+  if !runtime::image_is_up_to_date(&rt.name, runtime::BASE_IMAGE_TAG, &base_fp) {
+    build_one(
+      format!("using {} · build base", backend_name(&rt.name)),
+      runtime::BASE_IMAGE_TAG,
+      runtime::BASE_IMAGE_TARGET,
+      &base_fp,
+      None,
+    )?;
+  }
+  for &h in harnesses {
+    let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
+    if !runtime::image_is_up_to_date(&rt.name, &spec.tag, &spec.fingerprint) {
+      build_one(
+        format!("using {} · build {}", backend_name(&rt.name), h.as_str()),
+        &spec.tag,
+        &spec.target,
+        &spec.fingerprint,
+        Some(h),
+      )?;
+    }
+  }
+  Ok(())
+}
+
+/// Run a workflow definition: walk its DAG, running each step (via the same one-shot primitive a
+/// flat run uses) with its inputs bound from params and upstream outputs, validating each step's
+/// typed output, evaluating `when:` gates (a false gate — or a skipped dependency — skips the
+/// step), and running independent runnable steps in parallel. One session, one live board.
+fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>) -> i32 {
+  use std::collections::HashMap;
+  ui::signals::install();
+
+  // One session for the whole workflow (mirrors build_and_run's daemon attach).
+  let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
+  let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
+  if daemon::ensure_for_run().is_ok() {
+    let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
+    let skill_meta: Vec<(&str, &str)> = def.steps.iter().map(|s| (s.id.as_str(), s.agent.harness.as_str())).collect();
+    if client.register_session(&repo_path_for_session(root), &current_branch(root), Some(&def.name), &skill_meta) {
+      ok(&format!("track progress at {}", client.session_url()));
+      let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+      let ping_flag = std::sync::Arc::clone(&ping_active);
+      let ping_client = std::sync::Arc::clone(&client);
+      std::thread::spawn(move || {
+        while ping_flag.load(std::sync::atomic::Ordering::Relaxed) {
+          ping_client.ping();
+          std::thread::sleep(Duration::from_secs(2));
+        }
+      });
+      daemon_session.client = Some(client);
+      daemon_session.ping_active = Some(ping_active);
+      daemon_session.registered = true;
+    }
+  }
+  let daemon_client = daemon_session.client.clone();
+  let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
+
+  // Build the images every step agent needs (in first-seen order).
+  let mut harnesses = Vec::new();
+  for s in &def.steps {
+    if !harnesses.contains(&s.agent.harness) {
+      harnesses.push(s.agent.harness);
+    }
+  }
+  if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses) {
+    ui.finish();
+    fail(&msg);
+    return code;
+  }
+
+  let secs = now_secs();
+  let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let session_dir_rel = format!("{}/scsh/{session_id}", workflow_scratch_root(root));
+
+  // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
+  let mut state: HashMap<String, StepState> = HashMap::new();
+  let mut failure: Option<String> = None;
+  while state.len() < def.steps.len() && failure.is_none() {
+    let ready: Vec<&harness_def::Step> = def
+      .steps
+      .iter()
+      .filter(|s| !state.contains_key(&s.id) && s.needs.iter().all(|n| state.contains_key(n)))
+      .collect();
+    if ready.is_empty() {
+      break; // acyclic ⇒ this only happens once every step is decided
+    }
+
+    // Partition this wave into steps to skip (gate false, or a needed step was skipped) and to run.
+    let mut to_run: Vec<&harness_def::Step> = Vec::new();
+    for s in ready {
+      let need_skipped = s.needs.iter().any(|n| state.get(n).is_some_and(|st| st.skipped));
+      let when_ok = s.when.as_ref().is_none_or(|w| harness_def::when_holds(w, &|r| resolve_ref(r, def, &state)));
+      if need_skipped || !when_ok {
+        state.insert(s.id.clone(), StepState { skipped: true, outputs: HashMap::new() });
+      } else {
+        to_run.push(s);
+      }
+    }
+    if to_run.is_empty() {
+      continue;
+    }
+
+    // Resolve inputs and build one invocation + proc row per runnable step.
+    let mut invs: Vec<ResolvedInvocation> = Vec::new();
+    let mut procs: Vec<ui::screen::Proc> = Vec::new();
+    for s in &to_run {
+      let mut inputs: Vec<(String, String)> = Vec::new();
+      for b in &s.inputs {
+        inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
+      }
+      invs.push(step_invocation(s, &session_dir_rel, inputs));
+      let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
+      let p = ui.proc(label.clone(), false);
+      if let Some(c) = &daemon_client {
+        c.proc_add(
+          p.index(),
+          &label,
+          daemon::ProcKind::Skill,
+          Some(&s.id),
+          Some(s.agent.harness.as_str()),
+          s.agent.model.as_deref(),
+        );
+      }
+      procs.push(p);
+    }
+    ui.pin_board_to_top();
+
+    // Run the wave in parallel — independent steps proceed at once.
+    let results: Vec<(String, SkillRun)> = std::thread::scope(|scope| {
+      let handles: Vec<_> = invs
+        .iter()
+        .zip(procs)
+        .map(|(inv, p)| {
+          let dc = daemon_client.clone();
+          let base_ref = base.as_deref();
+          let id = inv.name.clone();
+          scope.spawn(move || (id, run_one_skill(inv, rt, root, secs, p, base_ref, dc)))
+        })
+        .collect();
+      handles
+        .into_iter()
+        .map(|h| {
+          h.join()
+            .unwrap_or_else(|_| (String::new(), SkillRun::failed(failure::reason::THREAD_PANICKED, None, None, None)))
+        })
+        .collect()
+    });
+
+    // Record each step's outcome; the first failure (run failure or an output that does not match
+    // the declared schema) aborts the workflow.
+    for (id, run) in results {
+      let Some(step) = def.steps.iter().find(|s| s.id == id) else { continue };
+      if !run.ok {
+        failure = Some(format!("step '{id}' failed ({})", run.fail_reason.as_deref().unwrap_or("unknown")));
+        break;
+      }
+      match run.result_content.as_deref().map(|c| extract_step_outputs(c, &step.outputs)) {
+        Some(Ok(outputs)) => {
+          state.insert(id, StepState { skipped: false, outputs });
+        }
+        Some(Err(e)) => {
+          failure = Some(format!("step '{id}' produced an invalid result: {e}"));
+          break;
+        }
+        None => {
+          failure = Some(format!("step '{id}' produced no result"));
+          break;
+        }
+      }
+    }
+  }
+
+  ui.finish();
+  if let Some(msg) = failure {
+    fail(&msg);
+    return 1;
+  }
+  let ran = state.values().filter(|s| !s.skipped).count();
+  let skipped = state.values().filter(|s| s.skipped).count();
+  ok(&format!(
+    "workflow '{}' complete — {ran} step{} ran{}",
+    def.name,
+    plural(ran),
+    if skipped > 0 { format!(", {skipped} skipped") } else { String::new() }
+  ));
+  0
 }
 
 /// The extra `doctor` preflight: report, as ok/hint lines, which agent images are built and
@@ -2320,6 +2655,10 @@ struct SkillRun {
   /// `format-patch` mbox, replayed onto the caller's branch so a hit reproduces the
   /// commit side effect (not just the result file). `None` otherwise.
   cached_commits: Option<String>,
+  /// The skill's result-file JSON as read from the host after the run (or the cache), so a
+  /// workflow orchestrator can feed one step's output into the next. `None` when no result
+  /// was produced (a failure) or it could not be read.
+  result_content: Option<String>,
 }
 
 impl SkillRun {
@@ -2334,10 +2673,11 @@ impl SkillRun {
       log: None,
       clone_dir: None,
       cached_commits: None,
+      result_content: None,
     }
   }
-  fn ok(log: String, clone_dir: Option<PathBuf>) -> SkillRun {
-    SkillRun { ok: true, log: Some(log), clone_dir, ..SkillRun::base() }
+  fn ok(log: String, clone_dir: Option<PathBuf>, result_content: Option<String>) -> SkillRun {
+    SkillRun { ok: true, log: Some(log), clone_dir, result_content, ..SkillRun::base() }
   }
   fn failed(reason: &str, run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
     SkillRun { fail_reason: Some(reason.into()), run_dir, log, clone_dir, ..SkillRun::base() }
@@ -2629,7 +2969,7 @@ fn run_one_skill(
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       spinner.finish_ok(Some(headline));
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
-      SkillRun::ok(log, clone_dir)
+      SkillRun::ok(log, clone_dir, content)
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);

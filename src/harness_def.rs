@@ -19,13 +19,15 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 /// discovery never reads the real home; power users may relocate their global definitions.
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
-/// The three built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research` are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 3] {
+/// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
+/// `doctor`/`add`/`research` (flat) and `fruits` (a workflow) are always available regardless of
+/// the repo. `(name, yaml)`.
+pub fn builtin_defs() -> [(&'static str, &'static str); 4] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
     ("research", include_str!("harness_defs/research.yml")),
+    ("fruits", include_str!("harness_defs/fruits.yml")),
   ]
 }
 
@@ -148,7 +150,121 @@ impl Param {
   }
 }
 
-/// A parsed, validated harness definition.
+/// A reference in a `when:` condition or `inputs:` binding — either a run parameter
+/// (`params.NAME`) or a field of an upstream step's validated output (`stepid.field`). This is
+/// the ONE reference form workflows use; there is no expression language, only these two shapes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ref {
+  /// `params.NAME` — a run parameter.
+  Param(String),
+  /// `stepid.field` — a field of an upstream step's `output`.
+  StepField { step: String, field: String },
+}
+
+impl Ref {
+  /// Parse a `head.tail` reference. `params.NAME` is a param; anything else is `stepid.field`.
+  fn parse(s: &str) -> Option<Ref> {
+    let (head, tail) = s.trim().split_once('.')?;
+    let (head, tail) = (head.trim(), tail.trim());
+    if head.is_empty() || tail.is_empty() || tail.contains('.') {
+      return None;
+    }
+    if head == "params" {
+      Some(Ref::Param(tail.to_string()))
+    } else {
+      Some(Ref::StepField { step: head.to_string(), field: tail.to_string() })
+    }
+  }
+}
+
+/// One `inputs:` binding: the env var name the step receives (its own name), bound to a source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InputBinding {
+  /// The environment variable the running step sees.
+  pub name: String,
+  /// Where its value comes from (a param or an upstream step's output field).
+  pub source: Ref,
+}
+
+/// A comparison operator in a `when:` condition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CondOp {
+  Eq,
+  Ne,
+  Lt,
+  Lte,
+  Gt,
+  Gte,
+  In,
+}
+
+impl CondOp {
+  fn parse(s: &str) -> Option<CondOp> {
+    match s {
+      "eq" => Some(CondOp::Eq),
+      "ne" => Some(CondOp::Ne),
+      "lt" => Some(CondOp::Lt),
+      "lte" => Some(CondOp::Lte),
+      "gt" => Some(CondOp::Gt),
+      "gte" => Some(CondOp::Gte),
+      "in" => Some(CondOp::In),
+      _ => None,
+    }
+  }
+}
+
+/// One condition: a reference compared against a literal (a comma-separated list, for `in`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cond {
+  pub reference: Ref,
+  pub op: CondOp,
+  /// The comparison value(s) — one, except `in` which takes several.
+  pub values: Vec<String>,
+}
+
+/// A step gate: a set of conditions, ALL of which must hold (AND). Disjunction ("run in either
+/// case") is expressed as separate steps, so the format needs no OR combinator — which also
+/// keeps `when:` a plain block map the minimal YAML reader can parse.
+pub type When = Vec<Cond>;
+
+/// One output field a step promises to write to its result JSON (name + type, enum choices).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OutputField {
+  pub name: String,
+  pub ty: ParamType,
+  pub choices: Vec<String>,
+}
+
+/// The agent (CLI + model) that runs a single step.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StepAgent {
+  pub harness: crate::config::Harness,
+  pub model: Option<String>,
+  pub effort: Option<String>,
+}
+
+/// One node in a workflow DAG. A step is a context-free unit: it receives its `inputs` as
+/// named environment variables and writes its `output` fields to `$SCSH_RESULT` — it knows
+/// nothing about the graph, other steps, or its own position (scsh resolves all of that).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Step {
+  /// Unique step id (`[A-Za-z0-9_]`).
+  pub id: String,
+  /// The agent that runs this step.
+  pub agent: StepAgent,
+  /// The task prompt (intent only; scsh appends the I/O contract from `inputs`/`outputs`).
+  pub prompt: String,
+  /// Input bindings: each names an env var the step sees and where its value comes from.
+  pub inputs: Vec<InputBinding>,
+  /// The typed result fields this step must produce (validated against `$SCSH_RESULT`).
+  pub outputs: Vec<OutputField>,
+  /// Optional gate: the step runs only when this evaluates true.
+  pub when: Option<When>,
+  /// Steps that must finish (or be skipped) before this one — the DAG edges.
+  pub needs: Vec<String>,
+}
+
+/// A parsed, validated harness definition — either a flat one-shot task or a workflow of steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HarnessDef {
   /// The definition name (the `.harness/<name>.yml` file stem, or the built-in name).
@@ -159,16 +275,26 @@ pub struct HarnessDef {
   pub description: String,
   /// Declared parameters, in file order.
   pub params: Vec<Param>,
-  /// The task prompt; materialized into the run clone as `.skills/<name>/SKILL.md`.
-  pub task: String,
-  /// The agent matrix — identical schema to a `.scsh.yml` skill's `invocations:`.
+  /// Flat form: the task prompt (`None` for a workflow), materialized into the run clone as
+  /// `.skills/<name>/SKILL.md`.
+  pub task: Option<String>,
+  /// Flat form: the agent matrix — identical schema to a `.scsh.yml` skill's `invocations:`
+  /// (empty for a workflow).
   pub invocations: Vec<InvocationRoute>,
+  /// Workflow form: the DAG of steps (empty for a flat definition).
+  pub steps: Vec<Step>,
 }
 
 impl HarnessDef {
-  /// Compile this definition into a synthetic [`Skill`] so the existing run path
+  /// Whether this is a workflow (has `steps:`) rather than a flat one-shot task.
+  pub fn is_workflow(&self) -> bool {
+    !self.steps.is_empty()
+  }
+
+  /// Compile a FLAT definition into a synthetic [`Skill`] so the existing run path
   /// (`expand_invocations` → `build_and_run`) runs it unchanged. Params become the skill's
   /// forwarded `env`; the agent matrix becomes its `invocations`; results land under `tmp/`.
+  /// (Workflows do not use this; the orchestrator builds a per-step invocation instead.)
   pub fn to_skill(&self) -> Skill {
     Skill {
       name: self.name.clone(),
@@ -184,6 +310,65 @@ impl HarnessDef {
       result: format!("tmp/{}_{{name}}.json", self.name),
     }
   }
+}
+
+impl Step {
+  /// The full `SKILL.md` body scsh materializes for this step: the author's `prompt` plus the
+  /// scsh-generated I/O contract — which env vars carry the inputs, and the exact JSON shape to
+  /// write to `$SCSH_RESULT`. The author writes intent; scsh guarantees the machine contract.
+  pub fn render_skill_body(&self) -> String {
+    let mut s = self.prompt.trim_end().to_string();
+    s.push_str("\n\n## Inputs\n\n");
+    if self.inputs.is_empty() {
+      s.push_str("This step takes no inputs.\n");
+    } else {
+      s.push_str("These values are provided as environment variables:\n");
+      for b in &self.inputs {
+        s.push_str(&format!("- `{}`\n", b.name));
+      }
+    }
+    s.push_str("\n## Output\n\nWrite a single JSON object to the file at `$SCSH_RESULT` with exactly these fields:\n");
+    for o in &self.outputs {
+      let ty = match o.ty {
+        ParamType::Enum => format!("one of: {}", o.choices.join(", ")),
+        other => other.as_str().to_string(),
+      };
+      s.push_str(&format!("- `{}` ({ty})\n", o.name));
+    }
+    s.push_str("\nDo not write anything else to that file.\n");
+    s
+  }
+}
+
+impl Cond {
+  /// Evaluate this condition. `value_of` returns the current string value of a reference
+  /// (a param value, or a field of an upstream step's result), or `None` if unavailable.
+  pub fn eval(&self, value_of: &impl Fn(&Ref) -> Option<String>) -> bool {
+    let Some(actual) = value_of(&self.reference) else { return false };
+    match self.op {
+      CondOp::Eq => self.values.first().is_some_and(|v| *v == actual),
+      CondOp::Ne => self.values.first().is_some_and(|v| *v != actual),
+      CondOp::In => self.values.iter().any(|v| *v == actual),
+      _ => {
+        let (Ok(a), Some(Ok(b))) = (actual.trim().parse::<i64>(), self.values.first().map(|v| v.trim().parse::<i64>()))
+        else {
+          return false;
+        };
+        match self.op {
+          CondOp::Lt => a < b,
+          CondOp::Lte => a <= b,
+          CondOp::Gt => a > b,
+          CondOp::Gte => a >= b,
+          _ => unreachable!("non-ordering op handled above"),
+        }
+      }
+    }
+  }
+}
+
+/// Whether a step's `when:` gate holds — every condition must (they are AND-ed).
+pub fn when_holds(when: &When, value_of: &impl Fn(&Ref) -> Option<String>) -> bool {
+  when.iter().all(|c| c.eval(value_of))
 }
 
 /// The result of discovering the definitions available to a repo: the merged definitions
@@ -295,15 +480,14 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
       errors.push(format!("duplicate top-level key '{k}'"));
     }
   }
-  const KNOWN: &[&str] = &["description", "params", "task", "invocations"];
+  const KNOWN: &[&str] = &["description", "params", "task", "invocations", "steps"];
   for (k, _) in &entries {
     if !KNOWN.contains(&k.as_str()) {
-      errors.push(format!("unknown top-level key '{k}' (allowed: description, params, task, invocations)"));
+      errors.push(format!("unknown top-level key '{k}' (allowed: description, params, task, invocations, steps)"));
     }
   }
 
   let description = required_scalar(top.get("description").copied(), "description", &mut errors);
-  let task = required_scalar(top.get("task").copied(), "task", &mut errors);
 
   let params = match top.get("params").copied() {
     None => Vec::new(),
@@ -314,15 +498,29 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
     Some(Node::Map(m)) => validate_params(m, &mut errors),
   };
 
-  let invocations = match top.get("invocations").copied() {
-    None => {
-      errors.push("missing required key 'invocations' (an agent matrix, like a .scsh.yml skill)".into());
-      Vec::new()
+  // A definition is EITHER a workflow (`steps:`) OR a flat one-shot task (`task:`+`invocations:`).
+  let stepped = top.contains_key("steps");
+  let flat = top.contains_key("task") || top.contains_key("invocations");
+  let mut task = None;
+  let mut invocations = Vec::new();
+  let mut steps = Vec::new();
+  if stepped && flat {
+    errors
+      .push("a definition uses either 'steps:' (a workflow) or 'task:'+'invocations:' (a one-shot), not both".into());
+  } else if stepped {
+    steps = validate_steps(top.get("steps").copied(), &params, &mut errors);
+  } else {
+    task = required_scalar(top.get("task").copied(), "task", &mut errors);
+    invocations = match top.get("invocations").copied() {
+      None => {
+        errors.push("missing required key 'invocations' (an agent matrix, like a .scsh.yml skill) — or use 'steps:' for a workflow".into());
+        Vec::new()
+      }
+      Some(node) => config::validate_invocations(name, node, &mut errors),
+    };
+    if top.contains_key("invocations") && invocations.is_empty() && errors.is_empty() {
+      errors.push("'invocations' must list at least one agent route".into());
     }
-    Some(node) => config::validate_invocations(name, node, &mut errors),
-  };
-  if top.contains_key("invocations") && invocations.is_empty() && errors.is_empty() {
-    errors.push("'invocations' must list at least one agent route".into());
   }
 
   if errors.is_empty() {
@@ -331,11 +529,367 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
       source,
       description: description.unwrap_or_default(),
       params,
-      task: task.unwrap_or_default(),
+      task,
       invocations,
+      steps,
     })
   } else {
     Err(errors)
+  }
+}
+
+/// Validate the `steps:` block map (keyed by step id) into a DAG: each step has an agent, a
+/// prompt, and typed `output` fields; `inputs`/`when` references resolve to a declared param or
+/// an upstream step's output field; `needs` names other steps; and the graph is acyclic. The
+/// minimal YAML reader has no flow collections, so `steps:` is a block map (not a sequence),
+/// `needs:` is a comma-separated scalar, and `when:` is a plain block map (AND of its entries).
+fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String>) -> Vec<Step> {
+  let entries = match node {
+    Some(Node::Map(m)) if !m.is_empty() => m,
+    Some(Node::Map(_)) => {
+      errors.push("'steps' must define at least one step".into());
+      return Vec::new();
+    }
+    _ => {
+      errors.push("'steps' must be a mapping of named steps".into());
+      return Vec::new();
+    }
+  };
+
+  let mut steps: Vec<Step> = Vec::new();
+  let mut seen: BTreeMap<&str, ()> = BTreeMap::new();
+  for (id, node) in entries {
+    let id = id.trim();
+    if !config::is_env_name(id) {
+      errors.push(format!("step id '{id}' is not a valid identifier ([A-Za-z_][A-Za-z0-9_]*)"));
+      continue;
+    }
+    if seen.insert(id, ()).is_some() {
+      errors.push(format!("duplicate step '{id}'"));
+    }
+    let fields = match node {
+      Node::Map(f) => f,
+      Node::Scalar(_) => {
+        errors.push(format!("step '{id}' must be a mapping (agent, prompt, inputs, output, when, needs)"));
+        continue;
+      }
+    };
+    let mut fm: BTreeMap<&str, &Node> = BTreeMap::new();
+    for (k, v) in fields {
+      if fm.insert(k.as_str(), v).is_some() {
+        errors.push(format!("duplicate key 'steps.{id}.{k}'"));
+      }
+    }
+    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs"];
+    for (k, _) in fields {
+      if !SK.contains(&k.as_str()) {
+        errors.push(format!("unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs)"));
+      }
+    }
+
+    let agent = validate_step_agent(id, fm.get("agent").copied(), errors);
+    let prompt = required_scalar(fm.get("prompt").copied(), &format!("steps.{id}.prompt"), errors);
+    let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
+    let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
+    let when = validate_step_when(id, fm.get("when").copied(), errors);
+    let needs = parse_needs(fm.get("needs").copied());
+
+    if let (Some(agent), Some(prompt)) = (agent, prompt) {
+      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs });
+    }
+  }
+
+  validate_step_graph(&steps, params, errors);
+  steps
+}
+
+/// Validate a step's `agent:` block into a [`StepAgent`] (harness required; model/effort optional).
+fn validate_step_agent(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Option<StepAgent> {
+  let fields = match node {
+    None => {
+      errors.push(format!("step '{id}' is missing required key 'agent'"));
+      return None;
+    }
+    Some(Node::Map(f)) => f,
+    Some(Node::Scalar(_)) => {
+      errors.push(format!("'steps.{id}.agent' must be a mapping with 'harness' (and optional 'model'/'effort')"));
+      return None;
+    }
+  };
+  let mut fm: BTreeMap<&str, &Node> = BTreeMap::new();
+  for (k, v) in fields {
+    fm.insert(k.as_str(), v);
+  }
+  for (k, _) in fields {
+    if !["harness", "model", "effort"].contains(&k.as_str()) {
+      errors.push(format!("unknown key 'steps.{id}.agent.{k}' (allowed: harness, model, effort)"));
+    }
+  }
+  let harness = match fm.get("harness").copied() {
+    Some(Node::Scalar(s)) => match crate::config::Harness::parse(s.trim()) {
+      Some(h) => Some(h),
+      None => {
+        errors.push(format!("'steps.{id}.agent.harness' is '{}', not a known harness", s.trim()));
+        None
+      }
+    },
+    _ => {
+      errors.push(format!("'steps.{id}.agent' is missing 'harness'"));
+      None
+    }
+  };
+  let model = step_opt_scalar(&fm, id, "model", errors);
+  let effort = step_opt_scalar(&fm, id, "effort", errors);
+  harness.map(|harness| StepAgent { harness, model, effort })
+}
+
+/// Validate a step's `inputs:` block into bindings (env var name → source reference).
+fn validate_step_inputs(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Vec<InputBinding> {
+  let entries = match node {
+    None => return Vec::new(),
+    Some(Node::Map(m)) => m,
+    Some(Node::Scalar(_)) => {
+      errors.push(format!("'steps.{id}.inputs' must be a mapping of NAME: source"));
+      return Vec::new();
+    }
+  };
+  let mut out = Vec::new();
+  for (name, node) in entries {
+    let name = name.trim();
+    if !config::is_env_name(name) {
+      errors.push(format!("'steps.{id}.inputs': '{name}' is not a valid variable name"));
+      continue;
+    }
+    let src = match node {
+      Node::Scalar(s) => s.trim(),
+      Node::Map(_) => {
+        errors.push(format!("'steps.{id}.inputs.{name}' must be a reference like params.X or stepid.field"));
+        continue;
+      }
+    };
+    match Ref::parse(src) {
+      Some(reference) => out.push(InputBinding { name: name.to_string(), source: reference }),
+      None => errors.push(format!("'steps.{id}.inputs.{name}' is '{src}', not a params.X or stepid.field reference")),
+    }
+  }
+  out
+}
+
+/// Validate a step's `output:` block into typed fields the step must produce.
+fn validate_step_outputs(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Vec<OutputField> {
+  let entries = match node {
+    None => {
+      errors.push(format!("step '{id}' is missing required key 'output' (the fields it must produce)"));
+      return Vec::new();
+    }
+    Some(Node::Map(m)) if !m.is_empty() => m,
+    _ => {
+      errors.push(format!("'steps.{id}.output' must declare at least one field"));
+      return Vec::new();
+    }
+  };
+  let mut out = Vec::new();
+  for (field, node) in entries {
+    let field = field.trim();
+    if !config::is_env_name(field) {
+      errors.push(format!("'steps.{id}.output': '{field}' is not a valid field name"));
+      continue;
+    }
+    let fm = match node {
+      Node::Map(m) => m,
+      Node::Scalar(_) => {
+        errors.push(format!("'steps.{id}.output.{field}' must be a mapping with 'type'"));
+        continue;
+      }
+    };
+    let mut m: BTreeMap<&str, &Node> = BTreeMap::new();
+    for (k, v) in fm {
+      m.insert(k.as_str(), v);
+    }
+    let ty = match m.get("type").copied() {
+      Some(Node::Scalar(s)) => ParamType::parse(s.trim()).unwrap_or(ParamType::String),
+      _ => ParamType::String,
+    };
+    let choices = match m.get("choices").copied() {
+      Some(Node::Scalar(s)) => s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect(),
+      _ => Vec::new(),
+    };
+    if ty == ParamType::Enum && choices.is_empty() {
+      errors.push(format!("'steps.{id}.output.{field}' is an enum but has no 'choices'"));
+    }
+    out.push(OutputField { name: field.to_string(), ty, choices });
+  }
+  out
+}
+
+/// Validate a step's `when:` block map into a list of AND-ed conditions.
+fn validate_step_when(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Option<When> {
+  let entries = match node {
+    None => return None,
+    Some(Node::Map(m)) if !m.is_empty() => m,
+    _ => {
+      errors.push(format!("'steps.{id}.when' must be a non-empty mapping of condition entries"));
+      return None;
+    }
+  };
+  let mut conds = Vec::new();
+  for (key, node) in entries {
+    let Some(reference) = Ref::parse(key.trim()) else {
+      errors.push(format!("'steps.{id}.when': '{}' is not a params.X or stepid.field reference", key.trim()));
+      continue;
+    };
+    let (op, values) = match node {
+      // A scalar value → equality.
+      Node::Scalar(s) => (CondOp::Eq, vec![s.trim().to_string()]),
+      // A one-entry mapping → the named operator.
+      Node::Map(m) if m.len() == 1 => {
+        let (opk, opv) = &m[0];
+        let Some(op) = CondOp::parse(opk.trim()) else {
+          errors.push(format!("'steps.{id}.when.{}': unknown operator '{}'", key.trim(), opk.trim()));
+          continue;
+        };
+        match opv {
+          Node::Scalar(s) if op == CondOp::In => {
+            (op, s.split(',').map(|v| v.trim().to_string()).filter(|v| !v.is_empty()).collect())
+          }
+          Node::Scalar(s) => (op, vec![s.trim().to_string()]),
+          Node::Map(_) => {
+            errors.push(format!("'steps.{id}.when.{}.{}' must be a value", key.trim(), opk.trim()));
+            continue;
+          }
+        }
+      }
+      Node::Map(_) => {
+        errors.push(format!("'steps.{id}.when.{}' must be a value or a single operator mapping", key.trim()));
+        continue;
+      }
+    };
+    conds.push(Cond { reference, op, values });
+  }
+  (!conds.is_empty()).then_some(conds)
+}
+
+/// Parse `needs:` — a comma/space-separated scalar (brackets optional): `needs: a, b` or `[a, b]`.
+fn parse_needs(node: Option<&Node>) -> Vec<String> {
+  let Some(Node::Scalar(s)) = node else { return Vec::new() };
+  s.trim()
+    .trim_start_matches('[')
+    .trim_end_matches(']')
+    .split([',', ' '])
+    .map(str::trim)
+    .filter(|x| !x.is_empty())
+    .map(str::to_string)
+    .collect()
+}
+
+/// Cross-step checks: `needs` names defined steps; the graph is acyclic; every `inputs`/`when`
+/// reference resolves to a declared param or an upstream step's declared output field, and any
+/// referenced step is listed in `needs` (so the ordering that makes the value available is explicit).
+fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String>) {
+  use std::collections::BTreeSet;
+  let ids: BTreeSet<&str> = steps.iter().map(|s| s.id.as_str()).collect();
+  let param_names: BTreeSet<&str> = params.iter().map(|p| p.name.as_str()).collect();
+  let output_of = |step: &str| steps.iter().find(|s| s.id == step).map(|s| &s.outputs);
+
+  for s in steps {
+    for need in &s.needs {
+      if !ids.contains(need.as_str()) {
+        errors.push(format!("step '{}' needs '{need}', which is not a defined step", s.id));
+      }
+      if need == &s.id {
+        errors.push(format!("step '{}' cannot need itself", s.id));
+      }
+    }
+    let check_ref = |reference: &Ref, ctx: &str, errors: &mut Vec<String>| match reference {
+      Ref::Param(n) => {
+        if !param_names.contains(n.as_str()) {
+          errors.push(format!("step '{}' {ctx} references params.{n}, which is not a declared param", s.id));
+        }
+      }
+      Ref::StepField { step, field } => {
+        if !s.needs.iter().any(|n| n == step) {
+          errors.push(format!("step '{}' {ctx} references {step}.{field} but does not 'needs: {step}'", s.id));
+        }
+        match output_of(step) {
+          None => {
+            errors.push(format!("step '{}' {ctx} references {step}.{field}, but '{step}' is not a defined step", s.id))
+          }
+          Some(outputs) if !outputs.iter().any(|o| &o.name == field) => errors.push(format!(
+            "step '{}' {ctx} references {step}.{field}, which '{step}' does not declare in its output",
+            s.id
+          )),
+          Some(_) => {}
+        }
+      }
+    };
+    for b in &s.inputs {
+      check_ref(&b.source, &format!("input '{}'", b.name), errors);
+    }
+    for c in s.when.iter().flatten() {
+      check_ref(&c.reference, "when", errors);
+    }
+  }
+
+  if let Some(cycle) = first_cycle(steps) {
+    errors.push(format!("steps form a cycle via 'needs': {}", cycle.join(" → ")));
+  }
+}
+
+/// Return a cycle in the `needs` graph (as a list of step ids) if one exists, via DFS.
+fn first_cycle(steps: &[Step]) -> Option<Vec<String>> {
+  use std::collections::BTreeMap as Map;
+  let deps: Map<&str, &Vec<String>> = steps.iter().map(|s| (s.id.as_str(), &s.needs)).collect();
+  // 0 = unvisited, 1 = on stack, 2 = done.
+  let mut state: Map<&str, u8> = steps.iter().map(|s| (s.id.as_str(), 0u8)).collect();
+  let mut stack: Vec<&str> = Vec::new();
+  fn dfs<'a>(
+    node: &'a str, deps: &Map<&'a str, &'a Vec<String>>, state: &mut Map<&'a str, u8>, stack: &mut Vec<&'a str>,
+  ) -> Option<Vec<String>> {
+    state.insert(node, 1);
+    stack.push(node);
+    if let Some(needs) = deps.get(node) {
+      for n in needs.iter() {
+        let n = n.as_str();
+        match state.get(n).copied().unwrap_or(2) {
+          1 => {
+            let start = stack.iter().position(|x| *x == n).unwrap_or(0);
+            let mut cyc: Vec<String> = stack[start..].iter().map(|s| s.to_string()).collect();
+            cyc.push(n.to_string());
+            return Some(cyc);
+          }
+          0 => {
+            if let Some(c) = dfs(n, deps, state, stack) {
+              return Some(c);
+            }
+          }
+          _ => {}
+        }
+      }
+    }
+    stack.pop();
+    state.insert(node, 2);
+    None
+  }
+  for s in steps {
+    if state.get(s.id.as_str()).copied().unwrap_or(2) == 0 {
+      if let Some(c) = dfs(s.id.as_str(), &deps, &mut state, &mut stack) {
+        return Some(c);
+      }
+    }
+  }
+  None
+}
+
+/// A step's optional scalar sub-field of `agent:`.
+fn step_opt_scalar(fm: &BTreeMap<&str, &Node>, id: &str, field: &str, errors: &mut Vec<String>) -> Option<String> {
+  match fm.get(field).copied() {
+    None => None,
+    Some(Node::Scalar(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+    Some(Node::Scalar(_)) => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'steps.{id}.agent.{field}' must be a string"));
+      None
+    }
   }
 }
 
@@ -486,8 +1040,9 @@ mod tests {
     assert!(add.params.iter().all(|p| p.ty == ParamType::Int));
     assert_eq!(add.params.iter().find(|p| p.name == "A").unwrap().default.as_deref(), Some("2"));
     // The `task:` block scalar is preserved verbatim across multiple lines.
-    assert!(add.task.contains('\n'), "task should be multi-line");
-    assert!(add.task.contains("SCSH_RESULT"), "task body preserved");
+    let task = add.task.as_deref().expect("flat def has a task");
+    assert!(task.contains('\n'), "task should be multi-line");
+    assert!(task.contains("SCSH_RESULT"), "task body preserved");
     assert_eq!(add.invocations.len(), 2);
 
     let research = builtin("research");
@@ -499,6 +1054,80 @@ mod tests {
     let doctor = builtin("doctor");
     assert!(doctor.params.is_empty());
     assert_eq!(doctor.invocations.len(), 3);
+  }
+
+  #[test]
+  fn builtin_fruits_workflow_parses() {
+    let f = builtin("fruits");
+    assert!(f.is_workflow(), "fruits is a workflow");
+    assert!(f.task.is_none() && f.invocations.is_empty(), "a workflow has no flat task/invocations");
+    assert_eq!(f.steps.len(), 3);
+    let categorize = f.steps.iter().find(|s| s.id == "categorize").unwrap();
+    assert!(categorize.needs.is_empty() && categorize.outputs.iter().any(|o| o.name == "fruits"));
+    let sort_fruits = f.steps.iter().find(|s| s.id == "sort_fruits").unwrap();
+    assert_eq!(sort_fruits.needs, vec!["categorize"]);
+    // Its LIST input binds to categorize.fruits.
+    let bind = sort_fruits.inputs.iter().find(|b| b.name == "LIST").unwrap();
+    assert_eq!(bind.source, Ref::StepField { step: "categorize".into(), field: "fruits".into() });
+  }
+
+  /// A minimal two-step workflow source for negative tests.
+  fn wf(extra_second: &str) -> String {
+    format!(
+      "description: \"x\"\nsteps:\n  a:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      do a\n    output:\n      kind:\n        type: string\n  b:\n{extra_second}\n"
+    )
+  }
+
+  #[test]
+  fn workflow_rejects_reference_to_undeclared_output() {
+    // b references a.missing, which a does not declare in its output.
+    let src = wf("    needs: a\n    agent:\n      harness: claude\n      model: sonnet\n    inputs:\n      X: a.missing\n    prompt: |\n      go\n    output:\n      y:\n        type: string");
+    let err = validate("t", &src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("a.missing")), "{err:?}");
+  }
+
+  #[test]
+  fn workflow_rejects_reference_without_needs() {
+    // b references a.kind but does not declare needs: a.
+    let src = wf("    agent:\n      harness: claude\n      model: sonnet\n    inputs:\n      X: a.kind\n    prompt: |\n      go\n    output:\n      y:\n        type: string");
+    let err = validate("t", &src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("does not 'needs: a'")), "{err:?}");
+  }
+
+  #[test]
+  fn workflow_rejects_cycles() {
+    let src = "description: \"x\"\nsteps:\n  a:\n    needs: b\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      a\n    output:\n      y:\n        type: string\n  b:\n    needs: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      b\n    output:\n      y:\n        type: string\n";
+    let err = validate("t", src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("cycle")), "{err:?}");
+  }
+
+  #[test]
+  fn workflow_and_flat_are_mutually_exclusive() {
+    let src = "description: \"x\"\ntask: |\n  do\ninvocations:\n  c:\n    harness: claude\n    model: sonnet\nsteps:\n  a:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      a\n    output:\n      y:\n        type: string\n";
+    let err = validate("t", src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("either 'steps:'")), "{err:?}");
+  }
+
+  #[test]
+  fn condition_evaluation() {
+    let refv = Ref::StepField { step: "s".into(), field: "n".into() };
+    let ge = Cond { reference: refv.clone(), op: CondOp::Gte, values: vec!["3".into()] };
+    assert!(ge.eval(&|_| Some("5".into())));
+    assert!(!ge.eval(&|_| Some("2".into())));
+    let eq = Cond { reference: refv.clone(), op: CondOp::Eq, values: vec!["code".into()] };
+    assert!(eq.eval(&|_| Some("code".into())));
+    assert!(!eq.eval(&|_| Some("docs".into())));
+    // A missing value never satisfies a condition.
+    assert!(!eq.eval(&|_| None));
+  }
+
+  #[test]
+  fn step_body_carries_the_io_contract() {
+    let f = builtin("fruits");
+    let body = f.steps.iter().find(|s| s.id == "categorize").unwrap().render_skill_body();
+    assert!(body.contains("WORDS"), "names the input");
+    assert!(body.contains("$SCSH_RESULT"), "points at the result file");
+    assert!(body.contains("fruits") && body.contains("vegetables"), "lists the output fields");
   }
 
   #[test]

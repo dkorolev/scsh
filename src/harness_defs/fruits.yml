@@ -1,0 +1,50 @@
+# Built-in workflow demo: one step categorizes words, then two parallel steps sort each list.
+# Shows the DAG mechanics — fan-out and typed input/output wiring — with a trivially checkable
+# result. Each step is context-free: it gets its inputs as env vars and writes $SCSH_RESULT.
+description: "Categorize words into fruits and vegetables, then sort each list alphabetically."
+params:
+  WORDS:
+    type: string
+    required: true
+    description: "Comma-separated words to categorize (e.g. apple, carrot, pear, onion)"
+steps:
+  categorize:
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      WORDS: params.WORDS
+    prompt: |
+      The WORDS input is a comma-separated list of words. Split them into two groups —
+      fruits and vegetables — and return each as a comma-separated string.
+    output:
+      fruits:
+        type: string
+      vegetables:
+        type: string
+  sort_fruits:
+    needs: categorize
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      LIST: categorize.fruits
+    prompt: |
+      The LIST input is a comma-separated list. Return it sorted alphabetically, as a
+      comma-separated string.
+    output:
+      sorted:
+        type: string
+  sort_vegetables:
+    needs: categorize
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      LIST: categorize.vegetables
+    prompt: |
+      The LIST input is a comma-separated list. Return it sorted alphabetically, as a
+      comma-separated string.
+    output:
+      sorted:
+        type: string
