@@ -53,7 +53,8 @@ curl -s "localhost:7391/" | grep -oE 'id="(repo-path|repo-open|defs-panel|repos-
 
 **Expect:** all four ids and the `jobs by repository` heading are present. (In a real browser at
 `http://127.0.0.1:7391/`, Open the repo, pick `add`, and confirm the param form renders inputs
-for `A` and `B` prefilled with `2` and `3`.)
+for `A` and `B` prefilled with `2` and `3`. The `fruits` definition shows a **workflow** badge.
+Clicking **Pick…** opens the native OS folder chooser on a machine with a display.)
 
 ## 4. Missing required parameter is rejected
 
@@ -120,6 +121,17 @@ cd "$REPO" && A=2 B=3 "$SCSH_BIN" run --def add
 and `git -C "$REPO" status` is clean afterward (the definition body never dirties the tree). For
 `scsh run --def doctor`, expect a preflight report of each agent's image/credential status before
 the confirm task.
+
+## 9. (Optional) A real workflow run
+
+```console
+cd "$REPO" && WORDS="apple, carrot, pear, onion" "$SCSH_BIN" run --def fruits
+```
+
+**Expect:** `categorize` runs first, then `sort_fruits` and `sort_vegetables` run in parallel;
+the session board shows all three step rows. The per-step results land under the gitignored
+session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fruits.json` has a
+`sorted` field with the fruits in alphabetical order, and `git -C "$REPO" status` is clean.
 
 ## Cleanup
 

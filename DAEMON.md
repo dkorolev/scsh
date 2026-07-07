@@ -232,6 +232,9 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
   per directory, validate the definition + params, then spawn a detached `scsh run --def <name>`
   in the repo with the params as environment and a pre-created session id.
   `{"ok":true,"session":id}`; a second job in the same repo (or a dirty tree) gets 409
+- `POST /api/v1/repos/pick` — pop the host's native folder chooser (the daemon is local) and
+  return the chosen path: `{"ok":true,"path":…}`, `{"ok":false,"cancelled":true}`, or
+  `{"ok":false,"error":…}` on a headless host (type the path instead)
 - `GET /api/v1/repos` — the opened repositories and any repos that have jobs, each with its
   jobs (sessions) grouped underneath
 
@@ -243,22 +246,36 @@ sources shadowing earlier ones by name (repo > home > built-in):
 
 - **built-in** (embedded in the binary, always available): `doctor` (report which agent images
   and credentials are present, then run a trivial end-to-end confirm task), `add` (an a+b math
-  self-test), and `research` (a trivial tool-calling demo).
+  self-test), `research` (a trivial tool-calling demo), and `fruits` (a workflow demo, below).
 - `~/.harness/<name>.yml` — the running user's personal definitions.
 - `<repo>/.harness/<name>.yml` — definitions that ship with a repository.
 
-Each `.harness/<name>.yml` is:
+A definition is **either** a flat one-shot task **or** a workflow. Note the YAML is
+**block-form only**: the minimal reader has no inline flow collections, so write nested mappings
+and lists as indented blocks (not `{ … }` / `[ … ]`), except `needs:` which is a comma-separated
+scalar.
+
+A flat `.harness/<name>.yml`:
 
 ```yaml
 description: "Add two integers A and B and verify the sum."   # one line, shown in the list
 params:                                                       # each forwards as an env var
-  A: { type: int, default: "2", description: "First addend" }
-  B: { type: int, default: "3", description: "Second addend" }
+  A:
+    type: int
+    default: "2"
+    description: "First addend"
+  B:
+    type: int
+    default: "3"
 task: |                                                       # becomes .skills/<name>/SKILL.md
   Read A and B from the environment, compute A+B, write {"sum": …} to $SCSH_RESULT, and assert.
 invocations:                                                  # the agent matrix (as in .scsh.yml)
-  opencode-gpt: { harness: opencode, model: openai/gpt-5.4-mini-fast }
-  claude-sonnet: { harness: claude, model: sonnet }
+  opencode-gpt:
+    harness: opencode
+    model: openai/gpt-5.4-mini-fast
+  claude-sonnet:
+    harness: claude
+    model: sonnet
 ```
 
 Param types are `string`, `int`, `bool`, and `enum` (with a comma-separated `choices:`). A param
@@ -267,14 +284,81 @@ with a `default:` is optional; without one it is required unless `required: fals
 so the caller's working tree stays clean — `scsh run --def` requires a clean repo just like a
 normal run.
 
+## Workflow definitions (`steps:`)
+
+A definition with `steps:` (instead of `task:`+`invocations:`) is a **workflow** — a DAG of
+steps scsh runs in order, passing typed output from one step into the next. Each step is a
+context-free unit: it names an `agent`, a `prompt`, typed `output` fields, and `inputs` bound
+from run params (`params.NAME`) or an upstream step's output (`stepid.field`). scsh resolves the
+wiring and hands each input to the step as a plain environment variable, and appends the I/O
+contract (which env vars carry the inputs, and the exact JSON to write to `$SCSH_RESULT`) to the
+prompt — so a step knows only about itself.
+
+```yaml
+description: "Categorize words, then sort each list."
+params:
+  WORDS:
+    type: string
+    required: true
+steps:
+  categorize:
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      WORDS: params.WORDS         # bind an input from a run param
+    prompt: |
+      Split the WORDS input into fruits and vegetables (comma-separated).
+    output:                       # the typed result this step must write
+      fruits:
+        type: string
+      vegetables:
+        type: string
+  sort_fruits:                    # sort_fruits and sort_vegetables run in parallel
+    needs: categorize             # DAG edge (comma-separated for several)
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      LIST: categorize.fruits     # bind an input from an upstream output field
+    prompt: |
+      Sort the LIST input alphabetically.
+    output:
+      sorted:
+        type: string
+```
+
+- **`needs:`** — the DAG edges; a step runs once every step it needs has run (or been skipped).
+- **`when:`** — an optional gate: a block map of `reference: value` (or `reference: { gte: 3 }`)
+  entries, ALL of which must hold (AND) for the step to run. Ops: `eq ne lt lte gt gte in`.
+  Disjunction is expressed as separate steps, so there is no OR combinator and no expression
+  language. A false gate — or a skipped dependency — skips the step.
+- **`output:`** — validated after the step: a missing or mistyped field fails the step (and any
+  branch that needs it). Only these fields are visible to downstream `inputs`/`when`.
+
+Every `inputs:`/`when:` reference must resolve to a declared param or an upstream step's declared
+output field, and any referenced step must be in `needs:` — checked when the definition is
+parsed, so a workflow that could branch on a value no step produces is rejected up front.
+
+**Session scratch.** A workflow's per-step result files live under a session directory
+`<scratch>/scsh/<session>/`, where `<scratch>` is `.harness/tmp` when that is gitignored (some
+repos prefer it) else `tmp`. scsh refuses to run unless the scratch it uses is gitignored, so a
+run never dirties the tracked tree.
+
 ## Start a job from the browser
 
-The session index page has a **repositories** panel: enter a path and **Open** (which validates
-the repo and lists its definitions with their agent routes and a clean/dirty note), pick a
+The session index page has a **repositories** panel: type or paste a path (or click **Pick…**
+for the native folder chooser) and **Open**, which validates the repo and lists its definitions —
+each with its agent routes, a clean/dirty note, and a badge if it is a workflow. Pick a
 definition to render its params as a control form, fill it in, and **Start job**. That posts
 `/api/v1/jobs/start` and deep-links to the spawned session — the same live board a console run
 gets, because the job *is* an ordinary `scsh run --def`. The daemon runs **at most one job per
 directory** at a time; a **jobs by repository** table lists each repo's jobs and updates live.
+
+Two built-in definitions make good demos: **`doctor`** (no params — confirms the agent images
+are built and each agent's credentials proxy through, then runs a trivial end-to-end task) and
+**`fruits`** (the workflow demo — give it `WORDS` like `apple, carrot, pear, onion` and watch
+`categorize` fan out into `sort_fruits` and `sort_vegetables` running in parallel).
 
 ## Images panel
 

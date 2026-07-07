@@ -186,13 +186,17 @@ See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 
 **Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
 runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
-`~/.harness/`) plus three built-ins (`doctor`, `add`, `research`). Each declares a
-`description`, typed `params` (which become environment variables), a `task` body, and an
-`invocations:` agent matrix. Run one from the console with `scsh run --def <name>` (params come
-from the environment), or, when the daemon is up, open a repository in the browser and start a
-job from a rendered parameter form — the daemon runs at most one job per directory. Here the
-word "harness" means the runnable definition; the CLI it dispatches to (claude/codex/opencode/…)
-is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
+`~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits` workflow). A flat
+definition declares a `description`, typed `params` (which become environment variables), a
+`task` body, and an `invocations:` agent matrix. A **workflow** definition instead declares
+`steps:` — a DAG where each step runs an agent, writes typed `output`, and feeds later steps
+whose `inputs` bind to `params.NAME` or `stepid.field` (`needs:` gives the edges, `when:` gates a
+step). Run one from the console with `scsh run --def <name>` (params from the environment), or,
+when the daemon is up, open a repository in the browser (type/paste a path or use the native
+folder picker) and start a job from a rendered parameter form — the daemon runs at most one job
+per directory. Here the word "harness" means the runnable definition; the CLI it dispatches to
+(claude/codex/opencode/…) is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and
+[`DAEMON-JOBS.md`](DAEMON-JOBS.md).
 
 **Installing skills.** With no arguments, `scsh installskills` drops scsh's one bundled skill —
 `scsh-harness-demo-and-selftest`, a demo-and-self-test you run with `/scsh-harness-demo-and-selftest`
