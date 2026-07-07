@@ -24,10 +24,11 @@ pub fn index_page(store: &Store) -> String {
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
-<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n{images}",
+<tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n{repos}{images}",
     url = base_url(port),
     mode = store.mode.as_str(),
     rows = rows,
+    repos = repos_panel(),
     images = images_panel()
   );
   wrap_page("scsh sessions", port, None, &body)
@@ -52,6 +53,32 @@ Stale means the image exists but no longer matches this scsh build's embedded Do
 <a href="#" id="images-refresh">refresh</a>
 <span id="images-note" class="dim"></span>
 </div>
+"##
+}
+
+/// The repositories panel: open a clean git repo (POST `/api/v1/repos/open`), pick one of the
+/// harness definitions it returns, fill the rendered param form, and start a job (POST
+/// `/api/v1/jobs/start`, deep-linking to the spawned session). The jobs-by-repository table is
+/// grouped client-side from the live WebSocket session snapshot.
+fn repos_panel() -> &'static str {
+  r##"<h2>repositories</h2>
+<p class="dim">Open a clean git repository to configure and start a harness-definition job in it —
+the daemon runs it just like <code>scsh run</code>. One job per repository at a time.</p>
+<div class="images-controls">
+<input type="text" id="repo-path" placeholder="/path/to/a/git/repo" size="44">
+<button id="repo-open">Open</button>
+<span id="repo-note" class="dim"></span>
+</div>
+<div id="defs-panel" hidden>
+<p class="dim">definitions in <code id="open-repo-path"></code></p>
+<div id="defs-list"></div>
+<div id="def-form"></div>
+</div>
+<h3>jobs by repository</h3>
+<div class="table-scroll"><table>
+<thead><tr><th>Repository</th><th>Jobs</th></tr></thead>
+<tbody id="repos-body"><tr><td colspan="2" class="dim">No repositories open yet.</td></tr></tbody>
+</table></div>
 "##
 }
 

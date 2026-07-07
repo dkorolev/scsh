@@ -70,6 +70,19 @@ fn index_page_carries_the_images_panel_and_its_client_wiring() {
 }
 
 #[test]
+fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
+  let store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let html = super::index_page(&store);
+  for id in ["repo-path", "repo-open", "defs-panel", "defs-list", "def-form", "repos-body"] {
+    assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
+  }
+  let js = live_client_js();
+  assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
+  assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
+  assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
+}
+
+#[test]
 fn empty_output_label_depends_on_proc_status() {
   assert_eq!(empty_output_label(ProcStatus::Running), "No output yet.");
   assert_eq!(empty_output_label(ProcStatus::Waiting), "No output yet.");
@@ -320,7 +333,9 @@ fn live_client_js_counts_alive_clients_and_shutdown() {
 fn live_client_js_skips_index_render_without_sessions() {
   let js = live_client_js();
   assert!(js.contains("if (!body || sessions == null) return"));
-  assert!(js.contains("if (snapshot) renderIndex(snapshot, nowUnix)"));
+  // renderIndex (and the jobs-per-repo view) run only when a snapshot is present.
+  assert!(js.contains("if (snapshot) {"));
+  assert!(js.contains("renderIndex(snapshot, nowUnix)"));
 }
 
 #[test]

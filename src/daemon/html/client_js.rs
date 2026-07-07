@@ -836,7 +836,10 @@ function onTick(msg) {
     }
   } else {
     const snapshot = msg.sessions ?? liveSessions;
-    if (snapshot) renderIndex(snapshot, nowUnix);
+    if (snapshot) {
+      renderIndex(snapshot, nowUnix);
+      renderRepoJobs(snapshot, nowUnix);
+    }
   }
 }
 let ws;
@@ -932,6 +935,136 @@ function startImagesBuild(all) {
   document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild(false));
   document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
   document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshImages(); });
+})();
+// ---- repositories panel (index page only) ----
+let OPEN_REPO = null;
+const OPEN_REPOS = {};    // path -> { clean }
+const DEFS_BY_NAME = {};  // name -> definition
+function defSourceBadge(src) {
+  const cls = src === 'repo' ? 'completed' : (src === 'home' ? 'cancelled' : 'running');
+  return '<span class="session-status ' + cls + '">' + esc(src) + '</span>';
+}
+function openRepo() {
+  const input = document.getElementById('repo-path');
+  const note = document.getElementById('repo-note');
+  const path = (input?.value || '').trim();
+  if (!path) { if (note) note.textContent = 'enter a repository path'; return; }
+  if (note) note.textContent = 'opening…';
+  fetch('/api/v1/repos/open', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path: path }),
+  }).then(r => r.json()).then(resp => {
+    if (!resp.ok) { if (note) note.textContent = resp.error || 'could not open'; return; }
+    OPEN_REPO = resp.repo;
+    OPEN_REPOS[resp.repo] = { clean: resp.clean };
+    const panel = document.getElementById('defs-panel');
+    if (panel) panel.hidden = false;
+    const label = document.getElementById('open-repo-path');
+    if (label) label.textContent = resp.repo;
+    if (note) note.textContent = resp.clean ? 'opened (clean)'
+      : 'opened, but the working tree is dirty — commit or stash before starting a job';
+    renderDefs(resp.defs || []);
+    const form = document.getElementById('def-form');
+    if (form) form.innerHTML = '';
+    renderRepoJobs(liveSessions, Date.now() / 1000);
+  }).catch(() => { if (note) note.textContent = 'could not open'; });
+}
+function renderDefs(defs) {
+  const list = document.getElementById('defs-list');
+  if (!list) return;
+  for (const k in DEFS_BY_NAME) delete DEFS_BY_NAME[k];
+  defs.forEach(d => { DEFS_BY_NAME[d.name] = d; });
+  if (!defs.length) { list.innerHTML = '<p class="dim">no harness definitions found.</p>'; return; }
+  list.innerHTML = defs.map(d => {
+    const agents = (d.agents || []).map(a =>
+      '<span class="agent-badge">' + esc(a.agent) + (a.model ? ' · ' + esc(a.model) : '') + '</span>').join(' ');
+    return '<div class="def-card">' +
+      '<button class="def-pick" data-def="' + esc(d.name) + '">' + esc(d.name) + '</button> ' +
+      defSourceBadge(d.source) + ' <span class="dim">' + esc(d.description) + '</span>' +
+      '<div class="def-agents">' + agents + '</div></div>';
+  }).join('');
+  list.querySelectorAll('.def-pick').forEach(b =>
+    b.addEventListener('click', () => selectDef(b.dataset.def)));
+}
+function selectDef(name) {
+  const def = DEFS_BY_NAME[name];
+  const form = document.getElementById('def-form');
+  if (!def || !form) return;
+  const fields = (def.params || []).map(p => {
+    const id = 'param-' + p.name;
+    let input;
+    if (p.type === 'bool') {
+      input = '<input type="checkbox" id="' + id + '"' + (p.default === 'true' ? ' checked' : '') + '>';
+    } else if (p.type === 'enum') {
+      input = '<select id="' + id + '">' + (p.choices || []).map(c =>
+        '<option' + (c === p.default ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select>';
+    } else {
+      const t = p.type === 'int' ? 'number' : 'text';
+      input = '<input type="' + t + '" id="' + id + '" value="' + esc(p.default || '') + '">';
+    }
+    return '<div class="param-row"><label for="' + id + '">' + esc(p.name) +
+      (p.required ? ' <span class="param-req">*</span>' : '') + '</label> ' + input +
+      (p.description ? ' <span class="dim">' + esc(p.description) + '</span>' : '') + '</div>';
+  }).join('');
+  form.innerHTML = '<h4>run <code>' + esc(name) + '</code></h4>' + fields +
+    '<div class="images-controls"><button id="def-start">Start job</button>' +
+    '<span id="def-note" class="dim"></span></div>';
+  document.getElementById('def-start')?.addEventListener('click', () => startJob(name));
+}
+function collectParams(def) {
+  const out = {};
+  (def.params || []).forEach(p => {
+    const el = document.getElementById('param-' + p.name);
+    if (!el) return;
+    out[p.name] = p.type === 'bool' ? (el.checked ? 'true' : 'false') : el.value;
+  });
+  return out;
+}
+function startJob(name) {
+  const def = DEFS_BY_NAME[name];
+  const note = document.getElementById('def-note');
+  if (!def || !OPEN_REPO) return;
+  const req = { repo: OPEN_REPO, def: name, params: collectParams(def) };
+  if (note) note.textContent = 'starting…';
+  fetch('/api/v1/jobs/start', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  }).then(r => r.json()).then(resp => {
+    if (resp.ok && resp.session) { window.location.href = '/session/' + resp.session; }
+    else if (note) note.textContent = resp.error || 'could not start job';
+  }).catch(() => { if (note) note.textContent = 'could not start job'; });
+}
+function renderRepoJobs(sessions, nowUnix) {
+  const body = document.getElementById('repos-body');
+  if (!body) return;
+  nowUnix = nowUnix ?? (Date.now() / 1000);
+  const byRepo = {};
+  Object.keys(OPEN_REPOS).forEach(r => { byRepo[r] = []; });
+  Object.keys(sessions || {}).forEach(id => {
+    const s = sessions[id];
+    if (!s || !s.repo || s.repo === '(image builds)') return;
+    (byRepo[s.repo] = byRepo[s.repo] || []).push(Object.assign({ id: id }, s));
+  });
+  const repos = Object.keys(byRepo).sort();
+  if (!repos.length) {
+    body.innerHTML = '<tr><td colspan="2" class="dim">No repositories open yet.</td></tr>';
+    return;
+  }
+  body.innerHTML = repos.map(repo => {
+    const jobs = (byRepo[repo] || []).sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+    const cells = jobs.length ? jobs.map(s => {
+      const lc = sessionLifecycle(s, nowUnix);
+      return '<a href="/session/' + esc(s.id) + '"><span class="session-status ' + lc.class + '">' +
+        esc(lc.label) + '</span> ' + esc(s.id) + (s.profile ? ' · ' + esc(s.profile) : '') + '</a>';
+    }).join('<br>') : '<span class="dim">no jobs yet</span>';
+    return '<tr><td class="repo-path">' + esc(repo) + '</td><td>' + cells + '</td></tr>';
+  }).join('');
+}
+(function initReposPanel() {
+  if (!document.getElementById('repo-path')) return;
+  document.getElementById('repo-open')?.addEventListener('click', openRepo);
+  document.getElementById('repo-path')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openRepo(); });
+  renderRepoJobs(liveSessions, Date.now() / 1000);
 })();
 "#
 }

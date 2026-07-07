@@ -22,6 +22,34 @@ const PAGE_CSS: &str = r#"
   .images-controls button:disabled { opacity: 0.45; cursor: default; }
   .images-controls label { cursor: pointer; user-select: none; }
   .image-select-cell { width: 1.5rem; }
+  .def-card {
+    border: 1px solid #8884; border-radius: 6px; padding: 0.5rem 0.7rem; margin-bottom: 0.5rem;
+  }
+  .def-card .def-pick {
+    font: inherit; font-weight: 600; color: #7ab4ff; background: none; border: 1px solid #8886;
+    border-radius: 5px; padding: 0.1rem 0.55rem; cursor: pointer;
+  }
+  .def-card .def-pick:hover { border-color: #7ab4ff; }
+  .def-agents { margin-top: 0.35rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
+  .agent-badge {
+    font-size: 0.72rem; color: #9aa; background: #8881; border: 1px solid #8884;
+    border-radius: 4px; padding: 0.08rem 0.4rem;
+  }
+  #def-form { margin: 0.75rem 0 1.25rem; }
+  #def-form h4 { margin: 0 0 0.5rem; }
+  .param-row {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin-bottom: 0.4rem; font-size: 0.85rem;
+  }
+  .param-row label { min-width: 6rem; font-weight: 600; }
+  .param-row input[type=text], .param-row input[type=number], .param-row select {
+    font: inherit; padding: 0.15rem 0.35rem; border: 1px solid #8886; border-radius: 4px;
+    background: none; color: inherit;
+  }
+  .param-req { color: #e55; }
+  #repo-path {
+    font: inherit; padding: 0.2rem 0.4rem; border: 1px solid #8886; border-radius: 4px;
+    background: none; color: inherit;
+  }
   .daemon-status {
     display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
     font-size: 0.85rem; margin-bottom: 1rem; padding: 0.35rem 0.6rem;
