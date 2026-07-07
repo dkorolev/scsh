@@ -944,6 +944,23 @@ function defSourceBadge(src) {
   const cls = src === 'repo' ? 'completed' : (src === 'home' ? 'cancelled' : 'running');
   return '<span class="session-status ' + cls + '">' + esc(src) + '</span>';
 }
+function pickRepo() {
+  // The daemon is local, so it can pop the native OS folder chooser and hand back the path.
+  const note = document.getElementById('repo-note');
+  if (note) note.textContent = 'opening the folder picker…';
+  fetch('/api/v1/repos/pick', { method: 'POST' }).then(r => r.json()).then(resp => {
+    if (resp.ok && resp.path) {
+      const input = document.getElementById('repo-path');
+      if (input) input.value = resp.path;
+      if (note) note.textContent = '';
+      openRepo();
+    } else if (resp.cancelled) {
+      if (note) note.textContent = '';
+    } else if (note) {
+      note.textContent = resp.error || 'picker unavailable — type or paste the path instead';
+    }
+  }).catch(() => { if (note) note.textContent = 'picker unavailable — type or paste the path instead'; });
+}
 function openRepo() {
   const input = document.getElementById('repo-path');
   const note = document.getElementById('repo-note');
@@ -978,9 +995,10 @@ function renderDefs(defs) {
   list.innerHTML = defs.map(d => {
     const agents = (d.agents || []).map(a =>
       '<span class="agent-badge">' + esc(a.agent) + (a.model ? ' · ' + esc(a.model) : '') + '</span>').join(' ');
+    const wf = d.workflow ? ' <span class="session-status completed">workflow · ' + d.steps + ' steps</span>' : '';
     return '<div class="def-card">' +
       '<button class="def-pick" data-def="' + esc(d.name) + '">' + esc(d.name) + '</button> ' +
-      defSourceBadge(d.source) + ' <span class="dim">' + esc(d.description) + '</span>' +
+      defSourceBadge(d.source) + wf + ' <span class="dim">' + esc(d.description) + '</span>' +
       '<div class="def-agents">' + agents + '</div></div>';
   }).join('');
   list.querySelectorAll('.def-pick').forEach(b =>
@@ -1063,6 +1081,7 @@ function renderRepoJobs(sessions, nowUnix) {
 (function initReposPanel() {
   if (!document.getElementById('repo-path')) return;
   document.getElementById('repo-open')?.addEventListener('click', openRepo);
+  document.getElementById('repo-pick')?.addEventListener('click', pickRepo);
   document.getElementById('repo-path')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openRepo(); });
   renderRepoJobs(liveSessions, Date.now() / 1000);
 })();

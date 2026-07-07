@@ -66,6 +66,7 @@ fn repos_panel() -> &'static str {
 the daemon runs it just like <code>scsh run</code>. One job per repository at a time.</p>
 <div class="images-controls">
 <input type="text" id="repo-path" placeholder="/path/to/a/git/repo" size="44">
+<button id="repo-pick">Pick…</button>
 <button id="repo-open">Open</button>
 <span id="repo-note" class="dim"></span>
 </div>

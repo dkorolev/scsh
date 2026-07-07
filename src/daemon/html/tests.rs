@@ -73,11 +73,12 @@ fn index_page_carries_the_images_panel_and_its_client_wiring() {
 fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
-  for id in ["repo-path", "repo-open", "defs-panel", "defs-list", "def-form", "repos-body"] {
+  for id in ["repo-path", "repo-pick", "repo-open", "defs-panel", "defs-list", "def-form", "repos-body"] {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
   let js = live_client_js();
   assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
+  assert!(js.contains("/api/v1/repos/pick"), "client js pops the folder picker");
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
 }

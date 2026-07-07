@@ -577,6 +577,9 @@ fn route(
     let (status, body, mutated) = jobs_start_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/repos/pick" {
+    return (200, repos_pick_response(), "application/json", false);
+  }
   if req.method == "POST" && req.path.starts_with("/api/v1/") {
     let ok = handle_api_post(&req.path, &req.body, store, prune);
     let body = if ok { "{\"ok\":true}" } else { "{\"ok\":false}" };
@@ -1079,6 +1082,56 @@ fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   (200, body, true)
 }
 
+/// `POST /api/v1/repos/pick` — pop the host's native folder chooser (the daemon is local) and
+/// return the chosen absolute path. `{ok:true,path}`, `{ok:false,cancelled:true}`, or
+/// `{ok:false,error}` when no picker is available (the browser then falls back to typing a path).
+fn repos_pick_response() -> String {
+  match pick_directory() {
+    Ok(Some(path)) => format!("{{\"ok\":true,\"path\":{}}}", quote(&path)),
+    Ok(None) => "{\"ok\":false,\"cancelled\":true}".to_string(),
+    Err(e) => err_body(&e),
+  }
+}
+
+/// Pop the native OS directory chooser and return the chosen absolute path (`None` on cancel).
+/// macOS uses AppleScript; Linux uses zenity or kdialog. Requires a display — headless daemons
+/// get an error and the UI falls back to a typed path.
+fn pick_directory() -> Result<Option<String>, String> {
+  let picked = |out: std::process::Output| -> Option<String> {
+    out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|p| !p.is_empty())
+  };
+  if cfg!(target_os = "macos") {
+    let out = std::process::Command::new("osascript")
+      .args(["-e", "POSIX path of (choose folder with prompt \"Pick a repository for scsh\")"])
+      .output()
+      .map_err(|e| format!("could not run osascript: {e}"))?;
+    if out.status.success() {
+      return Ok(picked(out));
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    // -128 / "User canceled" is a normal cancel, not an error.
+    if err.contains("User canceled") || err.contains("-128") {
+      return Ok(None);
+    }
+    return Err(format!("folder picker failed: {}", err.trim()));
+  }
+  if crate::runtime::which("zenity").is_some() {
+    let out = std::process::Command::new("zenity")
+      .args(["--file-selection", "--directory", "--title=Pick a repository for scsh"])
+      .output()
+      .map_err(|e| format!("could not run zenity: {e}"))?;
+    return Ok(picked(out)); // non-zero = cancel
+  }
+  if crate::runtime::which("kdialog").is_some() {
+    let out = std::process::Command::new("kdialog")
+      .args(["--getexistingdirectory", "."])
+      .output()
+      .map_err(|e| format!("could not run kdialog: {e}"))?;
+    return Ok(picked(out));
+  }
+  Err("no folder picker on this host (install zenity or kdialog) — type or paste the path instead".into())
+}
+
 /// `POST /api/v1/harness-defs` — body `{"repo":"…"}`. Re-discover the definitions for an
 /// already-open repo (a refresh). `{defs:[…]}`.
 fn harness_defs_response(body: &str) -> (u16, String) {
@@ -1259,23 +1312,27 @@ fn defs_json(defs: &[crate::harness_def::HarnessDef]) -> Vec<String> {
 
 fn def_json(def: &crate::harness_def::HarnessDef) -> String {
   let params: Vec<String> = def.params.iter().map(param_json).collect();
-  let agents: Vec<String> = def
-    .invocations
-    .iter()
-    .map(|r| {
-      format!(
-        "{{\"route\":{},\"agent\":{},\"model\":{}}}",
-        quote(&r.name),
-        quote(r.harness.as_str()),
-        r.model.as_deref().map(quote).unwrap_or_else(|| "null".into())
-      )
-    })
-    .collect();
+  // Agents come from the flat matrix, or (for a workflow) from each step's agent.
+  let agent_obj = |route: &str, harness: &str, model: Option<&str>| {
+    format!(
+      "{{\"route\":{},\"agent\":{},\"model\":{}}}",
+      quote(route),
+      quote(harness),
+      model.map(quote).unwrap_or_else(|| "null".into())
+    )
+  };
+  let agents: Vec<String> = if def.is_workflow() {
+    def.steps.iter().map(|s| agent_obj(&s.id, s.agent.harness.as_str(), s.agent.model.as_deref())).collect()
+  } else {
+    def.invocations.iter().map(|r| agent_obj(&r.name, r.harness.as_str(), r.model.as_deref())).collect()
+  };
   format!(
-    "{{\"name\":{},\"description\":{},\"source\":{},\"params\":[{}],\"agents\":[{}]}}",
+    "{{\"name\":{},\"description\":{},\"source\":{},\"workflow\":{},\"steps\":{},\"params\":[{}],\"agents\":[{}]}}",
     quote(&def.name),
     quote(&def.description),
     quote(def.source.as_str()),
+    def.is_workflow(),
+    def.steps.len(),
     params.join(","),
     agents.join(",")
   )
