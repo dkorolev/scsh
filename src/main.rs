@@ -997,7 +997,9 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
     inv.result = format!("{scratch}/{}.json", inv.name);
   }
 
-  ok(&format!("git · repo {} · clean · /tmp ignored · def {name}", display_path(&root)));
+  // Report the ACTUAL gitignored scratch root this run uses (`tmp/` or `.harness/tmp`), not a
+  // hardcoded one — the run writes its result, casts, logs, and cache there.
+  ok(&format!("git · repo {} · clean · {scratch}/ ignored · def {name}", display_path(&root)));
 
   // Skip routes whose agent or explicit opencode model is unavailable; fail only when none remain.
   let model_probe = runtime::OpencodeModelProbe::for_selected(&invocations);
