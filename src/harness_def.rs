@@ -1057,7 +1057,10 @@ mod tests {
 
     let doctor = builtin("doctor");
     assert!(doctor.params.is_empty());
-    assert_eq!(doctor.invocations.len(), 3);
+    // doctor exercises every agent end to end — all five harnesses.
+    assert_eq!(doctor.invocations.len(), 5);
+    let doc_agents: std::collections::BTreeSet<&str> = doctor.invocations.iter().map(|r| r.harness.as_str()).collect();
+    assert_eq!(doc_agents, ["claude", "codex", "cursor", "grok", "opencode"].into_iter().collect());
   }
 
   #[test]
