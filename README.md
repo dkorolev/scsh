@@ -125,9 +125,10 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 - **`harness`** *(required for direct run)* — **`opencode`** or **`claude`**. Omit at the skill level when using `invocations:`; each route supplies its own.
 - **`invocations:`** *(optional matrix)* — named routes, each with `harness`, optional `model`, optional `profile` (overrides the skill-level default), optional `commits` (overrides the skill-level default). Mutually exclusive with top-level `harness` / `model`.
-  OpenCode runs `opencode -m <model> run "run skill <source>"`. Claude runs headless via
-  `claude -p` with the skill's `SKILL.md` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
-  `~/.claude/.credentials.json`, plus optional `~/.claude` / `~/.claude.json` mounted into the container).
+  Every harness runs as a real interactive TUI recorded via tmux + asciinema (see
+  [`DAEMON.md`](DAEMON.md)), pointed at the skill's `SKILL.md` — e.g. claude with
+  `--permission-mode bypassPermissions` (host `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`, or
+  `~/.claude/.credentials.json`), opencode via `opencode --prompt`, grok via its default Build TUI.
 - **`model`** *(optional)* — the model the harness passes to its tool.
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,

@@ -43,12 +43,12 @@ harness output and container names.
 ## Terminal recordings (asciinema)
 
 Every harness runs inside a real PTY recorded by asciinema (size from the `terminal:`
-block in `.scsh.yml`, default **200×50**). For **claude, codex, and cursor** the recording
-is the genuine end-to-end interactive TUI — the same screen a human would see. The
+block in `.scsh.yml`, default **200×50**). **All five harnesses** run as the genuine
+end-to-end interactive TUI — the same screen a human would see: claude, codex, and cursor,
+plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build TUI). The
 `scsh-tui-record` script (baked into the base image) runs the harness in a tmux session,
 records the attached screen, and — when the skill's result file appears — sends the quit
-keys (`/exit`, double Ctrl-C) and ends the session. opencode and grok record their headless
-output streams.
+keys (`/exit`, double Ctrl-C) and ends the session.
 
 There is **no screen-scraping**: every consent, trust, and login prompt is skipped ahead
 of time by a flag or seeded config, so the recording is clean and a stuck harness surfaces
