@@ -3613,7 +3613,11 @@ fn forward_grok(run_dir: &Path) -> Option<PathBuf> {
   }
   let dest = run_dir.join(runtime::GROK_FORWARD_REL);
   std::fs::create_dir_all(&dest).ok()?;
-  for name in ["auth.json", "config.toml", "user-settings.json"] {
+  // Forward grok's full credential + device identity so the container is the same logged-in
+  // client as the host: `auth.json` (the OAuth session), `agent_id` (the device UUID the grok
+  // gateway recognizes — without it the interactive Build TUI treats the container as a new
+  // device and demands a browser sign-in), plus config/settings and `active_sessions.json`.
+  for name in ["auth.json", "agent_id", "active_sessions.json", "config.toml", "user-settings.json"] {
     let src = host_home.join(name);
     if src.is_file() {
       std::fs::copy(&src, dest.join(name)).ok()?;
