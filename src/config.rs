@@ -229,7 +229,10 @@ impl Harness {
   /// external interruption (a stray signal / teardown killing the pane) worth one retry, not only
   /// a deterministic skill bug.
   pub fn is_tui(self) -> bool {
-    matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor)
+    // Every harness runs as a real interactive TUI recorded via tmux + asciinema: claude/codex/
+    // cursor, plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build
+    // TUI). Headless single-shot modes are not used — the recording must show a genuine terminal.
+    matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor | Harness::Opencode | Harness::Grok)
   }
 
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
@@ -1862,8 +1865,9 @@ skills:
     assert!(Harness::Claude.is_tui());
     assert!(Harness::Codex.is_tui());
     assert!(Harness::Cursor.is_tui());
-    assert!(!Harness::Opencode.is_tui());
-    assert!(!Harness::Grok.is_tui());
+    // opencode and grok now run as recorded interactive TUIs too.
+    assert!(Harness::Opencode.is_tui());
+    assert!(Harness::Grok.is_tui());
   }
 
   #[test]

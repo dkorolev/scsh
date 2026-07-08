@@ -1189,6 +1189,9 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   if let Err(msg) = validate_job_params(def, &params) {
     return (400, err_body(&msg), false);
   }
+  // The tasks this job will run — pre-populated on the session so its page shows them
+  // immediately (no blank "limbo" while the spawned run starts up and registers).
+  let planned = planned_skills(def, &def_name);
 
   // One job per directory.
   let now = now_unix_secs();
@@ -1245,7 +1248,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           profile: Some(def_name.clone()),
           repo: repo.clone(),
           branch,
-          skills: Vec::new(),
+          skills: planned,
           procs: Vec::new(),
           last_seen_at: now,
           client_connected: false,
@@ -1335,6 +1338,21 @@ fn repos_json(store: &Store, now: u64) -> String {
     })
     .collect();
   format!("{{\"repos\":[{}]}}", repos.join(","))
+}
+
+/// The tasks a definition will run, as `SkillMeta` (name + agent) — a workflow's steps, or a
+/// flat definition's expanded `{def}-{route}` invocations. Pre-populated on a job's session so
+/// its page immediately lists what is about to run instead of a blank board.
+fn planned_skills(def: &crate::harness_def::HarnessDef, def_name: &str) -> Vec<SkillMeta> {
+  if def.is_workflow() {
+    def.steps.iter().map(|s| SkillMeta { name: s.id.clone(), harness: s.agent.harness.as_str().to_string() }).collect()
+  } else {
+    def
+      .invocations
+      .iter()
+      .map(|r| SkillMeta { name: format!("{def_name}-{}", r.name), harness: r.harness.as_str().to_string() })
+      .collect()
+  }
 }
 
 /// Check job params against a definition: every required param present, every value well-typed.
@@ -2295,9 +2313,15 @@ mod tests {
 
   #[test]
   fn jobs_start_spawns_and_guards_one_per_repo() {
-    // /usr/bin/true stands in for the scsh binary, so nothing is actually built or run.
-    std::env::set_var("SCSH_BIN", "/usr/bin/true");
+    // A sleeping stub stands in for the scsh binary: it stays alive during the test so the
+    // spawned "job" is still running when the guard is checked (a real run takes seconds; an
+    // instant-exit stub would be reconciled to ended before the second call, defeating the test).
     let dir = clean_repo("start");
+    // The stub lives OUTSIDE the repo, or it would dirty the tree and fail the readiness check.
+    let stub = std::env::temp_dir().join(format!("scsh-sleeper-{}.sh", crate::runtime::random_nonce_6()));
+    std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    std::env::set_var("SCSH_BIN", &stub);
     let repo = dir.to_string_lossy().into_owned();
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let body = format!(r#"{{"repo":{},"def":"add","params":{{"A":"2","B":"3"}}}}"#, quote(&repo));
@@ -2311,6 +2335,10 @@ mod tests {
       let session = guard.sessions.get(&session_id).expect("session pre-created");
       assert_eq!(session.profile.as_deref(), Some("add"), "session labeled with the definition name");
       assert!(!session.repo.is_empty(), "session carries the repo path");
+      // No limbo: the planned tasks are on the session immediately (add's four agents).
+      assert_eq!(session.skills.len(), 4, "planned skills shown at once, before the run registers");
+      assert!(session.skills.iter().any(|s| s.harness == "claude"), "agents listed by harness");
+      assert!(session.skills.iter().all(|s| s.name.starts_with("add-")), "flat routes named {{def}}-{{route}}");
     }
 
     // A second start in the same repo is refused while the first job is still running.
@@ -2319,6 +2347,7 @@ mod tests {
     assert!(out2.contains("already running"), "got: {out2}");
 
     std::env::remove_var("SCSH_BIN");
+    std::fs::remove_file(&stub).ok();
     std::fs::remove_dir_all(&dir).ok();
   }
 

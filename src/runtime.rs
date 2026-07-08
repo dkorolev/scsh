@@ -404,31 +404,24 @@ pub fn harness_command(
   harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
   term: crate::config::Terminal,
 ) -> String {
-  harness_command_verbose(harness, model, effort, skill_source, result, harness_verbose_enabled(), term)
-}
-
-fn harness_command_verbose(
-  harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str, verbose: bool,
-  term: crate::config::Terminal,
-) -> String {
   match harness {
     Harness::Opencode => {
-      let instruction = format!(
-        "run skill {skill_source}. Follow .skills/{skill_source}/SKILL.md exactly. \
+      let prompt = format!(
+        "Run the skill defined in .skills/{skill_source}/SKILL.md. Follow its instructions exactly. \
          Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
-      let mut cmd = String::from("opencode");
-      if verbose {
-        cmd.push_str(" --print-logs --log-level DEBUG");
-      }
+      // Full interactive TUI: opencode's default command IS the TUI, and `--prompt` seeds the
+      // initial message (vs the old headless `opencode run`, which produced no recording — and
+      // here no result). The ephemeral container is the sandbox.
+      let mut tui = String::from("opencode");
       if let Some(m) = model {
-        cmd.push_str(" -m ");
-        cmd.push_str(&shell_quote(m));
+        tui.push_str(" -m ");
+        tui.push_str(&shell_quote(m));
       }
-      cmd.push_str(" run ");
-      cmd.push_str(&shell_quote(&instruction));
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
+      tui.push_str(" --prompt ");
+      tui.push_str(&shell_quote(&prompt));
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
     }
     Harness::Claude => {
       let prompt = format!(
@@ -480,25 +473,21 @@ fn harness_command_verbose(
          Write the required result file to the path in the SCSH_RESULT environment variable. \
          Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
       );
-      // Single-turn headless run; the ephemeral container is the sandbox, so grok's own
-      // approvals are bypassed (same posture as the other harnesses).
-      let mut cmd = String::from("grok -p ");
-      cmd.push_str(&shell_quote(&prompt));
-      cmd.push_str(" --permission-mode bypassPermissions --always-approve");
+      // Full interactive TUI: grok's default IS the Build TUI, and a positional prompt seeds
+      // the interactive session (`grok "fix the bug"`) — vs the old headless `grok -p`, which
+      // recorded no real terminal. `--always-approve` auto-approves; the container is the sandbox.
+      let mut tui = String::from("grok --always-approve");
       if let Some(m) = model {
-        cmd.push_str(" -m ");
-        cmd.push_str(&shell_quote(m));
+        tui.push_str(" -m ");
+        tui.push_str(&shell_quote(m));
       }
       if let Some(e) = effort {
-        cmd.push_str(" --effort ");
-        cmd.push_str(&shell_quote(e));
+        tui.push_str(" --effort ");
+        tui.push_str(&shell_quote(e));
       }
-      if verbose {
-        cmd.push_str(" --debug --debug-file \"${");
-        cmd.push_str(RUN_LOG_VAR);
-        cmd.push_str("}.debug\"");
-      }
-      wrap_harness_shell(harness, skill_source, model, &cmd, verbose, term)
+      tui.push(' ');
+      tui.push_str(&shell_quote(&prompt)); // positional initial prompt
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
     }
     Harness::Cursor => {
       let prompt = format!(
@@ -608,48 +597,6 @@ fn cursor_model_with_effort(model: &str, effort: Option<&str>) -> String {
     return model.to_string();
   }
   format!("{model}-{suffix}")
-}
-
-/// Run the harness under `/bin/sh -c`, banner on stderr, all output teed to [`RUN_LOG_VAR`].
-///
-/// The harness itself runs inside `asciinema rec` — a real PTY of `term.cols` x `term.rows`
-/// — which records the raw terminal stream to `${SCSH_RUN_LOG}.cast` ([`RUN_CAST_REL`])
-/// while passing it through to the tee. asciinema 2.x does not propagate the child's exit
-/// status, which changes nothing here: the pipeline already returns tee's status, and skill
-/// failure is detected by the absence of the result file, not by exit code.
-fn wrap_harness_shell(
-  harness: Harness, skill_source: &str, model: Option<&str>, inner: &str, verbose: bool, term: crate::config::Terminal,
-) -> String {
-  let model_label = model.unwrap_or("(harness default)");
-  // Verbose claude/grok write a separate --debug-file, and verbose codex a final-message
-  // file; append them to the teed stream at the end so the run log is self-contained.
-  let post = match harness {
-    Harness::Claude if verbose => format!(
-      "if [ -f \"${{{log_var}}}.debug\" ]; then echo \"scsh: --- claude debug log ---\" >&2; cat \"${{{log_var}}}.debug\" >&2; fi",
-      log_var = RUN_LOG_VAR,
-    ),
-    Harness::Codex if verbose => format!(
-      "if [ -f \"${{{log_var}}}.last\" ]; then echo \"scsh: --- codex final message ---\" >&2; cat \"${{{log_var}}}.last\" >&2; fi",
-      log_var = RUN_LOG_VAR,
-    ),
-    Harness::Grok if verbose => format!(
-      "if [ -f \"${{{log_var}}}.debug\" ]; then echo \"scsh: --- grok debug log ---\" >&2; cat \"${{{log_var}}}.debug\" >&2; fi",
-      log_var = RUN_LOG_VAR,
-    ),
-    _ => String::new(),
-  };
-  let recorded = format!(
-    "asciinema rec -q --cols {cols} --rows {rows} -c {inner_q} \"${{{log_var}}}.cast\"",
-    cols = term.cols,
-    rows = term.rows,
-    inner_q = shell_quote(inner),
-    log_var = RUN_LOG_VAR,
-  );
-  format!(
-    "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; {recorded}; {post} }} 2>&1 | tee \"${{{log_var}}}\"",
-    harness.as_str(),
-    log_var = RUN_LOG_VAR,
-  )
 }
 
 /// How a given runtime accepts the generated Dockerfile.
@@ -2039,55 +1986,37 @@ mod tests {
 
   #[test]
   fn harness_command_builds_opencode_invocation() {
-    let cmd = harness_command_verbose(
+    // opencode now runs as a recorded interactive TUI (`opencode --prompt`), not headless.
+    let cmd = harness_command(
       Harness::Opencode,
       Some("openai/gpt-5.5"),
       None,
       "add",
       "tmp/add.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=opencode"));
-    assert!(cmd.contains("opencode --print-logs --log-level DEBUG"));
-    assert!(cmd.contains("-m openai/gpt-5.5"));
-    assert!(cmd.contains(" run "));
-    assert!(cmd.contains("run skill add"));
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add.json "), "got: {cmd}");
+    assert!(cmd.contains("opencode -m openai/gpt-5.5 --prompt "), "got: {cmd}");
+    assert!(!cmd.contains(" run "), "no headless run subcommand: {cmd}");
+    assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let cmd = harness_command_verbose(
-      Harness::Opencode,
-      None,
-      None,
-      "multiply",
-      "tmp/mul.json",
-      true,
-      crate::config::Terminal::default(),
-    );
-    assert!(cmd.contains("opencode --print-logs --log-level DEBUG run "));
-    let quiet = harness_command_verbose(
-      Harness::Opencode,
-      None,
-      None,
-      "multiply",
-      "tmp/mul.json",
-      false,
-      crate::config::Terminal::default(),
-    );
-    assert!(!quiet.contains("--print-logs"));
-    assert!(quiet.contains("scsh: harness=opencode"));
-    assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    // Model-less: no -m flag, still the TUI.
+    let bare =
+      harness_command(Harness::Opencode, None, None, "multiply", "tmp/mul.json", crate::config::Terminal::default());
+    assert!(bare.contains("opencode --prompt "), "got: {bare}");
+    assert!(!bare.contains(" -m "), "got: {bare}");
   }
 
   #[test]
   fn harness_command_builds_claude_invocation() {
-    let cmd = harness_command_verbose(
+    let cmd = harness_command(
       Harness::Claude,
       Some("sonnet"),
       None,
       "add",
       "tmp/add_claude_sonnet_4_6_result.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
@@ -2105,13 +2034,12 @@ mod tests {
 
   #[test]
   fn harness_command_builds_codex_invocation() {
-    let cmd = harness_command_verbose(
+    let cmd = harness_command(
       Harness::Codex,
       Some("gpt-5.5"),
       None,
       "add",
       "tmp/add_codex_result.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=codex"));
@@ -2126,65 +2054,48 @@ mod tests {
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(
-      Harness::Codex,
-      None,
-      None,
-      "multiply",
-      "tmp/mul.json",
-      false,
-      crate::config::Terminal::default(),
-    );
-    assert!(quiet.contains("codex --dangerously-bypass-approvals-and-sandbox"));
-    assert!(!quiet.contains(" -m "));
-    assert!(quiet.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+    let bare =
+      harness_command(Harness::Codex, None, None, "multiply", "tmp/mul.json", crate::config::Terminal::default());
+    assert!(bare.contains("codex --dangerously-bypass-approvals-and-sandbox"));
+    assert!(!bare.contains(" -m "));
+    assert!(bare.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
   }
 
   #[test]
   fn harness_command_builds_grok_invocation() {
-    let cmd = harness_command_verbose(
+    // grok now runs as its recorded interactive Build TUI (positional prompt), not headless `-p`.
+    let cmd = harness_command(
       Harness::Grok,
       Some("grok-build"),
       Some("high"),
       "add",
       "tmp/add_grok.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=grok"));
-    assert!(cmd.contains("grok -p "));
-    assert!(cmd.contains(" --permission-mode bypassPermissions --always-approve"));
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_grok.json "), "got: {cmd}");
+    assert!(cmd.contains("grok --always-approve"), "got: {cmd}");
+    assert!(!cmd.contains("grok -p "), "no headless -p: {cmd}");
     assert!(cmd.contains(" -m grok-build"));
     assert!(cmd.contains(" --effort high"));
-    assert!(cmd.contains(" --debug --debug-file \"${SCSH_RUN_LOG}.debug\""));
-    assert!(cmd.contains("scsh: --- grok debug log ---"));
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(
-      Harness::Grok,
-      None,
-      None,
-      "multiply",
-      "tmp/mul.json",
-      false,
-      crate::config::Terminal::default(),
-    );
-    assert!(quiet.contains("grok -p "));
-    assert!(!quiet.contains("--debug"));
-    assert!(!quiet.contains(" --effort "));
-    assert!(!quiet.contains(" -m "));
+    let bare =
+      harness_command(Harness::Grok, None, None, "multiply", "tmp/mul.json", crate::config::Terminal::default());
+    assert!(bare.contains("grok --always-approve"), "got: {bare}");
+    assert!(!bare.contains(" --effort "));
+    assert!(!bare.contains(" -m "));
   }
 
   #[test]
   fn harness_command_builds_cursor_invocation() {
-    let cmd = harness_command_verbose(
+    let cmd = harness_command(
       Harness::Cursor,
       Some("composer-2.5"),
       Some("high"),
       "add",
       "tmp/add_cursor.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=cursor"));
@@ -2200,17 +2111,10 @@ mod tests {
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let quiet = harness_command_verbose(
-      Harness::Cursor,
-      None,
-      None,
-      "multiply",
-      "tmp/mul.json",
-      false,
-      crate::config::Terminal::default(),
-    );
-    assert!(quiet.contains("cursor-agent --force --sandbox disabled"));
-    assert!(!quiet.contains(" --model "));
+    let bare =
+      harness_command(Harness::Cursor, None, None, "multiply", "tmp/mul.json", crate::config::Terminal::default());
+    assert!(bare.contains("cursor-agent --force --sandbox disabled"));
+    assert!(!bare.contains(" --model "));
   }
 
   #[test]
@@ -2224,42 +2128,29 @@ mod tests {
 
   #[test]
   fn harness_recorded_at_configured_pty_size() {
-    // TUI harnesses (claude/codex/cursor) record via scsh-tui-record with the PTY size as
-    // its first two args; the recording path is always ${SCSH_RUN_LOG}.cast.
+    // EVERY harness now records via scsh-tui-record with the PTY size as its first two args;
+    // the recording path is always ${SCSH_RUN_LOG}.cast.
     let term = crate::config::Terminal { cols: 120, rows: 30 };
-    for h in [Harness::Claude, Harness::Codex, Harness::Cursor] {
-      let cmd = harness_command_verbose(h, Some("m"), None, "add", "tmp/add.json", false, term);
+    for h in [Harness::Claude, Harness::Codex, Harness::Cursor, Harness::Opencode, Harness::Grok] {
+      let cmd = harness_command(h, Some("m"), None, "add", "tmp/add.json", term);
       assert!(cmd.contains("scsh-tui-record 120 30 "), "harness {h:?} got: {cmd}");
       assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "harness {h:?} got: {cmd}");
-    }
-    // Headless harnesses (opencode/grok) record inline via asciinema at the same size.
-    for h in [Harness::Opencode, Harness::Grok] {
-      let cmd = harness_command_verbose(h, None, None, "add", "tmp/add.json", false, term);
-      assert!(cmd.contains("asciinema rec -q --cols 120 --rows 30 -c "), "harness {h:?} got: {cmd}");
     }
   }
 
   #[test]
   fn harness_command_codex_passes_reasoning_effort() {
-    let cmd = harness_command_verbose(
+    let cmd = harness_command(
       Harness::Codex,
       Some("gpt-5.5"),
       Some("xhigh"),
       "add",
       "tmp/add.json",
-      true,
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
-    let without = harness_command_verbose(
-      Harness::Codex,
-      Some("gpt-5.5"),
-      None,
-      "add",
-      "tmp/add.json",
-      true,
-      crate::config::Terminal::default(),
-    );
+    let without =
+      harness_command(Harness::Codex, Some("gpt-5.5"), None, "add", "tmp/add.json", crate::config::Terminal::default());
     assert!(!without.contains("model_reasoning_effort"));
   }
 
