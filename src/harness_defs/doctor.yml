@@ -11,9 +11,9 @@ task: |
 
   Do nothing else — no commits, no network, no other files.
 invocations:
-  opencode-glm:
+  opencode-gpt-5.5:
     harness: opencode
-    model: nebius-glm/zai-org/GLM-5.2
+    model: openai/gpt-5.5
   claude-opus-4-8:
     harness: claude
     model: claude-opus-4-8
