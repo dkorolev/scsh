@@ -2322,7 +2322,7 @@ fn build_and_run(
   let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
   let needs_codex = skills.iter().any(|s| s.harness == config::Harness::Codex);
   if needs_opencode && opencode_auth_enabled() && runtime::opencode_auth_ready() {
-    ok("opencode creds found (auth.json and opencode config bind-mounted when present)");
+    ok("opencode creds found (auth.json and opencode config forwarded into the run clone)");
   }
   if needs_claude && runtime::claude_container_auth_ready() {
     let via =
