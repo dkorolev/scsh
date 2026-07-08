@@ -2780,6 +2780,8 @@ fn run_one_skill(
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
+  // Wall clock for this run, cached on success so a future hit shows the real duration.
+  let run_started = Instant::now();
   // Resolve forwarded env first: a missing required (${VAR:?…}) variable refuses
   // the skill before any work — no clone, no container.
   let env = match resolve_env(&skill.env) {
@@ -2804,7 +2806,15 @@ fn run_one_skill(
           Some(m) => format!("{}  (cached)", first_line(&m)),
           None => "(cached)".to_string(),
         };
-        spinner.finish_ok(Some(&line));
+        // Replay the original recording and show the original duration, so a hit reads the same
+        // as the run that produced it — not a bare "(cached) · 0s · no output".
+        if let (Some(c), Some(cast)) = (&daemon_client, &entry.cast) {
+          c.proc_cast(spinner.index(), &cast.to_string_lossy());
+        }
+        match entry.elapsed {
+          Some(e) => spinner.finish_ok_elapsed(Some(&line), e),
+          None => spinner.finish_ok(Some(&line)),
+        }
         // Carry any journaled commits so they're replayed onto the caller's branch — a hit
         // for a commit-enabled skill reproduces the commit, not just the result file.
         return SkillRun::cached(entry.commits);
@@ -2969,10 +2979,9 @@ fn run_one_skill(
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
   // and logs under the caller repo's gitignored tmp/ so they can be revisited later.
-  if let Some(durable) = persist_run_artifacts(root, &run_dir, &skill.name, secs) {
-    if let Some(c) = &daemon_client {
-      c.proc_cast(spinner.index(), &durable);
-    }
+  let durable_cast = persist_run_artifacts(root, &run_dir, &skill.name, secs);
+  if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
+    c.proc_cast(spinner.index(), durable);
   }
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
@@ -3031,7 +3040,14 @@ fn run_one_skill(
         // alongside the result, so a future cache hit can replay them.
         let commits =
           if skill.commits { base.and_then(|b| commit_patch(&runtime::commits_fetch_path(&run_dir), b)) } else { None };
-        cache_store(root, key, c, commits.as_deref());
+        cache_store(
+          root,
+          key,
+          c,
+          commits.as_deref(),
+          Some(run_started.elapsed().as_secs_f64()),
+          durable_cast.as_deref().map(Path::new),
+        );
       }
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
@@ -3850,8 +3866,17 @@ fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) 
   for (rel, hash) in skill_file_hashes(root, &skill.skill_source) {
     blob.push_str(&format!("{rel} {hash}\n"));
   }
+  // For a harness-definition/workflow run the body isn't a caller `.skills/` file — it rides on
+  // the invocation — so hash it here, so changing a definition's prompt busts the cache.
+  if let Some(body) = &skill.body {
+    blob.push_str(&format!("body={}\n", sha256::sha256_hex(body.as_bytes())));
+  }
+  // Hash the resolved input environment — every param and (for a workflow) every value bound
+  // from an upstream step's output. This is what makes different inputs a cache MISS. SCSH_RESULT
+  // is excluded: it is the output *path* (which for a workflow carries the random session id), not
+  // an input, so it must not change the key.
   blob.push_str("env:\n");
-  let mut pairs: Vec<&(String, String)> = env.iter().collect();
+  let mut pairs: Vec<&(String, String)> = env.iter().filter(|(k, _)| k != "SCSH_RESULT").collect();
   pairs.sort_by(|a, b| a.0.cmp(&b.0));
   for (k, v) in pairs {
     blob.push_str(&format!("{k}={v}\n"));
@@ -3888,31 +3913,54 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
   }
 }
 
-/// A cached run: the skill's result-file content, and (for a commit-enabled skill) the
-/// commits it made, journaled as a git `format-patch` mbox to replay on a hit.
+/// A cached run — everything needed to reproduce the original observation, not just the answer:
+/// the result-file content, any commits it made (a `format-patch` mbox, for a commit-enabled
+/// skill), how long the original run took, and its terminal recording. So a hit shows the same
+/// duration and replayable video as the first run, not a bare "(cached) · 0s".
 struct CacheEntry {
   result: String,
   commits: Option<String>,
+  /// The original run's wall-clock seconds, so the board shows the real duration on a hit.
+  elapsed: Option<f64>,
+  /// The original run's cast recording (copied into the cache), for replay on a hit.
+  cast: Option<PathBuf>,
 }
 
-/// Look up the cache entry for `key` (the result content, plus any journaled commits).
+/// Look up the cache entry for `key` (result, journaled commits, original duration, and cast).
 fn cache_lookup(root: &Path, key: &str) -> Option<CacheEntry> {
-  let text = std::fs::read_to_string(cache_dir(root).join(format!("{key}.json"))).ok()?;
-  Some(CacheEntry { result: json::field(&text, "result")?, commits: json::field(&text, "commits") })
+  let dir = cache_dir(root);
+  let text = std::fs::read_to_string(dir.join(format!("{key}.json"))).ok()?;
+  let cast = dir.join(format!("{key}.cast"));
+  Some(CacheEntry {
+    result: json::field(&text, "result")?,
+    commits: json::field(&text, "commits"),
+    elapsed: json::field(&text, "elapsed").and_then(|s| s.trim().parse::<f64>().ok()),
+    cast: cast.is_file().then_some(cast),
+  })
 }
 
-/// Store a skill's result-file `content` (and any commit `patch`) in the cache under `key`.
-/// Best-effort: a write failure just means the next identical run won't be a hit.
-fn cache_store(root: &Path, key: &str, content: &str, commits: Option<&str>) {
+/// Store a skill's result-file `content`, any commit `patch`, the original `elapsed` seconds, and
+/// its `cast_src` recording in the cache under `key` (the cast is copied alongside as
+/// `<key>.cast`). Best-effort: a write failure just means the next identical run won't be a hit.
+fn cache_store(
+  root: &Path, key: &str, content: &str, commits: Option<&str>, elapsed: Option<f64>, cast_src: Option<&Path>,
+) {
   let dir = cache_dir(root);
   if std::fs::create_dir_all(&dir).is_err() {
     return;
   }
-  let entry = match commits {
-    Some(patch) => format!("{{\"result\": {}, \"commits\": {}}}\n", json::quote(content), json::quote(patch)),
-    None => format!("{{\"result\": {}}}\n", json::quote(content)),
-  };
-  let _ = std::fs::write(dir.join(format!("{key}.json")), entry);
+  // elapsed is stored as a quoted string so the string-only `json::field` reader can read it back.
+  let mut fields = vec![format!("\"result\": {}", json::quote(content))];
+  if let Some(patch) = commits {
+    fields.push(format!("\"commits\": {}", json::quote(patch)));
+  }
+  if let Some(e) = elapsed {
+    fields.push(format!("\"elapsed\": {}", json::quote(&format!("{e}"))));
+  }
+  let _ = std::fs::write(dir.join(format!("{key}.json")), format!("{{{}}}\n", fields.join(", ")));
+  if let Some(src) = cast_src.filter(|p| p.is_file()) {
+    let _ = std::fs::copy(src, dir.join(format!("{key}.cast")));
+  }
 }
 
 /// A commit-enabled skill's new commits in its clone (`base..HEAD`) as a git `format-patch`
@@ -5866,6 +5914,33 @@ mod tests {
     let env2 = vec![("A".to_string(), "9".to_string()), ("B".to_string(), "3".to_string())];
     assert_ne!(cache_key(&caller, &s, &env2).unwrap(), k1);
 
+    // An input variable ALWAYS drives the key, even alongside a differing SCSH_RESULT — and
+    // SCSH_RESULT alone (the output path, e.g. a workflow's per-session dir) must NOT change it.
+    let env_a2 = vec![("A".into(), "2".to_string()), ("SCSH_RESULT".into(), "tmp/scsh/aaa/x.json".to_string())];
+    let env_a2b = vec![("A".into(), "2".to_string()), ("SCSH_RESULT".into(), "tmp/scsh/zzz/x.json".to_string())];
+    let env_a7 = vec![("A".into(), "7".to_string()), ("SCSH_RESULT".into(), "tmp/scsh/aaa/x.json".to_string())];
+    assert_eq!(
+      cache_key(&caller, &s, &env_a2).unwrap(),
+      cache_key(&caller, &s, &env_a2b).unwrap(),
+      "output path is not part of the key"
+    );
+    assert_ne!(
+      cache_key(&caller, &s, &env_a2).unwrap(),
+      cache_key(&caller, &s, &env_a7).unwrap(),
+      "an input value changes the key"
+    );
+
+    // A definition/workflow body drives the key (it isn't a caller .skills/ file).
+    let mut with_body = s.clone();
+    with_body.body = Some("do X".into());
+    let mut with_body2 = s.clone();
+    with_body2.body = Some("do Y".into());
+    assert_ne!(
+      cache_key(&caller, &with_body, &env).unwrap(),
+      cache_key(&caller, &with_body2, &env).unwrap(),
+      "body change busts the cache"
+    );
+
     // A committed change to repo content => different key (the HEAD tree changed).
     std::fs::write(caller.join("other.txt"), "x").unwrap();
     g(&caller, &["add", "-A"]);
@@ -5887,12 +5962,18 @@ mod tests {
     assert!(cache_lookup(&caller, key).is_none(), "empty cache misses");
 
     let result = r#"{"result": "2 + 3 = 5"}"#;
-    cache_store(&caller, key, result, None);
+    // Store with a duration and a cast recording, so a hit can reproduce them.
+    let cast_src = caller.join("orig.cast");
+    std::fs::write(&cast_src, "cast-bytes").unwrap();
+    cache_store(&caller, key, result, None, Some(12.5), Some(&cast_src));
     // Stored under the repo's gitignored tmp/.sccache/<key>.json, and reads back.
     assert!(caller.join("tmp/.sccache").join(format!("{key}.json")).is_file());
     let entry = cache_lookup(&caller, key).expect("hit");
     assert_eq!(entry.result, result);
     assert!(entry.commits.is_none(), "no commits journaled for a non-committing skill");
+    assert_eq!(entry.elapsed, Some(12.5), "the original duration round-trips");
+    let cast = entry.cast.expect("the cast was cached");
+    assert_eq!(std::fs::read_to_string(&cast).unwrap(), "cast-bytes", "the recording round-trips");
 
     // Restoring writes the result file (creating tmp/), exactly as a real run would have.
     restore_cached_result(&caller, "tmp/add_result.json", result).unwrap();
@@ -5907,10 +5988,11 @@ Subject: [PATCH] add: 2 + 3 = 5
 
 "diff" body
 "#;
-    cache_store(&caller, "withcommit", result, Some(patch));
+    cache_store(&caller, "withcommit", result, Some(patch), None, None);
     let e2 = cache_lookup(&caller, "withcommit").expect("hit");
     assert_eq!(e2.result, result);
     assert_eq!(e2.commits.as_deref(), Some(patch));
+    assert!(e2.elapsed.is_none() && e2.cast.is_none(), "optional fields absent when not stored");
   }
 
   #[test]

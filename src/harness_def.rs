@@ -1043,7 +1043,11 @@ mod tests {
     let task = add.task.as_deref().expect("flat def has a task");
     assert!(task.contains('\n'), "task should be multi-line");
     assert!(task.contains("SCSH_RESULT"), "task body preserved");
-    assert_eq!(add.invocations.len(), 2);
+    // add spins up every non-opencode agent: codex, claude, cursor, grok.
+    assert_eq!(add.invocations.len(), 4);
+    let agents: std::collections::BTreeSet<&str> = add.invocations.iter().map(|r| r.harness.as_str()).collect();
+    assert_eq!(agents, ["claude", "codex", "cursor", "grok"].into_iter().collect());
+    assert!(!agents.contains("opencode"), "opencode is intentionally excluded");
 
     let research = builtin("research");
     let city = research.params.iter().find(|p| p.name == "CITY").unwrap();
@@ -1212,7 +1216,7 @@ mod tests {
 
     let cfg = crate::config::Config { skills: vec![skill], terminal: crate::config::Terminal::default() };
     let inv = crate::config::expand_invocations(&cfg);
-    assert_eq!(inv.len(), 2);
+    assert_eq!(inv.len(), 4);
     assert!(inv.iter().any(|i| i.name == "add-claude-sonnet-4-6"));
     // Each route substitutes its own name into the result path (no collisions).
     assert!(inv.iter().any(|i| i.result == "tmp/add_claude-sonnet-4-6.json"));
