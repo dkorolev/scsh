@@ -1045,6 +1045,34 @@ pub fn opencode_auth_ready() -> bool {
     .is_some_and(|p| p.is_file())
 }
 
+/// If the opencode provider that `model` uses logs in via an OAuth token that has EXPIRED, return
+/// that provider's name. An expired OAuth login (e.g. the ChatGPT-plan `openai` provider) makes
+/// opencode silently stop responding — the run would hang instead of failing — so scsh checks the
+/// `expires` in `~/.local/share/opencode/auth.json` up front and refuses with a re-login message.
+/// `None` when the provider uses a non-expiring API key, is absent, or the token is still valid.
+pub fn opencode_expired_provider(model: &str) -> Option<String> {
+  let provider = opencode_model_provider(model);
+  let path = opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())?;
+  let crate::json::Value::Object(obj) = crate::json::parse(&std::fs::read_to_string(&path).ok()?).ok()? else {
+    return None;
+  };
+  let crate::json::Value::Object(fields) = obj.iter().find(|(k, _)| k == provider).map(|(_, v)| v)? else {
+    return None;
+  };
+  let field = |name: &str| fields.iter().find(|(k, _)| k == name).map(|(_, v)| v);
+  // Only OAuth logins expire; a `type: "api"` static key never does.
+  match field("type") {
+    Some(crate::json::Value::String(s)) if s == "oauth" => {}
+    _ => return None,
+  }
+  let expires_ms = match field("expires") {
+    Some(crate::json::Value::Number(n)) => *n,
+    _ => return None,
+  };
+  let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+  (expires_ms < now_ms as f64).then(|| provider.to_string())
+}
+
 pub fn claude_oauth_token() -> Option<String> {
   std::env::var(CLAUDE_OAUTH_TOKEN_ENV).ok().filter(|s| !s.is_empty())
 }
@@ -1183,6 +1211,13 @@ pub fn check_skill_host(harness: Harness, model: Option<&str>, probe: &OpencodeM
   check_harness_host(harness)?;
   if harness == Harness::Opencode {
     if let Some(m) = model {
+      // An expired provider login would make opencode hang; surface it as a clear "log in again".
+      if let Some(provider) = opencode_expired_provider(m) {
+        return Err(format!(
+          "opencode's '{provider}' login has expired — run `opencode auth login` on the host \
+           (choose {provider}), then re-run"
+        ));
+      }
       probe.check_model(m)?;
     }
   }
@@ -2600,6 +2635,40 @@ mod tests {
     assert_eq!(opencode_model_provider("openai/gpt-5.5"), "openai");
     assert_eq!(opencode_model_provider("nebius-glm/zai-org/GLM-5.2"), "nebius-glm");
     assert_eq!(opencode_model_provider("standalone"), "standalone");
+  }
+
+  #[test]
+  fn opencode_expired_provider_flags_only_expired_oauth() {
+    // A fake opencode data home with an EXPIRED openai OAuth login, a valid claude OAuth login,
+    // and a never-expiring nebius API key.
+    let base = std::env::temp_dir().join(format!("scsh-oc-exp-{}", std::process::id()));
+    let auth_dir = base.join("opencode");
+    std::fs::create_dir_all(&auth_dir).unwrap();
+    std::fs::write(
+      auth_dir.join("auth.json"),
+      r#"{
+        "openai": {"type": "oauth", "access": "x", "expires": 1000000000000},
+        "anthropic": {"type": "oauth", "access": "y", "expires": 99999999999999},
+        "nebius": {"type": "api", "key": "k"}
+      }"#,
+    )
+    .unwrap();
+    let xdg = base.clone().into_os_string();
+    let prev = std::env::var_os("XDG_DATA_HOME");
+    std::env::set_var("XDG_DATA_HOME", &xdg);
+    // openai OAuth is long-expired → flagged with the provider name.
+    assert_eq!(opencode_expired_provider("openai/gpt-5.5").as_deref(), Some("openai"));
+    // A valid OAuth login is not flagged.
+    assert_eq!(opencode_expired_provider("anthropic/claude"), None);
+    // A static API key never expires.
+    assert_eq!(opencode_expired_provider("nebius/whatever"), None);
+    // An unknown provider (no auth entry) is not flagged.
+    assert_eq!(opencode_expired_provider("mystery/model"), None);
+    match prev {
+      Some(v) => std::env::set_var("XDG_DATA_HOME", v),
+      None => std::env::remove_var("XDG_DATA_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   #[test]
