@@ -243,7 +243,12 @@ RUN set -eux; \
     opencode --version
 ENV OPENCODE_YOLO=true
 ENV OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS=true
+# opencode reads auth from $XDG_DATA_HOME/opencode and config from $XDG_CONFIG_HOME/opencode.
+# Both point under the repo-mounted, gitignored tmp/ so scsh forwards them by copying into the
+# run clone (riding the repo mount) — no separate single-file bind mounts (which Docker Desktop
+# on macOS rejects), same as claude/codex/grok/cursor.
 ENV XDG_DATA_HOME=/home/agent/repo/tmp/.xdg-data
+ENV XDG_CONFIG_HOME=/home/agent/repo/tmp/.config
 USER agent
 
 # --- Claude Code harness image (install harness last) ---

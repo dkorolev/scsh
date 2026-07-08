@@ -2883,15 +2883,12 @@ fn run_one_skill(
     let _ = std::fs::create_dir_all(parent);
   }
   let log = log_path.to_string_lossy().into_owned();
-  // Copy host opencode auth/config into the run clone and bind-mount from there.
+  // Copy host opencode auth/config into the run clone's tmp/ (rides the repo mount; no mounts).
   let opencode_forward = if skill.harness == config::Harness::Opencode && opencode_auth_enabled() {
     forward_opencode(&run_dir)
   } else {
     None
   };
-  if opencode_forward.is_some() {
-    prepare_opencode_mount_dirs(&run_dir);
-  }
   let claude_auth = if skill.harness == config::Harness::Claude && claude_auth_enabled() {
     forward_claude_auth(&run_dir)
   } else {
@@ -2908,11 +2905,7 @@ fn run_one_skill(
   // tmp/.claude-auth (the image's CLAUDE_CONFIG_DIR), riding along with the repo mount —
   // and stays WRITABLE, which the interactive TUI requires (single-file bind mounts are
   // read-only under Apple containers, and an unwritable config re-triggers onboarding).
-  let mut vols: Vec<(String, String)> = if let Some(ref forward) = opencode_forward {
-    runtime::opencode_forward_mounts(forward)
-  } else {
-    runtime::harness_volumes(skill.harness)
-  };
+  let mut vols: Vec<(String, String)> = runtime::harness_volumes(skill.harness);
   // Git transport bind-mounts back only `tmp/`. When this skill writes its result under the
   // alternate `.harness/tmp` scratch, mount that too so the result round-trips to the host.
   if git_transport && skill.result.starts_with(".harness/tmp/") {
@@ -3413,31 +3406,29 @@ fn schedule_run_dir_prune_backup(
 }
 
 /// Copy the host's opencode auth and config into `run_dir` for the upcoming run.
+/// Copy the host's opencode auth + config INTO the run clone's gitignored `tmp/` — the image
+/// points `XDG_DATA_HOME`/`XDG_CONFIG_HOME` at these paths, so they ride the repo mount (no
+/// separate single-file bind mounts, which Docker Desktop on macOS rejects). Returns the auth
+/// dir so the caller can scrub it after the run.
 fn forward_opencode(run_dir: &Path) -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from)?;
   let xdg_data = std::env::var_os("XDG_DATA_HOME");
   let xdg_config = std::env::var_os("XDG_CONFIG_HOME");
   let auth_src = runtime::opencode_auth_in(xdg_data.as_deref(), Some(home.as_os_str())).filter(|p| p.is_file())?;
 
-  let root = run_dir.join(runtime::OPENCODE_FORWARD_REL);
-  let xdg_dir = root.join("xdg/opencode");
-  let cfg_dir = root.join("config/opencode");
-  std::fs::create_dir_all(&xdg_dir).ok()?;
+  let data_dir = run_dir.join(runtime::OPENCODE_DATA_REL); // tmp/.xdg-data/opencode
+  let cfg_dir = run_dir.join(runtime::OPENCODE_CONFIG_REL); // tmp/.config/opencode
+  std::fs::create_dir_all(&data_dir).ok()?;
   std::fs::create_dir_all(&cfg_dir).ok()?;
-  std::fs::copy(&auth_src, xdg_dir.join("auth.json")).ok()?;
+  std::fs::copy(&auth_src, data_dir.join("auth.json")).ok()?;
 
   if let Some(cfg) = runtime::opencode_config_json_in(xdg_config.as_deref(), Some(home.as_os_str())) {
-    std::fs::copy(&cfg, cfg_dir.join("opencode.json")).ok()?;
+    let _ = std::fs::copy(&cfg, cfg_dir.join("opencode.json"));
   }
   if let Some(cfg) = runtime::opencode_config_jsonc_in(xdg_config.as_deref(), Some(home.as_os_str())) {
-    std::fs::copy(&cfg, cfg_dir.join("opencode.jsonc")).ok()?;
+    let _ = std::fs::copy(&cfg, cfg_dir.join("opencode.jsonc"));
   }
-  Some(root)
-}
-
-/// Ensure mount-point parents exist in the run clone for forwarded opencode files.
-fn prepare_opencode_mount_dirs(run_dir: &Path) {
-  let _ = std::fs::create_dir_all(run_dir.join(runtime::AGENT_XDG_DATA_REL).join("opencode"));
+  Some(data_dir)
 }
 
 /// Assemble the minimal Claude config the container needs into `run_dir`, returning the auth
@@ -5720,12 +5711,38 @@ mod tests {
   }
 
   #[test]
-  fn prepare_opencode_mount_dirs_creates_xdg_parent() {
-    let run = std::env::temp_dir().join(format!("scsh-auth-{}-{}", std::process::id(), now_secs()));
+  fn forward_opencode_copies_auth_and_config_into_the_run_clone() {
+    // A fake host opencode home + config, then confirm forward_opencode copies them under the
+    // run clone's tmp/ (riding the repo mount), not as separate bind mounts.
+    let base = std::env::temp_dir().join(format!("scsh-oc-fwd-{}-{}", std::process::id(), now_secs()));
+    let host = base.join("host");
+    std::fs::create_dir_all(host.join(".local/share/opencode")).unwrap();
+    std::fs::create_dir_all(host.join(".config/opencode")).unwrap();
+    std::fs::write(host.join(".local/share/opencode/auth.json"), "{\"k\":1}").unwrap();
+    std::fs::write(host.join(".config/opencode/opencode.json"), "{\"provider\":1}").unwrap();
+    let run = base.join("run");
     std::fs::create_dir_all(&run).unwrap();
-    prepare_opencode_mount_dirs(&run);
-    assert!(run.join("tmp/.xdg-data/opencode").is_dir());
-    let _ = std::fs::remove_dir_all(&run);
+    let prev_home = std::env::var_os("HOME");
+    let prev_xdg_d = std::env::var_os("XDG_DATA_HOME");
+    let prev_xdg_c = std::env::var_os("XDG_CONFIG_HOME");
+    std::env::set_var("HOME", &host);
+    std::env::remove_var("XDG_DATA_HOME");
+    std::env::remove_var("XDG_CONFIG_HOME");
+    let out = forward_opencode(&run);
+    match prev_home {
+      Some(v) => std::env::set_var("HOME", v),
+      None => std::env::remove_var("HOME"),
+    }
+    if let Some(v) = prev_xdg_d {
+      std::env::set_var("XDG_DATA_HOME", v);
+    }
+    if let Some(v) = prev_xdg_c {
+      std::env::set_var("XDG_CONFIG_HOME", v);
+    }
+    assert!(out.is_some(), "forwarding happened");
+    assert!(run.join("tmp/.xdg-data/opencode/auth.json").is_file(), "auth rides the repo mount");
+    assert!(run.join("tmp/.config/opencode/opencode.json").is_file(), "config rides the repo mount");
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   // --- commit integration ---------------------------------------------------
