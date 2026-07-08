@@ -317,8 +317,20 @@ impl Proc {
     self.finish(Status::Fail, combined.as_deref(), Some(reason));
   }
 
+  /// Finish green with an EXPLICIT elapsed time instead of this proc's own clock, and clear its
+  /// note. Used for a cache hit, which does no work of its own but should show the original run's
+  /// duration (not ~0s), so the board reads the same as when the result was first produced.
+  pub fn finish_ok_elapsed(&self, detail: Option<&str>, elapsed: f64) {
+    self.model.lock().unwrap().set_note(self.i, None);
+    self.finish_with(Status::Ok, detail, None, Some(elapsed));
+  }
+
   fn finish(&self, status: Status, detail: Option<&str>, fail_reason: Option<&str>) {
-    let elapsed = self.start_instant().elapsed().as_secs_f64();
+    self.finish_with(status, detail, fail_reason, None);
+  }
+
+  fn finish_with(&self, status: Status, detail: Option<&str>, fail_reason: Option<&str>, elapsed: Option<f64>) {
+    let elapsed = elapsed.unwrap_or_else(|| self.start_instant().elapsed().as_secs_f64());
     {
       let mut m = self.model.lock().unwrap();
       m.set_elapsed(self.i, elapsed);
