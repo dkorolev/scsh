@@ -443,7 +443,8 @@ pub fn harness_command(
       }
       tui.push_str(" --prompt ");
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
+      // opencode --prompt only PRE-FILLS the input box; send Enter once the TUI is up to submit.
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Enter, result, term)
     }
     Harness::Claude => {
       let prompt = format!(
@@ -464,7 +465,7 @@ pub fn harness_command(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
     Harness::Codex => {
       let prompt = format!(
@@ -487,7 +488,7 @@ pub fn harness_command(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Grok => {
       let prompt = format!(
@@ -509,7 +510,7 @@ pub fn harness_command(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt)); // positional initial prompt
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Cursor => {
       let prompt = format!(
@@ -534,7 +535,7 @@ pub fn harness_command(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, result, term)
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
   }
 }
@@ -559,6 +560,26 @@ impl TuiQuit {
   }
 }
 
+/// Whether a harness's initial prompt needs an explicit Enter to submit once the TUI is up.
+/// claude/codex/cursor/grok auto-run their prompt; opencode's `--prompt` only pre-fills the
+/// input box, so it must be submitted.
+#[derive(Debug, Clone, Copy)]
+enum TuiSubmit {
+  /// The prompt auto-runs; send nothing.
+  Auto,
+  /// Send Enter once the TUI is up (opencode).
+  Enter,
+}
+
+impl TuiSubmit {
+  fn as_arg(self) -> &'static str {
+    match self {
+      TuiSubmit::Auto => "none",
+      TuiSubmit::Enter => "enter",
+    }
+  }
+}
+
 /// Build the `scsh-tui-record` invocation that records a harness's interactive TUI.
 ///
 /// The heavy lifting lives in the `scsh-tui-record` script baked into the base image (see
@@ -572,8 +593,8 @@ impl TuiQuit {
 ///
 /// The output still tees to the run log, and scsh's container timeout remains the hard stop.
 fn wrap_tui_shell(
-  harness: Harness, skill_source: &str, model: Option<&str>, tui_cmd: &str, quit: TuiQuit, result: &str,
-  term: crate::config::Terminal,
+  harness: Harness, skill_source: &str, model: Option<&str>, tui_cmd: &str, quit: TuiQuit, submit: TuiSubmit,
+  result: &str, term: crate::config::Terminal,
 ) -> String {
   let model_label = model.unwrap_or("(harness default)");
   // `scsh-tui-record` records the harness's exit status to `${SCSH_RUN_LOG}.exit` via an EXIT
@@ -585,12 +606,13 @@ fn wrap_tui_shell(
   format!(
     "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
-scsh-tui-record {cols} {rows} {quit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log_var}}}\"",
+scsh-tui-record {cols} {rows} {quit} {submit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log_var}}}\"",
     harness.as_str(),
     log_var = RUN_LOG_VAR,
     cols = term.cols,
     rows = term.rows,
     quit = quit.as_arg(),
+    submit = submit.as_arg(),
     result_q = shell_quote(result),
     tui_q = shell_quote(tui_cmd),
   )
@@ -2026,7 +2048,7 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=opencode"));
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c enter tmp/add.json "), "got: {cmd}");
     assert!(cmd.contains("opencode -m openai/gpt-5.5 --prompt "), "got: {cmd}");
     assert!(!cmd.contains(" run "), "no headless run subcommand: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
@@ -2053,7 +2075,10 @@ mod tests {
     // Interactive TUI recorded via scsh-tui-record (no inline shell, no screen-scraping).
     // bypassPermissions enables every tool; its consent screen is suppressed by the minimal
     // forwarded .claude.json (host-side), not by any flag here.
-    assert!(cmd.contains("scsh-tui-record 200 50 slash-exit tmp/add_claude_sonnet_4_6_result.json "), "got: {cmd}");
+    assert!(
+      cmd.contains("scsh-tui-record 200 50 slash-exit none tmp/add_claude_sonnet_4_6_result.json "),
+      "got: {cmd}"
+    );
     assert!(cmd.contains("claude --permission-mode bypassPermissions --model sonnet"), "got: {cmd}");
     assert!(!cmd.contains("--settings"), "got: {cmd}");
     assert!(!cmd.contains("claude -p"), "got: {cmd}");
@@ -2075,7 +2100,7 @@ mod tests {
     assert!(cmd.contains("scsh: harness=codex"));
     // Interactive TUI (no `exec` subcommand) via scsh-tui-record. Folder-trust is seeded
     // host-side into the forwarded config.toml (not in the command), so no in-command seed.
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_codex_result.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_codex_result.json "), "got: {cmd}");
     assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"), "got: {cmd}");
     assert!(!cmd.contains("codex exec"), "got: {cmd}");
     assert!(cmd.contains(" -m gpt-5.5"));
@@ -2103,7 +2128,7 @@ mod tests {
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=grok"));
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_grok.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_grok.json "), "got: {cmd}");
     assert!(cmd.contains("grok --always-approve"), "got: {cmd}");
     assert!(!cmd.contains("grok -p "), "no headless -p: {cmd}");
     assert!(cmd.contains(" -m grok-build"));
@@ -2131,7 +2156,7 @@ mod tests {
     assert!(cmd.contains("scsh: harness=cursor"));
     // Interactive TUI via scsh-tui-record. Workspace trust is pre-seeded by creating
     // cursor's marker file in-container (no flag/config key exists), not by scraping.
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c tmp/add_cursor.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_cursor.json "), "got: {cmd}");
     assert!(cmd.contains("cursor-agent --force --sandbox disabled"), "got: {cmd}");
     assert!(!cmd.contains("cursor-agent -p"), "got: {cmd}");
     assert!(!cmd.contains("--trust"), "got: {cmd}");
