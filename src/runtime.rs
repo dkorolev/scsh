@@ -149,21 +149,16 @@ pub fn image_target(harness: Harness) -> &'static str {
 /// Claude Code's interactive TUI re-runs onboarding when it cannot write its state json.)
 pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
 
-/// In-container path where opencode reads `auth.json` (`$XDG_DATA_HOME/opencode/auth.json` in the
-/// image). scsh bind-mounts the host's `~/.local/share/opencode/auth.json` here when that file
-/// exists — required for third-party opencode providers (e.g. Nebius GLM) that authenticate via
-/// the host login rather than a built-in model route.
-pub const OPENCODE_AUTH_MOUNT: &str = "/home/agent/repo/tmp/.xdg-data/opencode/auth.json";
+/// Run-dir-relative opencode auth dir (`$XDG_DATA_HOME/opencode` in the image). scsh copies the
+/// host's `~/.local/share/opencode/auth.json` into the run clone here (riding the repo mount),
+/// required for third-party opencode providers (e.g. Nebius GLM) that authenticate via the host
+/// login rather than a built-in model route.
+pub const OPENCODE_DATA_REL: &str = "tmp/.xdg-data/opencode";
 
-/// Run-dir-relative tree where scsh copies forwarded opencode auth/config before a run.
-pub const OPENCODE_FORWARD_REL: &str = "tmp/.opencode-forward";
-
-/// In-container paths for forwarded opencode config (`$XDG_CONFIG_HOME/opencode/` on the host).
-/// Custom providers (e.g. Nebius GLM) are declared here; auth.json alone is not enough.
-/// scsh copies these from the host into each run clone (parallel runs cannot safely share one
-/// host bind-mount on Apple Containers).
-pub const OPENCODE_CONFIG_JSON_MOUNT: &str = "/home/agent/.config/opencode/opencode.json";
-pub const OPENCODE_CONFIG_JSONC_MOUNT: &str = "/home/agent/.config/opencode/opencode.jsonc";
+/// Run-dir-relative opencode config dir (`$XDG_CONFIG_HOME/opencode` in the image). Custom
+/// providers (e.g. Nebius GLM) are declared here; auth.json alone is not enough. scsh copies the
+/// host config into each run clone here so it rides the repo mount (no separate bind mounts).
+pub const OPENCODE_CONFIG_REL: &str = "tmp/.config/opencode";
 
 /// Host env var for long-lived Claude OAuth (`claude setup-token`).
 pub const CLAUDE_OAUTH_TOKEN_ENV: &str = "CLAUDE_CODE_OAUTH_TOKEN";
@@ -327,11 +322,6 @@ pub fn cursor_container_auth_ready() -> bool {
 pub const AGENT_REPO: &str = "/home/agent/repo";
 
 /// opencode's data dir (`XDG_DATA_HOME`), RELATIVE to the repo, where scsh drops the forwarded
-/// credential. It lives under the gitignored `tmp/`, so neither the auth nor opencode's own
-/// session data ever shows up as an untracked file. The image sets `XDG_DATA_HOME` to
-/// [`AGENT_REPO`]`/`this.
-pub const AGENT_XDG_DATA_REL: &str = "tmp/.xdg-data";
-
 /// Per-run log path the harness tees every line of its output to, RELATIVE to the repo. It
 /// lives under the gitignored `tmp/` (so it is never an untracked file); on the host it is
 /// therefore `<run_dir>/tmp/scsh-run.log`, where the full intra-container output can be read.
@@ -1221,58 +1211,13 @@ fn parse_opencode_models(stdout: &str) -> std::collections::HashSet<String> {
   stdout.lines().map(|line| line.trim()).filter(|line| !line.is_empty()).map(|line| line.to_string()).collect()
 }
 
-/// Host opencode paths for `scsh list --verbose` (real runs copy into the run clone first).
-pub fn opencode_host_mounts() -> Vec<(String, String)> {
-  opencode_host_mounts_from(
-    std::env::var_os("XDG_DATA_HOME").as_deref(),
-    std::env::var_os("XDG_CONFIG_HOME").as_deref(),
-    std::env::var_os("HOME").as_deref(),
-  )
-}
-
-pub fn opencode_host_mounts_from(
-  xdg_data_home: Option<&OsStr>, xdg_config_home: Option<&OsStr>, home: Option<&OsStr>,
-) -> Vec<(String, String)> {
-  let mut out = Vec::new();
-  if let Some(auth) = opencode_auth_in(xdg_data_home, home).filter(|p| p.is_file()) {
-    out.push((auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string()));
-  }
-  if let Some(cfg) = opencode_config_json_in(xdg_config_home, home) {
-    out.push((cfg.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSON_MOUNT.to_string()));
-  }
-  if let Some(cfg) = opencode_config_jsonc_in(xdg_config_home, home) {
-    out.push((cfg.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSONC_MOUNT.to_string()));
-  }
-  out
-}
-
-/// Bind-mount opencode auth/config copied into a run clone.
-pub fn opencode_forward_mounts(forward_root: &Path) -> Vec<(String, String)> {
-  let mut out = Vec::new();
-  let auth = forward_root.join("xdg/opencode/auth.json");
-  if auth.is_file() {
-    out.push((auth.to_string_lossy().into_owned(), OPENCODE_AUTH_MOUNT.to_string()));
-  }
-  let json = forward_root.join("config/opencode/opencode.json");
-  if json.is_file() {
-    out.push((json.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSON_MOUNT.to_string()));
-  }
-  let jsonc = forward_root.join("config/opencode/opencode.jsonc");
-  if jsonc.is_file() {
-    out.push((jsonc.to_string_lossy().into_owned(), OPENCODE_CONFIG_JSONC_MOUNT.to_string()));
-  }
-  out
-}
-
-/// Volume mounts shown by `scsh list --verbose` (host paths; real runs use the same bind-mounts).
-/// Claude, codex, grok, and cursor need no mounts: their auth/config is COPIED into the run
-/// clone's gitignored `tmp/` (the images' `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` /
-/// `CURSOR_CONFIG_DIR`), which rides along with the repo mount in both mount modes.
-pub fn harness_volumes(harness: Harness) -> Vec<(String, String)> {
-  match harness {
-    Harness::Opencode => opencode_host_mounts(),
-    Harness::Claude | Harness::Codex | Harness::Grok | Harness::Cursor => Vec::new(),
-  }
+/// Volume mounts for a harness run. NONE of the harnesses need extra bind-mounts: every one
+/// COPIES its auth/config into the run clone's gitignored `tmp/` (the images'
+/// `CLAUDE_CONFIG_DIR` / `CODEX_HOME` / `GROK_HOME` / `CURSOR_CONFIG_DIR`, and opencode's
+/// `XDG_DATA_HOME` / `XDG_CONFIG_HOME`), which rides along with the repo mount in both mount
+/// modes — so no single-file bind mount (rejected by Docker Desktop on macOS) is ever used.
+pub fn harness_volumes(_harness: Harness) -> Vec<(String, String)> {
+  Vec::new()
 }
 
 /// Render an argv as a copy-pasteable shell command (for `scsh list --verbose`).
@@ -2001,8 +1946,12 @@ mod tests {
     let df = dockerfile();
     assert!(df.contains(&format!("WORKDIR {AGENT_REPO}")), "WORKDIR must match AGENT_REPO");
     assert!(
-      df.contains(&format!("ENV XDG_DATA_HOME={AGENT_REPO}/{AGENT_XDG_DATA_REL}")),
-      "XDG_DATA_HOME must match AGENT_REPO/AGENT_XDG_DATA_REL"
+      df.contains(&format!("ENV XDG_DATA_HOME={AGENT_REPO}/tmp/.xdg-data")),
+      "XDG_DATA_HOME must live under the repo-mounted tmp/"
+    );
+    assert!(
+      df.contains(&format!("ENV XDG_CONFIG_HOME={AGENT_REPO}/tmp/.config")),
+      "XDG_CONFIG_HOME must live under the repo-mounted tmp/ (opencode config rides the mount)"
     );
     assert!(
       df.contains(&format!("ENV {RUN_LOG_VAR}={AGENT_REPO}/{RUN_LOG_REL}")),
@@ -2020,7 +1969,7 @@ mod tests {
     assert_ne!("/home/agent", AGENT_REPO, "the mount must not be the home dir");
     assert!(AGENT_REPO.starts_with("/home/agent/"), "the repo mount lives under the home dir");
     // The forwarded credential and the run log both live under the gitignored tmp/.
-    assert!(AGENT_XDG_DATA_REL.starts_with("tmp/") && RUN_LOG_REL.starts_with("tmp/"));
+    assert!(OPENCODE_DATA_REL.starts_with("tmp/") && RUN_LOG_REL.starts_with("tmp/"));
   }
 
   #[test]
@@ -2430,6 +2379,8 @@ mod tests {
         "claude -p hi"
       ]
     );
+    // opencode uses NO separate mount now — its auth/config is copied into the run clone's tmp/
+    // and rides the repo mount, same as the other harnesses.
     assert_eq!(
       run_command(
         "docker",
@@ -2437,7 +2388,7 @@ mod tests {
         "/tmp/run",
         "run-s",
         &[],
-        &[("/home/u/.local/share/opencode/auth.json", OPENCODE_AUTH_MOUNT)],
+        &[],
         "opencode run 'run skill s'",
         RepoMountMode::Full,
       ),
@@ -2448,8 +2399,6 @@ mod tests {
         "--name",
         "run-s",
         "-v",
-        "/home/u/.local/share/opencode/auth.json:/home/agent/repo/tmp/.xdg-data/opencode/auth.json",
-        "-v",
         "/tmp/run:/home/agent/repo",
         "scsh-opencode:latest",
         "/bin/sh",
@@ -2457,26 +2406,6 @@ mod tests {
         "opencode run 'run skill s'"
       ]
     );
-  }
-
-  #[test]
-  fn opencode_forward_mounts_maps_copied_tree() {
-    let base = std::env::temp_dir().join(format!("scsh-opencode-forward-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&base);
-    std::fs::create_dir_all(base.join("xdg/opencode")).unwrap();
-    std::fs::create_dir_all(base.join("config/opencode")).unwrap();
-    std::fs::write(base.join("xdg/opencode/auth.json"), "{}").unwrap();
-    std::fs::write(base.join("config/opencode/opencode.json"), "{}").unwrap();
-    let mounts = opencode_forward_mounts(&base);
-    assert_eq!(mounts.len(), 2);
-    assert_eq!(mounts[0].1, OPENCODE_AUTH_MOUNT);
-    assert_eq!(mounts[1].1, OPENCODE_CONFIG_JSON_MOUNT);
-    let _ = std::fs::remove_dir_all(&base);
-  }
-
-  #[test]
-  fn opencode_host_mounts_empty_when_nothing_on_host() {
-    assert!(opencode_host_mounts_from(None, None, None).is_empty());
   }
 
   #[test]
