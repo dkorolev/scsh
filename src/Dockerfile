@@ -139,10 +139,12 @@ ENV TERM=xterm-256color
 # should surface (via the container timeout), not be auto-clicked.
 RUN cat > /usr/local/bin/scsh-tui-record <<'SCSH_TUI_RECORD'
 #!/bin/sh
-# Usage: scsh-tui-record COLS ROWS QUIT RESULT CMD
-#   QUIT: slash-exit (Claude) | double-ctrl-c (codex, cursor)
+# Usage: scsh-tui-record COLS ROWS QUIT SUBMIT RESULT CMD
+#   QUIT:   slash-exit (Claude) | double-ctrl-c (codex, cursor, grok, opencode)
+#   SUBMIT: none (the prompt auto-runs) | enter (opencode --prompt only PRE-FILLS the input,
+#           so an Enter must be sent once the TUI is up to actually submit it)
 set -u
-cols=$1; rows=$2; quit=$3; result=$4; cmd=$5
+cols=$1; rows=$2; quit=$3; submit=$4; result=$5; cmd=$6
 dbg="$SCSH_RUN_LOG.tuidebug"
 exit_file="$SCSH_RUN_LOG.exit"
 log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }
@@ -175,6 +177,15 @@ n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"
 tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"
 log "tmux new-session rc=$?"
 tmux set -t scsh status off >/dev/null 2>&1 || true
+
+# Submitter: some harnesses (opencode) launch with the prompt only PRE-FILLED in the input box,
+# so it never runs until an Enter is sent. Send it once the TUI has had time to come up, and once
+# more if the result still hasn't appeared — then stop, so we never inject stray empty submits.
+if [ "$submit" = enter ]; then
+  ( sleep 8; tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (1)"
+    sleep 10; [ -f "$result" ] || { tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (2)"; }
+  ) >/dev/null 2>&1 &
+fi
 
 # Watcher: end the TUI once the skill has produced its result file.
 {
