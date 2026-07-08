@@ -220,6 +220,28 @@ pub fn grok_container_auth_ready() -> bool {
   grok_auth_file_on_host().is_some() || std::env::var(XAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false)
 }
 
+/// Whether grok's stored OAuth login has lapsed: `~/.grok/auth.json` carries an `expires_at`
+/// ISO-8601 timestamp, and once its date is before today the interactive Build TUI stops
+/// trusting the session and demands a fresh browser sign-in (headless `grok -p` silently
+/// refreshes, so it doesn't hit this). When true, the run skips grok with a "sign in on the
+/// host" message rather than hanging on the un-clickable browser-auth screen in the container.
+/// Best-effort: an unreadable/parse-less file returns `false` (don't block on uncertainty).
+pub fn grok_auth_expired() -> bool {
+  let Some(path) = grok_auth_file_on_host() else { return false };
+  let Ok(text) = std::fs::read_to_string(&path) else { return false };
+  // Pull the value after the first `"expires_at"` key — a quoted ISO date like
+  // "2026-07-03T22:28:34.057655Z". Compare its date (YYYYMMDD) to today's, lexicographically.
+  let Some(rest) = text.split("\"expires_at\"").nth(1).and_then(|s| s.split(':').nth(1)) else { return false };
+  let iso: String = rest.trim().trim_start_matches('"').chars().take(10).collect(); // "2026-07-03"
+  let expires: String = iso.chars().filter(|c| c.is_ascii_digit()).collect(); // "20260703"
+  if expires.len() != 8 {
+    return false;
+  }
+  let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+  let today = &format_utc_timestamp(now)[..8]; // "20260707"
+  expires.as_str() < today
+}
+
 /// Run-dir-relative Cursor config dir (`CURSOR_CONFIG_DIR` inside the container).
 pub const CURSOR_FORWARD_REL: &str = "tmp/.cursor";
 
@@ -1058,14 +1080,22 @@ pub fn check_harness_host(harness: Harness) -> Result<(), String> {
       }
     }
     Harness::Grok => {
-      if grok_container_auth_ready() {
-        Ok(())
-      } else {
+      if !grok_container_auth_ready() {
         Err(
           "grok harness unavailable (no ~/.grok/auth.json and XAI_API_KEY is not set \
            — run `grok login` (or `grok login --device-auth`), or export XAI_API_KEY in your shell)"
             .into(),
         )
+      } else if grok_auth_expired() {
+        // The interactive Build TUI can't refresh a lapsed session non-interactively — it would
+        // demand a browser sign-in that can't be clicked inside the container.
+        Err(
+          "grok login has expired — run `grok` on the host and sign in, then re-run \
+           (its interactive session must be refreshed on the host; the container can't do it)"
+            .into(),
+        )
+      } else {
+        Ok(())
       }
     }
     Harness::Cursor => {
