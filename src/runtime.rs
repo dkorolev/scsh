@@ -16,11 +16,14 @@ pub struct Runtime {
   pub path: PathBuf,
 }
 
-/// Candidate runtimes, in the order scsh tries them. Apple's `container` is
-/// preferred on macOS; Docker is the primary everywhere; Podman is the fallback.
+/// Candidate runtimes scsh auto-detects, in order. **On macOS, Apple's `container` is the
+/// only auto-detected runtime — scsh never silently falls back to Docker or Podman there.**
+/// A macOS user who wants Docker/Podman must ask for it explicitly with `SCSH_RUNTIME=docker`
+/// (which [`detect_runtime`] honors regardless of this list). Off macOS, Docker is primary and
+/// Podman the fallback.
 pub fn runtime_candidates(is_macos: bool) -> &'static [&'static str] {
   if is_macos {
-    &["container", "docker", "podman"]
+    &["container"]
   } else {
     &["docker", "podman"]
   }
@@ -1714,7 +1717,8 @@ mod tests {
 
   #[test]
   fn candidates_depend_on_os() {
-    assert_eq!(runtime_candidates(true), &["container", "docker", "podman"]);
+    // macOS: Apple 'container' ONLY — no auto Docker/Podman fallback.
+    assert_eq!(runtime_candidates(true), &["container"]);
     assert_eq!(runtime_candidates(false), &["docker", "podman"]);
   }
 
@@ -1759,6 +1763,18 @@ mod tests {
     make_exec(&d.join("docker"));
     let path = OsString::from(d.to_str().unwrap());
     assert_eq!(detect_runtime_in(true, &path).unwrap().name, "container");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn macos_never_auto_falls_back_to_docker() {
+    // Docker present but Apple 'container' absent → macOS auto-detects NOTHING (no silent
+    // Docker fallback). The user must opt in with SCSH_RUNTIME=docker.
+    let d = tmp("detect-macos-nofallback");
+    make_exec(&d.join("docker"));
+    make_exec(&d.join("podman"));
+    let path = OsString::from(d.to_str().unwrap());
+    assert!(detect_runtime_in(true, &path).is_none(), "no auto Docker/Podman fallback on macOS");
   }
 
   #[cfg(unix)]

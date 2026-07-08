@@ -4956,7 +4956,8 @@ fn install_git_hint() -> &'static str {
 
 fn install_runtime_hint() -> &'static str {
   if cfg!(target_os = "macos") {
-    "install Apple 'container' (https://github.com/apple/container), Docker Desktop, or Podman"
+    "install Apple 'container' (https://github.com/apple/container) — the runtime scsh uses on \
+     macOS; to use Docker or Podman instead, set SCSH_RUNTIME=docker (or podman) explicitly"
   } else {
     "install Docker (https://docs.docker.com/engine/install/) or Podman (https://podman.io)"
   }

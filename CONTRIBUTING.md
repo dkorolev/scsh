@@ -153,8 +153,9 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   standard-library only, so the binary stays self-contained.
 - **`git`** on `PATH` — required by `scsh` itself and by the integration tests.
 - **A container runtime** for real runs and for integration-test preflight:
-  Apple `container` → `docker` → `podman` on macOS; `docker` → `podman`
-  elsewhere. Override with `SCSH_RUNTIME=<docker|podman|container>`.
+  **on macOS, Apple `container` ONLY** — scsh never auto-falls back to Docker/Podman there;
+  `docker` → `podman` elsewhere. To use Docker/Podman on macOS, ask explicitly with
+  `SCSH_RUNTIME=<docker|podman>` (which overrides detection on any OS).
 - **Network** only for a *real* container run (it pulls the base image and
   installs opencode). Building, `scsh list`, and the whole test suite
   need no network.

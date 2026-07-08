@@ -333,8 +333,8 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 
 - A **Rust toolchain** (`cargo`) to build the binary.
 - **`git`** on your `PATH`.
-- A **container runtime**: Apple `container` → Docker → Podman on macOS; Docker →
-  Podman on Linux.
+- A **container runtime**: **on macOS, Apple `container` only** (scsh does not auto-fall back to
+  Docker/Podman — set `SCSH_RUNTIME=docker` to opt in explicitly); Docker → Podman on Linux.
 - **Network** only for a real `scsh run` (it pulls the base image and installs
   opencode). `list` and `init-demo-project` need none.
 - For skills to do real work, the container's opencode needs a configured model;
