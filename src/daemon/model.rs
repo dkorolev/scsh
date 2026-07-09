@@ -82,6 +82,8 @@ pub enum ProcStatus {
   Running,
   Ok,
   Fail,
+  /// Decided but never run — a workflow step gated off (or downstream of a skipped step).
+  Skipped,
 }
 
 impl ProcStatus {
@@ -91,6 +93,7 @@ impl ProcStatus {
       ProcStatus::Running => "running",
       ProcStatus::Ok => "ok",
       ProcStatus::Fail => "fail",
+      ProcStatus::Skipped => "skipped",
     }
   }
 
@@ -100,6 +103,7 @@ impl ProcStatus {
       "running" => Some(ProcStatus::Running),
       "ok" => Some(ProcStatus::Ok),
       "fail" => Some(ProcStatus::Fail),
+      "skipped" => Some(ProcStatus::Skipped),
       _ => None,
     }
   }

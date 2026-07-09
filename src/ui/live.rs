@@ -19,6 +19,8 @@ pub enum Status {
   Running,
   Ok,
   Fail,
+  /// Decided but never run — a workflow step whose gate was false or whose dependency skipped.
+  Skipped,
 }
 
 /// One captured output line, with the time (seconds since the proc started) it arrived — so the
@@ -301,6 +303,7 @@ fn glyph(status: Status, frame: u64) -> Seg {
     Status::Running => Seg::new(FRAMES[(frame as usize) % FRAMES.len()], Sty::Cyan),
     Status::Ok => Seg::new("✓", Sty::Green),
     Status::Fail => Seg::new("✗", Sty::Red),
+    Status::Skipped => Seg::new("⊘", Sty::Dim),
   }
 }
 
@@ -322,7 +325,7 @@ fn header_row_framed(i: usize, p: &Proc, frame: u64) -> Row {
   ];
   // Trailing note while running, or the final detail once done (red if it failed).
   let tail = match p.status {
-    Status::Ok | Status::Fail => p.detail.as_deref(),
+    Status::Ok | Status::Fail | Status::Skipped => p.detail.as_deref(),
     _ => p.note.as_deref(),
   };
   if let Some(t) = tail.filter(|t| !t.is_empty()) {

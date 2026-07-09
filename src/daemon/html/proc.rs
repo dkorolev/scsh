@@ -6,7 +6,7 @@ use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus};
 
 pub(crate) fn empty_output_label(status: ProcStatus) -> &'static str {
   match status {
-    ProcStatus::Ok | ProcStatus::Fail => "No output.",
+    ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped => "No output.",
     ProcStatus::Waiting | ProcStatus::Running => "No output yet.",
   }
 }
@@ -70,6 +70,7 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
     ProcStatus::Running => "◉",
     ProcStatus::Ok => "✓",
     ProcStatus::Fail => "✗",
+    ProcStatus::Skipped => "⊘",
   }
 }
 

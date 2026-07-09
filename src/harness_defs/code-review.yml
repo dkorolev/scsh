@@ -1,0 +1,45 @@
+# Built-in workflow: prove the review agent's credentials work with a cheap end-to-end
+# probe FIRST, then run the actual code review. Two steps the session browser renders as
+# separate rows (step 1/2, step 2/2 · needs probe_credentials) — an expired login fails
+# fast in the probe instead of wasting the long review container, and the review step is
+# gated off (⊘ skipped) when the probe does not come back ok.
+description: "Probe the review agent's credentials end to end, then review the repository's code."
+params:
+  FOCUS:
+    type: string
+    default: "correctness bugs, security problems, and resource leaks"
+    description: "What the review should concentrate on"
+steps:
+  probe_credentials:
+    agent:
+      harness: claude
+      model: sonnet
+    prompt: |
+      This is a credentials probe, nothing more. Confirm you are executing inside the
+      container by writing the JSON object {"ok": true} to the file named by the
+      SCSH_RESULT environment variable, then stop. Do nothing else — no commits, no
+      network, no other files.
+    output:
+      ok:
+        type: bool
+  review:
+    needs: probe_credentials
+    when:
+      probe_credentials.ok: "true"
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      FOCUS: params.FOCUS
+    prompt: |
+      Review the code in this repository, concentrating on the FOCUS input. Read the
+      most important source files first (entry points, then whatever they pull in),
+      then write a JSON object with two string fields to the file named by the
+      SCSH_RESULT environment variable: "summary" (a few sentences on the overall
+      state of the code) and "findings" (a numbered list in one string, most severe
+      first; the string "none" when you found nothing worth raising). Make no commits.
+    output:
+      summary:
+        type: string
+      findings:
+        type: string

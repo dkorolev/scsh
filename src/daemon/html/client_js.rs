@@ -81,7 +81,7 @@ function harnessChipsHtml(session) {
   let out = '';
   (session.procs || []).forEach((p) => {
     if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
-    const done = (p.status === 'ok' || p.status === 'fail');
+    const done = (p.status === 'ok' || p.status === 'fail' || p.status === 'skipped');
     const skill = p.skill_name || p.label || '';
     out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" title="' +
       esc(p.harness + ': ' + skill + ' (' + p.status + ')') + '">' +
@@ -123,7 +123,7 @@ function emptyOutputHtml(status) {
   return '<div class="dim">' + emptyOutputLabel(status) + '</div>';
 }
 function glyph(status) {
-  return ({waiting:'○',running:'◉',ok:'✓',fail:'✗'})[status] || '?';
+  return ({waiting:'○',running:'◉',ok:'✓',fail:'✗',skipped:'⊘'})[status] || '?';
 }
 function formatUnixTime(unix) {
   if (!unix) return '—';

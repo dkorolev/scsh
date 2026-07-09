@@ -360,6 +360,12 @@ impl Proc {
     self.finish(Status::Ok, detail, None);
   }
 
+  /// Finish as never-run: a workflow step decided out of the run (gate false, or a needed
+  /// step was skipped). Renders ⊘ with the reason, on the board and in the session browser.
+  pub fn finish_skipped(&self, why: &str) {
+    self.finish(Status::Skipped, Some(why), None);
+  }
+
   /// Finish red: as [`Proc::finish_ok`] but ✗ (the detail renders in red).
   pub fn finish_fail(&self, reason: &str, detail: Option<&str>) {
     crate::failure::log_proc(reason, &self.label, detail);
@@ -393,6 +399,7 @@ impl Proc {
         Status::Fail => crate::daemon::ProcStatus::Fail,
         Status::Running => crate::daemon::ProcStatus::Running,
         Status::Queued => crate::daemon::ProcStatus::Waiting,
+        Status::Skipped => crate::daemon::ProcStatus::Skipped,
       };
       s.proc_finish(self.i, ps, fail_reason, detail, elapsed);
     }
@@ -646,6 +653,13 @@ fn summary_line(label: &str, status: Status, elapsed: f64, detail: Option<&str>)
   if status == Status::Queued {
     return format!("{} {}  {}", style("·").dim(), style(label).bold(), style("not started").dim());
   }
+  if status == Status::Skipped {
+    let mut line = format!("{} {}", style("⊘").dim(), style(label).bold());
+    if let Some(d) = detail.filter(|d| !d.is_empty()) {
+      line.push_str(&format!("  {}", style(d).dim()));
+    }
+    return line;
+  }
   let (glyph, ok) = match status {
     Status::Fail => (style("✗").red().bold(), false),
     _ => (style("✓").green().bold(), true),
@@ -675,6 +689,14 @@ mod tests {
     assert_eq!(bad, "✗ multiply  0.0s  X required");
     let bare = console::strip_ansi_codes(&summary_line("build", Status::Ok, 4.0, None)).into_owned();
     assert_eq!(bare, "✓ build  4s");
+    let skipped = console::strip_ansi_codes(&summary_line(
+      "claude: review",
+      Status::Skipped,
+      0.0,
+      Some("skipped — its when: gate is false"),
+    ))
+    .into_owned();
+    assert_eq!(skipped, "⊘ claude: review  skipped — its when: gate is false");
     let queued = console::strip_ansi_codes(&summary_line("claude: add", Status::Queued, 0.0, None)).into_owned();
     assert_eq!(queued, "· claude: add  not started");
   }

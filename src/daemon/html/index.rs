@@ -230,7 +230,7 @@ fn harness_chips_html(session: &Session) -> String {
       continue;
     };
     let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
-    let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail);
+    let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped);
     let skill = p.skill_name.as_deref().unwrap_or(&p.label);
     chips.push_str(&format!(
       "<span class=\"hchip hchip--{h}{done}\" title=\"{title}\">{letter}</span>",

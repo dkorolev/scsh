@@ -279,6 +279,7 @@ const PAGE_CSS: &str = r#"
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
   .running .glyph { color: var(--cyan); }
+  .skipped .glyph, .skipped .label { color: var(--text-muted); }
   .proc-meta {
     font-size: 0.85rem; margin: 0.35rem 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem;
     color: var(--text-muted);

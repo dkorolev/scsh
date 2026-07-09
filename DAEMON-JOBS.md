@@ -128,7 +128,10 @@ the confirm task.
 cd "$REPO" && WORDS="apple, carrot, pear, onion" "$SCSH_BIN" run --def fruits
 ```
 
-**Expect:** `categorize` runs first, then `sort_fruits` and `sort_vegetables` run in parallel;
+**Expect:** every step appears in the session browser immediately — one row per step, noted
+`step k/n` (plus `needs …`), waiting rows included; a step whose gate is false finishes as a
+dim ⊘ `skipped` row instead of vanishing. `categorize` runs first, then `sort_fruits` and
+`sort_vegetables` run in parallel;
 the session board shows all three step rows. The per-step results land under the gitignored
 session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fruits.json` has a
 `sorted` field with the fruits in alphabetical order, and `git -C "$REPO" status` is clean.
