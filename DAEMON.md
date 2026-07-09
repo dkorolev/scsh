@@ -68,7 +68,9 @@ container starts — scsh never tries to drive a login screen.
 
 Each recorded skill — and each image build recorded on the host — is shown as an **inline
 player** in the session page (a build falls back to a text log only when `asciinema` is
-missing from PATH). The player (vendored asciinema-player, `fit:'both'`) has:
+missing from PATH). The player is scsh's own **scsh-cast-player** — a first-party,
+clean-room component (`src/daemon/html/player/`, MIT like the rest of scsh; no third-party
+code or license rides in the browser UI). It has:
 
 - **Playback** — play/pause, timeline scrubbing, and native keyboard: **space** pause,
   **←/→** seek, **&lt;/&gt;** speed, **[/]** jump between chapters (click the player first
@@ -219,7 +221,7 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
   `srcdoc` composition; procs without a recording become note rows). Served as a download
   attachment named `scsh-session-{id}.html`; 404 with an actionable body when the session
   has no exportable recording yet
-- `GET /assets/asciinema-player.{js,css}` — vendored player assets
+- `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
 - `GET /api/v1/images` — JSON status of every scsh image (base + one per harness) on the

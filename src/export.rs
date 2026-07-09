@@ -1,7 +1,7 @@
 //! Cast export: render a recorded asciicast — plus its `.chapters.json` annotation sidecar,
 //! when one sits next to it — into ONE self-contained offline `.html` player page.
 //!
-//! The page pipeline itself (template, vendored asciinema-player, strict `<script>`-safe
+//! The page pipeline itself (template, its embedded asciinema-player, strict `<script>`-safe
 //! escaping) is `beecast-page`, a deliberate zero-transitive-dependency crate; this module is
 //! the pure glue: find + parse the sidecar (reusing [`crate::annotate`]'s parser — the sidecar
 //! IS that module's output format), map it onto beecast's [`PageMeta`], and render. All of it

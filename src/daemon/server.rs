@@ -614,8 +614,8 @@ fn route(
         (404, "session not found".into(), "text/plain", false)
       }
     }
-    "/assets/asciinema-player.js" => (200, html::PLAYER_JS.to_string(), "application/javascript; charset=utf-8", false),
-    "/assets/asciinema-player.css" => (200, html::PLAYER_CSS.to_string(), "text/css; charset=utf-8", false),
+    "/assets/scsh-cast-player.js" => (200, html::PLAYER_JS.to_string(), "application/javascript; charset=utf-8", false),
+    "/assets/scsh-cast-player.css" => (200, html::PLAYER_CSS.to_string(), "text/css; charset=utf-8", false),
     path if path.starts_with("/cast/") && path.ends_with("/play") => {
       let rest = path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/play").unwrap_or("");
       let page = rest.split_once('/').and_then(|(sid, proc)| {

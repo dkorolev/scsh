@@ -1,0 +1,79 @@
+/* scsh-cast-player chrome + terminal palette (see README.md in this directory).
+   Clean-room, MIT like scsh. Every color is a variable so embedding pages can theme it. */
+.scsh-player {
+  --sp-bg: #121417;
+  --sp-fg: #cdd3dc;
+  /* ANSI 0–7 */
+  --sp-c0: #1c1f24; --sp-c1: #e05f65; --sp-c2: #78bd65; --sp-c3: #d5b45e;
+  --sp-c4: #6a9ded; --sp-c5: #bd7bd8; --sp-c6: #55b8c2; --sp-c7: #b8bfc9;
+  /* ANSI 8–15 (bright) */
+  --sp-c8: #596273; --sp-c9: #ff8188; --sp-c10: #98d989; --sp-c11: #f0d182;
+  --sp-c12: #8fb7ff; --sp-c13: #d99df0; --sp-c14: #7fd6df; --sp-c15: #eef1f5;
+  display: block;
+  background: var(--sp-bg);
+  color: var(--sp-fg);
+  border-radius: 4px;
+  outline: none;
+  overflow: hidden;
+}
+.scsh-player:focus-visible { box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.5); }
+.sp-screen-box { overflow: hidden; }
+.sp-screen {
+  margin: 0;
+  padding: 4px 6px;
+  font: 13px/1.25 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre;
+  transform-origin: top left;
+  width: max-content;
+}
+.sp-probe { visibility: hidden; position: absolute; }
+.sp-b { font-weight: 700; }
+.sp-d { opacity: 0.6; }
+.sp-i { font-style: italic; }
+.sp-u { text-decoration: underline; }
+.sp-s { text-decoration: line-through; }
+.sp-u.sp-s { text-decoration: underline line-through; }
+.sp-cur { outline: 1px solid var(--sp-fg); outline-offset: -1px; }
+
+/* control bar */
+.sp-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  background: rgba(255, 255, 255, 0.04);
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+  font: 12px/1 ui-sans-serif, system-ui, sans-serif;
+  user-select: none;
+}
+.sp-bar button {
+  font: inherit;
+  color: var(--sp-fg);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+}
+.sp-bar button:hover { color: #fff; }
+.sp-time, .sp-dur { color: var(--sp-fg); opacity: 0.8; min-width: 3.2em; text-align: center; font-variant-numeric: tabular-nums; }
+.sp-seek {
+  position: relative;
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+}
+.sp-fill {
+  position: absolute; left: 0; top: 0; bottom: 0;
+  width: 0;
+  border-radius: 3px;
+  background: var(--sp-c4);
+  pointer-events: none;
+}
+.sp-markers { position: absolute; inset: 0; pointer-events: none; }
+.sp-marker {
+  position: absolute; top: -2px; bottom: -2px; width: 2px;
+  background: var(--sp-c3);
+  pointer-events: auto;
+}

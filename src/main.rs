@@ -5401,8 +5401,8 @@ fn print_help_command(name: &str) {
         ("--json", "Per-cast {input, output, bytes, chapters} JSON; on by default when stdout is not a TTY."),
         ("<stem>.chapters.json", "A summary+chapters sidecar next to the cast renders into the page when present;"),
         ("", "a malformed sidecar is a warning — the cast still exports without it."),
-        ("(license)", "Generated pages embed the vendored asciinema-player (Apache-2.0, redistributed"),
-        ("", "unmodified; each page keeps its inline @license notice) — see LICENSE.md."),
+        ("(license)", "Exported pages (via beecast-page) embed asciinema-player (Apache-2.0,"),
+        ("", "redistributed unmodified; each page keeps its inline @license notice) — see LICENSE.md."),
       ],
     ),
     "version" => {

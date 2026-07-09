@@ -58,6 +58,152 @@ fn esc_handles_basic_html() {
 }
 
 #[test]
+fn browser_player_is_first_party_and_carries_no_third_party_license() {
+  // The whole point of scsh-cast-player: the session browser ships NO third-party code.
+  // (Exported .html pages still embed asciinema-player via beecast-page — that attribution
+  // is pinned separately in tests/cli.rs.)
+  let js = super::PLAYER_JS;
+  let css = super::PLAYER_CSS;
+  assert!(js.contains("ScshCastPlayer"), "the first-party player global must be defined");
+  assert!(js.contains("ScshVT"), "the DOM-free core must be bundled first");
+  assert!(js.contains("Clean-room implementation"), "the clean-room statement rides in the asset");
+  for banned in ["asciinema-player", "AsciinemaPlayer", "@license", "Apache"] {
+    assert!(!js.contains(banned), "browser player JS must not carry '{banned}'");
+    assert!(!css.contains(banned), "browser player CSS must not carry '{banned}'");
+  }
+}
+
+/// Run the DOM-free VT core's behavior tests under Node (parsing all three asciicast
+/// versions plus the terminal state machine). Skips silently when `node` is not on PATH —
+/// the Rust-side structural tests above still gate the asset itself.
+#[test]
+fn vt_core_node_selftest() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let dir = std::env::temp_dir().join(format!("scsh-vt-selftest-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let bundle = dir.join("player.js");
+  std::fs::write(&bundle, super::PLAYER_JS).unwrap();
+  let script = format!(
+    r#"
+const assert = require('assert');
+require({bundle:?});
+const VT = globalThis.ScshVT;
+
+// v3: intervals sum; term size from header; resize + marker events survive; # comments skip.
+let c = VT.parseCast('{{"version":3,"term":{{"cols":10,"rows":3}}}}\n# note\n[0.5,"o","hi"]\n[0.5,"m","chapter"]\n[1.0,"r","20x5"]\n');
+assert.strictEqual(c.cols, 10); assert.strictEqual(c.rows, 3);
+assert.strictEqual(c.events.length, 3);
+assert.strictEqual(c.duration, 2);
+assert.strictEqual(c.events[2].t, 2);
+
+// v2: absolute times.
+c = VT.parseCast('{{"version":2,"width":80,"height":24}}\n[0.5,"o","a"]\n[2.0,"o","b"]\n');
+assert.strictEqual(c.duration, 2); assert.strictEqual(c.events[1].t, 2);
+
+// v1: one JSON doc, stdout deltas.
+c = VT.parseCast('{{"version":1,"width":5,"height":2,"stdout":[[0.1,"x"],[0.2,"y"]]}}');
+assert.strictEqual(c.cols, 5); assert.strictEqual(c.events.length, 2);
+assert(Math.abs(c.duration - 0.3) < 1e-9);
+
+// Plain text + CR/LF.
+let t = new VT.Term(10, 3);
+t.write('hello\r\nworld');
+assert.deepStrictEqual(t.textLines(), ['hello', 'world', '']);
+
+// CUP + overwrite mid-screen.
+t.write('\x1b[1;3Hga');
+assert.strictEqual(t.textLines()[0], 'hegao');
+
+// ED 2 clears everything.
+t.write('\x1b[2J');
+assert.deepStrictEqual(t.textLines(), ['', '', '']);
+
+// SGR runs merge; colors land on cells.
+t = new VT.Term(10, 1);
+t.write('\x1b[31mred\x1b[0m ok');
+const runs = t.snapshot().rows[0];
+assert.strictEqual(runs[0].text, 'red'); assert.strictEqual(runs[0].fg, 1);
+assert.strictEqual(runs[1].fg, null);
+
+// 256-color + truecolor.
+t = new VT.Term(4, 1);
+t.write('\x1b[38;5;196mX\x1b[38;2;1;2;3mY');
+const r2 = t.snapshot().rows[0];
+assert.strictEqual(r2[0].fg, 196);
+assert.strictEqual(r2[1].fg, '#010203');
+assert.strictEqual(VT.color256(196), '#ff0000');
+assert.strictEqual(VT.color256(232), '#080808');
+
+// Deferred wrap: printing in the last column does not wrap until the next char.
+t = new VT.Term(3, 2);
+t.write('abc');
+assert.strictEqual(t.snapshot().cursor.y, 0);
+t.write('d');
+assert.deepStrictEqual(t.textLines(), ['abc', 'd']);
+
+// Scroll region: LF at the region bottom scrolls only the region.
+t = new VT.Term(5, 4);
+t.write('aa\r\nbb\r\ncc\r\ndd');
+t.write('\x1b[2;3r\x1b[3;1H\n');
+const lines = t.textLines();
+assert.strictEqual(lines[0], 'aa');
+assert.strictEqual(lines[1], 'cc');
+assert.strictEqual(lines[3], 'dd');
+
+// Alternate screen: primary content comes back on exit.
+t = new VT.Term(5, 2);
+t.write('main');
+t.write('\x1b[?1049h\x1b[Halt');
+assert.strictEqual(t.textLines()[0], 'alt');
+t.write('\x1b[?1049l');
+assert.strictEqual(t.textLines()[0], 'main');
+
+// DEC special graphics: tmux border characters.
+t = new VT.Term(4, 1);
+t.write('\x1b(0qqx\x1b(B');
+assert.strictEqual(t.textLines()[0], '──│');
+
+// Cursor hide/show.
+t = new VT.Term(2, 1);
+t.write('\x1b[?25l');
+assert.strictEqual(t.snapshot().cursor.visible, false);
+t.write('\x1b[?25h');
+assert.strictEqual(t.snapshot().cursor.visible, true);
+
+// OSC titles are consumed, never printed.
+t = new VT.Term(8, 1);
+t.write('\x1b]0;title\x07ok');
+assert.strictEqual(t.textLines()[0], 'ok');
+
+console.log('vt selftest OK');
+"#,
+    bundle = bundle
+  );
+  let out = std::process::Command::new("node")
+    .arg("-")
+    .arg("--input-type=commonjs")
+    .stdin(std::process::Stdio::piped())
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .spawn()
+    .and_then(|mut child| {
+      use std::io::Write;
+      child.stdin.take().unwrap().write_all(script.as_bytes())?;
+      child.wait_with_output()
+    })
+    .expect("node runs");
+  let _ = std::fs::remove_dir_all(&dir);
+  assert!(
+    out.status.success() && String::from_utf8_lossy(&out.stdout).contains("vt selftest OK"),
+    "vt selftest failed:\nstdout: {}\nstderr: {}",
+    String::from_utf8_lossy(&out.stdout),
+    String::from_utf8_lossy(&out.stderr)
+  );
+}
+
+#[test]
 fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   let mut store = store_with_cast_proc(ProcStatus::Skipped);
   {
@@ -286,8 +432,8 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   );
   let html = session_page(&store, "castab").expect("session page");
   // The page loads the player assets and embeds a player box wired to the cast endpoint.
-  assert!(html.contains(r#"<link rel="stylesheet" href="/assets/asciinema-player.css">"#), "player css");
-  assert!(html.contains(r#"<script src="/assets/asciinema-player.js"></script>"#), "player js");
+  assert!(html.contains(r#"<link rel="stylesheet" href="/assets/scsh-cast-player.css">"#), "player css");
+  assert!(html.contains(r#"<script src="/assets/scsh-cast-player.js"></script>"#), "player js");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<div class="cast" data-cast-url="/cast/castab/2""#), "cast embed");
   assert!(procs.contains("data-cast-fs"), "fullscreen button");

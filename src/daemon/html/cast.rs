@@ -1,7 +1,7 @@
 //! Standalone player page for a proc's asciinema recording.
 //!
-//! Served at `/cast/<session>/<proc>/play`. Self-contained: the vendored
-//! asciinema-player assets come from `/assets/asciinema-player.{js,css}`, and the cast
+//! Served at `/cast/<session>/<proc>/play`. Self-contained: the first-party
+//! scsh-cast-player assets come from `/assets/scsh-cast-player.{js,css}`, and the cast
 //! itself from `/cast/<session>/<proc>` (truncated server-side to whole NDJSON lines, so
 //! an in-progress recording plays as far as it has gotten). Supports play/pause and
 //! timeline scrubbing (native player controls), `#t=<seconds>` / `#t=<mm:ss>` deep links,
@@ -17,9 +17,11 @@ use super::escape::{esc, quote_js};
 use super::layout::FAVICON_LINK;
 use crate::daemon::model::{ProcStatus, Store};
 
-/// Vendored asciinema-player (see `vendor/README.md`), served at `/assets/…`.
-pub const PLAYER_JS: &str = include_str!("vendor/asciinema-player.min.js");
-pub const PLAYER_CSS: &str = include_str!("vendor/asciinema-player.css");
+/// The first-party scsh-cast-player (see `player/README.md` — clean-room, no third-party
+/// code, MIT like the rest of scsh): the DOM-free VT core plus the DOM half, concatenated
+/// and served as one asset.
+pub const PLAYER_JS: &str = concat!(include_str!("player/vt.js"), "\n", include_str!("player/player.js"));
+pub const PLAYER_CSS: &str = include_str!("player/player.css");
 
 pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> Option<String> {
   let session = store.sessions.get(session_id)?;
@@ -42,7 +44,7 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/asciinema-player.css">
+<link rel="stylesheet" href="/assets/scsh-cast-player.css">
 <style>
 :root {{
   --bg: #0d1117; --surface: #161b22; --border: #2a3140;
@@ -109,7 +111,7 @@ header code {{
 <div id="summary" class="dim"></div>
 <div id="chapters"></div>
 <div id="player-wrap"><div id="player"></div></div>
-<script src="/assets/asciinema-player.js"></script>
+<script src="/assets/scsh-cast-player.js"></script>
 <script>
 const CAST_URL = {cast_url_js};
 const SESSION = {sid_js};
@@ -165,7 +167,7 @@ function create(startAt, autoplay) {{
     if (startAt === 'end') startAt = stats.duration;
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
-    player = AsciinemaPlayer.create({{ data: text }}, mount, opts);
+    player = ScshCastPlayer.create({{ data: text }}, mount, opts);
     if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
   }});
 }}
@@ -190,12 +192,10 @@ function onWsMessage(msg) {{
   if (loadedDuration == null) {{ create(hashStart()); return; }} // placeholder upgrades to a player
   showGrew(msg.duration);
 }}
-// Live mode mechanism, chosen deliberately: the vendored asciinema-player 3.17.0 build
-// does ship streaming drivers (a websocket driver speaking the v1.alis / v2.asciicast
-// subprotocols, and an eventsource driver), but they need a dedicated per-cast streaming
-// endpoint next to the daemon's single JSON broadcast hub. Live mode instead rides the
-// hub's cast_growth notifications: each one re-fetches the cast, re-creates the player
-// seeked to where the previous load ended, and plays the newly appended tail.
+// Live mode mechanism, chosen deliberately: rather than a dedicated per-cast streaming
+// endpoint next to the daemon's single JSON broadcast hub, live mode rides the hub's
+// cast_growth notifications: each one re-fetches the cast, re-creates the player seeked
+// to where the previous load ended, and plays the newly appended tail.
 let liveMode = false;
 function setLiveMode(on) {{
   liveMode = !!on && castRunning;

@@ -504,7 +504,7 @@ function castEmbedHtml(p) {
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
 // fit:'both' scales the terminal to fit its box in both dimensions (inline and fullscreen).
 function initCasts(root) {
-  if (typeof AsciinemaPlayer === 'undefined') return;
+  if (typeof ScshCastPlayer === 'undefined') return;
   root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
     box.dataset.ready = '1';
     // A still-running recording previews from its tail — the last few seconds are what the
@@ -562,7 +562,7 @@ function castPlaceholderHtml(status) {
 // How far before the current end a still-running recording starts its preview.
 const LIVE_PREVIEW_TAIL_SECS = 3;
 function createCastPlayer(box, startAt, autoplay) {
-  if (typeof AsciinemaPlayer === 'undefined') return;
+  if (typeof ScshCastPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
   box._loading = true;
@@ -600,7 +600,7 @@ function createCastPlayer(box, startAt, autoplay) {
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
     // vs player, so the player must not fetch it a second time.
-    box._player = AsciinemaPlayer.create({ data: text }, mount, opts);
+    box._player = ScshCastPlayer.create({ data: text }, mount, opts);
     if (autoplay) { try { box._player.play(); } catch (_) {} }
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
@@ -609,12 +609,9 @@ function createCastPlayer(box, startAt, autoplay) {
 }
 // Live mode: while the proc runs, follow the tail of the recording as it grows.
 //
-// Mechanism, chosen deliberately: the vendored asciinema-player 3.17.0 build DOES ship
-// streaming drivers — a `websocket` driver speaking the v1.alis / v2.asciicast
-// subprotocols and an `eventsource` driver — but using them would require the daemon to
-// grow a second, per-cast streaming WS endpoint speaking those subprotocols next to its
-// single JSON broadcast hub. Instead, live mode rides the hub's existing cast_growth
-// notifications: each one re-fetches the cast (cheap; the bytes are local), re-creates
+// Mechanism, chosen deliberately: rather than a dedicated per-cast streaming WS endpoint
+// next to the daemon's single JSON broadcast hub, live mode rides the hub's existing
+// cast_growth notifications: each one re-fetches the cast (cheap; the bytes are local), re-creates
 // the player seeked to where the previous load ended, and plays the newly appended tail.
 // When the proc finishes, the status-change reload loads the complete cast and the
 // toggle turns off and hides.
@@ -743,8 +740,8 @@ function fmtClock(t) {
   const m = Math.floor(t / 60), s = t % 60;
   return m + ':' + (s < 10 ? '0' : '') + s;
 }
-// Entering/exiting fullscreen changes the box size: refit the player (asciinema-player
-// recomputes on window resize) and decide whether the chapters sidebar has room.
+// Entering/exiting fullscreen changes the box size: refit the player (scsh-cast-player
+// re-lays-out on window resize) and decide whether the chapters sidebar has room.
 document.addEventListener('fullscreenchange', () => {
   const box = document.fullscreenElement;
   try { window.dispatchEvent(new Event('resize')); } catch (_) {}
@@ -755,7 +752,7 @@ window.addEventListener('resize', () => {
   const box = document.fullscreenElement;
   if (box && box.classList && box.classList.contains('cast')) updateFsSidebar(box);
 });
-// asciinema-player's [ and ] jump to the previous/next chapter marker; after the jump,
+// The player's [ and ] keys jump to the previous/next chapter marker; after the jump,
 // flash the chapter title. The keys reach the focused player, so find its .cast box.
 document.addEventListener('keydown', (e) => {
   if (e.key !== '[' && e.key !== ']') return;

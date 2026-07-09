@@ -443,8 +443,8 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
   // The session page embeds an asciinema player per proc; the index page does not need it.
   let (player_css, player_js) = if session_id.is_some() {
     (
-      "<link rel=\"stylesheet\" href=\"/assets/asciinema-player.css\">",
-      "<script src=\"/assets/asciinema-player.js\"></script>",
+      "<link rel=\"stylesheet\" href=\"/assets/scsh-cast-player.css\">",
+      "<script src=\"/assets/scsh-cast-player.js\"></script>",
     )
   } else {
     ("", "")
