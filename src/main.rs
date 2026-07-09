@@ -102,7 +102,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
   use std::io::IsTerminal;
   let as_json = json_flag || !std::io::stdout().is_terminal();
   if paths.is_empty() {
-    return annotate_error(as_json, 2, "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/casts/foo.cast");
+    return annotate_error(as_json, 2, "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/recordings/foo.cast");
   }
   if !annotate::host_can_annotate() {
     return annotate_error(as_json, 1, "cursor-agent not available (need the `cursor-agent` CLI and a cursor login)");
@@ -161,7 +161,7 @@ fn export_casts_cmd(paths: &[String], output: Option<&str>, json_flag: bool) -> 
   let streaming = output == Some("-");
   let as_json = !streaming && (json_flag || !std::io::stdout().is_terminal());
   if paths.is_empty() {
-    return export_error(as_json, 2, "give one or more .cast files, e.g. scsh export-cast ~/.scsh/casts/foo.cast");
+    return export_error(as_json, 2, "give one or more .cast files, e.g. scsh export-cast ~/.scsh/recordings/foo.cast");
   }
   if output.is_some() && paths.len() != 1 {
     return export_error(as_json, 2, &format!("-o applies to exactly one cast ({} given)", paths.len()));
@@ -219,7 +219,7 @@ fn export_one_cast(
   };
   let stem = export::cast_stem(cast_path);
   let page = export::render_page(&ndjson, &stem, annotation.as_ref()).map_err(|e| {
-    (e.to_string(), "give an asciinema recording (asciicast v1/v2/v3), e.g. one under ~/.scsh/casts/".to_string())
+    (e.to_string(), "give an asciinema recording (asciicast v1/v2/v3), e.g. one under ~/.scsh/recordings/".to_string())
   })?;
   let chapters = annotation.as_ref().map(|a| a.chapters.len()).unwrap_or(0);
   let out_name = if output == Some("-") {
@@ -1046,7 +1046,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
     return 1;
   }
 
-  let cast_dir = runtime::host_casts_dir();
+  let cast_dir = runtime::host_recordings_dir();
   let before = casts_snapshot(&cast_dir);
   let code = build_and_run(&rt, &root, &runnable, Some(name), session);
   annotate_run_casts(new_casts_since(&cast_dir, &before));
@@ -1521,7 +1521,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      let cast_dir = runtime::host_casts_dir();
+      let cast_dir = runtime::host_recordings_dir();
       let before = casts_snapshot(&cast_dir);
       let code = build_and_run(&rt, &root, &runnable, profile, None);
       // Annotate the recordings this run just produced (best-effort; no-op without cursor).
@@ -3168,13 +3168,14 @@ fn run_one_skill(
 }
 
 /// Preserve a run's artifacts under `$SCSH_HOME` (default `~/.scsh`) before the run dir is
-/// pruned: the asciinema recording to `casts/<stem>.cast` and the harness run log (plus any
-/// verbose `.debug`/`.last` logs) to `logs/<stem>.{log,debug.log,last.log}`. All share one
+/// pruned: the asciinema recording to `recordings/<stem>.cast` and the harness run log (plus
+/// any verbose `.debug`/`.last` logs) to `logs/<stem>.{log,debug.log,last.log}`. All share one
 /// `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name.
 ///
 /// These live **outside** the caller repo on purpose: review skills often run in a throwaway
-/// clone under `tmp/` and delete it afterward — casts must still be exportable from the
-/// session browser. Build casts already used this home; skill casts join them.
+/// clone under `tmp/` and delete it afterward — recordings must still be exportable from the
+/// session browser. `recordings/` is permanent and separate from the cleanable build-cast
+/// `casts/` dir, so cleaning build scratch can never lose an agent run's recording.
 ///
 /// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
 /// the random nonce prevents same-second runs from overwriting each other. Returns the durable
@@ -3206,7 +3207,7 @@ fn persist_run_artifacts(run_dir: &Path, skill_name: &str, epoch_secs: u64) -> O
   if !cast_src.is_file() {
     return None;
   }
-  let casts_dir = runtime::host_casts_dir();
+  let casts_dir = runtime::host_recordings_dir();
   std::fs::create_dir_all(&casts_dir).ok()?;
   let dest = casts_dir.join(format!("{stem}.cast"));
   std::fs::copy(&cast_src, &dest).ok()?;
@@ -4245,7 +4246,7 @@ fn run_build_tui(
   let _ = std::fs::remove_dir_all(&dir);
 
   if let Some(c) = daemon_client {
-    // Re-register in case the path was cleared; durable path is already under ~/.scsh/casts.
+    // Re-register in case the path was cleared; durable path is already under ~/.scsh/recordings.
     c.proc_cast(build.index(), &cast_path_str);
   }
 
@@ -5291,7 +5292,7 @@ fn print_help_command(name: &str) {
         ("restart", "Stop then start (persistent)."),
         ("status", "Exit 0 when the daemon is listening."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
-        ("SCSH_HOME", "Dir for the session store, durable casts, and logs (default ~/.scsh)."),
+        ("SCSH_HOME", "Dir for the session store, permanent recordings, build casts, and logs (default ~/.scsh)."),
       ],
     ),
     "failures" => (
@@ -5828,8 +5829,8 @@ mod tests {
       None => std::env::remove_var("SCSH_HOME"),
     }
 
-    let casts_dir = home.join("casts");
-    assert!(cast.starts_with(casts_dir.to_string_lossy().as_ref()), "cast under SCSH_HOME/casts: {cast}");
+    let casts_dir = home.join("recordings");
+    assert!(cast.starts_with(casts_dir.to_string_lossy().as_ref()), "cast under SCSH_HOME/recordings: {cast}");
     let stem = std::path::Path::new(&cast).file_stem().unwrap().to_string_lossy().into_owned();
     assert!(stem.starts_with("add-"), "stem starts with skill name: {stem}");
     assert_eq!(std::fs::read_to_string(&cast).unwrap(), "cast-bytes");
