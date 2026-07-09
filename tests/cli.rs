@@ -1222,3 +1222,71 @@ fn run_def_unknown_definition_lists_available() {
     r.out
   );
 }
+
+// ---- --override-dot-scsh-yml ---------------------------------------------------------
+
+#[test]
+fn override_yml_needs_a_path() {
+  let d = unique_dir("ovrynopath");
+  let r = scsh(&d, &["run", "--override-dot-scsh-yml"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("--override-dot-scsh-yml needs a path"), "got: {}", r.out);
+}
+
+#[test]
+fn override_yml_rejects_def() {
+  let d = unique_dir("ovrydef");
+  let r = scsh(&d, &["run", "--def", "add", "--override-dot-scsh-yml", "/tmp/x.scsh.yml"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("mutually exclusive"), "got: {}", r.out);
+}
+
+#[test]
+fn override_yml_only_on_run_list_check() {
+  let d = unique_dir("ovrybad");
+  let r = scsh(&d, &["version", "--override-dot-scsh-yml", "/tmp/x.scsh.yml"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("only applies to 'run', 'list', and 'check-profile'"), "got: {}", r.out);
+}
+
+#[test]
+fn override_yml_check_profile_uses_external_config() {
+  // A clean repo with NO .scsh.yml of its own can still check a profile via an external
+  // override bundle (the global /code-fantastic-review path).
+  let d = unique_dir("ovrycheck");
+  git_init(&d);
+  std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+  git(&d, &["add", "-A"]);
+  git(&d, &["commit", "-qm", "init"]);
+
+  let bundle = unique_dir("ovrybundle");
+  std::fs::create_dir_all(bundle.join(".skills/conventions-reviewer")).unwrap();
+  std::fs::write(
+    bundle.join(".scsh.yml"),
+    r#"skills:
+  conventions-reviewer:
+    profile: code-review
+    timeout: 60
+    result: tmp/code-review-conventions-reviewer-{name}.json
+    invocations:
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+"#,
+  )
+  .unwrap();
+  std::fs::write(bundle.join(".skills/conventions-reviewer/SKILL.md"), "# conventions-reviewer\n").unwrap();
+
+  let yml = bundle.join(".scsh.yml");
+  let r = scsh(
+    &d,
+    &["check-profile", "code-review", "--override-dot-scsh-yml", yml.to_str().unwrap()],
+  );
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("profile 'code-review'"), "got: {}", r.out);
+
+  // Without the override, the same repo has no .scsh.yml → fail.
+  let bare = scsh(&d, &["check-profile", "code-review"]);
+  assert_ne!(bare.code, 0, "got: {}", bare.out);
+  assert!(bare.out.contains(".scsh.yml not found"), "got: {}", bare.out);
+}

@@ -60,17 +60,17 @@ fn run(args: &[String]) -> i32 {
       // paths, `--verbose` build commands) is not a subset of the JSON, and existing docs and
       // scripts grep that human text. Machines opt in explicitly with `--json`.
       if cli.json {
-        list_profiles_json()
+        list_profiles_json(cli.override_dot_scsh_yml.as_deref())
       } else {
-        preflight_then(Action::List, profile, cli.verbose)
+        preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref())
       }
     }
-    Mode::CheckProfile => check_profile_cmd(profile),
+    Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
     Mode::Run => match cli.def.as_deref() {
       // The daemon's "start a job" passes the session id it pre-created so its deep link and
       // the one-job-per-repo guard are authoritative before this child registers.
       Some(name) => preflight_then_def(name, cli.failures.session.as_deref()),
-      None => preflight_then(Action::Run, profile, cli.verbose),
+      None => preflight_then(Action::Run, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref()),
     },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
@@ -414,6 +414,10 @@ struct Cli {
   /// `run --def <name>`: run the named harness definition (a `.harness/<name>.yml` or a
   /// built-in) instead of the repo's `.scsh.yml` skills. Its params come from the environment.
   def: Option<String>,
+  /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
+  /// sibling `.skills/`) instead of the repo's, so a global skill can drive a fleet without
+  /// installing into the target tree.
+  override_dot_scsh_yml: Option<PathBuf>,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -452,6 +456,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_force = false;
   let mut build_rebuild_base = false;
   let mut def: Option<String> = None;
+  let mut override_dot_scsh_yml: Option<PathBuf> = None;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -643,6 +648,19 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           None
         }
       }
+      // Use an external `.scsh.yml` (and its sibling `.skills/`) instead of the repo's — so a
+      // global Cursor skill can drive `scsh run code-review` without polluting the target tree.
+      "--override-dot-scsh-yml" => {
+        i += 1;
+        let path = args
+          .get(i)
+          .ok_or("--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-fantastic-review/.scsh.yml")?;
+        if path.trim().is_empty() {
+          return Err("--override-dot-scsh-yml path must not be empty".into());
+        }
+        override_dot_scsh_yml = Some(PathBuf::from(path));
+        None
+      }
       "--verbose" | "-v" => {
         verbose = true;
         None
@@ -746,6 +764,14 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if def.is_some() && profile.is_some() {
     return Err("--def selects a harness definition, not a profile — don't combine them".into());
   }
+  if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile) {
+    return Err(
+      "--override-dot-scsh-yml only applies to 'run', 'list', and 'check-profile'".into(),
+    );
+  }
+  if override_dot_scsh_yml.is_some() && def.is_some() {
+    return Err("--override-dot-scsh-yml and --def are mutually exclusive".into());
+  }
   Ok(Cli {
     mode,
     profile,
@@ -761,6 +787,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_force,
     build_rebuild_base,
     def,
+    override_dot_scsh_yml,
   })
 }
 
@@ -1045,7 +1072,6 @@ fn scratch_root(root: &Path) -> Option<&'static str> {
     None
   }
 }
-
 
 /// Reasons a `scsh run --def` would refuse in `root` (empty ⇒ runnable): no commit to clone, a
 /// dirty working tree, or no gitignored scratch dir. Shared by the CLI preflight and the daemon
@@ -1403,7 +1429,7 @@ fn doctor_preflight(rt: &Runtime) {
   }
 }
 
-fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
+fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override_yml: Option<&Path>) -> i32 {
   // The preflight checks run quietly on success and collapse into one compact
   // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
   // with an actionable ✗/→. A real run is ordered repo-hygiene-first:
@@ -1416,34 +1442,11 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
     Err(code) => return code,
   };
 
-  // .scsh.yml present at the repo root.
-  let cfg_path = root.join(".scsh.yml");
-  if !cfg_path.is_file() {
-    fail(".scsh.yml not found — this repository isn't set up for scsh yet");
-    hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
-    hint("(writes .scsh.yml, gitignores /tmp, scaffolds example skills, and commits)");
-    return 1;
-  }
-
-  // 4. .scsh.yml matches the schema.
-  let src = match std::fs::read_to_string(&cfg_path) {
-    Ok(s) => s,
-    Err(e) => {
-      fail(&format!("could not read .scsh.yml: {e}"));
-      return 1;
-    }
-  };
-  let cfg = match config::validate(&src) {
-    Ok(c) => c,
-    Err(errs) => {
-      let n = errs.len();
-      fail(&format!(".scsh.yml does not match the schema ({n} problem{})", if n == 1 { "" } else { "s" }));
-      for e in &errs {
-        hint(e);
-      }
-      hint("fix the file to match the schema (see 'scsh --help' or the README)");
-      return 1;
-    }
+  // Resolve the config: either the repo's `.scsh.yml`, or an external override bundle
+  // (`--override-dot-scsh-yml`) whose sibling `.skills/` supplies the skill bodies.
+  let (cfg, override_skills_root) = match resolve_config_for_run(&root, override_yml) {
+    Ok(v) => v,
+    Err(code) => return code,
   };
 
   // a container runtime is available and, for a run, its engine is up.
@@ -1472,7 +1475,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
           return 1;
         }
       }
-      let selected = select_invocations(&cfg, profile);
+      let mut selected = select_invocations(&cfg, profile);
       if selected.is_empty() {
         let scope = profile.unwrap_or("default");
         fail(&format!("nothing to run \u{2014} the '{scope}' profile is empty"));
@@ -1480,9 +1483,18 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
         hint("then pick one:  scsh run --profile <name>");
         return 1;
       }
+      // External override: inject each skill's SKILL.md from the override bundle into the
+      // run clone (same path as `scsh run --def`), so the target repo need not ship `.skills/`.
+      if let Some(skills_root) = &override_skills_root {
+        if let Err(e) = attach_override_skill_bodies(&mut selected, skills_root) {
+          fail(&e);
+          return 1;
+        }
+      }
       // Every git/repo/state check passed — one compact line, then the run.
       let prof = profile.map(|p| format!(" · profile {p}")).unwrap_or_default();
-      ok(&format!("git · repo {} · clean · /tmp ignored{prof}", display_path(&root)));
+      let via = override_yml.map(|p| format!(" · override {}", p.display())).unwrap_or_default();
+      ok(&format!("git · repo {} · clean · /tmp ignored{prof}{via}", display_path(&root)));
       // Skip skills whose harness or explicit opencode model is unavailable; fail only when none remain.
       let model_probe = runtime::OpencodeModelProbe::for_selected(&selected);
       let mut runnable: Vec<&ResolvedInvocation> = Vec::new();
@@ -1491,10 +1503,16 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
           warn(&format!("skipping '{}' — {msg}", skill.name));
           continue;
         }
-        let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
-        if !skill_md.is_file() {
-          fail(&format!("skill source missing: .skills/{}/SKILL.md (invocation '{}')", skill.skill_source, skill.name));
-          return 1;
+        // Normal runs still require the skill body in the repo; override runs carry it on `body`.
+        if skill.body.is_none() {
+          let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
+          if !skill_md.is_file() {
+            fail(&format!(
+              "skill source missing: .skills/{}/SKILL.md (invocation '{}')",
+              skill.skill_source, skill.name
+            ));
+            return 1;
+          }
         }
         runnable.push(skill);
       }
@@ -1511,6 +1529,87 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool) -> i32 {
       code
     }
   }
+}
+
+/// Load the config for a normal or override-driven run/list.
+/// Returns `(config, Some(override_bundle_root))` when `--override-dot-scsh-yml` is set —
+/// the bundle root is the parent of the yml (sibling `.skills/` lives there).
+fn resolve_config_for_run(
+  root: &Path, override_yml: Option<&Path>,
+) -> Result<(config::Config, Option<PathBuf>), i32> {
+  let Some(override_path) = override_yml else {
+    let cfg_path = root.join(".scsh.yml");
+    if !cfg_path.is_file() {
+      fail(".scsh.yml not found — this repository isn't set up for scsh yet");
+      hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
+      hint("(writes .scsh.yml, gitignores /tmp, scaffolds example skills, and commits)");
+      return Err(1);
+    }
+    return Ok((load_validated_yml(&cfg_path)?, None));
+  };
+  let yml = match resolve_override_yml(override_path) {
+    Ok(p) => p,
+    Err(e) => {
+      fail(&e);
+      return Err(1);
+    }
+  };
+  let bundle = yml.parent().unwrap_or(Path::new(".")).to_path_buf();
+  Ok((load_validated_yml(&yml)?, Some(bundle)))
+}
+
+/// Absolute path to an existing override `.scsh.yml`.
+fn resolve_override_yml(path: &Path) -> Result<PathBuf, String> {
+  let p = if path.is_absolute() {
+    path.to_path_buf()
+  } else {
+    std::env::current_dir()
+      .map_err(|e| format!("could not resolve cwd for --override-dot-scsh-yml: {e}"))?
+      .join(path)
+  };
+  if !p.is_file() {
+    return Err(format!("--override-dot-scsh-yml path not found: {}", p.display()));
+  }
+  Ok(p)
+}
+
+/// Read + schema-validate a `.scsh.yml` at `yml_path`, reporting failures like the normal preflight.
+fn load_validated_yml(yml_path: &Path) -> Result<config::Config, i32> {
+  let src = match std::fs::read_to_string(yml_path) {
+    Ok(s) => s,
+    Err(e) => {
+      fail(&format!("could not read {}: {e}", yml_path.display()));
+      return Err(1);
+    }
+  };
+  match config::validate(&src) {
+    Ok(c) => Ok(c),
+    Err(errs) => {
+      let n = errs.len();
+      fail(&format!(
+        "{} does not match the schema ({n} problem{})",
+        yml_path.display(),
+        if n == 1 { "" } else { "s" }
+      ));
+      for e in &errs {
+        hint(e);
+      }
+      hint("fix the file to match the schema (see 'scsh --help' or the README)");
+      Err(1)
+    }
+  }
+}
+
+/// Attach each invocation's `SKILL.md` body from `skills_root/.skills/<skill_source>/SKILL.md`
+/// so the run clone gets the override bundle's skill text without the target repo shipping it.
+fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_root: &Path) -> Result<(), String> {
+  for inv in invocations {
+    let path = skills_root.join(".skills").join(&inv.skill_source).join("SKILL.md");
+    let body = std::fs::read_to_string(&path)
+      .map_err(|e| format!("override skill missing at {}: {e}", path.display()))?;
+    inv.body = Some(body);
+  }
+  Ok(())
 }
 
 /// The set of `.cast` files currently in `dir` (for detecting a run's new recordings).
@@ -1753,7 +1852,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
 /// the same git → repo → present → valid chain as a run's preflight, but WITHOUT the
 /// container-runtime/engine checks, so profiles can be queried on any machine. On failure it
 /// reports the problem and returns the process exit code; stdout is left untouched.
-fn load_config_for_inspection() -> Result<config::Config, i32> {
+fn load_config_for_inspection(override_yml: Option<&Path>) -> Result<config::Config, i32> {
   if runtime::which("git").is_none() {
     fail("git is not installed or not on PATH");
     hint(install_git_hint());
@@ -1767,30 +1866,8 @@ fn load_config_for_inspection() -> Result<config::Config, i32> {
       return Err(1);
     }
   };
-  let cfg_path = root.join(".scsh.yml");
-  if !cfg_path.is_file() {
-    fail(".scsh.yml not found — this repository isn't set up for scsh yet");
-    hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
-    return Err(1);
-  }
-  let src = match std::fs::read_to_string(&cfg_path) {
-    Ok(s) => s,
-    Err(e) => {
-      fail(&format!("could not read .scsh.yml: {e}"));
-      return Err(1);
-    }
-  };
-  match config::validate(&src) {
-    Ok(cfg) => Ok(cfg),
-    Err(errs) => {
-      let n = errs.len();
-      fail(&format!(".scsh.yml does not match the schema ({n} problem{})", if n == 1 { "" } else { "s" }));
-      for e in &errs {
-        hint(e);
-      }
-      Err(1)
-    }
-  }
+  let (cfg, _) = resolve_config_for_run(&root, override_yml)?;
+  Ok(cfg)
 }
 
 /// The config's profiles as `(name, skill-names)`: the reserved `default` profile (the
@@ -1815,8 +1892,8 @@ fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<String>)> {
 /// The reserved `default` profile is always present (possibly empty); every other profile
 /// listed has at least one skill. Stable shape:
 /// `{"profiles":[{"name":"default","skills":["add"]}, …]}`.
-fn list_profiles_json() -> i32 {
-  let cfg = match load_config_for_inspection() {
+fn list_profiles_json(override_yml: Option<&Path>) -> i32 {
+  let cfg = match load_config_for_inspection(override_yml) {
     Ok(c) => c,
     Err(code) => return code,
   };
@@ -1836,7 +1913,7 @@ fn list_profiles_json() -> i32 {
 /// profile exists AND has at least one skill (so a caller can gate on it directly); non-zero
 /// otherwise. The reserved `default` profile "exists" only when some skill has no `profile:`.
 /// Prints a one-line ✓/✗ — the exit code is the contract, so redirect it when scripting.
-fn check_profile_cmd(profile: Option<&str>) -> i32 {
+fn check_profile_cmd(profile: Option<&str>, override_yml: Option<&Path>) -> i32 {
   let name = match profile {
     Some(p) => p,
     None => {
@@ -1844,7 +1921,7 @@ fn check_profile_cmd(profile: Option<&str>) -> i32 {
       return 2;
     }
   };
-  let cfg = match load_config_for_inspection() {
+  let cfg = match load_config_for_inspection(override_yml) {
     Ok(c) => c,
     Err(code) => return code,
   };
@@ -3004,7 +3081,6 @@ fn run_one_skill(
     c.container_event(spinner.index(), "stop", &name);
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
-  // and logs under the caller repo's gitignored tmp/ so they can be revisited later.
   // and logs under $SCSH_HOME (default ~/.scsh) so session export survives throwaway clones.
   let durable_cast = persist_run_artifacts(&run_dir, &skill.name, secs);
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
@@ -3091,10 +3167,15 @@ fn run_one_skill(
   }
 }
 
-/// Preserve a run's artifacts into the caller repo's gitignored `tmp/` before the run dir is
-/// pruned: the asciinema recording to `tmp/casts/<stem>.cast` and the harness run log (plus
-/// any verbose `.debug`/`.last` logs) to `tmp/logs/<stem>.{log,debug.log,last.log}`. All share
-/// one `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name.
+/// Preserve a run's artifacts under `$SCSH_HOME` (default `~/.scsh`) before the run dir is
+/// pruned: the asciinema recording to `casts/<stem>.cast` and the harness run log (plus any
+/// verbose `.debug`/`.last` logs) to `logs/<stem>.{log,debug.log,last.log}`. All share one
+/// `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name.
+///
+/// These live **outside** the caller repo on purpose: review skills often run in a throwaway
+/// clone under `tmp/` and delete it afterward — casts must still be exportable from the
+/// session browser. Build casts already used this home; skill casts join them.
+///
 /// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
 /// the random nonce prevents same-second runs from overwriting each other. Returns the durable
 /// cast path (for the session browser) when a recording was copied.
@@ -5023,8 +5104,9 @@ fn dim_comment(comment: &str) -> String {
 }
 
 /// Ensure the repo ignores its `/tmp` (repo-root) path, appending a `/tmp` rule to
-/// `<root>/.gitignore` when it isn't already ignored (creating the file if needed).
-/// Returns whether a rule was added (`false` = already ignored, nothing changed).
+/// `<root>/.gitignore` when it isn't already ignored (creating the file if needed),
+/// and create the physical `tmp/` directory so results/logs/cache have a home.
+/// Returns whether a gitignore rule was added (`false` = already ignored).
 /// It only ever **appends** — existing `.gitignore` content is never rewritten.
 fn ensure_tmp_gitignored(root: &std::path::Path) -> Result<bool, String> {
   let added = if tmp_is_gitignored(root) {
@@ -5179,8 +5261,11 @@ fn print_help_command(name: &str) {
     ),
     "check-profile" => (
       "test whether a profile exists",
-      "scsh check-profile <name>",
-      &[("<name>", "Exit 0 iff that profile exists with >=1 skill; runtime-free (no build).")],
+      "scsh check-profile <name> [--override-dot-scsh-yml <path>]",
+      &[
+        ("<name>", "Exit 0 iff that profile exists with >=1 skill; runtime-free (no build)."),
+        ("--override-dot-scsh-yml <path>", "Check against this external `.scsh.yml` instead of the repo's."),
+      ],
     ),
     "init-demo-project" => (
       "scaffold a demo project",
@@ -5335,6 +5420,8 @@ fn print_help_overview() {
   println!();
   println!("{}", h_head("Options:"));
   help_row("--profile <names>", "With `run`: only these profiles (`default` = no-profile skills).");
+  help_row("--override-dot-scsh-yml <path>", "With `run`/`list`/`check-profile`: use this `.scsh.yml`");
+  help_cont("(+ sibling `.skills/`) instead of the repo's — no install into the target tree.");
   help_row("--verbose", "With list: also print the Dockerfile and exact commands.");
   help_row("--json", "With list: print profiles and skills as JSON.");
   println!();
@@ -5352,12 +5439,20 @@ fn print_help_run() {
   println!("{} {}", h_head("run"), console::style("\u{2014} run scoped skills in parallel").bold());
   println!();
   println!("{}", h_head("Synopsis"));
-  println!("{}", h_dim("  scsh run [profile…]"));
+  println!("{}", h_dim("  scsh run [profile…] [--override-dot-scsh-yml <path>]"));
   println!();
   println!("{}", h_head("Discover what to run (before `run`)"));
   help_row("scsh list", "Every skill by profile — result path, harness, env (human-readable).");
   help_row("scsh list --json", "Same, as JSON — preferred for scripts and agents.");
   help_row("scsh check-profile <name>", "Exit 0 iff that profile exists with at least one skill (no runtime).");
+  println!();
+  println!("{}", h_head("External config (no install into the target repo)"));
+  help_row(
+    "--override-dot-scsh-yml <path>",
+    "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.",
+  );
+  println!("{}", h_dim("  The target tree stays clean: skill bodies are injected into the run clone only."));
+  println!("{}", h_dim("  Works with `run`, `list`, and `check-profile`. Mutually exclusive with `--def`."));
   println!();
   println!("{}", h_head("Profile selection"));
   println!("{}", h_dim("  Skills with no `profile:` belong to the reserved `default` profile."));
@@ -5815,6 +5910,23 @@ mod tests {
     assert!(cli(&["foo"]).is_err(), "a bare token without `run` is an unknown command");
     assert!(cli(&["list", "foo"]).is_err(), "profiles don't apply to `list`");
     assert!(cli(&["run", "--nope"]).is_err(), "an unknown flag after `run` is not a profile");
+  }
+
+  #[test]
+  fn override_dot_scsh_yml_parses_on_run_list_check() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["run", "code-review", "--override-dot-scsh-yml", "/tmp/bundle/.scsh.yml"]).unwrap();
+    assert!(matches!(c.mode, Mode::Run));
+    assert_eq!(c.profile.as_deref(), Some("code-review"));
+    assert_eq!(
+      c.override_dot_scsh_yml.as_deref(),
+      Some(std::path::Path::new("/tmp/bundle/.scsh.yml"))
+    );
+    let c = cli(&["check-profile", "code-review", "--override-dot-scsh-yml", "/x.yml"]).unwrap();
+    assert!(matches!(c.mode, Mode::CheckProfile));
+    assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
+    assert!(cli(&["run", "--def", "add", "--override-dot-scsh-yml", "/x.yml"]).is_err());
+    assert!(cli(&["version", "--override-dot-scsh-yml", "/x.yml"]).is_err());
   }
 
   #[test]
