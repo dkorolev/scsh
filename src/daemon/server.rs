@@ -2504,7 +2504,10 @@ mod tests {
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"rec.html\""));
     assert!(page.contains("<title>rec</title>"), "cast stem is the title");
-    assert!(page.contains("@license"), "vendored player attribution survives the export");
+    assert!(
+      page.contains("ScshCastPlayer") && !page.contains("@license"),
+      "first-party player, no third-party attribution"
+    );
     assert!(page.contains("\"title\":\"Start\""), "sidecar chapter folded in");
     // A malformed sidecar exports without chapters — a warning path, never an error.
     std::fs::write(dir.join("rec.chapters.json"), "{ not json").unwrap();
@@ -2600,7 +2603,8 @@ mod tests {
     // survives the assembly at least once.
     assert_eq!(page.matches("<iframe").count(), 2, "one iframe per exportable cast");
     assert!(page.matches("loading=\"lazy\"").count() >= 2, "iframes load lazily");
-    assert!(page.matches("@license").count() >= 2, "each embedded page keeps the player license");
+    assert!(page.matches("ScshCastPlayer").count() >= 2, "each embedded page carries the first-party player");
+    assert!(!page.contains("@license"), "no third-party attribution anywhere in the assembled page");
     // Every proc section is a native <details> block — collapsible offline, no JS — open
     // by default with the informative head as its <summary>; and the page has the favicon.
     assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible section per proc");

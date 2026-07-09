@@ -29,9 +29,10 @@ redb = "4.1"
 # `beecast-page` turns a recorded cast (+ chapters) into one self-contained offline HTML
 # player page (`scsh export-cast`). It earns its place: zero transitive dependencies (a
 # one-line `cargo tree`), it *is* the page pipeline scsh would otherwise have to duplicate
-# — the page template, the vendored asciinema-player, and the strict `<script>`-safe
+# — the page template, the embedded first-party `scsh-cast-player` (0.3.0 dropped the
+# Apache-2.0 asciinema-player; everything is MIT now), and the strict `<script>`-safe
 # escaping — and its pages are byte-identical to the ones `beecast` itself exports.
-beecast-page = "0.2"
+beecast-page = "0.3"
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.

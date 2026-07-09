@@ -1093,7 +1093,7 @@ fn export_cast_renders_a_self_contained_page_with_sidecar_chapters() {
   assert_eq!(r.code, 0, "got: {}", r.out);
   let html = std::fs::read_to_string(d.join("rec.html")).expect("rec.html next to the cast");
   // The player boots and the recording's own text is embedded (as escaped script data).
-  assert!(html.contains("AsciinemaPlayer.create"), "player boot missing");
+  assert!(html.contains("ScshCastPlayer.create"), "player boot missing");
   assert!(html.contains("hello from scsh"), "cast data not embedded");
   // Self-contained: no external scripts, stylesheets, or http(s) resource references
   // (the same inline-safety bar beecast holds its own pages to).
@@ -1104,9 +1104,13 @@ fn export_cast_renders_a_self_contained_page_with_sidecar_chapters() {
   assert!(html.contains("<title>rec</title>"), "stem should be the title");
   assert!(html.contains("A tiny demo run."), "summary missing");
   assert!(html.contains("Greeting") && html.contains("Wrap-up"), "chapters missing");
-  // The vendored asciinema-player's Apache-2.0 attribution must survive in every page —
-  // a beecast-page upgrade that drops the inline @license notice has to fail here.
-  assert!(html.contains("@license") && html.contains("Apache-2.0"), "Apache-2.0 @license notice missing");
+  // Since beecast-page 0.3.0 the embedded player is the first-party scsh-cast-player: no
+  // third-party code — and no second license — may ride in any exported page. A beecast-page
+  // upgrade that reintroduces either has to fail here.
+  assert!(html.contains("ScshCastPlayer"), "the first-party player must be embedded");
+  for banned in ["@license", "Apache", "asciinema-player", "AsciinemaPlayer"] {
+    assert!(!html.contains(banned), "third-party marker '{banned}' in an exported page");
+  }
   // stdout was piped → the machine document, one entry with the per-cast facts.
   assert!(r.out.contains("\"exported\""), "got: {}", r.out);
   assert!(r.out.contains("\"chapters\": 2") && r.out.contains("rec.html"), "got: {}", r.out);
@@ -1132,7 +1136,7 @@ fn export_cast_streams_the_page_to_stdout_with_dash() {
   assert_eq!(code, 0, "got: {stdout}");
   // stdout IS the page — nothing else: no report document mixed into the HTML.
   assert!(stdout.starts_with("<!DOCTYPE html>"), "got: {}", &stdout[..stdout.len().min(80)]);
-  assert!(stdout.contains("AsciinemaPlayer.create") && stdout.contains("Greeting"), "page content on stdout");
+  assert!(stdout.contains("ScshCastPlayer.create") && stdout.contains("Greeting"), "page content on stdout");
   assert!(!stdout.contains("\"exported\""), "no JSON report in the streamed page");
   assert!(!d.join("rec.html").exists(), "-o - must not also write a file");
 }
