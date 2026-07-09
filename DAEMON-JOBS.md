@@ -53,7 +53,9 @@ curl -s "localhost:7391/" | grep -oE 'id="(repo-path|repo-open|defs-panel|repos-
 
 **Expect:** all four ids and the `jobs by repository` heading are present. (In a real browser at
 `http://127.0.0.1:7391/`, Open the repo, pick `add`, and confirm the param form renders inputs
-for `A` and `B` prefilled with `2` and `3`. The `fruits` definition shows a **workflow** badge.
+for `A` and `B` prefilled with `2` and `3`. The `fruits`, `code-review`, and `arith`
+definitions show a **workflow** badge — `arith` is the default “watch a bundle run” demo:
+every param defaulted, so it starts on any opened directory with zero setup.
 Clicking **Pick…** opens the native OS folder chooser on a machine with a display.)
 
 ## 4. Missing required parameter is rejected
@@ -135,6 +137,23 @@ dim ⊘ `skipped` row instead of vanishing. `categorize` runs first, then `sort_
 the session board shows all three step rows. The per-step results land under the gitignored
 session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fruits.json` has a
 `sorted` field with the fruits in alphabetical order, and `git -C "$REPO" status` is clean.
+
+## 10. (Optional) The three-harness bundle, with a file artifact
+
+`arith` is the built-in cross-harness demo: **claude** (sonnet) adds A+B, **codex** (gpt-5.5)
+multiplies X×Y in parallel, and **grok** (grok-4.5) folds both results into one plain-English
+paragraph. Needs all three CLIs logged in on the host.
+
+```console
+cd "$REPO" && "$SCSH_BIN" run --def arith
+```
+
+**Expect:** the three harness images build FIRST, each as its own tracked row, before any step
+starts; then three step rows (`step 1/3` … `step 3/3 · needs add, multiply`) with `add` and
+`multiply` running in parallel and `summarize` waiting on both. Afterwards the session dir holds
+`add.json` (`sum: 5`), `multiply.json` (`product: 20`), `summarize.json` (a `summary` string) —
+**and `summary.txt`**, the declared step artifact: a standalone plain-English sentence about
+both computations, copied back beside the results. `git -C "$REPO" status` stays clean.
 
 ## Cleanup
 
