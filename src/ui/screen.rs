@@ -254,17 +254,9 @@ impl Proc {
     self.model.lock().unwrap().tail_lines(self.i, max)
   }
 
-  /// Like [`Proc::run`] but kills the child — reporting `timed_out` — past `timeout`
-  /// (`None` waits forever). Returns `(success, timed_out, last_line)`.
-  pub fn run_timed(
-    &self, program: &str, args: &[String], timeout: Option<Duration>,
-  ) -> std::io::Result<(bool, bool, Option<String>)> {
-    let (ok, killed, last) = self.exec(program, args, None, timeout, None)?;
-    Ok((ok, killed == Killed::Timeout, last))
-  }
-
-  /// Like [`Proc::run_timed`] but also kills the child when `watch` sees no screen activity
-  /// for its limit. Returns `(success, why_killed, last_line)`.
+  /// Like [`Proc::run`] but kills the child past the wall-clock `timeout` and/or when
+  /// `watch` sees no screen activity for its limit (`None`s wait forever). Returns
+  /// `(success, why_killed, last_line)`.
   pub fn run_watched(
     &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
@@ -781,12 +773,13 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
-  fn proc_run_timed_kills_an_overrunning_child() {
+  fn proc_run_watched_kills_an_overrunning_child() {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("sleep", false);
     p.start();
-    let (ok, timed_out, _) = p.run_timed("sleep", &["5".to_string()], Some(Duration::from_millis(150))).unwrap();
-    assert!(timed_out && !ok, "the 5s sleep must be killed by the 150ms timeout");
+    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], Some(Duration::from_millis(150)), None).unwrap();
+    assert_eq!(killed, Killed::Timeout);
+    assert!(!ok, "the 5s sleep must be killed by the 150ms timeout");
   }
 
   #[test]
