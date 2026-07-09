@@ -12,6 +12,7 @@ mod export;
 mod failure;
 mod harness_def;
 mod json;
+#[cfg(test)]
 mod licenses;
 mod runtime;
 mod sha1;
