@@ -1,16 +1,22 @@
 //! Build script: stamp the binary with the current git commit (seven hex digits) and
 //! whether the tree was dirty at build time, so `scsh version` can report them.
+//! Also refuse to compile when `src/Dockerfile` exceeds Apple Containers' soft size
+//! limit (gRPC header — apple/container#735), so macOS / Apple Silicon stays green.
 //! Std-only — shells out to `git` with `-C $CARGO_MANIFEST_DIR` so the hash is found
 //! even when cargo's working directory is not the crate root.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Must stay in sync with `runtime::APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT`.
+const APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT: usize = 15_000;
+
 fn main() {
   let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"));
   let out_dir = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
 
   println!("cargo:rerun-if-changed=build.rs");
+  println!("cargo:rerun-if-changed=src/Dockerfile");
   println!("cargo:rerun-if-env-changed=SCSH_GIT_DESCRIBE");
   let head = manifest_dir.join(".git/HEAD");
   let index = manifest_dir.join(".git/index");
@@ -20,6 +26,8 @@ fn main() {
   if index.exists() {
     println!("cargo:rerun-if-changed={}", index.display());
   }
+
+  check_dockerfile_fits_apple_containers(&manifest_dir);
 
   let describe = git_describe(&manifest_dir);
   if describe.is_empty() {
@@ -34,6 +42,20 @@ fn main() {
 
   // Kept for integration tests (`option_env!("SCSH_GIT_DESCRIBE")`).
   println!("cargo:rustc-env=SCSH_GIT_DESCRIBE={describe}");
+}
+
+/// Fail the build early if `src/Dockerfile` would break Apple Containers on macOS.
+fn check_dockerfile_fits_apple_containers(manifest_dir: &Path) {
+  let path = manifest_dir.join("src/Dockerfile");
+  let bytes = std::fs::metadata(&path).map(|m| m.len() as usize).unwrap_or(0);
+  if bytes >= APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT {
+    panic!(
+      "src/Dockerfile is {bytes} bytes (≥ {APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT}). \
+       Apple Containers rejects Dockerfiles near 16KB with \"Stream unexpectedly closed\" \
+       (https://github.com/apple/container/issues/735). Trim comments or split stages — \
+       see runtime::APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT / CONTRIBUTING.md."
+    );
+  }
 }
 
 /// Seven hex digits of HEAD, plus `-dirty` when the tree is not clean. Empty when git is

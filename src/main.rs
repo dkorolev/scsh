@@ -1178,7 +1178,10 @@ fn ensure_workflow_images(
   harnesses: &[config::Harness],
 ) -> Result<(), (String, i32)> {
   let (uid, gid) = runtime::host_ids();
-  let df = runtime::dockerfile();
+  let df = runtime::dockerfile_for_runtime(&rt.name);
+  if rt.name == "container" && runtime::apple_dockerfile_too_large(&df) {
+    return Err((runtime::apple_dockerfile_too_large_message(df.len()), 1));
+  }
   let tz = runtime::host_timezone();
   let build_one =
     |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
@@ -1659,13 +1662,21 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
   if verbose {
     let skills = &expanded[..];
     let (uid, gid) = runtime::host_ids();
-    let df = runtime::dockerfile();
+    // Show / fingerprint the same Dockerfile text the runtime will build (Apple: compacted).
+    let df = runtime::dockerfile_for_runtime(&rt.name);
     let mut harnesses: std::collections::BTreeSet<config::Harness> = std::collections::BTreeSet::new();
     for s in skills.iter() {
       harnesses.insert(s.harness);
     }
     println!("\n{}", h_head("Images"));
-    println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
+    if rt.name == "container" {
+      println!(
+        "{}",
+        h_dim("--- Dockerfile for Apple Containers (comments stripped; gRPC header ≤16KB, apple/container#735) ---")
+      );
+    } else {
+      println!("{}", h_dim("--- generated Dockerfile (in memory; shared base + per-harness targets) ---"));
+    }
     print!("{df}");
     let host_tz = runtime::host_timezone();
     let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &host_tz);
@@ -2354,7 +2365,12 @@ fn build_and_run(
 
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
 
-  let df = runtime::dockerfile();
+  // Apple Containers: comment-strip so the Dockerfile fits the gRPC header limit (#735).
+  let df = runtime::dockerfile_for_runtime(&rt.name);
+  if rt.name == "container" && runtime::apple_dockerfile_too_large(&df) {
+    fail(&runtime::apple_dockerfile_too_large_message(df.len()));
+    return 1;
+  }
   let tz = runtime::host_timezone();
   // Harness build order: first time each harness appears in the manifest (not enum sort).
   let mut harness_list = Vec::new();
@@ -4041,6 +4057,10 @@ fn run_build(
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
 
+  if runtime_name == "container" && runtime::apple_dockerfile_too_large(dockerfile) {
+    return Err((runtime::apple_dockerfile_too_large_message(dockerfile.len()), 1));
+  }
+
   // Prefer the TUI path whenever asciinema is available — every build should be a cast.
   if runtime::asciinema_available() {
     return run_build_tui(
@@ -4081,10 +4101,21 @@ fn run_build(
   if ok {
     Ok(())
   } else {
-    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
-    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
-    Err((format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {excerpt}"), 1))
+    Err(image_build_failure(runtime_name, target, tag, build, last.as_deref()))
   }
+}
+
+fn image_build_failure(
+  runtime_name: &str, target: &str, tag: &str, build: &ui::screen::Proc, last: Option<&str>,
+) -> (String, i32) {
+  let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
+  let excerpt = failure::failure_excerpt(last, &tail, "build produced no output");
+  let detail = if runtime_name == "container" {
+    runtime::rewrite_apple_build_failure(&excerpt).unwrap_or(excerpt)
+  } else {
+    excerpt
+  };
+  (format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {detail}"), 1)
 }
 
 /// Record one image build under a host PTY via `asciinema rec --headless`, register the cast
@@ -4147,9 +4178,7 @@ fn run_build_tui(
   if ok {
     Ok(())
   } else {
-    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
-    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
-    Err((format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {excerpt}"), 1))
+    Err(image_build_failure(runtime_name, target, tag, build, last.as_deref()))
   }
 }
 
@@ -4231,7 +4260,12 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   let daemon_client = daemon_session.client.clone();
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
 
-  let df = runtime::dockerfile();
+  // Apple Containers: comment-strip so the Dockerfile fits the gRPC header limit (#735).
+  let df = runtime::dockerfile_for_runtime(&rt.name);
+  if rt.name == "container" && runtime::apple_dockerfile_too_large(&df) {
+    fail(&runtime::apple_dockerfile_too_large_message(df.len()));
+    return 1;
+  }
   let (uid, gid) = runtime::host_ids();
   let tz = runtime::host_timezone();
   let rt_name = rt.name.clone();
@@ -5577,8 +5611,10 @@ fn print_help_internals() {
   Unavailable harnesses and opencode models are skipped; a run fails only when every selected skill is skipped.
   Every line of harness output is teed to <run_dir>/tmp/scsh-run.log for inspection.
 
-  The Dockerfile is generated in memory (streamed to the builder's stdin), and your
-  repository is modified only by the result copies (into the gitignored tmp/).
+  The Dockerfile is embedded at compile time (`src/Dockerfile`). docker/podman get it
+  on stdin; Apple Containers gets a comment-stripped copy written to a temp context dir
+  (Apple has no stdin build, and rejects Dockerfiles ≥ 16KB — apple/container#735).
+  Your repository is modified only by the result copies (into the gitignored tmp/).
 
   Cleanup: a skill's container is --rm, and its /tmp clone is host-side scratch. After a
   SUCCESSFUL skill scsh removes that clone; a FAILED skill's clone is kept for inspection
@@ -5611,7 +5647,9 @@ fn print_help_internals() {
   The image is built with the TIMEZONE OF THE MACHINE BUILDING IT (scsh passes the
   host's TZ as a build arg), so timestamps a skill produces match your machine.
   It is platform-agnostic: the same Dockerfile builds on x86_64 and arm64 (arch is
-  resolved at build time, no hardcoded-arch downloads).
+  resolved at build time, no hardcoded-arch downloads). On macOS, Apple Containers is
+  the default runtime — keep src/Dockerfile under 15KB so builds stay under Apple's
+  16KB gRPC header limit.
 "#
   );
   println!();

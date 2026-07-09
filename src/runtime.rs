@@ -653,6 +653,19 @@ pub enum BuildMethod {
 /// default Dockerfile name, so no `-f` flag is needed).
 pub const CONTEXT_DOCKERFILE_NAME: &str = "Dockerfile";
 
+/// Apple Containers sends the Dockerfile in a gRPC *header* (default 16 KiB). At or
+/// above this size, `container build` fails with `Stream unexpectedly closed` /
+/// `Transport became inactive` ([apple/container#735](https://github.com/apple/container/issues/735)).
+/// scsh keeps `src/Dockerfile` under [`APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT`] and
+/// comment-strips before every Apple build so macOS / Apple Silicon stays the default path.
+pub const APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT: usize = 16 * 1024;
+
+/// Soft ceiling for the embedded Dockerfile (unit-tested). Leaves headroom under the
+/// hard gRPC limit after labels / build-arg metadata Apple may also stuff into headers.
+pub const APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT: usize = 15_000;
+
+const _: () = assert!(APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT < APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT);
+
 /// Pick the build method for a runtime.
 pub fn build_method(runtime: &str) -> BuildMethod {
   if runtime == "container" {
@@ -660,6 +673,116 @@ pub fn build_method(runtime: &str) -> BuildMethod {
   } else {
     BuildMethod::Stdin
   }
+}
+
+/// Dockerfile text that will actually be built (and fingerprinted) for `runtime`.
+/// On Apple Containers this is a comment-stripped copy so we stay under the gRPC
+/// header limit; docker/podman get the embedded file verbatim.
+pub fn dockerfile_for_runtime(runtime: &str) -> String {
+  let raw = dockerfile();
+  if runtime == "container" {
+    compact_dockerfile_for_apple(&raw)
+  } else {
+    raw
+  }
+}
+
+/// Strip full-line comments (and comment-only lines inside `<<…` heredocs) so the
+/// Dockerfile fits Apple Containers' gRPC header limit. Instructions and heredoc
+/// *code* are preserved; `# syntax=` is kept.
+pub fn compact_dockerfile_for_apple(src: &str) -> String {
+  let mut out = String::with_capacity(src.len());
+  let mut heredoc_tag: Option<String> = None;
+  let mut blank_pending = false;
+  for line in src.lines() {
+    if let Some(tag) = heredoc_tag.as_deref() {
+      if line.trim() == tag {
+        heredoc_tag = None;
+        out.push_str(line);
+        out.push('\n');
+        blank_pending = false;
+        continue;
+      }
+      let trimmed = line.trim_start();
+      if trimmed.starts_with('#') && !trimmed.starts_with("#!") {
+        continue;
+      }
+      out.push_str(line);
+      out.push('\n');
+      blank_pending = false;
+      continue;
+    }
+
+    if let Some(tag) = dockerfile_heredoc_tag(line) {
+      heredoc_tag = Some(tag.to_string());
+      out.push_str(line);
+      out.push('\n');
+      blank_pending = false;
+      continue;
+    }
+
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+      blank_pending = true;
+      continue;
+    }
+    if trimmed.starts_with('#') && !trimmed.starts_with("# syntax=") {
+      continue;
+    }
+    if blank_pending && !out.is_empty() {
+      out.push('\n');
+    }
+    blank_pending = false;
+    out.push_str(line);
+    out.push('\n');
+  }
+  out
+}
+
+/// `<<'TAG'`, `<<"TAG"`, or `<<TAG` on a Dockerfile line → the terminator tag.
+fn dockerfile_heredoc_tag(line: &str) -> Option<&str> {
+  let idx = line.find("<<")?;
+  let rest = line[idx + 2..].trim_start();
+  if let Some(r) = rest.strip_prefix('\'') {
+    return r.split('\'').next().filter(|s| !s.is_empty());
+  }
+  if let Some(r) = rest.strip_prefix('"') {
+    return r.split('"').next().filter(|s| !s.is_empty());
+  }
+  rest.split_whitespace().next().filter(|s| !s.is_empty())
+}
+
+/// True when `dockerfile` cannot be sent to Apple's builder (hard gRPC limit).
+pub fn apple_dockerfile_too_large(dockerfile: &str) -> bool {
+  dockerfile.len() >= APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT
+}
+
+/// User-facing error when a compacted Dockerfile still exceeds Apple's limit.
+pub fn apple_dockerfile_too_large_message(bytes: usize) -> String {
+  format!(
+    "Dockerfile is {bytes} bytes after compacting for Apple Containers; \
+     `container build` rejects files ≥ {APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT} bytes \
+     (gRPC header limit — https://github.com/apple/container/issues/735). \
+     Trim comments/stages in src/Dockerfile, or opt into Docker with SCSH_RUNTIME=docker."
+  )
+}
+
+/// Rewrite Apple's opaque build failures into an actionable message when the excerpt
+/// matches the known gRPC-header / wedged-BuildKit symptoms.
+pub fn rewrite_apple_build_failure(excerpt: &str) -> Option<String> {
+  let lower = excerpt.to_lowercase();
+  let grpc = lower.contains("stream unexpectedly closed") || lower.contains("transport became inactive");
+  if !grpc {
+    return None;
+  }
+  Some(format!(
+    "{excerpt}\n\
+     hint: Apple Containers often fails this way when the Dockerfile is near/over 16KB \
+     (https://github.com/apple/container/issues/735), or when BuildKit is wedged. \
+     scsh already comment-strips the Dockerfile; if it still fails, reset the builder:\n\
+       container builder delete --force && container builder start --cpus 6 --memory 8G\n\
+     Or opt into Docker with SCSH_RUNTIME=docker."
+  ))
 }
 
 /// OCI label scsh stamps on every harness image at build time. Compared on later runs
@@ -755,7 +878,9 @@ pub struct ImageStatus {
 /// One status row per scsh image: the shared base first, then every harness image,
 /// each compared against the fingerprint the embedded Dockerfile would produce today.
 pub fn image_statuses(runtime: &str) -> Vec<ImageStatus> {
-  let df = dockerfile();
+  // Fingerprints must match what `run` / `build-images` actually build (Apple gets a
+  // comment-stripped Dockerfile under the gRPC header limit).
+  let df = dockerfile_for_runtime(runtime);
   let (uid, gid) = host_ids();
   let tz = host_timezone();
   let base_fp = base_image_fingerprint(&df, uid, gid, &tz);
@@ -1914,6 +2039,79 @@ mod tests {
     assert!(!df.contains("CMD ["));
     assert!(df.contains("ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log"));
     assert!(df.contains("ENV SCSH=1"));
+  }
+
+  /// Apple Containers sends the Dockerfile in a gRPC header (16KB default). Files that
+  /// approach that limit fail with "Stream unexpectedly closed" (apple/container#735).
+  /// Keep a margin under the soft limit so builds keep working on macOS / Apple Silicon.
+  #[test]
+  fn dockerfile_stays_under_apple_containers_grpc_header_limit() {
+    let bytes = include_str!("Dockerfile").len();
+    assert!(
+      bytes < APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT,
+      "src/Dockerfile is {bytes} bytes; Apple Containers fails builds near \
+       {APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT} bytes (apple/container#735). \
+       Trim comments or split stages before growing further."
+    );
+    let compact = compact_dockerfile_for_apple(include_str!("Dockerfile"));
+    assert!(
+      compact.len() < APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT,
+      "compacted Dockerfile is {} bytes — still over Apple's hard limit",
+      compact.len()
+    );
+    // Compaction must preserve every stage and the TUI recorder body.
+    assert!(compact.contains("FROM scsh-base AS scsh-cursor"));
+    assert!(compact.contains("pane_relaunch="));
+    assert!(compact.contains("# syntax=docker/dockerfile:1"));
+  }
+
+  #[test]
+  fn compact_dockerfile_strips_comments_but_keeps_heredoc_code() {
+    let src = "\
+# syntax=docker/dockerfile:1
+# long prose that must go
+FROM scratch AS scsh-base
+# section note
+RUN cat > /bin/x <<'TAG'
+#!/bin/sh
+# keep shebang above; drop this comment
+echo hi
+TAG
+# trailing
+";
+    let out = compact_dockerfile_for_apple(src);
+    assert!(out.contains("# syntax=docker/dockerfile:1"));
+    assert!(!out.contains("long prose"));
+    assert!(!out.contains("section note"));
+    assert!(!out.contains("trailing"));
+    assert!(out.contains("#!/bin/sh"));
+    assert!(!out.contains("drop this comment"));
+    assert!(out.contains("echo hi"));
+    assert!(out.contains("FROM scratch AS scsh-base"));
+  }
+
+  #[test]
+  fn apple_dockerfile_size_gate_and_failure_rewrite() {
+    assert!(!apple_dockerfile_too_large("small"));
+    let big = "x".repeat(APPLE_CONTAINER_DOCKERFILE_HARD_LIMIT);
+    assert!(apple_dockerfile_too_large(&big));
+    let msg = apple_dockerfile_too_large_message(big.len());
+    assert!(msg.contains("apple/container/issues/735"));
+    assert!(msg.contains("SCSH_RUNTIME=docker"));
+
+    let rewritten = rewrite_apple_build_failure("Error: unavailable: \"Stream unexpectedly closed.\"");
+    assert!(rewritten.unwrap().contains("container builder delete --force"));
+    assert!(rewrite_apple_build_failure("apt-get failed").is_none());
+  }
+
+  #[test]
+  fn dockerfile_for_runtime_compacts_only_apple_container() {
+    let raw = dockerfile();
+    let apple = dockerfile_for_runtime("container");
+    let docker = dockerfile_for_runtime("docker");
+    assert_eq!(docker, raw);
+    assert!(apple.len() <= raw.len());
+    assert!(apple.contains("FROM debian:bookworm-slim AS scsh-base"));
   }
 
   #[test]
