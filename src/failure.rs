@@ -17,6 +17,7 @@ pub mod reason {
   pub const GIT_DAEMON: &str = "git_daemon_start_failed";
   pub const CLONE: &str = "clone_failed";
   pub const CONTAINER_TIMEOUT: &str = "container_timeout";
+  pub const CONTAINER_INACTIVE: &str = "container_inactive";
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
@@ -33,7 +34,10 @@ const LOG_NAME: &str = "failures.log";
 /// container plausibly fix. Deterministic failures (bad env, missing result file,
 /// harness exiting non-zero) are never retried. Opt out with `SCSH_NO_RETRY=1`.
 pub fn is_transient(reason: &str) -> bool {
-  matches!(reason, reason::CONTAINER_TIMEOUT | reason::CONTAINER_RUN | reason::CLONE | reason::GIT_DAEMON)
+  matches!(
+    reason,
+    reason::CONTAINER_TIMEOUT | reason::CONTAINER_INACTIVE | reason::CONTAINER_RUN | reason::CLONE | reason::GIT_DAEMON
+  )
 }
 
 pub fn retry_enabled() -> bool {
@@ -379,6 +383,7 @@ mod tests {
   #[test]
   fn transient_reasons_are_retryable_and_deterministic_ones_are_not() {
     assert!(is_transient(reason::CONTAINER_TIMEOUT));
+    assert!(is_transient(reason::CONTAINER_INACTIVE));
     assert!(is_transient(reason::CONTAINER_RUN));
     assert!(is_transient(reason::CLONE));
     assert!(is_transient(reason::GIT_DAEMON));

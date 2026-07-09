@@ -366,11 +366,8 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("scsh-annotate-test-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let cast = dir.join("rec.cast");
-    std::fs::write(
-      &cast,
-      "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.1, \"o\", \"working\\r\\n\"]\n",
-    )
-    .unwrap();
+    std::fs::write(&cast, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.1, \"o\", \"working\\r\\n\"]\n")
+      .unwrap();
     let stub =
       |_m: &str, _p: &str| Some("{\"summary\":\"Did work.\",\"chapters\":[{\"t\":0,\"title\":\"Start\"}]}".to_string());
     let side = annotate_cast_with(&cast, "composer-2.5-fast", stub).unwrap();

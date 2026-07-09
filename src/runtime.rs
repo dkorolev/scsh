@@ -2327,16 +2327,10 @@ TAG
   fn dockerfile_reclaims_agent_home_after_harness_installs() {
     let df = dockerfile();
     let chowns = df.matches("chown -R agent:agent /home/agent").count();
-    assert!(
-      chowns >= 5,
-      "each harness stage must chown /home/agent after its install (found {chowns})"
-    );
+    assert!(chowns >= 5, "each harness stage must chown /home/agent after its install (found {chowns})");
     // Version probes must not write into the real agent home as root.
     for cli in ["opencode", "claude", "codex", "grok", "cursor-agent"] {
-      assert!(
-        df.contains(&format!("HOME=/tmp {cli} --version")),
-        "{cli} --version must run with HOME=/tmp"
-      );
+      assert!(df.contains(&format!("HOME=/tmp {cli} --version")), "{cli} --version must run with HOME=/tmp");
     }
   }
 
@@ -3026,6 +3020,7 @@ TAG
         profile: None,
         commits: false,
         timeout: None,
+        inactivity_timeout: None,
         env: vec![],
         result: "tmp/a.json".into(),
         terminal: crate::config::Terminal::default(),
@@ -3040,6 +3035,7 @@ TAG
         profile: None,
         commits: false,
         timeout: None,
+        inactivity_timeout: None,
         env: vec![],
         result: "tmp/b.json".into(),
         terminal: crate::config::Terminal::default(),
@@ -3054,6 +3050,7 @@ TAG
         profile: None,
         commits: false,
         timeout: None,
+        inactivity_timeout: None,
         env: vec![],
         result: "tmp/c.json".into(),
         terminal: crate::config::Terminal::default(),
@@ -3105,6 +3102,7 @@ TAG
       profile: None,
       commits: false,
       timeout: None,
+      inactivity_timeout: None,
       env: vec![],
       result: "tmp/add.json".into(),
       terminal: crate::config::Terminal::default(),

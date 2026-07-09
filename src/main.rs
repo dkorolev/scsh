@@ -102,7 +102,11 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
   use std::io::IsTerminal;
   let as_json = json_flag || !std::io::stdout().is_terminal();
   if paths.is_empty() {
-    return annotate_error(as_json, 2, "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/recordings/foo.cast");
+    return annotate_error(
+      as_json,
+      2,
+      "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/recordings/foo.cast",
+    );
   }
   if !annotate::host_can_annotate() {
     return annotate_error(as_json, 1, "cursor-agent not available (need the `cursor-agent` CLI and a cursor login)");
@@ -652,9 +656,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // global Cursor skill can drive `scsh run code-review` without polluting the target tree.
       "--override-dot-scsh-yml" => {
         i += 1;
-        let path = args
-          .get(i)
-          .ok_or("--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-fantastic-review/.scsh.yml")?;
+        let path = args.get(i).ok_or(
+          "--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-fantastic-review/.scsh.yml",
+        )?;
         if path.trim().is_empty() {
           return Err("--override-dot-scsh-yml path must not be empty".into());
         }
@@ -765,9 +769,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     return Err("--def selects a harness definition, not a profile — don't combine them".into());
   }
   if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile) {
-    return Err(
-      "--override-dot-scsh-yml only applies to 'run', 'list', and 'check-profile'".into(),
-    );
+    return Err("--override-dot-scsh-yml only applies to 'run', 'list', and 'check-profile'".into());
   }
   if override_dot_scsh_yml.is_some() && def.is_some() {
     return Err("--override-dot-scsh-yml and --def are mutually exclusive".into());
@@ -1176,6 +1178,7 @@ fn step_invocation(
     model: step.agent.model.clone(),
     effort: step.agent.effort.clone(),
     timeout: None,
+    inactivity_timeout: None,
     env: inputs
       .into_iter()
       .map(|(key, value)| config::EnvVar { key, rule: config::EnvRule::Constant(value) })
@@ -1534,9 +1537,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
 /// Load the config for a normal or override-driven run/list.
 /// Returns `(config, Some(override_bundle_root))` when `--override-dot-scsh-yml` is set —
 /// the bundle root is the parent of the yml (sibling `.skills/` lives there).
-fn resolve_config_for_run(
-  root: &Path, override_yml: Option<&Path>,
-) -> Result<(config::Config, Option<PathBuf>), i32> {
+fn resolve_config_for_run(root: &Path, override_yml: Option<&Path>) -> Result<(config::Config, Option<PathBuf>), i32> {
   let Some(override_path) = override_yml else {
     let cfg_path = root.join(".scsh.yml");
     if !cfg_path.is_file() {
@@ -1563,9 +1564,7 @@ fn resolve_override_yml(path: &Path) -> Result<PathBuf, String> {
   let p = if path.is_absolute() {
     path.to_path_buf()
   } else {
-    std::env::current_dir()
-      .map_err(|e| format!("could not resolve cwd for --override-dot-scsh-yml: {e}"))?
-      .join(path)
+    std::env::current_dir().map_err(|e| format!("could not resolve cwd for --override-dot-scsh-yml: {e}"))?.join(path)
   };
   if !p.is_file() {
     return Err(format!("--override-dot-scsh-yml path not found: {}", p.display()));
@@ -1586,11 +1585,7 @@ fn load_validated_yml(yml_path: &Path) -> Result<config::Config, i32> {
     Ok(c) => Ok(c),
     Err(errs) => {
       let n = errs.len();
-      fail(&format!(
-        "{} does not match the schema ({n} problem{})",
-        yml_path.display(),
-        if n == 1 { "" } else { "s" }
-      ));
+      fail(&format!("{} does not match the schema ({n} problem{})", yml_path.display(), if n == 1 { "" } else { "s" }));
       for e in &errs {
         hint(e);
       }
@@ -1605,8 +1600,8 @@ fn load_validated_yml(yml_path: &Path) -> Result<config::Config, i32> {
 fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_root: &Path) -> Result<(), String> {
   for inv in invocations {
     let path = skills_root.join(".skills").join(&inv.skill_source).join("SKILL.md");
-    let body = std::fs::read_to_string(&path)
-      .map_err(|e| format!("override skill missing at {}: {e}", path.display()))?;
+    let body =
+      std::fs::read_to_string(&path).map_err(|e| format!("override skill missing at {}: {e}", path.display()))?;
     inv.body = Some(body);
   }
   Ok(())
@@ -3069,6 +3064,14 @@ fn run_one_skill(
   let repo_mount = if git_transport { runtime::RepoMountMode::TmpOnly } else { runtime::RepoMountMode::Full };
   let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd, repo_mount);
   let timeout = skill.timeout.map(Duration::from_secs);
+  // Screen-inactivity watchdog: the bind-mounted cast grows on every TUI redraw, so a frozen
+  // cast means a stuck harness (hung login, exhausted quota, dead TUI) — kill it rather than
+  // waiting out the full wall-clock timeout.
+  let inactivity_secs = skill.inactivity_timeout.unwrap_or(config::DEFAULT_INACTIVITY_TIMEOUT_SECS);
+  let watch = ui::screen::ActivityWatch {
+    file: run_dir.join(runtime::RUN_CAST_REL),
+    limit: Duration::from_secs(inactivity_secs),
+  };
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "start", &name);
@@ -3076,7 +3079,7 @@ fn run_one_skill(
     // lets the session browser download/replay the recording mid-run.
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
-  let result = spinner.run_timed(&run[0], &run[1..], timeout);
+  let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch));
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name);
   }
@@ -3103,7 +3106,7 @@ fn run_one_skill(
   }
   match result {
     Ok((true, _, _)) => {}
-    Ok((false, true, _)) => {
+    Ok((false, ui::screen::Killed::Timeout, _)) => {
       // Timed out: the client was killed; stop the container too (best effort).
       ui::signals::stop_container(&rt.name, &name);
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -3112,7 +3115,17 @@ fn run_one_skill(
       spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir);
     }
-    Ok((false, false, last)) => {
+    Ok((false, ui::screen::Killed::Inactive, _)) => {
+      // The recorded screen froze past the watchdog limit: same teardown as a timeout,
+      // but its own reason so stats can tell a stuck harness from a slow one.
+      ui::signals::stop_container(&rt.name, &name);
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+      let why = format!("no screen activity for {inactivity_secs}s (inactivity_timeout)");
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
+      return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir);
+    }
+    Ok((false, ui::screen::Killed::No, last)) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
       let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
@@ -4139,12 +4152,25 @@ fn run_build(
   // Prefer the TUI path whenever asciinema is available — every build should be a cast.
   if runtime::asciinema_available() {
     return run_build_tui(
-      build, runtime_name, tag, target, dockerfile, uid, gid, &tz, fingerprint, no_cache, daemon_client, cast_stem,
+      build,
+      runtime_name,
+      tag,
+      target,
+      dockerfile,
+      uid,
+      gid,
+      &tz,
+      fingerprint,
+      no_cache,
+      daemon_client,
+      cast_stem,
     );
   }
 
   // Fallback: no asciinema on the host — stream plain text into the board (legacy path).
-  hint("asciinema not found on PATH — image builds fall back to a text log (install asciinema for the TUI cast player)");
+  hint(
+    "asciinema not found on PATH — image builds fall back to a text log (install asciinema for the TUI cast player)",
+  );
   let (ok, last) = match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
       let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint, no_cache);
@@ -4200,7 +4226,8 @@ fn run_build_tui(
   tz: &str, fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
 ) -> Result<(), (String, i32)> {
   let casts_dir = runtime::host_casts_dir();
-  std::fs::create_dir_all(&casts_dir).map_err(|e| (format!("could not create cast dir {}: {e}", casts_dir.display()), 1))?;
+  std::fs::create_dir_all(&casts_dir)
+    .map_err(|e| (format!("could not create cast dir {}: {e}", casts_dir.display()), 1))?;
   let cast_path = casts_dir.join(format!(
     "build-{cast_stem}-{}-utc-{}.cast",
     runtime::format_utc_timestamp(now_secs()),
@@ -5448,10 +5475,7 @@ fn print_help_run() {
   help_row("scsh check-profile <name>", "Exit 0 iff that profile exists with at least one skill (no runtime).");
   println!();
   println!("{}", h_head("External config (no install into the target repo)"));
-  help_row(
-    "--override-dot-scsh-yml <path>",
-    "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.",
-  );
+  help_row("--override-dot-scsh-yml <path>", "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.");
   println!("{}", h_dim("  The target tree stays clean: skill bodies are injected into the run clone only."));
   println!("{}", h_dim("  Works with `run`, `list`, and `check-profile`. Mutually exclusive with `--def`."));
   println!();
@@ -5548,6 +5572,8 @@ fn print_help_config() {
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
+      inactivity_timeout: 120  # optional; seconds the recorded screen may stay frozen
+                          #       before the run is killed as stuck (default 120)
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
         - B: ${B:-5}      #       forward B, or inject the default 5 when unset
@@ -5919,10 +5945,7 @@ mod tests {
     let c = cli(&["run", "code-review", "--override-dot-scsh-yml", "/tmp/bundle/.scsh.yml"]).unwrap();
     assert!(matches!(c.mode, Mode::Run));
     assert_eq!(c.profile.as_deref(), Some("code-review"));
-    assert_eq!(
-      c.override_dot_scsh_yml.as_deref(),
-      Some(std::path::Path::new("/tmp/bundle/.scsh.yml"))
-    );
+    assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/tmp/bundle/.scsh.yml")));
     let c = cli(&["check-profile", "code-review", "--override-dot-scsh-yml", "/x.yml"]).unwrap();
     assert!(matches!(c.mode, Mode::CheckProfile));
     assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
@@ -6180,6 +6203,7 @@ mod tests {
       model: None,
       effort: None,
       timeout: None,
+      inactivity_timeout: None,
       env: Vec::new(),
       profile: None,
       commits: false,
