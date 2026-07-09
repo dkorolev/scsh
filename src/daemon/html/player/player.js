@@ -119,7 +119,7 @@ function Player(src, mount, opts) {
   this.term = new VT.Term(cast.cols, cast.rows);
   this.pacing = buildPacing(cast.events, cast.duration, opts.idleTimeLimit);
   this.markers = (opts.markers || []).map(function (m) { return { t: Number(m[0]) || 0, label: String(m[1] || '') }; });
-  this.speed = 1;
+  this.speed = SPEEDS.indexOf(Number(opts.speed)) >= 0 ? Number(opts.speed) : 1;
   this.playing = false;
   this.pacedPos = 0;   // the playback clock, in paced seconds
   this.eventIdx = 0;   // events [0, eventIdx) are applied to the term
@@ -127,11 +127,13 @@ function Player(src, mount, opts) {
   this.lastTick = null;
   this.disposed = false;
   this.buildDom(mount, opts.controls !== false);
+  if (this.speedBtn) this.speedBtn.textContent = String(this.speed).replace(/\.0$/, '') + '\u00d7';
   this.fit = opts.fit || null;
   this.applyEventsUpTo(0);
   if (opts.startAt != null) this.seek(parseTime(opts.startAt));
   this.render();
   this.layout();
+  if (opts.autoPlay) this.play();
   const self = this;
   if (typeof ResizeObserver !== 'undefined') {
     this.resizeObs = new ResizeObserver(function () { self.layout(); });
@@ -260,22 +262,26 @@ Player.prototype.render = function () {
   if (this.layoutPending) { this.layoutPending = false; this.layout(); }
 };
 
-// fit: scale the fixed-metric terminal down (never up) to the containing box's width.
+// fit: scale the fixed-metric terminal down (never up) to the containing box's width —
+// and, for fit:'both', also to the mount's height when the embedding page gives it one
+// (a definite flex/viewport height; a content-sized mount never shrinks the terminal).
 Player.prototype.layout = function () {
   if (!this.fit) return;
   const box = this.root.querySelector('.sp-screen-box');
-  const probe = document.createElement('span');
-  probe.className = 'sp-probe';
-  probe.textContent = 'M'.repeat(100);
-  this.screenEl.appendChild(probe);
-  const cellW = probe.getBoundingClientRect().width / 100;
-  probe.remove();
-  if (!(cellW > 0)) return;
-  const naturalW = cellW * this.term.cols;
-  const avail = box.clientWidth;
-  const scale = avail > 0 && naturalW > avail ? avail / naturalW : 1;
+  this.screenEl.style.transform = '';
+  const rect = this.screenEl.getBoundingClientRect();
+  const naturalW = rect.width, naturalH = rect.height;
+  if (!(naturalW > 0 && naturalH > 0)) return;
+  const availW = box.clientWidth;
+  let scale = availW > 0 && naturalW > availW ? availW / naturalW : 1;
+  if (this.fit === 'both' && this.root.parentNode) {
+    const bar = this.root.querySelector('.sp-bar');
+    const availH = this.root.parentNode.clientHeight - (bar ? bar.offsetHeight : 0);
+    // The 2px slack keeps a content-sized mount (whose height IS the terminal's) stable.
+    if (availH > 40 && naturalH * scale > availH + 2) scale = Math.min(scale, availH / naturalH);
+  }
   this.screenEl.style.transform = scale < 1 ? 'scale(' + scale + ')' : '';
-  box.style.height = this.screenEl.getBoundingClientRect().height + 'px';
+  box.style.height = naturalH * scale + 'px';
 };
 
 Player.prototype.tick = function (nowMs) {

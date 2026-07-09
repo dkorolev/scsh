@@ -31,6 +31,8 @@ const player = ScshCastPlayer.create({ data: castText }, mountElement, {
   idleTimeLimit: 2,   // cap silent gaps at N seconds of playback time
   markers: [[t, 'label'], …],  // chapter ticks on the seek bar
   startAt: 12.5,      // seconds, or a 'mm:ss' string
+  speed: 1.5,         // initial speed (one of 0.5, 1, 1.5, 2, 3, 5)
+  autoPlay: true,     // start playing immediately
 });
 player.play();
 player.pause();
