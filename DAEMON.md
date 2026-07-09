@@ -18,10 +18,11 @@ During `scsh run`, if no persistent daemon is already running, `scsh` auto-start
 **ephemeral** daemon. That daemon stays up while runs are active (with periodic pings) and
 shuts down **five minutes** after the last client disconnects.
 
-Every `scsh run` gets a session id of six random lowercase letters. When the run finishes, the
-last line printed is the deep link URL (reachable while a daemon is listening on that port;
-start `scsh daemon start` for durable post-run browsing, or rely on persisted state after
-`scsh daemon restart`):
+Every `scsh run` gets a session id of six random lowercase letters. The run prints its
+clickable deep link URL twice — right after registering (watch live) and again as one of the
+very last lines (so a coding agent relaying the tail of the output always surfaces it). It is
+reachable while a daemon is listening on that port; start `scsh daemon start` for durable
+post-run browsing, or rely on persisted state after `scsh daemon restart`:
 
 ```text
 http://127.0.0.1:7274/session/abcdef
