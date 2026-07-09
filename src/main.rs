@@ -1196,6 +1196,7 @@ fn step_invocation(
     result: format!("{session_dir_rel}/{}.json", step.id),
     terminal: config::Terminal::default(),
     delivery: config::SkillDelivery::IntoClone(step.render_skill_body()),
+    artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
 }
 
@@ -3183,7 +3184,18 @@ fn run_one_skill(
   }
 
   // Pull the result file OUT of the run clone into the caller repo (host-side, always).
-  // The result file is required: missing → this skill (and the whole run) fails.
+  // The result file is required: missing → this skill (and the whole run) fails. Declared
+  // artifacts are part of the same contract: each is copied back beside the result, and a
+  // missing one fails the skill exactly like a missing result.
+  for artifact in &skill.artifacts {
+    if let Err(e) = collect_skill_result(root, &run_dir, artifact, secs) {
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+      let why = format!("declared artifact: {e}");
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+      return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir);
+    }
+  }
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
     Ok(dest) => {
       // Cache the result content under this run's key, so an identical future run
@@ -4029,6 +4041,11 @@ fn cache_dir(root: &Path) -> PathBuf {
 /// same skill + same env** map to the same key. `None` when the repo content can't be
 /// read (e.g. a repo with no commit yet) — then the run is simply not cached.
 fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) -> Option<String> {
+  // Declared artifacts are side FILES; the cache journals only the result content (plus
+  // commits), so a hit could not reproduce them — artifact-bearing steps always run live.
+  if !skill.artifacts.is_empty() {
+    return None;
+  }
   let tree = git_capture(root, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
   let mut blob = String::new();
   blob.push_str("scsh-cache v2\n");
@@ -6266,6 +6283,7 @@ mod tests {
       result: "tmp/r.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::Repo,
+      artifacts: Vec::new(),
     }
   }
 
@@ -6390,6 +6408,27 @@ Subject: [PATCH] add: 2 + 3 = 5
   }
 
   #[test]
+  fn step_invocation_routes_artifacts_into_the_session_dir_and_bypasses_the_cache() {
+    let step = harness_def::Step {
+      id: "summarize".into(),
+      agent: harness_def::StepAgent { harness: config::Harness::Grok, model: Some("grok-4.5".into()), effort: None },
+      prompt: "p".into(),
+      inputs: Vec::new(),
+      outputs: Vec::new(),
+      when: None,
+      needs: vec!["add".into()],
+      artifacts: vec!["summary.txt".into()],
+    };
+    let inv = step_invocation(&step, "tmp/scsh/abcdef", Vec::new());
+    // The artifact lands beside the step's result, inside the caller's session scratch dir.
+    assert_eq!(inv.result, "tmp/scsh/abcdef/summarize.json");
+    assert_eq!(inv.artifacts, vec!["tmp/scsh/abcdef/summary.txt".to_string()]);
+    // Side files are not journaled in the cache, so artifact steps must always run live.
+    let caller = repo("artifacts-nocache");
+    assert!(cache_key(&caller, &inv, &[]).is_none(), "artifact steps must bypass the cache");
+  }
+
+  #[test]
   fn global_install_lands_in_the_harness_skills_dir_on_both_transports() {
     let base = std::env::temp_dir().join(format!("scsh-global-skill-{}", runtime::random_nonce_6()));
     let inv = |harness: config::Harness| config::ResolvedInvocation {
@@ -6406,6 +6445,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       result: "tmp/greet.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::GlobalInstall("# greet\nsay hi\n".into()),
+      artifacts: Vec::new(),
     };
     // claude: the CLI's user-level skills dir (under CLAUDE_CONFIG_DIR). The write must land
     // identically with and without the git transport — tmp/ is mounted on both.

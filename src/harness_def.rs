@@ -263,6 +263,11 @@ pub struct Step {
   pub when: Option<When>,
   /// Steps that must finish (or be skipped) before this one — the DAG edges.
   pub needs: Vec<String>,
+  /// Extra files the step must write NEXT TO its `$SCSH_RESULT` (plain filenames, no
+  /// directories) — copied back into the caller repo's session dir exactly like the result,
+  /// and required once declared. For deliverables that are files, not JSON fields (e.g. a
+  /// plain-English `summary.txt`).
+  pub artifacts: Vec<String>,
 }
 
 /// A parsed, validated harness definition — either a flat one-shot task or a workflow of steps.
@@ -338,6 +343,13 @@ impl Step {
       s.push_str(&format!("- `{}` ({ty})\n", o.name));
     }
     s.push_str("\nDo not write anything else to that file.\n");
+    if !self.artifacts.is_empty() {
+      s.push_str("\n## Required files\n\nAlso write, in the SAME directory as the `$SCSH_RESULT` file:\n");
+      for a in &self.artifacts {
+        s.push_str(&format!("- `{a}`\n"));
+      }
+      s.push_str("\nThese files are required; the step fails without them.\n");
+    }
     s
   }
 }
@@ -572,7 +584,7 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     let fields = match node {
       Node::Map(f) => f,
       Node::Scalar(_) => {
-        errors.push(format!("step '{id}' must be a mapping (agent, prompt, inputs, output, when, needs)"));
+        errors.push(format!("step '{id}' must be a mapping (agent, prompt, inputs, output, when, needs, artifacts)"));
         continue;
       }
     };
@@ -582,10 +594,12 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("duplicate key 'steps.{id}.{k}'"));
       }
     }
-    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs"];
+    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts"];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
-        errors.push(format!("unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs)"));
+        errors.push(format!(
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts)"
+        ));
       }
     }
 
@@ -595,9 +609,17 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
     let when = validate_step_when(id, fm.get("when").copied(), errors);
     let needs = parse_needs(fm.get("needs").copied());
+    let artifacts = parse_needs(fm.get("artifacts").copied());
+    for a in &artifacts {
+      // Artifacts land beside the step's result inside the session scratch dir; a plain
+      // filename is the whole contract — no directories, no traversal.
+      if a.contains('/') || a.contains("..") {
+        errors.push(format!("'steps.{id}.artifacts': '{a}' must be a plain filename (no '/' or '..')"));
+      }
+    }
 
     if let (Some(agent), Some(prompt)) = (agent, prompt) {
-      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs });
+      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts });
     }
   }
 
@@ -771,7 +793,8 @@ fn validate_step_when(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -
   (!conds.is_empty()).then_some(conds)
 }
 
-/// Parse `needs:` — a comma/space-separated scalar (brackets optional): `needs: a, b` or `[a, b]`.
+/// Parse a comma/space-separated scalar list (brackets optional): `needs: a, b` or `[a, b]`.
+/// Shared by `needs:` and `artifacts:`.
 fn parse_needs(node: Option<&Node>) -> Vec<String> {
   let Some(Node::Scalar(s)) = node else { return Vec::new() };
   s.trim()
@@ -1028,6 +1051,23 @@ fn opt_scalar(fm: &BTreeMap<&str, &Node>, param: &str, field: &str, errors: &mut
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn step_artifacts_must_be_plain_filenames() {
+    let bad = r#"description: "x"
+steps:
+  s1:
+    agent:
+      harness: claude
+    prompt: p
+    artifacts: ../escape.txt
+    output:
+      ok:
+        type: string
+"#;
+    let err = validate("t", bad, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("must be a plain filename")), "got: {err:?}");
+  }
 
   #[test]
   fn builtin_code_review_probes_credentials_then_reviews() {

@@ -3121,6 +3121,7 @@ TAG
         result: "tmp/a.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
         name: "b".into(),
@@ -3136,6 +3137,7 @@ TAG
         result: "tmp/b.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        artifacts: Vec::new(),
       },
       crate::config::ResolvedInvocation {
         name: "c".into(),
@@ -3151,6 +3153,7 @@ TAG
         result: "tmp/c.json".into(),
         terminal: crate::config::Terminal::default(),
         delivery: crate::config::SkillDelivery::Repo,
+        artifacts: Vec::new(),
       },
     ];
     let set = requested_opencode_models(&skills);
@@ -3203,6 +3206,7 @@ TAG
       result: "tmp/add.json".into(),
       terminal: crate::config::Terminal::default(),
       delivery: crate::config::SkillDelivery::Repo,
+      artifacts: Vec::new(),
     }];
     let probe = OpencodeModelProbe::for_selected(&skills);
     assert!(probe.check_model("openai/anything").is_ok());
