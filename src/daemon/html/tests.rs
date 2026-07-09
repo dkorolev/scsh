@@ -58,6 +58,15 @@ fn esc_handles_basic_html() {
 }
 
 #[test]
+fn running_cast_preview_starts_near_the_end() {
+  let js = live_client_js();
+  // A still-running proc's player opens ~3s before the current tail (autoplaying), not at 0.
+  assert!(js.contains("const LIVE_PREVIEW_TAIL_SECS = 3"), "tail preview window constant");
+  assert!(js.contains("createCastPlayer(box, 'near-end', true)"), "running casts open near the end");
+  assert!(js.contains("stats.duration - LIVE_PREVIEW_TAIL_SECS"), "near-end resolves against the loaded duration");
+}
+
+#[test]
 fn index_page_shows_colored_harness_chips_per_proc() {
   let mut store = store_with_cast_proc(ProcStatus::Running);
   // A second, finished proc on another harness: its chip renders dimmed.

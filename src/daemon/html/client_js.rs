@@ -507,7 +507,10 @@ function initCasts(root) {
   if (typeof AsciinemaPlayer === 'undefined') return;
   root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
     box.dataset.ready = '1';
-    createCastPlayer(box);
+    // A still-running recording previews from its tail — the last few seconds are what the
+    // viewer came to see — while a finished one still opens at the start.
+    if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
+    else createCastPlayer(box);
     const proc = box.dataset.proc;
     const playUrl = () => location.origin + '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/play';
     box.querySelector('[data-cast-fs]').addEventListener('click', () => {
@@ -556,6 +559,8 @@ function castPlaceholderHtml(status) {
 // cast with no complete event lines yet (a run that just started) — show a calm placeholder
 // instead of letting the player error on the empty/404 cast. The placeholder upgrades to a
 // real player on the next reload (a WS cast_growth notification, or the finish reload).
+// How far before the current end a still-running recording starts its preview.
+const LIVE_PREVIEW_TAIL_SECS = 3;
 function createCastPlayer(box, startAt, autoplay) {
   if (typeof AsciinemaPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
@@ -591,6 +596,7 @@ function createCastPlayer(box, startAt, autoplay) {
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
     const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers };
     if (startAt === 'end') startAt = stats.duration;
+    if (startAt === 'near-end') startAt = Math.max(0, stats.duration - LIVE_PREVIEW_TAIL_SECS);
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
     // vs player, so the player must not fetch it a second time.
