@@ -1035,11 +1035,19 @@ pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd
   ]
 }
 
-/// Durable directory for host-recorded casts — build TUIs and skill recordings alike
-/// (`$SCSH_HOME/casts`, default `~/.scsh/casts`). Kept outside any caller repo so a
-/// throwaway clone (e.g. code-beautiful-review) cannot delete session-exportable casts.
+/// Directory for host-recorded **build** casts (`$SCSH_HOME/casts`, default `~/.scsh/casts`).
+/// Disposable: safe to clean whenever — a rebuild recreates them.
 pub fn host_casts_dir() -> std::path::PathBuf {
   scsh_home().join("casts")
+}
+
+/// **Permanent** directory for skill-run recordings (`$SCSH_HOME/recordings`, default
+/// `~/.scsh/recordings`). Deliberately separate from the cleanable build-cast dir
+/// [`host_casts_dir`]: these are the recordings of actual agent runs — scsh never deletes
+/// them, and nothing that treats `casts/` as scratch can take them along. Kept outside any
+/// caller repo so a throwaway clone (e.g. code-beautiful-review) cannot delete them either.
+pub fn host_recordings_dir() -> std::path::PathBuf {
+  scsh_home().join("recordings")
 }
 
 /// Durable directory for preserved harness run logs (`$SCSH_HOME/logs`).
