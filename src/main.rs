@@ -422,7 +422,10 @@ struct Cli {
   def: Option<String>,
   /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
   /// sibling `.skills/`) instead of the repo's, so a global skill can drive a fleet without
-  /// installing into the target tree.
+  /// installing into the target tree. The bundle's skills are installed GLOBALLY inside each
+  /// container — claude and cursor discover them natively in their user-level skills dirs
+  /// (invocable as `/<name>`); the rest get `tmp/.scsh-skills/` referenced by path. The
+  /// target repo's checkout never contains the skill.
   override_dot_scsh_yml: Option<PathBuf>,
 }
 
@@ -1024,7 +1027,10 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let cfg = config::Config { skills: vec![def.to_skill()], terminal: config::Terminal::default() };
   let mut invocations = config::expand_invocations(&cfg);
   for inv in &mut invocations {
-    inv.body = def.task.clone();
+    inv.delivery = match &def.task {
+      Some(task) => config::SkillDelivery::IntoClone(task.clone()),
+      None => config::SkillDelivery::Repo,
+    };
     // Route the result under the gitignored scratch root (which may be `.harness/tmp`), so the
     // run never writes an untracked file into the working tree.
     inv.result = format!("{scratch}/{}.json", inv.name);
@@ -1189,7 +1195,7 @@ fn step_invocation(
     commits: false,
     result: format!("{session_dir_rel}/{}.json", step.id),
     terminal: config::Terminal::default(),
-    body: Some(step.render_skill_body()),
+    delivery: config::SkillDelivery::IntoClone(step.render_skill_body()),
   }
 }
 
@@ -1529,8 +1535,9 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
           warn(&format!("skipping '{}' — {msg}", skill.name));
           continue;
         }
-        // Normal runs still require the skill body in the repo; override runs carry it on `body`.
-        if skill.body.is_none() {
+        // Normal runs still require the skill body in the repo; override runs carry theirs
+        // for a global in-container install.
+        if matches!(skill.delivery, config::SkillDelivery::Repo) {
           let skill_md = root.join(".skills").join(&skill.skill_source).join("SKILL.md");
           if !skill_md.is_file() {
             fail(&format!(
@@ -1618,14 +1625,16 @@ fn load_validated_yml(yml_path: &Path) -> Result<config::Config, i32> {
   }
 }
 
-/// Attach each invocation's `SKILL.md` body from `skills_root/.skills/<skill_source>/SKILL.md`
-/// so the run clone gets the override bundle's skill text without the target repo shipping it.
+/// Attach each invocation's `SKILL.md` body from `skills_root/.skills/<skill_source>/SKILL.md`,
+/// to be installed GLOBALLY in the container: the harness's own user-level skills directory
+/// where the CLI discovers skills natively (claude, cursor), a neutral container path
+/// otherwise. The target repo never ships, and its checkout never contains, the skill.
 fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_root: &Path) -> Result<(), String> {
   for inv in invocations {
     let path = skills_root.join(".skills").join(&inv.skill_source).join("SKILL.md");
     let body =
       std::fs::read_to_string(&path).map_err(|e| format!("override skill missing at {}: {e}", path.display()))?;
-    inv.body = Some(body);
+    inv.delivery = config::SkillDelivery::GlobalInstall(body);
   }
   Ok(())
 }
@@ -1817,6 +1826,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         &skill.skill_source,
         &skill.result,
         skill.terminal,
+        skill.delivery.is_global(),
       );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
@@ -2993,7 +3003,7 @@ fn run_one_skill(
   // A harness-definition run (`scsh run --def`) carries its SKILL.md body; write it into the
   // clone so the agent finds it at `.skills/<name>/SKILL.md`. The caller's working tree stays
   // clean. A normal `.scsh.yml` skill has no body and this is a no-op.
-  if let Err(e) = materialize_def_body(&run_dir, git_transport, skill) {
+  if let Err(e) = materialize_skill_body(&run_dir, git_transport, skill) {
     spinner.finish_fail(failure::reason::CLONE, Some(&e));
     return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, clone_dir);
   }
@@ -3084,6 +3094,7 @@ fn run_one_skill(
     &skill.skill_source,
     &skill.result,
     skill.terminal,
+    skill.delivery.is_global(),
   );
   let cmd = if git_transport {
     runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
@@ -3384,23 +3395,34 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
   Ok(())
 }
 
-/// Materialize a harness definition's `SKILL.md` body into the run clone so the agent finds it
-/// at `.skills/<skill_source>/SKILL.md`. A full-mount runtime gets the file written into the
-/// bind-mounted clone; the Apple Container git transport gets it committed into the bare repo
-/// the container clones from. A normal `.scsh.yml` skill (no `body`) is a no-op — the committed
-/// `.skills/<name>/SKILL.md` already rides along in the clone.
-fn materialize_def_body(run_dir: &Path, git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
-  let Some(body) = &skill.body else { return Ok(()) };
-  let rel = format!(".skills/{}/SKILL.md", skill.skill_source);
-  if git_transport {
-    let bare = run_dir.join(runtime::TRANSPORT_BARE);
-    runtime::inject_file_into_bare(&bare, &rel, body, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
-  } else {
-    let path = run_dir.join(&rel);
+/// Materialize a carried `SKILL.md` body for the agent. `IntoClone` (a `--def` run) lands at
+/// `.skills/<skill_source>/SKILL.md` in the clone — written into the bind mount, or committed
+/// into the bare transport repo on Apple Containers. `GlobalInstall` (an override-bundle run)
+/// lands in the harness's global skills dir, which lives under the run dir's `tmp/` — mounted
+/// on BOTH transports, so a plain host-side write reaches the container and the checkout
+/// never contains the skill. `Repo` is a no-op: the committed copy already rides in the clone.
+fn materialize_skill_body(run_dir: &Path, git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
+  let write = |rel: &str, body: &str| -> Result<(), String> {
+    let path = run_dir.join(rel);
     if let Some(parent) = path.parent() {
       std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
     }
     std::fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))
+  };
+  match &skill.delivery {
+    config::SkillDelivery::Repo => Ok(()),
+    config::SkillDelivery::IntoClone(body) => {
+      let rel = format!(".skills/{}/SKILL.md", skill.skill_source);
+      if git_transport {
+        let bare = run_dir.join(runtime::TRANSPORT_BARE);
+        runtime::inject_file_into_bare(&bare, &rel, body, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
+      } else {
+        write(&rel, body)
+      }
+    }
+    config::SkillDelivery::GlobalInstall(body) => {
+      write(&format!("{}/{}/SKILL.md", skill.harness.global_skills_rel(), skill.skill_source), body)
+    }
   }
 }
 
@@ -4022,7 +4044,7 @@ fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) 
   }
   // For a harness-definition/workflow run the body isn't a caller `.skills/` file — it rides on
   // the invocation — so hash it here, so changing a definition's prompt busts the cache.
-  if let Some(body) = &skill.body {
+  if let Some(body) = skill.delivery.body() {
     blob.push_str(&format!("body={}\n", sha256::sha256_hex(body.as_bytes())));
   }
   // Hash the resolved input environment — every param and (for a workflow) every value bound
@@ -6243,7 +6265,7 @@ mod tests {
       commits: false,
       result: "tmp/r.json".into(),
       terminal: config::Terminal::default(),
-      body: None,
+      delivery: config::SkillDelivery::Repo,
     }
   }
 
@@ -6285,9 +6307,9 @@ mod tests {
 
     // A definition/workflow body drives the key (it isn't a caller .skills/ file).
     let mut with_body = s.clone();
-    with_body.body = Some("do X".into());
+    with_body.delivery = config::SkillDelivery::IntoClone("do X".into());
     let mut with_body2 = s.clone();
-    with_body2.body = Some("do Y".into());
+    with_body2.delivery = config::SkillDelivery::IntoClone("do Y".into());
     assert_ne!(
       cache_key(&caller, &with_body, &env).unwrap(),
       cache_key(&caller, &with_body2, &env).unwrap(),
@@ -6365,6 +6387,42 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert!(caller.join("note.txt").exists(), "replayed file is present");
     assert_eq!(git_capture(&caller, &["log", "-1", "--format=%s"]).unwrap().trim(), "add note");
     assert_ne!(git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim(), base, "HEAD advanced past base");
+  }
+
+  #[test]
+  fn global_install_lands_in_the_harness_skills_dir_on_both_transports() {
+    let base = std::env::temp_dir().join(format!("scsh-global-skill-{}", runtime::random_nonce_6()));
+    let inv = |harness: config::Harness| config::ResolvedInvocation {
+      name: "greet".into(),
+      skill_source: "greet".into(),
+      harness,
+      model: None,
+      effort: None,
+      timeout: None,
+      inactivity_timeout: None,
+      env: Vec::new(),
+      profile: None,
+      commits: false,
+      result: "tmp/greet.json".into(),
+      terminal: config::Terminal::default(),
+      delivery: config::SkillDelivery::GlobalInstall("# greet\nsay hi\n".into()),
+    };
+    // claude: the CLI's user-level skills dir (under CLAUDE_CONFIG_DIR). The write must land
+    // identically with and without the git transport — tmp/ is mounted on both.
+    for git_transport in [false, true] {
+      let run_dir = base.join(format!("claude-{git_transport}"));
+      std::fs::create_dir_all(&run_dir).unwrap();
+      materialize_skill_body(&run_dir, git_transport, &inv(config::Harness::Claude)).unwrap();
+      let installed = run_dir.join("tmp/.claude-auth/.claude/skills/greet/SKILL.md");
+      assert!(installed.is_file(), "git_transport={git_transport}");
+      assert!(!run_dir.join(".skills").exists(), "the checkout never contains a global skill");
+    }
+    // A harness without native discovery gets the neutral container path.
+    let run_dir = base.join("opencode");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    materialize_skill_body(&run_dir, false, &inv(config::Harness::Opencode)).unwrap();
+    assert!(run_dir.join("tmp/.scsh-skills/greet/SKILL.md").is_file());
+    let _ = std::fs::remove_dir_all(&base);
   }
 
   #[test]

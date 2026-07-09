@@ -106,11 +106,38 @@ pub struct ResolvedInvocation {
   pub result: String,
   /// PTY size the harness runs (and is recorded) in — the config's top-level `terminal:`.
   pub terminal: Terminal,
-  /// For a harness-definition run (`scsh run --def`), the `SKILL.md` body to materialize
-  /// into the run clone as `.skills/<skill_source>/SKILL.md` (the repo is clean, so the body
-  /// cannot live in the working tree). `None` for a normal `.scsh.yml` skill, whose body is
-  /// the committed `.skills/<name>/SKILL.md`.
-  pub body: Option<String>,
+  /// How the skill's `SKILL.md` reaches the agent inside the container.
+  pub delivery: SkillDelivery,
+}
+
+/// How a skill's `SKILL.md` reaches the agent inside the container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SkillDelivery {
+  /// The repo's own committed `.skills/<name>/SKILL.md`, already present in the clone.
+  Repo,
+  /// A carried body (a `scsh run --def` / workflow-step run), materialized into the clone at
+  /// `.skills/<name>/SKILL.md` — the caller's working tree stays clean.
+  IntoClone(String),
+  /// A carried body (an `--override-dot-scsh-yml` run), installed into the harness's GLOBAL
+  /// skills location inside the container ([`Harness::global_skills_rel`]) — the repo
+  /// checkout never contains the skill, yet the agent can use it, natively by name where the
+  /// CLI discovers user-level skills (claude, cursor), by absolute path otherwise.
+  GlobalInstall(String),
+}
+
+impl SkillDelivery {
+  /// The carried `SKILL.md` body, when this delivery carries one.
+  pub fn body(&self) -> Option<&str> {
+    match self {
+      SkillDelivery::Repo => None,
+      SkillDelivery::IntoClone(b) | SkillDelivery::GlobalInstall(b) => Some(b),
+    }
+  }
+
+  /// Whether the skill is installed globally in the container rather than in the checkout.
+  pub fn is_global(&self) -> bool {
+    matches!(self, SkillDelivery::GlobalInstall(_))
+  }
 }
 
 /// Expand every manifest skill into the invocation(s) `scsh run` would execute, in file order.
@@ -140,7 +167,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       commits: skill.commits,
       result: skill.result.clone(),
       terminal,
-      body: None,
+      delivery: SkillDelivery::Repo,
     }];
   }
   skill
@@ -159,7 +186,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       commits: route.commits.unwrap_or(skill.commits),
       result: skill.result.replace("{name}", &route.name),
       terminal,
-      body: None,
+      delivery: SkillDelivery::Repo,
     })
     .collect()
 }
@@ -250,6 +277,26 @@ impl Harness {
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
   /// grok passes `--effort`, codex passes `-c model_reasoning_effort=`, cursor appends
   /// a hyphen suffix on `--model` (e.g. `claude-opus-4-8-low`, `composer-2.5-fast`).
+  /// The container-side directory (relative to the repo mount) where a globally-installed
+  /// skill lands for this harness. claude and cursor read their user-level skills from
+  /// their config homes, which scsh already points into the bind-mounted `tmp/`
+  /// (`$CLAUDE_CONFIG_DIR`, `$CURSOR_CONFIG_DIR`) — so a file written there IS a globally
+  /// installed skill inside that container. Harnesses without native skill discovery get a
+  /// neutral `tmp/.scsh-skills/` home that the prompt references by path.
+  pub fn global_skills_rel(self) -> &'static str {
+    match self {
+      Harness::Claude => "tmp/.claude-auth/.claude/skills",
+      Harness::Cursor => "tmp/.cursor/skills",
+      Harness::Opencode | Harness::Codex | Harness::Grok => "tmp/.scsh-skills",
+    }
+  }
+
+  /// Whether this harness's CLI natively discovers skills in [`Self::global_skills_rel`]
+  /// (its user-level skills directory), making them invocable by name (`/<name>`).
+  pub fn resolves_skills_by_name(self) -> bool {
+    matches!(self, Harness::Claude | Harness::Cursor)
+  }
+
   pub fn supports_effort(self) -> bool {
     !self.effort_levels().is_empty()
   }
@@ -1696,6 +1743,26 @@ mod tests {
         other => panic!("expected Require for {spec}, got {other:?}"),
       }
     }
+  }
+
+  #[test]
+  fn global_skill_dirs_sit_under_the_mounted_tmp() {
+    for h in Harness::ALL {
+      // Every global-install location must live under tmp/ — the one path scsh mounts into
+      // the container on BOTH transports — or the install would never reach the agent.
+      assert!(h.global_skills_rel().starts_with("tmp/"), "{h:?}: {}", h.global_skills_rel());
+    }
+    // claude and cursor point at their config homes (CLAUDE_CONFIG_DIR / CURSOR_CONFIG_DIR),
+    // where those CLIs natively discover user-level skills.
+    assert_eq!(Harness::Claude.global_skills_rel(), "tmp/.claude-auth/.claude/skills");
+    assert_eq!(Harness::Cursor.global_skills_rel(), "tmp/.cursor/skills");
+    assert!(Harness::Claude.resolves_skills_by_name() && Harness::Cursor.resolves_skills_by_name());
+    assert!(!Harness::Opencode.resolves_skills_by_name());
+    // SkillDelivery: only GlobalInstall is global; only Repo carries no body.
+    assert!(SkillDelivery::GlobalInstall("x".into()).is_global());
+    assert!(!SkillDelivery::IntoClone("x".into()).is_global());
+    assert_eq!(SkillDelivery::Repo.body(), None);
+    assert_eq!(SkillDelivery::GlobalInstall("x".into()).body(), Some("x"));
   }
 
   #[test]

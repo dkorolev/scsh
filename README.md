@@ -20,7 +20,11 @@ what you committed.
 
 **To see it in action:** clone this repo and `cargo build --release`, then — from **any
 empty directory that is not yet a git repository** — start your favorite skills-aware
-agent and ask it to *follow the steps in [`DEMO.md`](DEMO.md)*. It will build a tiny
+agent and ask it to *follow the steps in [`DEMO.md`](DEMO.md)*. (A second walkthrough,
+[`GLOBAL-SKILLS-DEMO.md`](GLOBAL-SKILLS-DEMO.md), demos `--override-dot-scsh-yml`: an
+external bundle's skill installed **globally inside the container** — claude and cursor
+discover it natively in their user-level skills dirs — against a repo that ships no
+`.scsh.yml` and no `.skills/` at all.) It will build a tiny
 `scsh` project right there and run it: the `add` skill computes a sum (with defaults and
 with values you pass), and `multiply` runs under its profile when given `X`/`Y` — and is
 refused by `scsh` itself when they're missing.
