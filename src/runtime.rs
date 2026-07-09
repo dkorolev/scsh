@@ -838,10 +838,17 @@ pub fn image_is_up_to_date(runtime: &str, tag: &str, fingerprint: &str) -> bool 
   image_inspect_fingerprint(runtime, tag).as_deref() == Some(fingerprint)
 }
 
+/// Pull a string label out of Apple `container image inspect` JSON.
+///
+/// Apple pretty-prints with spaces (`"key" : "value"`); docker/podman `--format` is compact
+/// (`"key":"value"`). Match either so a fingerprint mismatch never falsely forces a rebuild.
 fn parse_label_from_container_inspect(json: &str, key: &str) -> Option<String> {
-  let needle = format!(r#""{key}":""#);
-  let start = json.find(&needle)? + needle.len();
-  let rest = &json[start..];
+  let key_pat = format!(r#""{key}""#);
+  let key_at = json.find(&key_pat)?;
+  let after_key = &json[key_at + key_pat.len()..];
+  let colon = after_key.find(':')?;
+  let after_colon = after_key[colon + 1..].trim_start();
+  let rest = after_colon.strip_prefix('"')?;
   let end = rest.find('"')?;
   Some(rest[..end].to_string())
 }
@@ -2565,10 +2572,28 @@ TAG
 
   #[test]
   fn parse_label_from_container_inspect_json() {
-    let json =
+    let compact =
       r#"{"variants":[{"config":{"config":{"Labels":{"scsh.generated":"true","scsh.build.fingerprint":"abc123"}}}}}]"#;
-    assert_eq!(parse_label_from_container_inspect(json, BUILD_FINGERPRINT_LABEL).as_deref(), Some("abc123"));
-    assert!(parse_label_from_container_inspect(json, "missing").is_none());
+    assert_eq!(parse_label_from_container_inspect(compact, BUILD_FINGERPRINT_LABEL).as_deref(), Some("abc123"));
+    assert!(parse_label_from_container_inspect(compact, "missing").is_none());
+    // Apple Containers pretty-prints with spaces around `:` (session kuovup / add job rebuilt
+    // every image because the compact-only needle never matched).
+    let pretty = r#"{
+  "variants" : [ {
+    "config" : {
+      "config" : {
+        "Labels" : {
+          "scsh.build.fingerprint" : "0d358dfff4332f525a8ecfc7606340efd5f0e177a3465dcbf9dbdb8d5e162190",
+          "scsh.generated" : "true"
+        }
+      }
+    }
+  } ]
+}"#;
+    assert_eq!(
+      parse_label_from_container_inspect(pretty, BUILD_FINGERPRINT_LABEL).as_deref(),
+      Some("0d358dfff4332f525a8ecfc7606340efd5f0e177a3465dcbf9dbdb8d5e162190")
+    );
   }
 
   #[test]
