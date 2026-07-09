@@ -882,6 +882,7 @@ startProcClock();
   initCasts(root);
   initSessionStop();
   initProcKills(root);
+  initHarnessStops();
 })();
 function syncSessionStopButton(session) {
   const btn = document.getElementById('session-stop');
@@ -949,6 +950,38 @@ async function killProc(btn) {
     btn.textContent = '\u2715 kill';
     alert(String(e));
   }
+}
+// ---- stop-all-of-a-harness (index page) ----
+async function stopHarness(btn) {
+  const harness = btn.getAttribute('data-harness-stop');
+  if (!harness) return;
+  if (!confirm('Stop ALL running ' + harness + ' containers, in every session?')) return;
+  btn.disabled = true;
+  setBtnLabel(btn, 'stopping\u2026');
+  try {
+    const resp = await fetch('/api/v1/harness/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ harness: harness }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok !== true) {
+      btn.disabled = false;
+      setBtnLabel(btn, '\u2715 stop all ' + harness);
+      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    setBtnLabel(btn, 'stopped ' + (data.stopped || 0));
+  } catch (e) {
+    btn.disabled = false;
+    setBtnLabel(btn, '\u2715 stop all ' + harness);
+    alert(String(e));
+  }
+}
+function initHarnessStops() {
+  document.querySelectorAll('button[data-harness-stop]').forEach((btn) => {
+    btn.addEventListener('click', () => stopHarness(btn));
+  });
 }
 function initProcKills(root) {
   (root || document).querySelectorAll('button[data-proc-stop]').forEach((btn) => {

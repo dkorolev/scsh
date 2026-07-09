@@ -29,7 +29,7 @@ pub fn index_page(store: &Store) -> String {
 </nav>\n\
 <section class=\"tab-panel active\" id=\"tab-jobs\">\n\
 <div class=\"card card--accent-left-cyan\">\n\
-<p class=\"section-label\">Jobs</p>\n\
+<p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
@@ -42,11 +42,44 @@ pub fn index_page(store: &Store) -> String {
     url = base_url(port),
     mode = store.mode.as_str(),
     rows = rows,
+    harness_stops = harness_stop_strip(store),
     dirs = dirs_panel(),
     start = start_panel(),
     images = images_panel()
   );
   wrap_page("scsh", port, None, &body)
+}
+
+/// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a
+/// misbehaving harness (say, grok out of quota) can be cut across every live session at once
+/// (`POST /api/v1/harness/stop`). Empty when nothing is running.
+fn harness_stop_strip(store: &Store) -> String {
+  use crate::daemon::model::{ProcKind, ProcStatus};
+  let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+  for s in store.sessions.values() {
+    if s.ended_at.is_some() {
+      continue;
+    }
+    for p in &s.procs {
+      let live = p.status == ProcStatus::Running || p.status == ProcStatus::Waiting;
+      if live && p.kind == ProcKind::Skill {
+        if let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) {
+          *counts.entry(h.to_string()).or_insert(0) += 1;
+        }
+      }
+    }
+  }
+  if counts.is_empty() {
+    return String::new();
+  }
+  let mut buttons = String::new();
+  for (harness, n) in &counts {
+    buttons.push_str(&format!(
+      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" data-harness-stop=\"{h}\" title=\"Stop every running {h} container, in every session\"><span>✕ stop all {h} ({n})</span></button>\n",
+      h = esc(harness),
+    ));
+  }
+  format!("<div class=\"harness-stops\">{buttons}</div>\n")
 }
 
 /// The images panel: a table of every scsh image (populated by the client from

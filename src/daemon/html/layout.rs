@@ -285,6 +285,7 @@ const PAGE_CSS: &str = r#"
   }
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
+  .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
   .proc-kill {
     margin-left: auto; align-self: center; flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
