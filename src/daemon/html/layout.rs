@@ -285,6 +285,14 @@ const PAGE_CSS: &str = r#"
   }
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
+  .proc-kill {
+    margin-left: auto; align-self: center; flex-shrink: 0;
+    font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
+    color: var(--red); background: transparent; border: 1px solid var(--red);
+    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+  }
+  .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
+  .proc-kill:disabled { cursor: default; opacity: 0.55; }
   .autoscroll-ctl {
     display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
     cursor: pointer; user-select: none; color: var(--text-muted);

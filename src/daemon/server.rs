@@ -581,6 +581,10 @@ fn route(
     let (status, body, mutated) = session_stop_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/proc/stop" {
+    let (status, body, mutated) = proc_stop_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/repos/pick" {
     return (200, repos_pick_response(), "application/json", false);
   }
@@ -1429,6 +1433,57 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   (200, "{\"ok\":true}".into(), true)
 }
 
+/// `POST /api/v1/proc/stop` — body `{"session":"…","proc":<index>}`. Kill ONE container: stop
+/// just that proc's container and mark it failed with `force_stopped`; the session (and its
+/// other procs) keeps running. Idempotent on a proc that already finished
+/// (`{ok:true,already_ended:true}`).
+fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let session_id = match field_str(&obj, "session") {
+    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+    _ => return (400, err_body("give a session id"), false),
+  };
+  let Some(index) = field_num(&obj, "proc").map(|n| n as usize) else {
+    return (400, err_body("give a proc index"), false);
+  };
+  let runtime = crate::runtime::detect_runtime().map(|r| r.name);
+  let (container, label) = {
+    let mut store = lock_store(store);
+    let Some(s) = store.sessions.get_mut(&session_id) else {
+      return (404, err_body("session not found"), false);
+    };
+    let Some(p) = s.procs.iter_mut().find(|p| p.index == index) else {
+      return (404, err_body("proc not found"), false);
+    };
+    if p.status != ProcStatus::Running && p.status != ProcStatus::Waiting {
+      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
+    }
+    let container = p.container_name.take();
+    p.status = ProcStatus::Fail;
+    p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+    if p.detail.is_none() {
+      p.detail = Some("container killed from the session browser".into());
+    }
+    let label = p.label.clone();
+    s.last_seen_at = now_unix_secs();
+    (container, label)
+  };
+  // Tear down outside the store lock: container stop sleeps up to ~1s.
+  if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
+    crate::ui::signals::stop_container(rt, name);
+  }
+  crate::failure::log_session_proc(
+    &session_id,
+    crate::failure::reason::FORCE_STOPPED,
+    &label,
+    "container killed from the session browser",
+  );
+  (200, "{\"ok\":true}".into(), true)
+}
+
 /// SIGTERM a run PID, wait briefly, then SIGKILL if it is still alive — same cadence as Ctrl-C.
 fn signal_run_pid(pid: u32) {
   let _ = std::process::Command::new("kill")
@@ -1991,6 +2046,68 @@ mod tests {
     assert_eq!(status2, 200);
     assert!(!mutated2);
     assert!(body2.contains("already_ended"));
+  }
+
+  #[test]
+  fn proc_stop_kills_one_container_and_leaves_the_session_running() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let proc = |index: usize, name: &str| ProcRecord {
+      index,
+      label: format!("grok: {name}"),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Running,
+      skill_name: Some(name.into()),
+      harness: Some("grok".into()),
+      model: None,
+      started_at: Some(50),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+      cast_path: None,
+    };
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "kill01".into(),
+        Session {
+          id: "kill01".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: None,
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: vec![proc(0, "review-a"), proc(1, "review-b")],
+          last_seen_at: 50,
+          client_connected: true,
+          run_pid: None,
+        },
+      );
+    }
+    let (status, body, mutated) = proc_stop_response(r#"{"session":"kill01","proc":1}"#, &store);
+    assert_eq!(status, 200, "got: {body}");
+    assert!(mutated);
+    assert!(body.contains(r#""ok":true"#));
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get("kill01").unwrap();
+      // Only proc 1 was killed; the session and its sibling proc keep running.
+      assert!(session.ended_at.is_none());
+      assert_eq!(session.procs[0].status, ProcStatus::Running);
+      assert_eq!(session.procs[1].status, ProcStatus::Fail);
+      assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
+    }
+    // Idempotent on a proc that already finished.
+    let (status2, body2, mutated2) = proc_stop_response(r#"{"session":"kill01","proc":1}"#, &store);
+    assert_eq!(status2, 200);
+    assert!(!mutated2);
+    assert!(body2.contains("already_ended"));
+    // Unknown proc index → 404.
+    let (status3, _, _) = proc_stop_response(r#"{"session":"kill01","proc":9}"#, &store);
+    assert_eq!(status3, 404);
   }
 
   #[test]

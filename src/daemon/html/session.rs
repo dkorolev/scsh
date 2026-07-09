@@ -46,7 +46,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 <span class="label">{label}</span> {proc_stat}
 <span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
 <span class="note dim">{note}</span>
-</summary>
+{kill_btn}</summary>
 {proc_meta}
 <div class="detail">{detail}</div>
 {container_line}
@@ -58,6 +58,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       glyph = glyph,
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
+      kill_btn = proc_kill_btn_html(&session.id, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = elapsed,
       note = esc(note),
@@ -117,6 +118,21 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     permalink = permalink
   );
   Some(wrap_page(&format!("session {session_id}"), port, Some(session_id), &body))
+}
+
+/// A small per-proc "✕ kill" button, shown only while that proc still runs: it stops just
+/// this container (`POST /api/v1/proc/stop`) — unlike the session-level Force stop, the rest
+/// of the run keeps going.
+fn proc_kill_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord) -> String {
+  use crate::daemon::model::ProcStatus;
+  if proc.status != ProcStatus::Running && proc.status != ProcStatus::Waiting {
+    return String::new();
+  }
+  format!(
+    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Kill this container only — the rest of the run continues\">✕ kill</button>",
+    index = proc.index,
+    id = esc(session_id),
+  )
 }
 
 fn session_meta_placeholder(session: &Session) -> String {

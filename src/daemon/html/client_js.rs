@@ -421,6 +421,9 @@ function updateProcFields(det, p, nowUnix) {
   syncProcElapsed(meta, p, nowUnix, p.status === 'running');
   const noteEl = det.querySelector('summary .note');
   if (noteEl) noteEl.textContent = p.note || '';
+  // The per-proc kill button only makes sense while the proc still runs.
+  const killEl = det.querySelector('button[data-proc-stop]');
+  if (killEl && p.status !== 'running' && p.status !== 'waiting') killEl.remove();
   const detailEl = det.querySelector('.detail');
   if (detailEl) detailEl.textContent = p.detail || '';
   const containerEl = det.querySelector('.container');
@@ -878,6 +881,7 @@ startProcClock();
   applyAutoScrollAll(root);
   initCasts(root);
   initSessionStop();
+  initProcKills(root);
 })();
 function syncSessionStopButton(session) {
   const btn = document.getElementById('session-stop');
@@ -917,6 +921,43 @@ function initSessionStop() {
   const btn = document.getElementById('session-stop');
   if (!btn) return;
   btn.addEventListener('click', () => forceStopSession(btn));
+}
+// ---- per-proc kill (session page) ----
+async function killProc(btn) {
+  const session = btn.getAttribute('data-session');
+  const proc = parseInt(btn.getAttribute('data-proc-stop'), 10);
+  if (!session || Number.isNaN(proc)) return;
+  if (!confirm('Kill this container? Only this proc stops; the rest of the run continues.')) return;
+  btn.disabled = true;
+  btn.textContent = 'killing\u2026';
+  try {
+    const resp = await fetch('/api/v1/proc/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: session, proc: proc }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok !== true) {
+      btn.disabled = false;
+      btn.textContent = '\u2715 kill';
+      alert(data.error || ('kill failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    btn.textContent = data.already_ended ? 'already ended' : 'killed';
+  } catch (e) {
+    btn.disabled = false;
+    btn.textContent = '\u2715 kill';
+    alert(String(e));
+  }
+}
+function initProcKills(root) {
+  (root || document).querySelectorAll('button[data-proc-stop]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      killProc(btn);
+    });
+  });
 }
 // ---- images panel (index page only) ----
 function imageStatusBadge(img) {
