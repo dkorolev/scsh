@@ -147,9 +147,9 @@ log "start cols=$cols rows=$rows quit=$quit result=$result cwd=$(pwd) pid=$$"
 log "result_exists_at_start=$([ -f "$result" ] && echo YES || echo NO)"
 
 pane_cmd="trap 'ec=\$?; echo \$ec > \"$exit_file\"; echo pane_exit=\$ec >> \"$dbg\"' EXIT; \
-trap 'echo pane_signal=TERM >> \"$dbg\"' TERM; \
+trap 'echo pane_signal=TERM >> \"$dbg\"; for p in /proc/[0-9]*; do echo \"  \$p \$(cat \$p/comm 2>/dev/null)\" >> \"$dbg\"; done' TERM; \
 trap 'echo pane_signal=INT  >> \"$dbg\"' INT; \
-trap 'echo pane_signal=HUP  >> \"$dbg\"' HUP; \
+trap 'echo pane_signal=HUP  >> \"$dbg\"; exit 129' HUP; \
 n=0; while :; do $cmd; ec=\$?; \
 if [ -f \"$result\" ] || [ \$n -ge 2 ]; then exit \$ec; fi; \
 n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"
