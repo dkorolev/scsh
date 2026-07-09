@@ -302,6 +302,7 @@ impl HarnessDef {
       model: None,
       effort: None,
       timeout: None,
+      inactivity_timeout: None,
       env: self.params.iter().map(Param::to_env_var).collect(),
       profile: None,
       commits: false,

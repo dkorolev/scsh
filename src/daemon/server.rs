@@ -1301,11 +1301,8 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
   s.client_connected = false;
   s.run_pid = None;
   if s.procs.is_empty() {
-    let label = if s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) {
-      "build failed to start"
-    } else {
-      "run failed to start"
-    };
+    let label =
+      if s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) { "build failed to start" } else { "run failed to start" };
     s.procs.push(ProcRecord {
       index: 0,
       label: label.into(),
@@ -2254,7 +2251,8 @@ mod tests {
     assert!(body.contains("no recorded frames yet"), "body: {body}");
     assert!(disposition.is_none());
     // Frames + a sidecar → the self-contained page, served as `<stem>.html`.
-    std::fs::write(&cast_path, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(&cast_path, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n")
+      .unwrap();
     std::fs::write(
       dir.join("rec.chapters.json"),
       r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
@@ -2328,7 +2326,8 @@ mod tests {
     std::fs::create_dir_all(&dir).unwrap();
     // Proc 0: a recording WITH a chapters sidecar. Proc 1: a bare recording. Proc 2: no cast.
     let cast0 = dir.join("rec0.cast");
-    std::fs::write(&cast0, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(&cast0, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n")
+      .unwrap();
     std::fs::write(
       dir.join("rec0.chapters.json"),
       r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,

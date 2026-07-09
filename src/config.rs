@@ -31,6 +31,10 @@ pub struct Terminal {
 pub const DEFAULT_TERMINAL_COLS: u16 = 200;
 pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 
+/// Default seconds of screen inactivity (the recorded cast not growing) before a running
+/// skill is killed as stuck. Per-skill override: `inactivity_timeout:` in `.scsh.yml`.
+pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 120;
+
 impl Default for Terminal {
   fn default() -> Self {
     Terminal { cols: DEFAULT_TERMINAL_COLS, rows: DEFAULT_TERMINAL_ROWS }
@@ -54,6 +58,9 @@ pub struct Skill {
   /// has no effort knob simply ignore an inherited value.
   pub effort: Option<String>,
   pub timeout: Option<u64>,
+  /// Seconds the recorded screen may stay frozen before the run is killed as inactive
+  /// (`None` = [`DEFAULT_INACTIVITY_TIMEOUT_SECS`]).
+  pub inactivity_timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
   pub profile: Option<String>,
@@ -90,6 +97,9 @@ pub struct ResolvedInvocation {
   /// Reasoning effort; only ever set for harnesses with an effort knob.
   pub effort: Option<String>,
   pub timeout: Option<u64>,
+  /// Seconds the recorded screen may stay frozen before the run is killed as inactive
+  /// (`None` = [`DEFAULT_INACTIVITY_TIMEOUT_SECS`]).
+  pub inactivity_timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   pub profile: Option<String>,
   pub commits: bool,
@@ -124,6 +134,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       model: skill.model.clone(),
       effort: effort_for(harness, None),
       timeout: skill.timeout,
+      inactivity_timeout: skill.inactivity_timeout,
       env: skill.env.clone(),
       profile: skill.profile.clone(),
       commits: skill.commits,
@@ -142,6 +153,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       model: route.model.clone(),
       effort: effort_for(route.harness, route.effort.as_ref()),
       timeout: skill.timeout,
+      inactivity_timeout: skill.inactivity_timeout,
       env: skill.env.clone(),
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
       commits: route.commits.unwrap_or(skill.commits),
@@ -455,12 +467,23 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
       errors.push(format!("duplicate key 'skills.{name}.{k}'"));
     }
   }
-  const SK: &[&str] =
-    &["harness", "model", "effort", "timeout", "env", "profile", "commits", "autoinstall", "invocations", "result"];
+  const SK: &[&str] = &[
+    "harness",
+    "model",
+    "effort",
+    "timeout",
+    "inactivity_timeout",
+    "env",
+    "profile",
+    "commits",
+    "autoinstall",
+    "invocations",
+    "result",
+  ];
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -577,25 +600,9 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     }
   };
 
-  // timeout: optional positive integer (seconds).
-  let timeout = match fm.get("timeout").copied() {
-    None => None,
-    Some(Node::Map(_)) => {
-      errors.push(format!("'skills.{name}.timeout' must be an integer number of seconds, not a mapping"));
-      None
-    }
-    Some(Node::Scalar(s)) => match s.trim().parse::<u64>() {
-      Ok(n) if n >= 1 => Some(n),
-      Ok(_) => {
-        errors.push(format!("'skills.{name}.timeout' must be a positive number of seconds"));
-        None
-      }
-      Err(_) => {
-        errors.push(format!("'skills.{name}.timeout' must be an integer number of seconds (got '{}')", s.trim()));
-        None
-      }
-    },
-  };
+  // timeout / inactivity_timeout: optional positive integers (seconds).
+  let timeout = parse_positive_secs(&fm, name, "timeout", errors);
+  let inactivity_timeout = parse_positive_secs(&fm, name, "inactivity_timeout", errors);
 
   // env: optional list/mapping of forwarded variables.
   let env = match fm.get("env").copied() {
@@ -676,6 +683,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
         model,
         effort,
         timeout,
+        inactivity_timeout,
         env,
         profile,
         commits,
@@ -685,6 +693,29 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
       })
     }
     _ => None,
+  }
+}
+
+/// Parse one optional positive-integer seconds field (`timeout`, `inactivity_timeout`),
+/// pushing schema errors under `skills.<name>.<key>`. Absent key ⇒ `None`.
+fn parse_positive_secs(fm: &BTreeMap<&str, &Node>, name: &str, key: &str, errors: &mut Vec<String>) -> Option<u64> {
+  match fm.get(key).copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'skills.{name}.{key}' must be an integer number of seconds, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => match s.trim().parse::<u64>() {
+      Ok(n) if n >= 1 => Some(n),
+      Ok(_) => {
+        errors.push(format!("'skills.{name}.{key}' must be a positive number of seconds"));
+        None
+      }
+      Err(_) => {
+        errors.push(format!("'skills.{name}.{key}' must be an integer number of seconds (got '{}')", s.trim()));
+        None
+      }
+    },
   }
 }
 
@@ -1696,6 +1727,44 @@ mod tests {
 "#,
     );
     assert!(validate(&bad).unwrap_err().iter().any(|e| e.contains("integer number of seconds")));
+  }
+
+  #[test]
+  fn inactivity_timeout_is_an_optional_positive_integer() {
+    let with = one_skill(
+      r#"    harness: opencode
+    inactivity_timeout: 300
+    result: tmp/x.json
+"#,
+    );
+    assert_eq!(validate(&with).unwrap().skills[0].inactivity_timeout, Some(300));
+    let without = one_skill(
+      r#"    harness: opencode
+    result: tmp/x.json
+"#,
+    );
+    // Absent means the run-time default applies (DEFAULT_INACTIVITY_TIMEOUT_SECS).
+    assert_eq!(validate(&without).unwrap().skills[0].inactivity_timeout, None);
+    let zero = one_skill(
+      r#"    harness: opencode
+    inactivity_timeout: 0
+    result: tmp/x.json
+"#,
+    );
+    assert!(validate(&zero)
+      .unwrap_err()
+      .iter()
+      .any(|e| e.contains("'skills.s.inactivity_timeout' must be a positive number of seconds")));
+    let bad = one_skill(
+      r#"    harness: opencode
+    inactivity_timeout: soon
+    result: tmp/x.json
+"#,
+    );
+    assert!(validate(&bad)
+      .unwrap_err()
+      .iter()
+      .any(|e| e.contains("'skills.s.inactivity_timeout' must be an integer number of seconds")));
   }
 
   #[test]

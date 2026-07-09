@@ -91,10 +91,7 @@ rebuild it here.</p>
 /// One known-image row in its first observable state: present, status `checking…`.
 fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
   let checkbox = if selectable {
-    format!(
-      r#"<input type="checkbox" class="image-select" value="{name}" disabled>"#,
-      name = esc(name)
-    )
+    format!(r#"<input type="checkbox" class="image-select" value="{name}" disabled>"#, name = esc(name))
   } else {
     String::new()
   };

@@ -1278,10 +1278,7 @@ fn override_yml_check_profile_uses_external_config() {
   std::fs::write(bundle.join(".skills/conventions-reviewer/SKILL.md"), "# conventions-reviewer\n").unwrap();
 
   let yml = bundle.join(".scsh.yml");
-  let r = scsh(
-    &d,
-    &["check-profile", "code-review", "--override-dot-scsh-yml", yml.to_str().unwrap()],
-  );
+  let r = scsh(&d, &["check-profile", "code-review", "--override-dot-scsh-yml", yml.to_str().unwrap()]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("profile 'code-review'"), "got: {}", r.out);
 

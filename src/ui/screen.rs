@@ -164,6 +164,27 @@ impl Drop for LiveUi {
   }
 }
 
+/// Screen-activity watchdog for [`Proc::run_watched`]: the growing file whose size is the
+/// heartbeat (for a skill run, the bind-mounted asciinema cast — every TUI redraw grows it),
+/// and how long it may stay frozen before the child is killed as inactive.
+pub struct ActivityWatch {
+  /// Polled (`~100ms`) for size changes; a file that never appears counts as never active.
+  pub file: std::path::PathBuf,
+  /// Silence budget: kill the child when `file` has not grown for this long.
+  pub limit: Duration,
+}
+
+/// Why an [`ActivityWatch`]ed child was killed, if it was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Killed {
+  /// Not killed — the child exited on its own (its exit status is the verdict).
+  No,
+  /// The wall-clock `timeout` elapsed.
+  Timeout,
+  /// The watched file showed no activity for the watchdog's limit.
+  Inactive,
+}
+
 /// A worker's handle to one proc: mark it started, run a child while pumping its output into the
 /// model as timestamped lines, and finish it ✓/✗.
 pub struct Proc {
@@ -224,7 +245,7 @@ impl Proc {
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
-    let (ok, _timed_out, last) = self.exec(program, args, None, None)?;
+    let (ok, _killed, last) = self.exec(program, args, None, None, None)?;
     Ok((ok, last))
   }
 
@@ -238,7 +259,16 @@ impl Proc {
   pub fn run_timed(
     &self, program: &str, args: &[String], timeout: Option<Duration>,
   ) -> std::io::Result<(bool, bool, Option<String>)> {
-    self.exec(program, args, None, timeout)
+    let (ok, killed, last) = self.exec(program, args, None, timeout, None)?;
+    Ok((ok, killed == Killed::Timeout, last))
+  }
+
+  /// Like [`Proc::run_timed`] but also kills the child when `watch` sees no screen activity
+  /// for its limit. Returns `(success, why_killed, last_line)`.
+  pub fn run_watched(
+    &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
+  ) -> std::io::Result<(bool, Killed, Option<String>)> {
+    self.exec(program, args, None, timeout, watch)
   }
 
   /// Like [`Proc::run`] but feeds `stdin` to the child and then closes it (EOF) — how the image
@@ -246,7 +276,7 @@ impl Proc {
   pub fn run_with_stdin(
     &self, program: &str, args: &[String], stdin: &[u8],
   ) -> std::io::Result<(bool, Option<String>)> {
-    let (ok, _timed_out, last) = self.exec(program, args, Some(stdin), None)?;
+    let (ok, _killed, last) = self.exec(program, args, Some(stdin), None, None)?;
     Ok((ok, last))
   }
 
@@ -255,7 +285,8 @@ impl Proc {
   /// public `run*` methods delegate to.
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
-  ) -> std::io::Result<(bool, bool, Option<String>)> {
+    watch: Option<&ActivityWatch>,
+  ) -> std::io::Result<(bool, Killed, Option<String>)> {
     let started = self.start_instant();
     let mut command = Command::new(program);
     command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -281,27 +312,46 @@ impl Proc {
       }
     }
 
-    let mut timed_out = false;
-    let status = match timeout {
-      None => child.wait()?,
-      Some(limit) => loop {
+    let mut killed = Killed::No;
+    let status = if timeout.is_none() && watch.is_none() {
+      child.wait()?
+    } else {
+      // The activity clock starts now: a watched file that never appears (or never grows)
+      // still trips the watchdog once the limit elapses.
+      let mut last_seen_len: Option<u64> = watch.and_then(|w| std::fs::metadata(&w.file).ok()).map(|m| m.len());
+      let mut last_activity = std::time::Instant::now();
+      loop {
         if let Some(s) = child.try_wait()? {
           break s;
         }
-        if started.elapsed() >= limit {
-          let _ = child.kill();
-          timed_out = true;
-          break child.wait()?;
+        if let Some(limit) = timeout {
+          if started.elapsed() >= limit {
+            let _ = child.kill();
+            killed = Killed::Timeout;
+            break child.wait()?;
+          }
+        }
+        if let Some(w) = watch {
+          let len = std::fs::metadata(&w.file).ok().map(|m| m.len());
+          if len != last_seen_len {
+            last_seen_len = len;
+            last_activity = std::time::Instant::now();
+          }
+          if last_activity.elapsed() >= w.limit {
+            let _ = child.kill();
+            killed = Killed::Inactive;
+            break child.wait()?;
+          }
         }
         thread::sleep(Duration::from_millis(100));
-      },
+      }
     };
     unregister_child(pid);
     for p in pumps {
       let _ = p.join();
     }
     let last = last.lock().unwrap().clone();
-    Ok((status.success(), timed_out, last))
+    Ok((status.success(), killed, last))
   }
 
   /// Finish green: set the proc ✓, freeze its clock, and attach an optional detail. Off-TTY,
@@ -715,5 +765,36 @@ mod tests {
     p.start();
     let (ok, timed_out, _) = p.run_timed("sleep", &["5".to_string()], Some(Duration::from_millis(150))).unwrap();
     assert!(timed_out && !ok, "the 5s sleep must be killed by the 150ms timeout");
+  }
+
+  #[test]
+  fn proc_run_watched_kills_a_child_whose_screen_never_moves() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("frozen", false);
+    p.start();
+    // The watched file never appears, so the watchdog fires long before the 5s sleep ends.
+    let watch = ActivityWatch {
+      file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
+      limit: Duration::from_millis(200),
+    };
+    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch)).unwrap();
+    assert_eq!(killed, Killed::Inactive);
+    assert!(!ok);
+  }
+
+  #[test]
+  fn proc_run_watched_lets_an_active_screen_run_to_completion() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("active", false);
+    p.start();
+    let file = std::env::temp_dir().join(format!("scsh-watch-grow-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    // The child grows the watched file every 100ms — well inside the 600ms budget — then exits 0.
+    let script = format!("for i in 1 2 3 4 5 6 7 8; do echo x >> {}; sleep 0.1; done", file.display());
+    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600) };
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch)).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(killed, Killed::No);
+    assert!(ok, "an active child must not be killed by the watchdog");
   }
 }
