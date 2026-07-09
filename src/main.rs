@@ -1298,6 +1298,33 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
 
+  // Declare EVERY step as a proc row up front, in definition order — the board and the
+  // session browser show the whole job's shape (step k/n, what it needs) from the first
+  // paint. A gated-off step later finishes as ⊘ skipped instead of silently never existing.
+  let total_steps = def.steps.len();
+  let mut step_procs: HashMap<String, ui::screen::Proc> = HashMap::new();
+  for (i, s) in def.steps.iter().enumerate() {
+    let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
+    let p = ui.proc(label.clone(), false);
+    let mut note = format!("step {}/{total_steps}", i + 1);
+    if !s.needs.is_empty() {
+      note.push_str(&format!(" · needs {}", s.needs.join(", ")));
+    }
+    p.note(&note);
+    if let Some(c) = &daemon_client {
+      c.proc_add(
+        p.index(),
+        &label,
+        daemon::ProcKind::Skill,
+        Some(&s.id),
+        Some(s.agent.harness.as_str()),
+        s.agent.model.as_deref(),
+      );
+    }
+    step_procs.insert(s.id.clone(), p);
+  }
+  ui.pin_board_to_top();
+
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
   let mut state: HashMap<String, StepState> = HashMap::new();
   let mut failure: Option<String> = None;
@@ -1314,9 +1341,16 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     // Partition this wave into steps to skip (gate false, or a needed step was skipped) and to run.
     let mut to_run: Vec<&harness_def::Step> = Vec::new();
     for s in ready {
-      let need_skipped = s.needs.iter().any(|n| state.get(n).is_some_and(|st| st.skipped));
+      let skipped_need = s.needs.iter().find(|n| state.get(*n).is_some_and(|st| st.skipped));
       let when_ok = s.when.as_ref().is_none_or(|w| harness_def::when_holds(w, &|r| resolve_ref(r, def, &state)));
-      if need_skipped || !when_ok {
+      if skipped_need.is_some() || !when_ok {
+        let why = match skipped_need {
+          Some(n) => format!("skipped — needs '{n}', which was skipped"),
+          None => "skipped — its when: gate is false".to_string(),
+        };
+        if let Some(p) = step_procs.remove(&s.id) {
+          p.finish_skipped(&why);
+        }
         state.insert(s.id.clone(), StepState { skipped: true, outputs: HashMap::new() });
       } else {
         to_run.push(s);
@@ -1326,7 +1360,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       continue;
     }
 
-    // Resolve inputs and build one invocation + proc row per runnable step.
+    // Resolve inputs and pair each runnable step with its pre-declared proc row.
     let mut invs: Vec<ResolvedInvocation> = Vec::new();
     let mut procs: Vec<ui::screen::Proc> = Vec::new();
     for s in &to_run {
@@ -1335,21 +1369,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
       }
       invs.push(step_invocation(s, &session_dir_rel, inputs));
-      let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
-      let p = ui.proc(label.clone(), false);
-      if let Some(c) = &daemon_client {
-        c.proc_add(
-          p.index(),
-          &label,
-          daemon::ProcKind::Skill,
-          Some(&s.id),
-          Some(s.agent.harness.as_str()),
-          s.agent.model.as_deref(),
-        );
-      }
-      procs.push(p);
+      procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
     }
-    ui.pin_board_to_top();
 
     // Run the wave in parallel — independent steps proceed at once.
     let results: Vec<(String, SkillRun)> = std::thread::scope(|scope| {

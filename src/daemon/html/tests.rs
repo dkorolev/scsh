@@ -58,6 +58,27 @@ fn esc_handles_basic_html() {
 }
 
 #[test]
+fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
+  let mut store = store_with_cast_proc(ProcStatus::Skipped);
+  {
+    let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
+    p.cast_path = None; // a skipped step never ran, so it has no recording
+    p.detail = Some("skipped — its when: gate is false".into());
+    p.note = Some("step 2/2 · needs probe_credentials".into());
+  }
+  let html = session_page(&store, "castab").expect("session renders");
+  let procs = session_procs_html(&html);
+  assert!(procs.contains(r#"class="proc skipped""#), "got: {procs}");
+  assert!(procs.contains("⊘"), "skipped glyph: {procs}");
+  assert!(procs.contains("step 2/2 · needs probe_credentials"), "step note: {procs}");
+  assert!(procs.contains("skipped — its when: gate is false"), "skip reason: {procs}");
+  assert!(!procs.contains("data-proc-stop"), "a skipped step offers no kill button: {procs}");
+  // The client knows the glyph too (live updates keep ⊘ when a tick arrives).
+  let js = live_client_js();
+  assert!(js.contains("skipped:'⊘'"));
+}
+
+#[test]
 fn running_cast_preview_starts_near_the_end() {
   let js = live_client_js();
   // A still-running proc's player opens ~3s before the current tail (autoplaying), not at 0.

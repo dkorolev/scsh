@@ -20,14 +20,15 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research` (flat) and `fruits` (a workflow) are always available regardless of
-/// the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 4] {
+/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review` (workflows) are always
+/// available regardless of the repo. `(name, yaml)`.
+pub fn builtin_defs() -> [(&'static str, &'static str); 5] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
     ("research", include_str!("harness_defs/research.yml")),
     ("fruits", include_str!("harness_defs/fruits.yml")),
+    ("code-review", include_str!("harness_defs/code-review.yml")),
   ]
 }
 
@@ -1027,6 +1028,26 @@ fn opt_scalar(fm: &BTreeMap<&str, &Node>, param: &str, field: &str, errors: &mut
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn builtin_code_review_probes_credentials_then_reviews() {
+    let def = builtin("code-review");
+    assert!(def.is_workflow());
+    assert_eq!(def.steps.len(), 2);
+    let probe = &def.steps[0];
+    assert_eq!(probe.id, "probe_credentials");
+    assert!(probe.needs.is_empty() && probe.when.is_none());
+    assert_eq!(probe.outputs.len(), 1);
+    let review = &def.steps[1];
+    assert_eq!(review.id, "review");
+    // The review runs only after — and only if — the probe succeeded end to end.
+    assert_eq!(review.needs, vec!["probe_credentials".to_string()]);
+    let when = review.when.as_ref().expect("review is gated on the probe");
+    assert_eq!(when.len(), 1);
+    assert_eq!(when[0].reference, Ref::StepField { step: "probe_credentials".into(), field: "ok".into() });
+    assert_eq!(when[0].op, CondOp::Eq);
+    assert_eq!(when[0].values, vec!["true".to_string()]);
+  }
 
   /// Index into `builtin_defs()` for readability.
   fn builtin(name: &str) -> HarnessDef {
