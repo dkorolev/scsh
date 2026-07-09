@@ -301,6 +301,13 @@ const PAGE_CSS: &str = r#"
   .hchip--cursor { --hchip-bg: #a371f7; }
   .hchip--done { opacity: 0.35; }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
+  .image-build-btn {
+    font: inherit; font-size: 0.75rem; line-height: 1.5; cursor: pointer; white-space: nowrap;
+    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
+    border-radius: 4px; padding: 0 0.5rem;
+  }
+  .image-build-btn:hover:not(:disabled) { background: rgba(88, 166, 255, 0.12); }
+  .image-build-btn:disabled { cursor: default; opacity: 0.55; }
   .proc-kill {
     margin-left: auto; align-self: center; flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;

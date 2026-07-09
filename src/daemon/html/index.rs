@@ -103,7 +103,7 @@ fn images_panel() -> String {
 Stale means the image exists but no longer matches this scsh build's embedded Dockerfile —
 rebuild it here.</p>
 <div class="table-scroll"><table>
-<thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th></tr></thead>
+<thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th><th></th></tr></thead>
 <tbody id="images-body">
 {rows}</tbody>
 </table></div>
@@ -129,7 +129,7 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
     String::new()
   };
   format!(
-    r#"<tr data-image="{name}" data-pending="1"><td class="image-select-cell">{checkbox}</td><td><code>{tag}</code></td><td class="image-status-cell"><span class="chamfer session-status checking"><span>checking…</span></span></td><td class="dim image-created-cell">—</td><td class="dim image-size-cell">—</td></tr>
+    r#"<tr data-image="{name}" data-pending="1"><td class="image-select-cell">{checkbox}</td><td><code>{tag}</code></td><td class="image-status-cell"><span class="chamfer session-status checking"><span>checking…</span></span></td><td class="dim image-created-cell">—</td><td class="dim image-size-cell">—</td><td class="image-action-cell"></td></tr>
 "#,
     name = esc(name),
     tag = esc(tag),
