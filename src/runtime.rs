@@ -536,8 +536,14 @@ pub fn harness_command(
       // path slug is `/`-stripped, `/`->`-` of AGENT_REPO.
       let trust_dir = format!("$HOME/.cursor/projects/{}", AGENT_REPO.trim_start_matches('/').replace('/', "-"));
       // No `exec`: the wrapping shell must survive cursor-agent to record its exit status.
+      // `--disable-auto-update` (a hidden but stable cursor-agent flag, present in every
+      // version scsh has pinned): the launcher's auto-updater is the prime suspect for the
+      // early-exit bug — it can end a freshly started run ~1.5s in with a process-group
+      // SIGTERM (the bundle relaunches itself via `process.kill(-pid, "SIGTERM")`), and its
+      // server config can also demand a minimum version and exit. Updating inside a
+      // throwaway container built from a version-pinned image is meaningless anyway.
       let mut tui = format!(
-        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted && cursor-agent --force --sandbox disabled"
+        "mkdir -p {trust_dir} && : > {trust_dir}/.workspace-trusted &&          cursor-agent --force --sandbox disabled --disable-auto-update"
       );
       if let Some(m) = model {
         tui.push_str(" --model ");
@@ -2210,6 +2216,14 @@ TAG
     assert!(df.contains(r#"[ -f \"$result\" ] || [ \$n -ge 2 ]"#), "relaunch stop conditions missing");
     assert!(df.contains("re-send $quit"), "graceful quit re-send missing");
     assert!(df.contains("killed session (harness ignored quit)"), "force-kill fallback missing");
+    // A TERM'd pane names its sender: the trap snapshots the container's process table
+    // (via /proc — no extra packages) into the tuidebug, so the next early-exit recurrence
+    // is attributable instead of a mystery.
+    assert!(df.contains(r#"for p in /proc/[0-9]*"#), "TERM trap must snapshot the process table");
+    // tmux kill-session teardown (SIGHUP) must still write `.exit` — the trap exits so the
+    // EXIT trap runs. Keeps "absent .exit = uncatchable SIGKILL" true for every harness,
+    // including codex whose double-ctrl-c quit is sometimes ignored.
+    assert!(df.contains("exit 129' HUP"), "HUP trap must exit so .exit gets written");
   }
 
   #[test]
@@ -2517,6 +2531,9 @@ TAG
       false,
     );
     assert!(cmd.contains("scsh: harness=cursor"));
+    // The launcher's auto-updater can SIGTERM a freshly started run (the ~1.5s early-exit
+    // bug) and serves no purpose in a version-pinned throwaway container — always off.
+    assert!(cmd.contains("--disable-auto-update"), "got: {cmd}");
     // Interactive TUI via scsh-tui-record. Workspace trust is pre-seeded by creating
     // cursor's marker file in-container (no flag/config key exists), not by scraping.
     assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_cursor.json "), "got: {cmd}");
