@@ -504,7 +504,15 @@ fn init_demo_then_list() {
     "got: {}",
     v.out
   );
-  assert!(v.out.contains("run skill add") && v.out.contains("-run-add-opencode-gpt-5.4-mini-fast"), "got: {}", v.out);
+  // Every harness is a recorded interactive TUI pointed at the skill's SKILL.md (not the
+  // old headless `opencode run "run skill …"` form). The container name still carries the
+  // `-run-<invocation>` stem.
+  assert!(
+    v.out.contains("Run the skill defined in .skills/add/SKILL.md")
+      && v.out.contains("-run-add-opencode-gpt-5.4-mini-fast"),
+    "got: {}",
+    v.out
+  );
 }
 
 #[test]
