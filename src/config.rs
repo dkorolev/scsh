@@ -108,6 +108,10 @@ pub struct ResolvedInvocation {
   pub terminal: Terminal,
   /// How the skill's `SKILL.md` reaches the agent inside the container.
   pub delivery: SkillDelivery,
+  /// Repo-relative files (beyond `result`) the run must produce and scsh copies back to the
+  /// caller — a workflow step's declared `artifacts:`, resolved against its session dir.
+  /// Empty for `.scsh.yml` skills.
+  pub artifacts: Vec<String>,
 }
 
 /// How a skill's `SKILL.md` reaches the agent inside the container.
@@ -168,6 +172,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       result: skill.result.clone(),
       terminal,
       delivery: SkillDelivery::Repo,
+      artifacts: Vec::new(),
     }];
   }
   skill
@@ -187,6 +192,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       result: skill.result.replace("{name}", &route.name),
       terminal,
       delivery: SkillDelivery::Repo,
+      artifacts: Vec::new(),
     })
     .collect()
 }

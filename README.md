@@ -196,7 +196,8 @@ runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in
 spending the long review container). A flat
 definition declares a `description`, typed `params` (which become environment variables), a
 `task` body, and an `invocations:` agent matrix. A **workflow** definition instead declares
-`steps:` — a DAG where each step runs an agent, writes typed `output`, and feeds later steps
+`steps:` — a DAG where each step runs an agent, writes typed `output` (plus any declared
+`artifacts:` — plain files copied back beside its result, e.g. a `summary.txt`), and feeds later steps
 whose `inputs` bind to `params.NAME` or `stepid.field` (`needs:` gives the edges, `when:` gates a
 step). Run one from the console with `scsh run --def <name>` (params from the environment), or,
 when the daemon is up, open a repository in the browser (type/paste a path or use the native
