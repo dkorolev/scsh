@@ -585,6 +585,10 @@ fn route(
     let (status, body, mutated) = proc_stop_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/harness/stop" {
+    let (status, body, mutated) = harness_stop_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/repos/pick" {
     return (200, repos_pick_response(), "application/json", false);
   }
@@ -1484,6 +1488,68 @@ fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bo
   (200, "{\"ok\":true}".into(), true)
 }
 
+/// `POST /api/v1/harness/stop` — body `{"harness":"grok"}`. Stop EVERY still-running skill
+/// container of one harness across all live sessions (the "grok is out of quota" button) and
+/// mark each proc failed with `force_stopped`. Sessions keep running for their other harnesses.
+/// Returns `{ok:true,stopped:<n>}` (`0` when nothing of that harness was running).
+fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let harness = match field_str(&obj, "harness") {
+    Some(h) if !h.trim().is_empty() => h.trim().to_string(),
+    _ => return (400, err_body("give a harness name"), false),
+  };
+  let runtime = crate::runtime::detect_runtime().map(|r| r.name);
+  let now = now_unix_secs();
+  // (session, proc label, container) for every victim — teardown and logging happen
+  // outside the store lock (container stop sleeps up to ~1s each).
+  let mut stopped: Vec<(String, String, Option<String>)> = Vec::new();
+  {
+    let mut store = lock_store(store);
+    for (sid, s) in store.sessions.iter_mut() {
+      if s.ended_at.is_some() {
+        continue;
+      }
+      let mut touched = false;
+      for p in &mut s.procs {
+        let live = p.status == ProcStatus::Running || p.status == ProcStatus::Waiting;
+        if !live || p.kind != ProcKind::Skill || p.harness.as_deref() != Some(harness.as_str()) {
+          continue;
+        }
+        stopped.push((sid.clone(), p.label.clone(), p.container_name.take()));
+        p.status = ProcStatus::Fail;
+        p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+        if p.detail.is_none() {
+          p.detail = Some(format!("all {harness} containers stopped from the session browser"));
+        }
+        touched = true;
+      }
+      if touched {
+        s.last_seen_at = now;
+      }
+    }
+  }
+  if let Some(rt) = runtime.as_deref() {
+    for (_, _, container) in &stopped {
+      if let Some(name) = container.as_deref() {
+        crate::ui::signals::stop_container(rt, name);
+      }
+    }
+  }
+  for (sid, label, _) in &stopped {
+    crate::failure::log_session_proc(
+      sid,
+      crate::failure::reason::FORCE_STOPPED,
+      label,
+      &format!("all {harness} containers stopped from the session browser"),
+    );
+  }
+  let n = stopped.len();
+  (200, format!("{{\"ok\":true,\"stopped\":{n}}}"), n > 0)
+}
+
 /// SIGTERM a run PID, wait briefly, then SIGKILL if it is still alive — same cadence as Ctrl-C.
 fn signal_run_pid(pid: u32) {
   let _ = std::process::Command::new("kill")
@@ -2108,6 +2174,65 @@ mod tests {
     // Unknown proc index → 404.
     let (status3, _, _) = proc_stop_response(r#"{"session":"kill01","proc":9}"#, &store);
     assert_eq!(status3, 404);
+  }
+
+  #[test]
+  fn harness_stop_kills_only_that_harness_across_live_sessions() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let proc = |index: usize, harness: &str| ProcRecord {
+      index,
+      label: format!("{harness}: review"),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Running,
+      skill_name: Some("review".into()),
+      harness: Some(harness.into()),
+      model: None,
+      started_at: Some(50),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+      cast_path: None,
+    };
+    let session = |id: &str, procs: Vec<ProcRecord>| Session {
+      id: id.into(),
+      started_at: 50,
+      ended_at: None,
+      profile: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs,
+      last_seen_at: 50,
+      client_connected: true,
+      run_pid: None,
+    };
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session("hs01".into(), session("hs01", vec![proc(0, "grok"), proc(1, "opencode")]));
+      s.insert_session("hs02".into(), session("hs02", vec![proc(0, "grok")]));
+    }
+    let (status, body, mutated) = harness_stop_response(r#"{"harness":"grok"}"#, &store);
+    assert_eq!(status, 200, "got: {body}");
+    assert!(mutated);
+    assert!(body.contains(r#""stopped":2"#), "got: {body}");
+    {
+      let guard = store.lock().unwrap();
+      let s1 = guard.sessions.get("hs01").unwrap();
+      // grok died, opencode keeps running, the session itself stays live.
+      assert!(s1.ended_at.is_none());
+      assert_eq!(s1.procs[0].status, ProcStatus::Fail);
+      assert_eq!(s1.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
+      assert_eq!(s1.procs[1].status, ProcStatus::Running);
+      assert_eq!(guard.sessions.get("hs02").unwrap().procs[0].status, ProcStatus::Fail);
+    }
+    // Nothing of that harness left → ok, zero stopped, no mutation.
+    let (status2, body2, mutated2) = harness_stop_response(r#"{"harness":"grok"}"#, &store);
+    assert_eq!(status2, 200);
+    assert!(!mutated2);
+    assert!(body2.contains(r#""stopped":0"#), "got: {body2}");
   }
 
   #[test]
