@@ -115,7 +115,7 @@ RUN set -eu; \
     groupadd -g "$gid" agent 2>/dev/null || groupadd agent 2>/dev/null || true; \
     useradd -u "$uid" -g "$gid" -m -d /home/agent -s /bin/sh agent 2>/dev/null \
       || useradd -g "$gid" -m -d /home/agent -s /bin/sh agent 2>/dev/null || true; \
-    mkdir -p /home/agent/repo; chown -R "$uid:$gid" /home/agent
+    mkdir -p /home/agent/repo/tmp; chown -R "$uid:$gid" /home/agent
 
 WORKDIR /home/agent/repo
 
@@ -134,6 +134,9 @@ RUN cat > /usr/local/bin/scsh-tui-record <<'SCSH_TUI_RECORD'
 #!/bin/sh
 set -u
 cols=$1; rows=$2; quit=$3; submit=$4; result=$5; cmd=$6
+# SCSH_RUN_LOG lives under the bind-mounted repo tmp/; create it so tuidebug/cast
+# never fail with "Directory nonexistent" when the mount is empty or late.
+mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true
 dbg="$SCSH_RUN_LOG.tuidebug"
 exit_file="$SCSH_RUN_LOG.exit"
 log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }

@@ -855,6 +855,8 @@ so they would not be in the container",
       }
       return Err(1);
     }
+    // Physical scratch dir for results/logs/cache — gitignored above, always present.
+    let _ = std::fs::create_dir_all(root.join("tmp"));
   }
   Ok(root)
 }
@@ -5034,21 +5036,24 @@ fn dim_comment(comment: &str) -> String {
 /// Returns whether a rule was added (`false` = already ignored, nothing changed).
 /// It only ever **appends** — existing `.gitignore` content is never rewritten.
 fn ensure_tmp_gitignored(root: &std::path::Path) -> Result<bool, String> {
-  if tmp_is_gitignored(root) {
-    return Ok(false);
-  }
-  let path = root.join(".gitignore");
-  let mut content = match std::fs::read_to_string(&path) {
-    Ok(s) => s,
-    Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-    Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+  let added = if tmp_is_gitignored(root) {
+    false
+  } else {
+    let path = root.join(".gitignore");
+    let mut content = match std::fs::read_to_string(&path) {
+      Ok(s) => s,
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+      Err(e) => return Err(format!("could not read {}: {e}", path.display())),
+    };
+    if !content.is_empty() && !content.ends_with('\n') {
+      content.push('\n');
+    }
+    content.push_str("# scsh uses the system temp dir for build scratch; never track a local /tmp.\n/tmp\n");
+    std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    true
   };
-  if !content.is_empty() && !content.ends_with('\n') {
-    content.push('\n');
-  }
-  content.push_str("# scsh uses the system temp dir for build scratch; never track a local /tmp.\n/tmp\n");
-  std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
-  Ok(true)
+  std::fs::create_dir_all(root.join("tmp")).map_err(|e| format!("could not create {}/tmp: {e}", root.display()))?;
+  Ok(added)
 }
 
 // ---------------------------------------------------------------------------
@@ -6191,5 +6196,19 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert!(caller.join("note.txt").exists(), "replayed file is present");
     assert_eq!(git_capture(&caller, &["log", "-1", "--format=%s"]).unwrap().trim(), "add note");
     assert_ne!(git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim(), base, "HEAD advanced past base");
+
+  }
+
+  #[test]
+  fn ensure_tmp_gitignored_adds_rule_and_creates_dir() {
+    let root = repo("tmp-ensure");
+    assert!(!root.join("tmp").is_dir());
+    assert!(!tmp_is_gitignored(&root));
+    assert_eq!(ensure_tmp_gitignored(&root).unwrap(), true);
+    assert!(tmp_is_gitignored(&root));
+    assert!(root.join("tmp").is_dir());
+    // Second call is a no-op for the rule, but still keeps the dir.
+    assert_eq!(ensure_tmp_gitignored(&root).unwrap(), false);
+    assert!(root.join("tmp").is_dir());
   }
 }

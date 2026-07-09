@@ -597,7 +597,8 @@ fn wrap_tui_shell(
   // that merely wrote no result. A trap is used rather than a bare `; echo $?` so a catchable
   // signal still records — an ABSENT .exit then uniquely means an uncatchable SIGKILL.
   format!(
-    "{{ echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
+    "{{ mkdir -p \"$(dirname \"${{{log_var}}}\")\"; \
+echo \"scsh: harness={} skill={skill_source} model={model_label} tui=tmux \
 log=${{{log_var}}} cast=${{{log_var}}}.cast\" >&2; \
 scsh-tui-record {cols} {rows} {quit} {submit} {result_q} {tui_q}; }} 2>&1 | tee \"${{{log_var}}}\"",
     harness.as_str(),
@@ -1824,6 +1825,7 @@ pub fn git_transport_entry(harness: &str, push_commits: bool, commit_name: &str,
      (cd /home/agent/.scsh-clone && tar -cf - .) | (cd {repo} && tar -xf -)\n\
      rm -rf /home/agent/.scsh-clone\n\
      cd {repo}\n\
+     mkdir -p {repo}/tmp\n\
      git rev-parse --verify origin/main >/dev/null 2>&1 || {{ echo \"scsh: origin/main missing after git transport clone (point local main at the review base)\" >&2; exit 1; }}\n\
      cur=$(git rev-parse --abbrev-ref HEAD)\n\
      for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin); do\n\
@@ -2251,6 +2253,14 @@ TAG
     let df = dockerfile();
     assert!(df.contains(&format!("WORKDIR {AGENT_REPO}")), "WORKDIR must match AGENT_REPO");
     assert!(
+      df.contains(&format!("mkdir -p {AGENT_REPO}/tmp")),
+      "image must create the bind-mounted tmp/ so logs/results have a home before the mount attaches"
+    );
+    assert!(
+      df.contains("mkdir -p \"$(dirname \"$SCSH_RUN_LOG\")\""),
+      "scsh-tui-record must mkdir the run-log parent before writing tuidebug/cast"
+    );
+    assert!(
       df.contains(&format!("ENV XDG_DATA_HOME={AGENT_REPO}/tmp/.xdg-data")),
       "XDG_DATA_HOME must live under the repo-mounted tmp/"
     );
@@ -2322,6 +2332,7 @@ TAG
       crate::config::Terminal::default(),
     );
     assert!(cmd.contains("scsh: harness=opencode"));
+    assert!(cmd.contains("mkdir -p \"$(dirname \"${SCSH_RUN_LOG}\")\""), "got: {cmd}");
     assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c enter tmp/add.json "), "got: {cmd}");
     assert!(cmd.contains("opencode -m openai/gpt-5.5 --prompt "), "got: {cmd}");
     assert!(!cmd.contains(" run "), "no headless run subcommand: {cmd}");
@@ -2923,6 +2934,7 @@ TAG
     assert!(entry.contains("ip -4 route show default"));
     assert!(entry.contains("git clone"));
     assert!(entry.contains("transport.git"));
+    assert!(entry.contains(&format!("mkdir -p {AGENT_REPO}/tmp")));
     assert!(entry.contains("origin/main missing after git transport clone"));
     assert!(entry.contains("echo hi"));
     assert!(!entry.contains("pull.git"));
