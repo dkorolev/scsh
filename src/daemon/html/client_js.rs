@@ -1043,11 +1043,29 @@ function markImagesChecking() {
 function imageRowHtml(img) {
   const checkbox = img.name === 'base' ? '' :
     '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
+  // Per-row build: "Rebuild" (forced) once the image is up to date, "Build" otherwise.
+  // The base row rebuilds the shared base — and, since every harness image sits on it,
+  // everything on top.
+  const upToDate = !!(img.exists && img.up_to_date);
+  const label = img.name === 'base' ? (upToDate ? 'Rebuild base + all' : 'Build base + all')
+    : (upToDate ? 'Rebuild' : 'Build');
+  const title = img.name === 'base'
+    ? 'Rebuild the shared base image, then every harness image on top of it'
+    : (upToDate ? 'Force-rebuild this image' : 'Build this image');
+  const action = '<button type="button" class="image-build-btn" data-image-build="' + esc(img.name) +
+    '" data-uptodate="' + (upToDate ? '1' : '0') + '" title="' + title + '">' + label + '</button>';
   return '<tr data-image="' + esc(img.name) + '"><td class="image-select-cell">' + checkbox + '</td>' +
     '<td><code>' + esc(img.tag) + '</code></td>' +
     '<td class="image-status-cell">' + imageStatusBadge(img) + '</td>' +
     '<td class="image-created-cell">' + esc(img.created || '—') + '</td>' +
-    '<td class="image-size-cell">' + esc(img.size || '—') + '</td></tr>';
+    '<td class="image-size-cell">' + esc(img.size || '—') + '</td>' +
+    '<td class="image-action-cell">' + action + '</td></tr>';
+}
+function wireImageBuildButtons(body) {
+  body.querySelectorAll('button[data-image-build]').forEach(btn => btn.addEventListener('click', () => {
+    btn.disabled = true;
+    startImageBuildOne(btn.getAttribute('data-image-build'), btn.getAttribute('data-uptodate') === '1');
+  }));
 }
 function wireImageSelectButtons(body) {
   const btn = document.getElementById('images-build-selected');
@@ -1076,6 +1094,7 @@ function renderImages(data) {
   body.innerHTML = (data.images || []).map(imageRowHtml).join('');
   if (note) note.textContent = data.runtime ? ('runtime: ' + data.runtime) : '';
   wireImageSelectButtons(body);
+  wireImageBuildButtons(body);
 }
 function refreshImages() {
   markImagesChecking();
@@ -1083,15 +1102,8 @@ function refreshImages() {
     renderImages({ error: 'images unavailable (daemon error)' });
   });
 }
-function startImagesBuild(all) {
+function postImagesBuild(req) {
   const note = document.getElementById('images-note');
-  const harnesses = all ? [] :
-    Array.from(document.querySelectorAll('.image-select:checked')).map(cb => cb.value);
-  const req = {
-    harnesses: harnesses,
-    rebuild_base: !!document.getElementById('images-rebuild-base')?.checked,
-    force: !!document.getElementById('images-force')?.checked,
-  };
   if (note) note.textContent = 'starting build…';
   fetch('/api/v1/images/build', {
     method: 'POST',
@@ -1104,6 +1116,23 @@ function startImagesBuild(all) {
       note.textContent = resp.error || 'build request failed';
     }
   }).catch(() => { if (note) note.textContent = 'build request failed'; });
+}
+function startImagesBuild(all) {
+  const harnesses = all ? [] :
+    Array.from(document.querySelectorAll('.image-select:checked')).map(cb => cb.value);
+  postImagesBuild({
+    harnesses: harnesses,
+    rebuild_base: !!document.getElementById('images-rebuild-base')?.checked,
+    force: !!document.getElementById('images-force')?.checked,
+  });
+}
+function startImageBuildOne(name, upToDate) {
+  if (name === 'base') {
+    // Rebuilding the base implies rebuilding every harness image layered on it.
+    postImagesBuild({ harnesses: [], rebuild_base: true, force: true });
+    return;
+  }
+  postImagesBuild({ harnesses: [name], rebuild_base: false, force: upToDate });
 }
 (function initImagesPanel() {
   if (!document.getElementById('images-body')) return;

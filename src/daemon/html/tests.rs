@@ -108,6 +108,10 @@ fn index_page_carries_the_images_panel_and_its_client_wiring() {
   assert!(js.contains("/api/v1/images/build"), "client js should post builds");
   assert!(js.contains("function markImagesChecking"), "refresh keeps rows visible while checking");
   assert!(!js.contains("loading…"), "must not replace the table with a blank loading row");
+  // Each image row carries its own [re]build button (base row rebuilds base + everything).
+  assert!(js.contains("data-image-build"), "per-row build buttons are rendered");
+  assert!(js.contains("function startImageBuildOne"), "per-row build buttons are wired");
+  assert!(html.contains("image-action-cell"), "skeleton rows reserve the per-row action cell");
 }
 
 #[test]
