@@ -156,6 +156,13 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   **on macOS, Apple `container` ONLY** — scsh never auto-falls back to Docker/Podman there;
   `docker` → `podman` elsewhere. To use Docker/Podman on macOS, ask explicitly with
   `SCSH_RUNTIME=<docker|podman>` (which overrides detection on any OS).
+  **Apple Containers Dockerfile size:** Apple's builder rejects Dockerfiles ≥ 16 KB
+  ([apple/container#735](https://github.com/apple/container/issues/735)). Keep
+  [`src/Dockerfile`](src/Dockerfile) under **15 KB** (enforced at **compile time** by
+  `build.rs` and by the unit test
+  `dockerfile_stays_under_apple_containers_grpc_header_limit`). `scsh` also
+  comment-strips the file at build time for Apple; do not grow the embedded source past
+  the soft limit and assume compaction will always save you — heredoc *code* still counts.
 - **Network** only for a *real* container run (it pulls the base image and
   installs opencode). Building, `scsh list`, and the whole test suite
   need no network.

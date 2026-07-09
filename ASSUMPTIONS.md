@@ -18,8 +18,8 @@ Review these before merging or extending.
 
 ## Images
 
-- **Two final images, one Dockerfile:** shared `scsh-base`, then `scsh-opencode` and `scsh-claude` targets. Harness CLI installed last in each stage.
-- Tags: `scsh-opencode:latest`, `scsh-claude:latest`. scsh builds only images needed by the selected skills, **in parallel**, and **skips** a build when the tag already carries a matching `scsh.build.fingerprint` label (sha256 of the embedded Dockerfile + target + uid/gid/tz).
+- **One Dockerfile, many targets:** shared `scsh-base`, then `scsh-opencode`, `scsh-claude`, `scsh-codex`, `scsh-grok`, `scsh-cursor`. Harness CLI installed last in each stage.
+- Tags: `scsh-*:latest`. scsh builds only images needed by the selected skills, **in parallel**, and **skips** a build when the tag already carries a matching `scsh.build.fingerprint` label (sha256 of the Dockerfile text actually built + target + uid/gid/tz). On Apple Containers that text is **comment-stripped** so it fits the 16 KB gRPC header limit ([apple/container#735](https://github.com/apple/container/issues/735)); keep `src/Dockerfile` under 15 KB.
 
 ## Auth
 
