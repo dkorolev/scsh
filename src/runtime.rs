@@ -1035,15 +1035,27 @@ pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd
   ]
 }
 
-/// Durable directory for host-recorded build casts (`~/.scsh/casts`).
-pub fn host_build_casts_dir() -> std::path::PathBuf {
-  // Prefer $SCSH_HOME, else ~/.scsh — same home the daemon store uses.
+/// Durable directory for host-recorded casts — build TUIs and skill recordings alike
+/// (`$SCSH_HOME/casts`, default `~/.scsh/casts`). Kept outside any caller repo so a
+/// throwaway clone (e.g. code-beautiful-review) cannot delete session-exportable casts.
+pub fn host_casts_dir() -> std::path::PathBuf {
+  scsh_home().join("casts")
+}
+
+/// Durable directory for preserved harness run logs (`$SCSH_HOME/logs`).
+pub fn host_logs_dir() -> std::path::PathBuf {
+  scsh_home().join("logs")
+}
+
+/// scsh's durable home on the host (`$SCSH_HOME`, else `~/.scsh`, else a temp fallback).
+/// Same root the daemon store and build casts already use.
+pub fn scsh_home() -> std::path::PathBuf {
   if let Some(dir) = std::env::var_os("SCSH_HOME").filter(|s| !s.is_empty()) {
-    return std::path::PathBuf::from(dir).join("casts");
+    return std::path::PathBuf::from(dir);
   }
   match std::env::var_os("HOME").filter(|s| !s.is_empty()) {
-    Some(home) => std::path::PathBuf::from(home).join(".scsh").join("casts"),
-    None => std::env::temp_dir().join("scsh-build-casts"),
+    Some(home) => std::path::PathBuf::from(home).join(".scsh"),
+    None => std::env::temp_dir().join("scsh-home"),
   }
 }
 
