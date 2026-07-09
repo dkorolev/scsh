@@ -420,7 +420,7 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
   const NO_RECORDING: &str = "no recording — skipped/failed before output";
   let Some(cast_path) = proc.cast_path.as_deref() else {
     let note = match proc.kind {
-      ProcKind::Build => "no recording — image-build step (text log only)",
+      ProcKind::Build => "no recording — image build ran without asciinema on PATH (text log only)",
       ProcKind::Skill => NO_RECORDING,
     };
     return html::CastExport::Note(note.into());
@@ -577,6 +577,10 @@ fn route(
     let (status, body, mutated) = jobs_start_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/session/stop" {
+    let (status, body, mutated) = session_stop_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/repos/pick" {
     return (200, repos_pick_response(), "application/json", false);
   }
@@ -674,6 +678,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let branch = field_str(&obj, "branch").unwrap_or_default();
       let profile = field_str(&obj, "profile");
       let skills = parse_skills_array(&obj);
+      let run_pid = field_num(&obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
       if id.is_empty() {
         return false;
       }
@@ -690,6 +695,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if !skills.is_empty() {
           s.skills = skills;
         }
+        if run_pid.is_some() {
+          s.run_pid = run_pid;
+        }
         return true;
       }
       let session = Session {
@@ -703,6 +711,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         procs: Vec::new(),
         last_seen_at: now,
         client_connected: false,
+        run_pid,
       };
       store.insert_session(id, session);
       true
@@ -727,6 +736,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           s.last_seen_at = now;
           if s.ended_at.is_none() {
             s.ended_at = Some(now);
+            s.run_pid = None;
             for p in &mut s.procs {
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
                 p.status = ProcStatus::Fail;
@@ -947,7 +957,9 @@ fn images_json() -> String {
 /// bool}` (all fields optional; no harnesses = all). Spawns a detached `scsh build-images
 /// --session <id>` and pre-creates that session in the store, so the returned
 /// `{"ok":true,"session":id}` deep-links to a live page before the child registers. One image
-/// build at a time; a concurrent request gets 409.
+/// build at a time; a concurrent request gets 409. Stderr is piped and the session is
+/// reconciled on exit (same fate-binding as `jobs/start`), so a silent startup failure never
+/// leaves a stranded "running" build.
 fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
@@ -992,14 +1004,25 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   }
   cmd.args(["--session", &session_id]);
   cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.env("NO_COLOR", "1"); // plain stderr, so a captured startup failure reads cleanly
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
-  cmd.stderr(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
   match cmd.spawn() {
     Ok(mut child) => {
-      // Reap the child when it exits so it never lingers as a zombie under the daemon.
+      let run_pid = Some(child.id());
+      // Same fate-binding as jobs/start: drain stderr, wait, reconcile — so a build that dies
+      // before it registers becomes a *failed* session (with the error), never a hidden "running".
+      let store_reap = Arc::clone(store);
+      let sid = session_id.clone();
+      let stderr = child.stderr.take();
       std::thread::spawn(move || {
-        let _ = child.wait();
+        let mut tail = String::new();
+        if let Some(mut e) = stderr {
+          let _ = e.read_to_string(&mut tail);
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
       let mut store = lock_store(store);
       store.touch(now);
@@ -1016,6 +1039,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           procs: Vec::new(),
           last_seen_at: now,
           client_connected: false,
+          run_pid,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1223,6 +1247,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
   match cmd.spawn() {
     Ok(mut child) => {
+      let run_pid = Some(child.id());
       // Bind the session's fate to the process: drain its stderr, wait, then reconcile — so a job
       // that dies before it ever registers becomes a *failed* session (with the error), never a
       // hidden "running" one.
@@ -1252,6 +1277,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           procs: Vec::new(),
           last_seen_at: now,
           client_connected: false,
+          run_pid,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1273,10 +1299,16 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
   }
   s.ended_at = Some(now);
   s.client_connected = false;
+  s.run_pid = None;
   if s.procs.is_empty() {
+    let label = if s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) {
+      "build failed to start"
+    } else {
+      "run failed to start"
+    };
     s.procs.push(ProcRecord {
       index: 0,
-      label: "run failed to start".into(),
+      label: label.into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Fail,
       skill_name: None,
@@ -1338,6 +1370,85 @@ fn repos_json(store: &Store, now: u64) -> String {
     })
     .collect();
   format!("{{\"repos\":[{}]}}", repos.join(","))
+}
+
+/// `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job: stop every
+/// still-named container for the session, SIGTERM (then SIGKILL) the `scsh run` process when its
+/// PID is known, and mark incomplete procs failed with `force_stopped`. Idempotent on an already
+/// ended session (`{ok:true,already_ended:true}`).
+fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let session_id = match field_str(&obj, "session") {
+    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+    _ => return (400, err_body("give a session id"), false),
+  };
+  let now = now_unix_secs();
+  let runtime = crate::runtime::detect_runtime().map(|r| r.name);
+  let (run_pid, containers, already_ended) = {
+    let mut store = lock_store(store);
+    let Some(s) = store.sessions.get_mut(&session_id) else {
+      return (404, err_body("session not found"), false);
+    };
+    if s.ended_at.is_some() {
+      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
+    }
+    let containers: Vec<String> = s.procs.iter().filter_map(|p| p.container_name.clone()).collect();
+    let run_pid = s.run_pid;
+    s.ended_at = Some(now);
+    s.client_connected = false;
+    s.run_pid = None;
+    s.last_seen_at = now;
+    for p in &mut s.procs {
+      if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
+        p.status = ProcStatus::Fail;
+        p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+        if p.detail.is_none() {
+          p.detail = Some("force-stopped from the session browser".into());
+        }
+        p.container_name = None;
+      }
+    }
+    (run_pid, containers, false)
+  };
+  let _ = already_ended;
+  // Tear down outside the store lock: container stop sleeps up to ~1s each.
+  if let Some(rt) = runtime.as_deref() {
+    for name in &containers {
+      crate::ui::signals::stop_container(rt, name);
+    }
+  }
+  if let Some(pid) = run_pid {
+    signal_run_pid(pid);
+  }
+  crate::failure::log_session_proc(
+    &session_id,
+    crate::failure::reason::FORCE_STOPPED,
+    "(session)",
+    "force-stopped from the session browser",
+  );
+  (200, "{\"ok\":true}".into(), true)
+}
+
+/// SIGTERM a run PID, wait briefly, then SIGKILL if it is still alive — same cadence as Ctrl-C.
+fn signal_run_pid(pid: u32) {
+  let _ = std::process::Command::new("kill")
+    .arg("-TERM")
+    .arg(pid.to_string())
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
+  std::thread::sleep(std::time::Duration::from_secs(1));
+  if super::paths::pid_alive(pid) {
+    let _ = std::process::Command::new("kill")
+      .arg("-9")
+      .arg(pid.to_string())
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status();
+  }
 }
 
 /// The tasks a definition will run, as `SkillMeta` (name + agent) — a workflow's steps, or a
@@ -1650,6 +1761,7 @@ mod tests {
           }],
           last_seen_at: 50,
           client_connected: true,
+          run_pid: None,
         },
       );
     }
@@ -1694,6 +1806,7 @@ mod tests {
           }],
           last_seen_at: 1,
           client_connected: false,
+          run_pid: None,
         },
       );
     }
@@ -1740,6 +1853,7 @@ mod tests {
           }],
           last_seen_at: 10,
           client_connected: true,
+          run_pid: None,
         },
       );
     }
@@ -1806,6 +1920,7 @@ mod tests {
           }],
           last_seen_at: 50,
           client_connected: true,
+          run_pid: None,
         },
       );
     }
@@ -1822,6 +1937,81 @@ mod tests {
       .unwrap_or("")
       .contains("session ended before this proc reported finish"));
     assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn session_stop_marks_running_procs_force_stopped() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "stop01".into(),
+        Session {
+          id: "stop01".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: Some("doctor".into()),
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: vec![ProcRecord {
+            index: 0,
+            label: "opencode: doctor".into(),
+            kind: ProcKind::Skill,
+            status: ProcStatus::Running,
+            skill_name: Some("doctor".into()),
+            harness: Some("opencode".into()),
+            model: None,
+            started_at: Some(50),
+            note: None,
+            detail: None,
+            fail_reason: None,
+            elapsed: None,
+            lines: Vec::new(),
+            container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+            cast_path: None,
+          }],
+          last_seen_at: 50,
+          client_connected: true,
+          // No live PID — we assert store state, not kill success.
+          run_pid: None,
+        },
+      );
+    }
+    let (status, body, mutated) = session_stop_response(r#"{"session":"stop01"}"#, &store);
+    assert_eq!(status, 200);
+    assert!(mutated);
+    assert!(body.contains(r#""ok":true"#));
+    let guard = store.lock().unwrap();
+    let session = guard.sessions.get("stop01").unwrap();
+    assert!(session.ended_at.is_some());
+    assert!(session.run_pid.is_none());
+    assert_eq!(session.procs[0].status, ProcStatus::Fail);
+    assert_eq!(session.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
+    drop(guard);
+    // Idempotent on an already-ended session.
+    let (status2, body2, mutated2) = session_stop_response(r#"{"session":"stop01"}"#, &store);
+    assert_eq!(status2, 200);
+    assert!(!mutated2);
+    assert!(body2.contains("already_ended"));
+  }
+
+  #[test]
+  fn session_stop_unknown_session_is_404() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let (status, body, mutated) = session_stop_response(r#"{"session":"nosuch"}"#, &store);
+    assert_eq!(status, 404);
+    assert!(!mutated);
+    assert!(body.contains("not found"));
+  }
+
+  #[test]
+  fn session_start_records_run_pid() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let body = r#"{"session":"pidabc","repo":"/r","branch":"main","profile":"default","skills":[],"run_pid":4242}"#;
+    assert!(handle_api_post("/api/v1/session/start", body, &store, &prune));
+    assert_eq!(store.lock().unwrap().sessions.get("pidabc").unwrap().run_pid, Some(4242));
   }
 
   #[test]
@@ -1872,6 +2062,7 @@ mod tests {
           procs: Vec::new(),
           last_seen_at: now,
           client_connected: true,
+          run_pid: None,
         },
       );
     }
@@ -1883,9 +2074,12 @@ mod tests {
 
   #[test]
   fn images_build_spawns_and_precreates_session() {
-    // SCSH_BIN points the spawn at /usr/bin/true, so the "child" exits instantly and the
-    // test never builds anything. The env var is process-global; no other test sets it.
-    std::env::set_var("SCSH_BIN", "/usr/bin/true");
+    // A sleeping stub stands in for scsh so the "build" stays alive while we assert the
+    // pre-created session (an instant-exit stub would be reconciled to ended before we look).
+    let stub = std::env::temp_dir().join(format!("scsh-build-sleeper-{}.sh", crate::runtime::random_nonce_6()));
+    std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    std::env::set_var("SCSH_BIN", &stub);
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let (status, body, mutated) =
       images_build_response(r#"{"harnesses":["claude"],"rebuild_base":true,"force":true}"#, &store);
@@ -1898,6 +2092,34 @@ mod tests {
     assert_eq!(session.profile.as_deref(), Some(BUILD_IMAGES_PROFILE));
     assert_eq!(session.repo, "(image builds)");
     assert!(session.ended_at.is_none());
+    assert!(session.run_pid.is_some(), "build PID recorded for Force stop");
+    drop(guard);
+    std::fs::remove_file(&stub).ok();
+  }
+
+  #[test]
+  fn images_build_reconciles_a_silent_startup_failure() {
+    // Instant-exit stub with no registration → session must end as failed, not stay "running".
+    std::env::set_var("SCSH_BIN", "/usr/bin/false");
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let (status, body, _) = images_build_response(r#"{"harnesses":["claude"]}"#, &store);
+    std::env::remove_var("SCSH_BIN");
+    assert_eq!(status, 200, "body: {body}");
+    let session_id = body.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+    // Reap thread may need a beat to wait() + reconcile.
+    for _ in 0..50 {
+      let ended = store.lock().unwrap().sessions.get(&session_id).and_then(|s| s.ended_at).is_some();
+      if ended {
+        break;
+      }
+      std::thread::sleep(Duration::from_millis(20));
+    }
+    let guard = store.lock().unwrap();
+    let session = guard.sessions.get(&session_id).expect("session");
+    assert!(session.ended_at.is_some(), "startup failure must end the session");
+    assert_eq!(session.procs.len(), 1);
+    assert_eq!(session.procs[0].label, "build failed to start");
+    assert_eq!(session.procs[0].status, ProcStatus::Fail);
   }
 
   #[test]
@@ -1942,6 +2164,7 @@ mod tests {
           }],
           last_seen_at: 50,
           client_connected: true,
+          run_pid: None,
         },
       );
     }
@@ -1951,7 +2174,7 @@ mod tests {
 
     // Register a cast path; write a partially-flushed asciicast (last line incomplete).
     let path = std::env::temp_dir().join(format!("scsh-test-cast-{}.cast", std::process::id()));
-    let header = r#"{"version": 2, "width": 200, "height": 50}"#;
+    let header = r#"{"version": 3, "term": {"cols": 200, "rows": 50}}"#;
     std::fs::write(&path, format!("{header}\n[0.1, \"o\", \"hello\"]\n[0.2, \"o\", \"trunc")).unwrap();
     let body = format!(r#"{{"session":"castab","proc":0,"path":{}}}"#, crate::json::quote(&path.to_string_lossy()));
     assert!(handle_api_post("/api/v1/proc/cast", &body, &store, &prune));
@@ -2015,6 +2238,7 @@ mod tests {
           }],
           last_seen_at: 50,
           client_connected: false,
+          run_pid: None,
         },
       );
     }
@@ -2024,13 +2248,13 @@ mod tests {
     // A registered cast whose file is not on disk yet → 404.
     assert_eq!(export_response("/cast/expabc/0/export.html", &store).0, 404);
     // A header with no complete frames yet → 404 with an actionable body.
-    std::fs::write(&cast_path, "{\"version\":2,\"width\":80,\"height\":24}\n").unwrap();
+    std::fs::write(&cast_path, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n").unwrap();
     let (status, body, disposition) = export_response("/cast/expabc/0/export.html", &store);
     assert_eq!(status, 404);
     assert!(body.contains("no recorded frames yet"), "body: {body}");
     assert!(disposition.is_none());
     // Frames + a sidecar → the self-contained page, served as `<stem>.html`.
-    std::fs::write(&cast_path, "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(&cast_path, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
     std::fs::write(
       dir.join("rec.chapters.json"),
       r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
@@ -2086,6 +2310,7 @@ mod tests {
         procs,
         last_seen_at: 60,
         client_connected: false,
+        run_pid: None,
       },
     );
     store
@@ -2103,14 +2328,14 @@ mod tests {
     std::fs::create_dir_all(&dir).unwrap();
     // Proc 0: a recording WITH a chapters sidecar. Proc 1: a bare recording. Proc 2: no cast.
     let cast0 = dir.join("rec0.cast");
-    std::fs::write(&cast0, "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
+    std::fs::write(&cast0, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n").unwrap();
     std::fs::write(
       dir.join("rec0.chapters.json"),
       r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
     )
     .unwrap();
     let cast1 = dir.join("rec1.cast");
-    std::fs::write(&cast1, "{\"version\":2,\"width\":80,\"height\":24}\n[1.0,\"o\",\"done\\r\\n\"]\n").unwrap();
+    std::fs::write(&cast1, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[1.0,\"o\",\"done\\r\\n\"]\n").unwrap();
     let store = store_with_export_session(
       "sexabc",
       vec![
@@ -2157,7 +2382,7 @@ mod tests {
     let cast = dir.join("evil.cast");
     std::fs::write(
       &cast,
-      "{\"version\":2,\"width\":80,\"height\":24}\n[0.1,\"o\",\"x\\\" & <b> </iframe><script>alert(1)</script>\"]\n",
+      "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.1,\"o\",\"x\\\" & <b> </iframe><script>alert(1)</script>\"]\n",
     )
     .unwrap();
     let store = store_with_export_session(
@@ -2184,7 +2409,7 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("scsh-session-export-404-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let cast = dir.join("frameless.cast");
-    std::fs::write(&cast, "{\"version\":2,\"width\":80,\"height\":24}\n").unwrap();
+    std::fs::write(&cast, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n").unwrap();
     let store = store_with_export_session(
       "nocast",
       vec![
@@ -2227,6 +2452,7 @@ mod tests {
             procs: Vec::new(),
             last_seen_at: 1,
             client_connected: true,
+            run_pid: None,
           },
         );
       }
@@ -2418,6 +2644,7 @@ mod tests {
         procs: Vec::new(),
         last_seen_at: 50,
         client_connected: false,
+        run_pid: None,
       },
     );
     reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
@@ -2446,6 +2673,7 @@ mod tests {
         procs: Vec::new(),
         last_seen_at: 55,
         client_connected: false,
+        run_pid: None,
       },
     );
     reconcile_finished_job(&store, "done", Some(0), "");
@@ -2470,6 +2698,7 @@ mod tests {
         procs: Vec::new(),
         last_seen_at: 50,
         client_connected: false,
+        run_pid: None,
       },
     );
     let out = repos_json(&store, 51);

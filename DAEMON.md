@@ -65,8 +65,9 @@ as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
 Missing/invalid credentials fail fast with a clear "log in on the host" error before any
 container starts — scsh never tries to drive a login screen.
 
-Each recorded skill is shown as an **inline player** in the session page (build rows keep
-their text log). The player (vendored asciinema-player, `fit:'both'`) has:
+Each recorded skill — and each image build recorded on the host — is shown as an **inline
+player** in the session page (a build falls back to a text log only when `asciinema` is
+missing from PATH). The player (vendored asciinema-player, `fit:'both'`) has:
 
 - **Playback** — play/pause, timeline scrubbing, and native keyboard: **space** pause,
   **←/→** seek, **&lt;/&gt;** speed, **[/]** jump between chapters (click the player first
@@ -77,7 +78,7 @@ their text log). The player (vendored asciinema-player, `fit:'both'`) has:
   above the player.
 - **Link at time** — copies a deep link to the standalone player at the current timestamp
   (`/cast/{session}/{proc}/play#t=<seconds>`).
-- **⬇ .cast** — downloads the raw asciicast v2. Works **mid-run**: the recording is NDJSON,
+- **⬇ .cast** — downloads the raw asciicast v3. Works **mid-run**: the recording is NDJSON,
   so the daemon serves the bytes written so far (truncated to the last complete line).
 - **⬇ .html** — downloads the recording as **one self-contained offline HTML player page**
   (the same rendering `scsh export-cast` does, chapters sidecar folded in when present),
@@ -127,15 +128,16 @@ scsh annotate-cast tmp/casts/<recording>.cast     # override model via SCSH_ANNO
 
 ## Artifact formats
 
-**Recording — asciicast v2** (`*.cast`). The [asciicast v2](https://docs.asciinema.org/manual/asciicast/v2/)
+**Recording — asciicast v3** (`*.cast`). The [asciicast v3](https://docs.asciinema.org/manual/asciicast/v3/)
 format: a header object on the first line, then one JSON array per line (NDJSON) — an output
-event is `[<seconds:number>, "o", "<text:string>"]`. Being line-delimited is what makes a
+event is `[<interval-seconds:number>, "o", "<text:string>"]` (times are intervals from the
+previous event, not absolute). Being line-delimited is what makes a
 partial file valid mid-run.
 
 ```jsonc
-{"version": 2, "width": 200, "height": 50, "timestamp": 1783108212, "env": {"TERM": "xterm-256color"}}
+{"version": 3, "term": {"cols": 200, "rows": 50, "type": "xterm-256color"}, "timestamp": 1783108212}
 [0.12, "o", "[?25lstarting…\r\n"]
-[1.34, "o", "done\r\n"]
+[1.22, "o", "done\r\n"]
 ```
 
 **Annotation sidecar** (`<cast-stem>.chapters.json`). Written by the annotation pass, served
@@ -198,7 +200,7 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
 
 - `GET /` — HTML session index
 - `GET /session/{id}` — HTML session detail
-- `GET /cast/{session}/{proc}` — asciicast v2 recording (valid partial file mid-run);
+- `GET /cast/{session}/{proc}` — asciicast v3 recording (valid partial file mid-run);
   `?dl=1` for a download attachment
 - `GET /cast/{session}/{proc}/play` — HTML player page (scrub, pause, `#t=…` deep links)
 - `GET /cast/{session}/{proc}/export.html` — the recording rendered as one self-contained
@@ -220,9 +222,17 @@ history survives a `daemon restart`; the daemon's own uptime/client state starts
 - `POST /api/v1/images/build` — body `{"harnesses": [name…], "rebuild_base": bool, "force":
   bool}` (all optional; no harnesses = all). Spawns a detached `scsh build-images --session
   <id>`, pre-creates that session, and returns `{"ok":true,"session":id}` so the caller can
-  deep-link it. One build at a time — a concurrent request gets 409.
+  deep-link it. One build at a time — a concurrent request gets 409. Stderr is captured and
+  the session is reconciled on exit (same as `jobs/start`), so a build that dies before it
+  registers becomes a failed session with the error — never a stranded "running" one. Each
+  image build is recorded as an asciinema cast on the host (same ASCII-cinema player as
+  skill runs) whenever `asciinema` is on PATH.
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
   — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path
+- `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job from the
+  session page: stop every still-named container, SIGTERM (then SIGKILL) the `scsh run`
+  process when its PID is known, and mark incomplete procs failed with `force_stopped`.
+  Idempotent on an already-ended session.
 - `POST /api/v1/repos/open` — body `{"path": "…"}`. Validate the path is a git repo, report
   whether it is clean, discover the harness definitions available to it, and remember it as an
   open repo. `{"ok":true,"repo":…,"clean":bool,"dirty":[…],"defs":[…]}`, or `{"ok":false,"error":…}`
@@ -379,7 +389,9 @@ upgrade), or **missing**. Select rows and press **Build selected** (or **Build a
 optional toggles force-rebuild the base image (`--no-cache`) or rebuild images that are
 already up to date. The buttons call `POST /api/v1/images/build` and navigate straight to
 the spawned `scsh build-images` session, where each image build streams as a proc row —
-the same view a run's build rows get.
+the same view a run's build rows get. Builds are TUI-first: each image build runs under
+a host `asciinema` PTY so Docker BuildKit / Apple `container` show their native progress,
+and the session page embeds the cast player (identical to a skill recording).
 
 ## Assumptions
 

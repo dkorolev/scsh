@@ -20,6 +20,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       branch: "main".into(),
       last_seen_at: 1,
       client_connected: true,
+      run_pid: None,
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
@@ -64,9 +65,19 @@ fn index_page_carries_the_images_panel_and_its_client_wiring() {
   for id in ["images-body", "images-build-selected", "images-build-all", "images-rebuild-base", "images-force"] {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
-  // The embedded client script populates the panel from the images API.
-  assert!(live_client_js().contains("/api/v1/images"), "client js should fetch the images API");
-  assert!(live_client_js().contains("/api/v1/images/build"), "client js should post builds");
+  // First paint already lists every known image (§13: no empty limbo while inspect runs).
+  assert!(html.contains("checking…"), "skeleton rows start in checking…");
+  assert!(html.contains("scsh-base:latest"), "base image row on first paint");
+  for tag in ["scsh-opencode:latest", "scsh-claude:latest", "scsh-codex:latest", "scsh-grok:latest", "scsh-cursor:latest"] {
+    assert!(html.contains(tag), "harness image {tag} on first paint");
+  }
+  assert!(html.contains("checking container runtime…"), "note explains the pending inspect");
+  // The embedded client script populates the panel from the images API without blanking rows.
+  let js = live_client_js();
+  assert!(js.contains("/api/v1/images"), "client js should fetch the images API");
+  assert!(js.contains("/api/v1/images/build"), "client js should post builds");
+  assert!(js.contains("function markImagesChecking"), "refresh keeps rows visible while checking");
+  assert!(!js.contains("loading…"), "must not replace the table with a blank loading row");
 }
 
 #[test]
@@ -112,6 +123,7 @@ fn session_proc_html_has_no_stray_backslashes() {
       branch: "main".into(),
       last_seen_at: 1,
       client_connected: false,
+      run_pid: None,
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
@@ -139,6 +151,38 @@ fn session_proc_html_has_no_stray_backslashes() {
   assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
   assert!(procs.contains("Auto-scroll to bottom"));
   assert!(html.contains(r#"<div class="output"><div class="dim">No output yet.</div>"#));
+  assert!(html.contains(r#"id="session-stop""#), "running session should offer Force stop");
+  assert!(html.contains("Force stop"));
+}
+
+#[test]
+fn ended_session_hides_force_stop_button() {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "done01".into(),
+    Session {
+      id: "done01".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![],
+    },
+  );
+  let html = session_page(&store, "done01").expect("session page");
+  assert!(!html.contains(r#"id="session-stop""#), "ended session must not offer Force stop");
+}
+
+#[test]
+fn client_js_wires_force_stop() {
+  let js = live_client_js();
+  assert!(js.contains("/api/v1/session/stop"), "client js posts session stop");
+  assert!(js.contains("function forceStopSession"), "client js defines forceStopSession");
 }
 
 #[test]
@@ -155,6 +199,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       branch: "main".into(),
       last_seen_at: 1,
       client_connected: true,
+      run_pid: None,
       skills: vec![],
       procs: vec![ProcRecord {
         index: 2,
@@ -213,6 +258,7 @@ fn session_proc_html_shows_autoscroll_while_running() {
       branch: "main".into(),
       last_seen_at: 1,
       client_connected: true,
+      run_pid: None,
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
@@ -319,7 +365,7 @@ fn session_page_header_offers_the_session_export_download() {
   // (decided server-side: any proc with a registered cast; the endpoint 404s edge cases).
   let html = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   assert!(
-    html.contains(r#"<a class="session-export" href="/session/castab/export.html" download>⬇ session .html</a>"#),
+    html.contains(r#"href="/session/castab/export.html" download"#) && html.contains("session-export"),
     "session export button"
   );
   // No recorded proc anywhere → no button (nothing to export; the 404 would only confuse).
@@ -358,7 +404,7 @@ fn wrap_page_connecting_status_uses_blue() {
   use super::layout::wrap_page;
   let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
   assert!(html.contains("class=\"daemon-status connecting\""));
-  assert!(html.contains(".daemon-status.connecting .dot { background: #6af; }"));
+  assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
 }
 
 #[test]

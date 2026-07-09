@@ -28,7 +28,8 @@ pub(crate) fn empty_output_html(status: ProcStatus) -> String {
   format!("<div class=\"dim\">{}</div>\n", empty_output_label(status))
 }
 
-/// Whether this proc has an asciinema recording to embed (skills do; build rows don't).
+/// Whether this proc has an asciinema recording to embed (skills always; builds when the
+/// host recorded the image build under a PTY).
 pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }

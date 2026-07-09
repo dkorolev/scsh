@@ -21,8 +21,8 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let elapsed = proc_elapsed_secs(proc, now).map(|e| format_elapsed_clock(e)).unwrap_or_else(|| "—".to_string());
     let note = proc.note.as_deref().unwrap_or("");
     let container = proc.container_name.as_deref().unwrap_or("");
-    // Recorded procs (skills) show the inline cast player; the rest (build rows) show the
-    // timestamped text output with its auto-scroll control.
+    // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
+    // build fallbacks (no asciinema on PATH) keep the timestamped output with auto-scroll.
     let body_html = if proc_has_cast(proc) {
       cast_embed_html(&session.id, proc)
     } else {
@@ -84,21 +84,33 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let id = esc(&session.id);
   let permalink = esc(&session_url(port, &session.id));
   let session_meta = session_meta_placeholder(session);
-  // Whole-session download: every recording assembled into one offline page. Decided
-  // server-side — the button renders whenever any proc has a registered cast, and the
-  // endpoint's actionable 404 speaks for the edge cases (e.g. casts still frameless).
-  let export_link = if session.procs.iter().any(proc_has_cast) {
-    format!("<a class=\"session-export\" href=\"/session/{id}/export.html\" download>⬇ session .html</a>\n", id = id)
+  let export_btn = if session.procs.iter().any(proc_has_cast) {
+    format!(
+      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ session .html</span></a>\n",
+      id = id
+    )
+  } else {
+    String::new()
+  };
+  let stop_btn = if session.ended_at.is_none() {
+    format!(
+      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"><span>Force stop</span></button>\n",
+      id = id
+    )
   } else {
     String::new()
   };
   let body = format!(
     "<h1><a href=\"/\">scsh</a> › session <code>{id}</code></h1>\n\
-<p class=\"dim\">profile {profile}</p>\n{export_link}{session_meta}\n{skills}\
+<p class=\"subtitle\">profile {profile}</p>\n\
+<div class=\"session-actions\">{stop_btn}{export_btn}</div>\n\
+<div class=\"card card--accent-left-cyan\">{session_meta}\n{skills}</div>\n\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
 <p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
     id = id,
     profile = esc(profile),
+    export_btn = export_btn,
+    stop_btn = stop_btn,
     session_meta = session_meta,
     skills = skills_html,
     procs = procs_html,

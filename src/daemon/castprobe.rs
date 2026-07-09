@@ -16,9 +16,9 @@ use super::model::{ProcStatus, Store};
 
 /// Incremental parser state for one proc's asciicast file.
 ///
-/// `scsh` records asciicast **v2** (the in-container asciinema CLI), where each event line
-/// is `[<absolute-seconds>, "o"|"i"|…, …]` — the available duration is the max event time.
-/// The header's `version` is still honored: a v3 cast (interval timestamps) sums them.
+/// `scsh` records asciicast **v3** (asciinema CLI 3.x), where each event line is
+/// `[<interval-seconds>, "o"|"i"|…, …]` — the available duration is the sum of intervals.
+/// The header's `version` is still honored: a legacy v2 cast (absolute timestamps) takes the max.
 pub(crate) struct CastProbe {
   /// Bytes parsed so far — always a complete-line boundary; the truncated tail (if any)
   /// is re-read on the next probe once asciinema finishes the line.
@@ -34,7 +34,7 @@ pub(crate) struct CastProbe {
 
 impl Default for CastProbe {
   fn default() -> CastProbe {
-    CastProbe { offset: 0, version: 2, duration: 0.0, saw_event: false, last_sent: None }
+    CastProbe { offset: 0, version: 3, duration: 0.0, saw_event: false, last_sent: None }
   }
 }
 
@@ -169,6 +169,7 @@ mod tests {
     std::env::temp_dir().join(format!("scsh-castprobe-{name}-{}.cast", std::process::id()))
   }
 
+  const HEADER_V3: &str = r#"{"version": 3, "term": {"cols": 200, "rows": 50}}"#;
   const HEADER_V2: &str = r#"{"version": 2, "width": 200, "height": 50}"#;
 
   #[test]
@@ -180,7 +181,7 @@ mod tests {
     std::fs::write(&path, "").unwrap();
     probe.probe(&path); // empty file
     assert_eq!(probe.take_growth(), None);
-    std::fs::write(&path, format!("{HEADER_V2}\n")).unwrap();
+    std::fs::write(&path, format!("{HEADER_V3}\n")).unwrap();
     probe.probe(&path); // header only — still no events
     assert_eq!(probe.take_growth(), None);
     std::fs::remove_file(&path).unwrap();
@@ -189,7 +190,8 @@ mod tests {
   #[test]
   fn probe_tolerates_truncated_trailing_line_and_resumes_from_cached_offset() {
     let path = temp_cast("truncated");
-    std::fs::write(&path, format!("{HEADER_V2}\n[0.5, \"o\", \"a\"]\n[1.25, \"o\", \"tr")).unwrap();
+    // v3 intervals: 0.5 then 1.25 → duration 1.75 once the truncated line completes; +3.75 → 5.5.
+    std::fs::write(&path, format!("{HEADER_V3}\n[0.5, \"o\", \"a\"]\n[1.25, \"o\", \"tr")).unwrap();
     let mut probe = CastProbe::default();
     probe.probe(&path);
     // Only the complete lines count; the truncated tail is not parsed (and not consumed).
@@ -199,7 +201,7 @@ mod tests {
     f.write_all(b"unc\"]\n[3.75, \"o\", \"b\"]\n").unwrap();
     drop(f);
     probe.probe(&path);
-    assert_eq!(probe.take_growth(), Some(3.75));
+    assert_eq!(probe.take_growth(), Some(5.5));
     // No new bytes → no growth, and take_growth stays quiet after the value is taken.
     probe.probe(&path);
     assert_eq!(probe.take_growth(), None);
@@ -207,27 +209,27 @@ mod tests {
   }
 
   #[test]
-  fn v2_uses_absolute_times_and_v3_sums_intervals() {
-    // scsh records asciicast v2 (absolute event times → duration is the max)…
+  fn v3_sums_intervals_and_legacy_v2_uses_absolute_times() {
+    // scsh records asciicast v3 (interval timestamps → duration is the sum)…
+    let mut v3 = CastProbe::default();
+    v3.ingest(format!("{HEADER_V3}\n[1.0, \"o\", \"a\"]\n[2.5, \"o\", \"b\"]\n").as_bytes());
+    assert_eq!(v3.take_growth(), Some(3.5));
+    // …and a legacy v2 header (absolute timestamps) is honored by taking the max.
     let mut v2 = CastProbe::default();
     v2.ingest(format!("{HEADER_V2}\n[1.0, \"o\", \"a\"]\n[2.5, \"o\", \"b\"]\n").as_bytes());
     assert_eq!(v2.take_growth(), Some(2.5));
-    // …but a v3 header (interval timestamps) is honored by summing.
-    let mut v3 = CastProbe::default();
-    v3.ingest(b"{\"version\": 3, \"term\": {\"cols\": 80, \"rows\": 24}}\n[1.0, \"o\", \"a\"]\n[2.5, \"o\", \"b\"]\n");
-    assert_eq!(v3.take_growth(), Some(3.5));
   }
 
   #[test]
   fn rewritten_smaller_file_restarts_parsing_without_reannouncing() {
     let path = temp_cast("rewritten");
-    std::fs::write(&path, format!("{HEADER_V2}\n[5.0, \"o\", \"a\"]\n")).unwrap();
+    std::fs::write(&path, format!("{HEADER_V3}\n[5.0, \"o\", \"a\"]\n")).unwrap();
     let mut probe = CastProbe::default();
     probe.probe(&path);
     assert_eq!(probe.take_growth(), Some(5.0));
     // The file was replaced by a shorter one: parsing restarts, but a smaller duration
     // is not re-announced as growth.
-    std::fs::write(&path, format!("{HEADER_V2}\n[2.0, \"o\", \"a\"]\n")).unwrap();
+    std::fs::write(&path, format!("{HEADER_V3}\n[2.0, \"o\", \"a\"]\n")).unwrap();
     probe.probe(&path);
     assert_eq!(probe.take_growth(), None);
     std::fs::remove_file(&path).unwrap();
@@ -237,7 +239,7 @@ mod tests {
   fn event_time_ignores_non_event_lines() {
     assert_eq!(event_time(r#"[1.5, "o", "x"]"#), Some(1.5));
     assert_eq!(event_time(r#"[ 2.25 , "o", "x"]"#), Some(2.25));
-    assert_eq!(event_time(r#"{"version": 2}"#), None);
+    assert_eq!(event_time(r#"{"version": 3}"#), None);
     assert_eq!(event_time("not json"), None);
     assert_eq!(event_time(""), None);
   }
@@ -245,7 +247,7 @@ mod tests {
   #[test]
   fn growth_messages_cover_running_growth_final_notice_and_eviction() {
     let path = temp_cast("messages");
-    std::fs::write(&path, format!("{HEADER_V2}\n[0.5, \"o\", \"a\"]\n")).unwrap();
+    std::fs::write(&path, format!("{HEADER_V3}\n[0.5, \"o\", \"a\"]\n")).unwrap();
     let cast = path.to_string_lossy().to_string();
     let mut probes = HashMap::new();
 

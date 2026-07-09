@@ -60,7 +60,13 @@ function sessionDurationLabel(session, nowUnix, lifecycle) {
   return '—';
 }
 function sessionStatusBadge(lifecycle) {
-  return '<span class="session-status ' + esc(lifecycle.class) + '">' + esc(lifecycle.label) + '</span>';
+  return '<span class="chamfer session-status ' + esc(lifecycle.class) + '"><span>' +
+    esc(lifecycle.label) + '</span></span>';
+}
+function setBtnLabel(btn, text) {
+  const span = btn.querySelector(':scope > span');
+  if (span) span.textContent = text;
+  else btn.textContent = text;
 }
 function sessionStartedCell(session, nowUnix) {
   const ts = session.started_at || 0;
@@ -499,15 +505,15 @@ function initCasts(root) {
   });
 }
 // The available duration and event count of loaded asciicast text (complete lines only —
-// the cast endpoint truncates to whole lines). scsh records asciicast v2, where event
-// times are absolute (duration = max); a v3 header (interval times) is honored by summing.
+// the cast endpoint truncates to whole lines). scsh records asciicast v3, where event
+// times are intervals (duration = sum); a legacy v2 header (absolute times) takes the max.
 function castEventStats(text) {
-  let version = 2, duration = 0, events = 0;
+  let version = 3, duration = 0, events = 0;
   for (const raw of String(text || '').split('\n')) {
     const line = raw.trim();
-    if (!line) continue;
+    if (!line || line[0] === '#') continue;
     if (line[0] === '{') {
-      try { version = Number(JSON.parse(line).version) || 2; } catch (_) {}
+      try { version = Number(JSON.parse(line).version) || 3; } catch (_) {}
       continue;
     }
     if (line[0] !== '[') continue;
@@ -575,7 +581,7 @@ function createCastPlayer(box, startAt, autoplay) {
 }
 // Live mode: while the proc runs, follow the tail of the recording as it grows.
 //
-// Mechanism, chosen deliberately: the vendored asciinema-player 3.9.0 build DOES ship
+// Mechanism, chosen deliberately: the vendored asciinema-player 3.17.0 build DOES ship
 // streaming drivers — a `websocket` driver speaking the v1.alis / v2.asciicast
 // subprotocols and an `eventsource` driver — but using them would require the daemon to
 // grow a second, per-cast streaming WS endpoint speaking those subprotocols next to its
@@ -833,6 +839,7 @@ function onTick(msg) {
     if (session) {
       renderSessionMeta(session, nowUnix);
       renderSession(session, nowUnix);
+      syncSessionStopButton(session);
     }
   } else {
     const snapshot = msg.sessions ?? liveSessions;
@@ -870,41 +877,117 @@ startProcClock();
   });
   applyAutoScrollAll(root);
   initCasts(root);
+  initSessionStop();
 })();
+function syncSessionStopButton(session) {
+  const btn = document.getElementById('session-stop');
+  if (!btn) return;
+  if (session && session.ended_at) {
+    btn.disabled = true;
+    setBtnLabel(btn, 'Stopped');
+  }
+}
+async function forceStopSession(btn) {
+  const id = btn.getAttribute('data-session') || SESSION_ID;
+  if (!id) return;
+  if (!confirm('Force-stop this session? Running containers will be killed.')) return;
+  btn.disabled = true;
+  setBtnLabel(btn, 'Stopping…');
+  try {
+    const resp = await fetch('/api/v1/session/stop', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: id }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      btn.disabled = false;
+      setBtnLabel(btn, 'Force stop');
+      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    setBtnLabel(btn, data.already_ended ? 'Already ended' : 'Stopped');
+  } catch (e) {
+    btn.disabled = false;
+    setBtnLabel(btn, 'Force stop');
+    alert(String(e));
+  }
+}
+function initSessionStop() {
+  const btn = document.getElementById('session-stop');
+  if (!btn) return;
+  btn.addEventListener('click', () => forceStopSession(btn));
+}
 // ---- images panel (index page only) ----
 function imageStatusBadge(img) {
-  if (!img.exists) return '<span class="session-status failed">missing</span>';
-  if (!img.up_to_date) return '<span class="session-status cancelled">stale</span>';
-  return '<span class="session-status completed">up to date</span>';
+  if (!img.exists) return '<span class="chamfer session-status failed"><span>missing</span></span>';
+  if (!img.up_to_date) return '<span class="chamfer session-status cancelled"><span>stale</span></span>';
+  return '<span class="chamfer session-status completed"><span>up to date</span></span>';
+}
+function imageCheckingBadge() {
+  return '<span class="chamfer session-status checking"><span>checking…</span></span>';
+}
+// Keep every known image row visible while the runtime inspect runs (§13: no empty limbo).
+function markImagesChecking() {
+  const body = document.getElementById('images-body');
+  if (!body) return;
+  body.querySelectorAll('tr[data-image]').forEach(tr => {
+    tr.dataset.pending = '1';
+    const status = tr.querySelector('.image-status-cell');
+    if (status) status.innerHTML = imageCheckingBadge();
+    const created = tr.querySelector('.image-created-cell');
+    if (created) { created.textContent = '—'; created.classList.add('dim'); }
+    const size = tr.querySelector('.image-size-cell');
+    if (size) { size.textContent = '—'; size.classList.add('dim'); }
+    const cb = tr.querySelector('.image-select');
+    if (cb) cb.disabled = true;
+  });
+  const note = document.getElementById('images-note');
+  if (note) note.textContent = 'checking container runtime…';
+  const btn = document.getElementById('images-build-selected');
+  if (btn) btn.disabled = true;
+}
+function imageRowHtml(img) {
+  const checkbox = img.name === 'base' ? '' :
+    '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
+  return '<tr data-image="' + esc(img.name) + '"><td class="image-select-cell">' + checkbox + '</td>' +
+    '<td><code>' + esc(img.tag) + '</code></td>' +
+    '<td class="image-status-cell">' + imageStatusBadge(img) + '</td>' +
+    '<td class="image-created-cell">' + esc(img.created || '—') + '</td>' +
+    '<td class="image-size-cell">' + esc(img.size || '—') + '</td></tr>';
+}
+function wireImageSelectButtons(body) {
+  const btn = document.getElementById('images-build-selected');
+  if (!btn || !body) return;
+  body.querySelectorAll('.image-select').forEach(cb => cb.addEventListener('change', () => {
+    btn.disabled = body.querySelectorAll('.image-select:checked').length === 0;
+  }));
+  btn.disabled = body.querySelectorAll('.image-select:checked').length === 0;
 }
 function renderImages(data) {
   const body = document.getElementById('images-body');
   if (!body) return;
+  const note = document.getElementById('images-note');
   if (data.error) {
-    body.innerHTML = '<tr><td colspan="5" class="dim">' + esc(data.error) + '</td></tr>';
+    // Keep the known image list; surface the failure in the note, not by emptying the table.
+    body.querySelectorAll('tr[data-image]').forEach(tr => {
+      delete tr.dataset.pending;
+      const status = tr.querySelector('.image-status-cell');
+      if (status) status.innerHTML = '<span class="chamfer session-status failed"><span>unavailable</span></span>';
+      const cb = tr.querySelector('.image-select');
+      if (cb) cb.disabled = true;
+    });
+    if (note) note.textContent = data.error;
     return;
   }
-  body.innerHTML = (data.images || []).map(img => {
-    const checkbox = img.name === 'base' ? '' :
-      '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
-    return '<tr><td class="image-select-cell">' + checkbox + '</td>' +
-      '<td><code>' + esc(img.tag) + '</code></td>' +
-      '<td>' + imageStatusBadge(img) + '</td>' +
-      '<td>' + esc(img.created || '—') + '</td>' +
-      '<td>' + esc(img.size || '—') + '</td></tr>';
-  }).join('');
-  const btn = document.getElementById('images-build-selected');
-  if (btn) {
-    body.querySelectorAll('.image-select').forEach(cb => cb.addEventListener('change', () => {
-      btn.disabled = body.querySelectorAll('.image-select:checked').length === 0;
-    }));
-  }
+  body.innerHTML = (data.images || []).map(imageRowHtml).join('');
+  if (note) note.textContent = data.runtime ? ('runtime: ' + data.runtime) : '';
+  wireImageSelectButtons(body);
 }
 function refreshImages() {
-  const body = document.getElementById('images-body');
-  if (body) body.innerHTML = '<tr><td colspan="5" class="dim">loading…</td></tr>';
+  markImagesChecking();
   fetch('/api/v1/images').then(r => r.json()).then(renderImages).catch(() => {
-    if (body) body.innerHTML = '<tr><td colspan="5" class="dim">images unavailable (daemon error)</td></tr>';
+    renderImages({ error: 'images unavailable (daemon error)' });
   });
 }
 function startImagesBuild(all) {
@@ -954,7 +1037,7 @@ const DEFS_BY_NAME = {};  // name -> definition
 })();
 function defSourceBadge(src) {
   const cls = src === 'repo' ? 'completed' : (src === 'home' ? 'cancelled' : 'running');
-  return '<span class="session-status ' + cls + '">' + esc(src) + '</span>';
+  return '<span class="chamfer session-status ' + cls + '"><span>' + esc(src) + '</span></span>';
 }
 function pickRepo() {
   // The daemon is local, so it can pop the native OS folder chooser and hand back the path.
@@ -1019,10 +1102,14 @@ function renderDefs(defs) {
   if (!defs.length) { list.innerHTML = '<p class="dim">no harness definitions found.</p>'; return; }
   list.innerHTML = defs.map(d => {
     const agents = (d.agents || []).map(a =>
-      '<span class="agent-badge">' + esc(a.agent) + (a.model ? ' · ' + esc(a.model) : '') + '</span>').join(' ');
-    const wf = d.workflow ? ' <span class="session-status completed">workflow · ' + d.steps + ' steps</span>' : '';
+      '<span class="chamfer agent-badge"><span>' + esc(a.agent) +
+      (a.model ? ' · ' + esc(a.model) : '') + '</span></span>').join(' ');
+    const wf = d.workflow
+      ? ' <span class="chamfer session-status completed"><span>workflow · ' + d.steps + ' steps</span></span>'
+      : '';
     return '<div class="def-card">' +
-      '<button class="def-pick" data-def="' + esc(d.name) + '">' + esc(d.name) + '</button> ' +
+      '<button type="button" class="chamfer btn btn--cyan btn--sm def-pick" data-def="' +
+      esc(d.name) + '"><span>' + esc(d.name) + '</span></button> ' +
       defSourceBadge(d.source) + wf + ' <span class="dim">' + esc(d.description) + '</span>' +
       '<div class="def-agents">' + agents + '</div></div>';
   }).join('');
@@ -1051,8 +1138,9 @@ function selectDef(name) {
   }).join('');
   const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
   const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
-  form.innerHTML = '<h4>run <code>' + esc(name) + '</code></h4>' + fields +
-    '<div class="images-controls"><button id="def-start"' + disabled + '>Start job</button>' +
+  form.innerHTML = '<h4 class="form-title">run <code>' + esc(name) + '</code></h4>' + fields +
+    '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
+    disabled + '><span>Start job</span></button>' +
     '<span id="def-note" class="dim">' + hint + '</span></div>';
   document.getElementById('def-start')?.addEventListener('click', () => startJob(name));
 }
@@ -1100,8 +1188,9 @@ function renderRepoJobs(sessions, nowUnix) {
     const jobs = (byRepo[repo] || []).sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
     const cells = jobs.length ? jobs.map(s => {
       const lc = sessionLifecycle(s, nowUnix);
-      return '<a href="/session/' + esc(s.id) + '"><span class="session-status ' + lc.class + '">' +
-        esc(lc.label) + '</span> ' + esc(s.id) + (s.profile ? ' · ' + esc(s.profile) : '') + '</a>';
+      return '<a href="/session/' + esc(s.id) + '"><span class="chamfer session-status ' + lc.class +
+        '"><span>' + esc(lc.label) + '</span></span> ' + esc(s.id) +
+        (s.profile ? ' · ' + esc(s.profile) : '') + '</a>';
     }).join('<br>') : '<span class="dim">no jobs yet</span>';
     return '<tr><td class="repo-path">' + esc(repo) + '</td><td>' + cells + '</td></tr>';
   }).join('');

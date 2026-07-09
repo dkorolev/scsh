@@ -22,6 +22,7 @@ pub mod reason {
   pub const RESULT_MISSING: &str = "result_file_missing";
   pub const THREAD_PANICKED: &str = "skill_thread_panicked";
   pub const SESSION_END_INCOMPLETE: &str = "session_end_before_proc_finish";
+  pub const FORCE_STOPPED: &str = "force_stopped";
   pub const DAEMON_DRAIN_TIMEOUT: &str = "daemon_poster_drain_timeout";
   pub const DAEMON_POST_FAILED: &str = "daemon_post_failed";
 }

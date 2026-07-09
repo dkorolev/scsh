@@ -83,7 +83,7 @@ mod tests {
   use crate::annotate::Chapter;
 
   const CAST: &str =
-    "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello\\r\\n\"]\n[2.0,\"o\",\"done\\r\\n\"]\n";
+    "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello\\r\\n\"]\n[1.5,\"o\",\"done\\r\\n\"]\n";
 
   fn annotation() -> CastAnnotation {
     CastAnnotation {

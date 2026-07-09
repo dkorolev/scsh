@@ -1065,9 +1065,9 @@ fn daemon_http_get(path: &str, port: u16) -> Option<String> {
 // self-contained offline HTML player page. These tests need no container and no network:
 // the fixture cast is synthesized right here.
 
-/// A tiny synthetic asciicast v2 recording.
+/// A tiny synthetic asciicast v3 recording (interval timestamps).
 const EXPORT_CAST: &str =
-  "{\"version\":2,\"width\":80,\"height\":24}\n[0.5,\"o\",\"hello from scsh\\r\\n\"]\n[2.0,\"o\",\"all done\\r\\n\"]\n";
+  "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.5,\"o\",\"hello from scsh\\r\\n\"]\n[1.5,\"o\",\"all done\\r\\n\"]\n";
 
 /// The matching `annotate-cast`-style sidecar: a summary plus two chapters.
 const EXPORT_SIDECAR: &str = "{\n  \"summary\": \"A tiny demo run.\",\n  \"chapters\": \

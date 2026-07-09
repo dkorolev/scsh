@@ -31,7 +31,7 @@ RUN set -eux; \
       perl gawk \
       jq sqlite3 postgresql-client \
       ripgrep shellcheck \
-      asciinema tmux \
+      tmux \
       protobuf-compiler \
       iputils-ping traceroute bind9-dnsutils netcat-openbsd iproute2 whois socat; \
     rm -rf /var/lib/apt/lists/*
@@ -45,14 +45,20 @@ RUN set -eux; \
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \
     case "$arch" in \
-      amd64) uvarch=x86_64 ;; \
-      arm64) uvarch=aarch64 ;; \
+      amd64) uvarch=x86_64; asciinema_arch=x86_64 ;; \
+      arm64) uvarch=aarch64; asciinema_arch=aarch64 ;; \
       *) echo "scsh: unsupported architecture '$arch'" >&2; exit 1 ;; \
     esac; \
     tmp="$(mktemp -d)"; \
     curl -fsSL "https://github.com/astral-sh/uv/releases/latest/download/uv-${uvarch}-unknown-linux-gnu.tar.gz" \
       | tar xz -C "$tmp" --strip-components=1; \
     install -m 0755 "$tmp/uv" "$tmp/uvx" /usr/local/bin/; rm -rf "$tmp"; \
+    # asciinema 3.x (asciicast v3). Debian bookworm still ships 2.2 (v2-only) — pin the
+    # official static binary so every harness recording is the current format.
+    curl -fsSL "https://github.com/asciinema/asciinema/releases/download/v3.2.1/asciinema-${asciinema_arch}-unknown-linux-gnu" \
+      -o /usr/local/bin/asciinema; \
+    chmod +x /usr/local/bin/asciinema; \
+    asciinema --version; \
     curl -fsSL "https://github.com/mikefarah/yq/releases/latest/download/yq_linux_${arch}" -o /usr/local/bin/yq; \
     chmod +x /usr/local/bin/yq; \
     curl -fsSL "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${arch}/kubectl" \
@@ -225,7 +231,9 @@ fi
   log "watcher: exit (session gone or killed)"
 } >/dev/null 2>&1 &
 
-asciinema rec -q --cols "$cols" --rows "$rows" -c 'tmux attach -r -t scsh' "$SCSH_RUN_LOG.cast"
+# asciinema 3.x defaults to asciicast-v3; --window-size replaces the old --cols/--rows flags.
+asciinema rec -q --overwrite -f asciicast-v3 --window-size "${cols}x${rows}" \
+  -c 'tmux attach -r -t scsh' "$SCSH_RUN_LOG.cast"
 log "asciinema exited rc=$?"
 wait
 log "done"

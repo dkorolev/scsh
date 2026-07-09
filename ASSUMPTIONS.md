@@ -14,7 +14,7 @@ Review these before merging or extending.
 ## Invocation
 
 - **Claude uses prompt model (B):** `claude -p "Run .skills/<source>/SKILL.md …"` with `--permission-mode bypassPermissions` and `--no-session-persistence`. Not slash-command `/add` (headless skill bugs).
-- **OpenCode unchanged:** `opencode run "run skill <source>"`.
+- **OpenCode is a recorded interactive TUI:** `opencode -m <model> --prompt "Run the skill defined in .skills/<source>/…"`, submitted with Enter once the TUI is up (not the old headless `opencode run`).
 
 ## Images
 

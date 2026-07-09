@@ -97,15 +97,28 @@ pub fn strip_ansi(s: &str) -> String {
   out
 }
 
-/// Render an asciicast v2 recording (NDJSON) into a compact timestamped transcript:
+/// Render an asciicast recording (NDJSON v2 or v3) into a compact timestamped transcript:
 /// `[<secs>s] visible text`, one line per change, deduped and downsampled to `max_lines`.
 /// TUI redraws produce repetitive frames, so consecutive identical lines are collapsed.
+///
+/// Event times are absolute wall-clock seconds from the start of the recording: v2 stamps
+/// are already absolute; v3 stamps are intervals and are summed as they are read.
 pub fn cast_transcript(cast_ndjson: &str, max_lines: usize) -> String {
   let mut events: Vec<(f64, String)> = Vec::new();
   let mut last = String::new();
-  for line in cast_ndjson.lines().skip(1) {
+  let mut version = 3u8;
+  let mut abs_t = 0.0;
+  for line in cast_ndjson.lines() {
     let line = line.trim();
-    if line.is_empty() {
+    if line.is_empty() || line.starts_with('#') {
+      continue;
+    }
+    if line.starts_with('{') {
+      if let Ok(Value::Object(obj)) = json::parse(line) {
+        if let Some(Value::Number(n)) = obj.iter().find(|(k, _)| k == "version").map(|(_, v)| v) {
+          version = *n as u8;
+        }
+      }
       continue;
     }
     let Ok(Value::Array(items)) = json::parse(line) else { continue };
@@ -115,7 +128,18 @@ pub fn cast_transcript(cast_ndjson: &str, max_lines: usize) -> String {
       continue;
     };
     if code != "o" {
+      // Still advance the clock for non-output events so chapter times stay aligned.
+      if version == 3 {
+        abs_t += *t;
+      } else {
+        abs_t = abs_t.max(*t);
+      }
       continue;
+    }
+    if version == 3 {
+      abs_t += *t;
+    } else {
+      abs_t = *t;
     }
     for raw in strip_ansi(data).split('\n') {
       let text: String = raw.split_whitespace().collect::<Vec<_>>().join(" ");
@@ -124,7 +148,7 @@ pub fn cast_transcript(cast_ndjson: &str, max_lines: usize) -> String {
       }
       last = text.clone();
       let clipped: String = text.chars().take(200).collect();
-      events.push((*t, clipped));
+      events.push((abs_t, clipped));
     }
   }
   // Downsample evenly to at most `max_lines` while keeping chronological order. Timestamps
@@ -280,14 +304,25 @@ mod tests {
 
   #[test]
   fn cast_transcript_dedups_and_timestamps() {
-    let cast = "{\"version\":2,\"width\":80,\"height\":24}\n\
+    // v3: intervals sum to absolute times shown in the transcript.
+    let cast = "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n\
 [0.5, \"o\", \"\\u001b[2Jhello\\r\\n\"]\n\
-[1.0, \"o\", \"hello\\r\\n\"]\n\
-[65.0, \"o\", \"done\\r\\n\"]\n";
+[0.5, \"o\", \"hello\\r\\n\"]\n\
+[64.0, \"o\", \"done\\r\\n\"]\n";
     let t = cast_transcript(cast, 120);
     // Fractional-second timestamps so chapters can be floats.
     assert!(t.contains("[0.5s] hello"), "got: {t}");
     assert!(!t.contains("[1.0s] hello"), "consecutive duplicate dropped: {t}");
+    assert!(t.contains("[65.0s] done"), "got: {t}");
+  }
+
+  #[test]
+  fn cast_transcript_still_reads_legacy_v2_absolute_times() {
+    let cast = "{\"version\":2,\"width\":80,\"height\":24}\n\
+[0.5, \"o\", \"hello\\r\\n\"]\n\
+[65.0, \"o\", \"done\\r\\n\"]\n";
+    let t = cast_transcript(cast, 120);
+    assert!(t.contains("[0.5s] hello"), "got: {t}");
     assert!(t.contains("[65.0s] done"), "got: {t}");
   }
 
@@ -331,7 +366,11 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("scsh-annotate-test-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let cast = dir.join("rec.cast");
-    std::fs::write(&cast, "{\"version\":2,\"width\":80,\"height\":24}\n[0.1, \"o\", \"working\\r\\n\"]\n").unwrap();
+    std::fs::write(
+      &cast,
+      "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.1, \"o\", \"working\\r\\n\"]\n",
+    )
+    .unwrap();
     let stub =
       |_m: &str, _p: &str| Some("{\"summary\":\"Did work.\",\"chapters\":[{\"t\":0,\"title\":\"Start\"}]}".to_string());
     let side = annotate_cast_with(&cast, "composer-2.5-fast", stub).unwrap();

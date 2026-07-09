@@ -4,9 +4,9 @@ version = 4
 
 [[package]]
 name = "beecast-page"
-version = "0.2.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "40d5b23ec572922010787d4fea86a02d6e5f32855755cd294371eaa27b47fbf9"
+checksum = "93fa054a0bbc5f4d20d92fae4c106322089e173674a5e0d3b61537950c552f04"
 
 [[package]]
 name = "bitflags"

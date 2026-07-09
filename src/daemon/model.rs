@@ -185,6 +185,9 @@ pub struct Session {
   pub last_seen_at: u64,
   /// True while the `scsh run` client is registered (between register and deregister).
   pub client_connected: bool,
+  /// Host PID of the `scsh run` / `scsh build-images` process, when known — so the web UI can
+  /// force-stop a stalled job (SIGTERM the run; its signal handler tears containers down).
+  pub run_pid: Option<u32>,
 }
 
 /// A repository opened from the daemon UI, ready to start jobs in. Kept in memory only (a
@@ -397,6 +400,7 @@ mod tests {
       }],
       last_seen_at: 200,
       client_connected: false,
+      run_pid: None,
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     assert_eq!(session.duration_secs(200), Some(100));
@@ -415,6 +419,7 @@ mod tests {
       procs: Vec::new(),
       last_seen_at: 100,
       client_connected: true,
+      run_pid: None,
     };
     assert_eq!(session.lifecycle_status(110), SessionLifecycle::Running);
     assert_eq!(session.lifecycle_status(111), SessionLifecycle::Terminated);
@@ -449,6 +454,7 @@ mod tests {
       }],
       last_seen_at: 50,
       client_connected: false,
+      run_pid: None,
     };
     assert_eq!(session.lifecycle_status(50), SessionLifecycle::Cancelled);
   }
@@ -501,6 +507,7 @@ mod tests {
       ],
       last_seen_at: 1,
       client_connected: true,
+      run_pid: None,
     };
     assert!(session.has_incomplete_procs());
     assert_eq!(session.lifecycle_status(2), SessionLifecycle::Running);
@@ -519,6 +526,7 @@ mod tests {
       procs: Vec::new(),
       last_seen_at: 100,
       client_connected: true,
+      run_pid: None,
     };
     let done = Session {
       id: "done".into(),
@@ -531,6 +539,7 @@ mod tests {
       procs: Vec::new(),
       last_seen_at: 250,
       client_connected: false,
+      run_pid: None,
     };
     let mut sessions = BTreeMap::new();
     sessions.insert(done.id.clone(), done);
@@ -558,6 +567,7 @@ mod tests {
           procs: Vec::new(),
           last_seen_at: i as u64,
           client_connected: false,
+          run_pid: None,
         },
       );
     }
@@ -600,6 +610,7 @@ mod tests {
         procs: Vec::new(),
         last_seen_at: now,
         client_connected: true,
+        run_pid: None,
       },
     );
     assert_eq!(store.alive_clients(now + SESSION_STALE_SECS), 1);

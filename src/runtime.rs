@@ -330,7 +330,7 @@ pub const AGENT_REPO: &str = "/home/agent/repo";
 /// therefore `<run_dir>/tmp/scsh-run.log`, where the full intra-container output can be read.
 pub const RUN_LOG_REL: &str = "tmp/scsh-run.log";
 
-/// Per-run asciinema recording (asciicast v2, NDJSON) of the harness PTY, RELATIVE to the
+/// Per-run asciinema recording (asciicast v3, NDJSON) of the harness PTY, RELATIVE to the
 /// repo: `${SCSH_RUN_LOG}.cast` in-container, `<run_dir>/tmp/scsh-run.log.cast` on the host.
 /// NDJSON means any byte-prefix ending on a newline is itself a valid (partial) recording,
 /// so the file can be downloaded and replayed while the skill is still running.
@@ -838,6 +838,8 @@ fn format_image_size(bytes: u64) -> String {
 
 /// Build argv for the stdin method: the Dockerfile is sent on stdin (`-`). `no_cache` adds
 /// `--no-cache` so a forced rebuild re-runs every layer instead of no-op'ing on the cache.
+/// Prefer [`build_command_context`] when recording a TUI cast — a PTY cannot feed stdin the
+/// same way `Proc::run_with_stdin` does.
 pub fn build_command_stdin(
   runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str, no_cache: bool,
 ) -> Vec<String> {
@@ -863,6 +865,53 @@ pub fn build_command_context(
   v.extend(build_labels(fingerprint));
   v.push(context_dir.into());
   v
+}
+
+/// True when the host has an `asciinema` CLI that can record a build's PTY (the same
+/// ASCII-cinema path skills use inside the container).
+pub fn asciinema_available() -> bool {
+  std::process::Command::new("asciinema")
+    .arg("--version")
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status()
+    .map(|s| s.success())
+    .unwrap_or(false)
+}
+
+/// Argv that records `build_shell_cmd` under a real PTY into `cast_path` (asciinema 3.x).
+///
+/// `--headless` keeps the live board's terminal free (the cast is the UI); `--return` forwards
+/// the builder's exit status; `--overwrite` lets a retry reuse the same path. Window size matches
+/// the default harness PTY so BuildKit / Apple `container` render their native progress TUI.
+pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd: &str) -> Vec<String> {
+  vec![
+    "asciinema".into(),
+    "rec".into(),
+    "-q".into(),
+    "--overwrite".into(),
+    "--return".into(),
+    "--headless".into(),
+    "-f".into(),
+    "asciicast-v3".into(),
+    "--window-size".into(),
+    format!("{cols}x{rows}"),
+    "--command".into(),
+    build_shell_cmd.into(),
+    cast_path.into(),
+  ]
+}
+
+/// Durable directory for host-recorded build casts (`~/.scsh/casts`).
+pub fn host_build_casts_dir() -> std::path::PathBuf {
+  // Prefer $SCSH_HOME, else ~/.scsh — same home the daemon store uses.
+  if let Some(dir) = std::env::var_os("SCSH_HOME").filter(|s| !s.is_empty()) {
+    return std::path::PathBuf::from(dir).join("casts");
+  }
+  match std::env::var_os("HOME").filter(|s| !s.is_empty()) {
+    Some(home) => std::path::PathBuf::from(home).join(".scsh").join("casts"),
+    None => std::env::temp_dir().join("scsh-build-casts"),
+  }
 }
 
 /// One harness image scsh may build from the shared Dockerfile.
@@ -2352,6 +2401,15 @@ mod tests {
     assert!(forced_ctx.contains(&"--no-cache".to_string()));
     assert!(!build_command_context("docker", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", false)
       .contains(&"--no-cache".to_string()));
+    // Host TUI recorder argv (asciinema 3.x) — builds get a real PTY, not --progress=plain.
+    let rec = asciinema_rec_argv("/tmp/b.cast", 120, 40, "docker build -t t /ctx");
+    assert_eq!(rec[0], "asciinema");
+    assert!(rec.contains(&"--headless".to_string()));
+    assert!(rec.contains(&"--return".to_string()));
+    assert!(rec.contains(&"asciicast-v3".to_string()));
+    assert!(rec.contains(&"120x40".to_string()));
+    assert!(!build_command_context("container", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", false)
+      .contains(&"--progress=plain".to_string()));
     assert_eq!(
       run_command(
         "docker",

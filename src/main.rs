@@ -1182,12 +1182,14 @@ fn ensure_workflow_images(
   let tz = runtime::host_timezone();
   let build_one =
     |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
-      let p = ui.proc(label.clone(), true);
+      // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
+      let p = ui.proc(label.clone(), false);
       if let Some(c) = daemon_client {
         c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None);
       }
       p.start();
-      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false) {
+      let stem = harness.map(|h| h.as_str()).unwrap_or("base");
+      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem) {
         Ok(()) => {
           p.finish_ok(None);
           Ok(())
@@ -2379,7 +2381,7 @@ fn build_and_run(
   let mut base_build = None;
   if base_needs_build {
     let base_label = format!("using {} · build base", backend_name(&rt.name));
-    let p = ui.proc(base_label.clone(), true);
+    let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
       c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None);
     }
@@ -2388,7 +2390,7 @@ fn build_and_run(
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
     let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
-    let p = ui.proc(label.clone(), true);
+    let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
       c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
     }
@@ -2417,8 +2419,19 @@ fn build_and_run(
 
   let mut build_failed = if let Some(ref base) = base_build {
     base.start();
-    match run_build(base, &rt_name, runtime::BASE_IMAGE_TAG, runtime::BASE_IMAGE_TARGET, &df, uid, gid, &base_fp, false)
-    {
+    match run_build(
+      base,
+      &rt_name,
+      runtime::BASE_IMAGE_TAG,
+      runtime::BASE_IMAGE_TARGET,
+      &df,
+      uid,
+      gid,
+      &base_fp,
+      false,
+      daemon_client.as_deref(),
+      "base",
+    ) {
       Ok(()) => {
         base.finish_ok(None);
         None
@@ -2443,9 +2456,22 @@ fn build_and_run(
         .map(|(build, spec)| {
           let rt_name = &rt_name;
           let df = &df;
+          let daemon_client = &daemon_client;
           scope.spawn(move || {
             build.start();
-            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint, false) {
+            match run_build(
+              build,
+              rt_name,
+              &spec.tag,
+              &spec.target,
+              df,
+              uid,
+              gid,
+              &spec.fingerprint,
+              false,
+              daemon_client.as_deref(),
+              spec.harness.as_str(),
+            ) {
               Ok(()) => {
                 build.finish_ok(None);
                 None
@@ -4002,16 +4028,28 @@ fn now_secs() -> u64 {
   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Build a single harness image through the live board's build proc (so its output streams into the
-/// collapsible build row, timestamped). docker/podman take the in-memory Dockerfile on stdin;
-/// Apple's `container` has no stdin build mode, so it gets an ephemeral context dir instead.
+/// Build a single harness image as a recorded TUI (asciinema on the host), the same ASCII-cinema
+/// path skills use inside the container. docker/podman/Apple `container` all get a context-dir
+/// build under a real PTY so BuildKit / Apple progress render natively; the cast is registered
+/// with the daemon so the session page embeds the player instead of a text log. Falls back to
+/// the old piped text pump only when `asciinema` is not on PATH.
 /// `no_cache` forces every layer to rebuild (`build-images --force` / `--rebuild-base`).
 fn run_build(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
-  fingerprint: &str, no_cache: bool,
+  fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
+
+  // Prefer the TUI path whenever asciinema is available — every build should be a cast.
+  if runtime::asciinema_available() {
+    return run_build_tui(
+      build, runtime_name, tag, target, dockerfile, uid, gid, &tz, fingerprint, no_cache, daemon_client, cast_stem,
+    );
+  }
+
+  // Fallback: no asciinema on the host — stream plain text into the board (legacy path).
+  hint("asciinema not found on PATH — image builds fall back to a text log (install asciinema for the TUI cast player)");
   let (ok, last) = match runtime::build_method(runtime_name) {
     runtime::BuildMethod::Stdin => {
       let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint, no_cache);
@@ -4036,10 +4074,76 @@ fn run_build(
         no_cache,
       );
       let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
-      let _ = std::fs::remove_dir_all(&dir); // best-effort cleanup
+      let _ = std::fs::remove_dir_all(&dir);
       out?
     }
   };
+  if ok {
+    Ok(())
+  } else {
+    let tail = build.tail_lines(failure::FAILURE_TAIL_LINES);
+    let excerpt = failure::failure_excerpt(last.as_deref(), &tail, "build produced no output");
+    Err((format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {excerpt}"), 1))
+  }
+}
+
+/// Record one image build under a host PTY via `asciinema rec --headless`, register the cast
+/// with the daemon, and return Ok/Err from the builder's exit status.
+fn run_build_tui(
+  build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
+  tz: &str, fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
+) -> Result<(), (String, i32)> {
+  let casts_dir = runtime::host_build_casts_dir();
+  std::fs::create_dir_all(&casts_dir).map_err(|e| (format!("could not create cast dir {}: {e}", casts_dir.display()), 1))?;
+  let cast_path = casts_dir.join(format!(
+    "build-{cast_stem}-{}-utc-{}.cast",
+    runtime::format_utc_timestamp(now_secs()),
+    runtime::random_nonce_6()
+  ));
+  let cast_path_str = cast_path.to_string_lossy().into_owned();
+
+  // Context dir for every runtime: a PTY-recorded shell cannot feed Dockerfile-on-stdin the
+  // way Proc::run_with_stdin does, and Apple container already requires a context dir.
+  let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
+  let df_path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
+  if let Err(e) = std::fs::write(&df_path, dockerfile) {
+    let _ = std::fs::remove_dir_all(&dir);
+    return Err((format!("could not write Dockerfile to build context: {e}"), 1));
+  }
+  let build_argv = runtime::build_command_context(
+    runtime_name,
+    tag,
+    target,
+    &dir.to_string_lossy(),
+    uid,
+    gid,
+    tz,
+    fingerprint,
+    no_cache,
+  );
+  let build_shell = runtime::shell_join(&build_argv);
+  let term = config::Terminal::default();
+  let rec = runtime::asciinema_rec_argv(&cast_path_str, term.cols, term.rows, &build_shell);
+
+  if let Some(c) = daemon_client {
+    // Register before the recorder starts so the session page can open the player mid-build.
+    c.proc_cast(build.index(), &cast_path_str);
+  }
+  build.note(&format!("recording TUI → {}", cast_path.display()));
+
+  let started = |e: std::io::Error| {
+    let _ = std::fs::remove_dir_all(&dir);
+    (format!("failed to start asciinema: {e}"), 1)
+  };
+  // Quiet pump: the cast is the UI; we still capture a short tail for failure excerpts.
+  let (ok, last) = build.run(&rec[0], &rec[1..]).map_err(started)?;
+  let _ = std::fs::remove_dir_all(&dir);
+
+  if let Some(c) = daemon_client {
+    // Re-register in case the path was cleared; durable path is already under ~/.scsh/casts.
+    c.proc_cast(build.index(), &cast_path_str);
+  }
+
   if ok {
     Ok(())
   } else {
@@ -4156,7 +4260,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   let mut base_build = None;
   if build_base {
     let label = format!("using {} · build base", backend_name(&rt_name));
-    let p = ui.proc(label.clone(), true);
+    let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
       c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None);
     }
@@ -4165,7 +4269,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
     let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
-    let p = ui.proc(label.clone(), true);
+    let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
       c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
     }
@@ -4185,6 +4289,8 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
       gid,
       &base_fp,
       rebuild_base,
+      daemon_client.as_deref(),
+      "base",
     ) {
       Ok(()) => {
         base.finish_ok(None);
@@ -4210,9 +4316,22 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
         .map(|(build, spec)| {
           let rt_name = &rt_name;
           let df = &df;
+          let daemon_client = &daemon_client;
           scope.spawn(move || {
             build.start();
-            match run_build(build, rt_name, &spec.tag, &spec.target, df, uid, gid, &spec.fingerprint, force) {
+            match run_build(
+              build,
+              rt_name,
+              &spec.tag,
+              &spec.target,
+              df,
+              uid,
+              gid,
+              &spec.fingerprint,
+              force,
+              daemon_client.as_deref(),
+              spec.harness.as_str(),
+            ) {
               Ok(()) => {
                 build.finish_ok(None);
                 None
@@ -5343,34 +5462,34 @@ fn print_help_config() {
   println!("{}", h_dim("  authoring-only), merging the rest verbatim into that repo's own .scsh.yml."));
   println!("{}", h_dim("  Existing skill keys in the consumer are left untouched — scsh warns on conflicts."));
   println!();
-  println!("{}", h_dim("Harness commands (inside the container):"));
-  println!("{}", h_dim("  opencode: opencode -m <model> run \"run skill <source>\""));
+  println!("{}", h_dim("Harness commands (inside the container, all recorded as interactive TUIs):"));
+  println!("{}", h_dim("  opencode: opencode -m <model> --prompt \"Run the skill defined in .skills/<source>/…\""));
   println!(
     "{}",
     h_dim(
-      "  claude:   claude -p \"Run .skills/<source>/SKILL.md …\" \
+      "  claude:   claude --permission-mode bypassPermissions \"Run the skill defined in .skills/<source>/…\" \
 (CLAUDE_CODE_OAUTH_TOKEN or ~/.claude/.credentials.json)",
     )
   );
   println!(
     "{}",
     h_dim(
-      "  codex:    codex exec -m <model> \"Run .skills/<source>/SKILL.md …\" \
-(~/.codex/auth.json or OPENAI_API_KEY) — the native harness for GPT models",
+      "  codex:    codex --dangerously-bypass-approvals-and-sandbox -m <model> \"Run the skill defined in .skills/<source>/…\" \
+(~/.codex/auth.json or OPENAI_API_KEY)",
     )
   );
   println!(
     "{}",
     h_dim(
-      "  grok:     grok -p \"Run .skills/<source>/SKILL.md …\" -m <model> --effort <level> \
-(~/.grok/auth.json or XAI_API_KEY) — the native harness for Grok models",
+      "  grok:     grok --always-approve -m <model> --effort <level> \"Run the skill defined in .skills/<source>/…\" \
+(~/.grok/auth.json or XAI_API_KEY)",
     )
   );
   println!(
     "{}",
     h_dim(
-      "  cursor:   cursor-agent -p --force --trust \"Run .skills/<source>/SKILL.md …\" \
-(macOS keychain / auth.json / CURSOR_API_KEY) — the native harness for Cursor models",
+      "  cursor:   cursor-agent --force --sandbox disabled --model <model> \"Run the skill defined in .skills/<source>/…\" \
+(macOS keychain / auth.json / CURSOR_API_KEY)",
     )
   );
   println!();

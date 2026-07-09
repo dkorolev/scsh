@@ -39,32 +39,56 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {favicon}
 <title>cast · {label} · {sid}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/asciinema-player.css">
 <style>
-:root {{ color-scheme: dark; }}
-body {{ margin: 0; background: #121317; color: #d7d9df; font: 14px/1.5 system-ui, sans-serif; }}
-header {{ padding: 12px 16px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; }}
-header a {{ color: #7ab4ff; text-decoration: none; }}
-header code {{ background: #1d1f26; padding: 1px 5px; border-radius: 4px; }}
-.dim {{ color: #8a8d97; }}
-.live {{ color: #ff6a6a; }}
-.controls {{ padding: 0 16px 10px; display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }}
-.controls a, .controls button {{ color: #7ab4ff; background: none; border: 1px solid #2a2d36;
-  border-radius: 6px; padding: 4px 10px; font: inherit; cursor: pointer; text-decoration: none; }}
-.controls button:hover, .controls a:hover {{ border-color: #7ab4ff; }}
-.controls button.on {{ border-color: #ff6a6a; color: #ff6a6a; }}
+:root {{
+  --bg: #0d1117; --surface: #161b22; --border: #2a3140;
+  --text: #e6edf3; --text-muted: #7d8590; --cyan: #58a6ff;
+  --green: #3fb950; --red: #f85149; color-scheme: dark;
+}}
+body {{
+  margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 'Ubuntu', ui-sans-serif, system-ui, sans-serif;
+}}
+header {{
+  padding: 16px 20px 8px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+}}
+header a {{ color: var(--cyan); text-decoration: none; }}
+header a:hover {{ text-decoration: underline; }}
+header code {{
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  background: rgba(255,255,255,0.06); padding: 1px 6px; border-radius: 3px;
+}}
+.dim {{ color: var(--text-muted); }}
+.live {{ color: var(--red); }}
+.controls {{
+  padding: 0 20px 12px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+}}
+.controls a, .controls button {{
+  color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 4px; padding: 5px 12px; font: inherit; cursor: pointer; text-decoration: none;
+}}
+.controls button:hover, .controls a:hover {{ border-color: var(--cyan); color: var(--cyan); }}
+.controls button.on {{ border-color: var(--red); color: var(--red); }}
 .controls button:disabled {{ opacity: 0.5; cursor: default; }}
-#copied {{ color: #7dd87d; visibility: hidden; }}
-#summary {{ padding: 0 16px 8px; font-size: 14px; max-width: 70ch; }}
+#copied {{ color: var(--green); visibility: hidden; }}
+#summary {{ padding: 0 20px 8px; font-size: 14px; max-width: 70ch; }}
 #summary:empty {{ display: none; }}
-#chapters {{ padding: 0 16px 10px; display: flex; flex-wrap: wrap; gap: 6px; }}
-#chapters button {{ font: inherit; font-size: 12px; color: #cdd; background: #1d1f26; border: 1px solid #2a2d36;
-  border-radius: 5px; padding: 2px 8px; cursor: pointer; }}
-#chapters button:hover {{ border-color: #7ab4ff; color: #fff; }}
+#chapters {{ padding: 0 20px 10px; display: flex; flex-wrap: wrap; gap: 6px; }}
+#chapters button {{
+  font: inherit; font-size: 12px; color: var(--text); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer;
+}}
+#chapters button:hover {{ border-color: var(--cyan); color: var(--cyan); }}
 /* Fill the viewport below the header/controls so fit:'both' fits vertically too. */
-#player-wrap {{ padding: 0 16px 16px; height: calc(100vh - 200px); min-height: 300px; }}
+#player-wrap {{ padding: 0 20px 20px; height: calc(100vh - 200px); min-height: 300px; }}
 #player, .ap-player {{ width: 100%; height: 100%; max-width: 100%; }}
-.cast-placeholder {{ padding: 24px 16px; border: 1px dashed #2a2d36; border-radius: 6px; }}
+.cast-placeholder {{
+  padding: 24px 16px; border: 1px dashed var(--border); border-radius: 6px; color: var(--text-muted);
+}}
 </style>
 </head>
 <body>
@@ -99,14 +123,14 @@ function hashStart() {{
 }}
 function fmtClock(t) {{ t = Math.max(0, Math.floor(t)); const m = Math.floor(t/60), s = t%60; return m + ':' + (s<10?'0':'') + s; }}
 // Available duration + event count of the fetched asciicast text (complete lines only).
-// scsh records asciicast v2 (absolute times → max); a v3 header (intervals) sums.
+// scsh records asciicast v3 (intervals → sum); a legacy v2 header (absolute times) takes max.
 function castEventStats(text) {{
-  let version = 2, duration = 0, events = 0;
+  let version = 3, duration = 0, events = 0;
   for (const raw of String(text || '').split('\n')) {{
     const line = raw.trim();
-    if (!line) continue;
+    if (!line || line[0] === '#') continue;
     if (line[0] === '{{') {{
-      try {{ version = Number(JSON.parse(line).version) || 2; }} catch (_) {{}}
+      try {{ version = Number(JSON.parse(line).version) || 3; }} catch (_) {{}}
       continue;
     }}
     if (line[0] !== '[') continue;
@@ -166,7 +190,7 @@ function onWsMessage(msg) {{
   if (loadedDuration == null) {{ create(hashStart()); return; }} // placeholder upgrades to a player
   showGrew(msg.duration);
 }}
-// Live mode mechanism, chosen deliberately: the vendored asciinema-player 3.9.0 build
+// Live mode mechanism, chosen deliberately: the vendored asciinema-player 3.17.0 build
 // does ship streaming drivers (a websocket driver speaking the v1.alis / v2.asciicast
 // subprotocols, and an eventsource driver), but they need a dedicated per-cast streaming
 // endpoint next to the daemon's single JSON broadcast hub. Live mode instead rides the

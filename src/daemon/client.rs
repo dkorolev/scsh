@@ -66,12 +66,13 @@ impl Client {
       None => "null".to_string(),
     };
     let body = format!(
-      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"skills\": [{}] }}",
+      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"skills\": [{}], \"run_pid\": {} }}",
       quote(&self.inner.session_id),
       quote(repo),
       quote(branch),
       profile_json,
-      skill_parts.join(", ")
+      skill_parts.join(", "),
+      std::process::id(),
     );
     let start_ok = self.post_sync_after_flush("/api/v1/session/start", &body);
     let register_ok =

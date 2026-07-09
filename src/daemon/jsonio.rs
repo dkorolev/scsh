@@ -86,9 +86,14 @@ fn session_json(s: &Session) -> String {
     Some(t) => format!("{t}"),
     None => "null".to_string(),
   };
+  let run_pid = match s.run_pid {
+    Some(p) => format!("{p}"),
+    None => "null".to_string(),
+  };
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"repo\": {}, \
-\"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {} }}",
+\"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
+\"run_pid\": {run_pid} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -167,7 +172,20 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   };
   let last_seen_at = field_num(obj, "last_seen_at").map(|n| n as u64).unwrap_or(started_at);
   let client_connected = field_bool(obj, "client_connected").unwrap_or(false);
-  Ok(Session { id, started_at, ended_at, profile, repo, branch, skills, procs, last_seen_at, client_connected })
+  let run_pid = field_num(obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
+  Ok(Session {
+    id,
+    started_at,
+    ended_at,
+    profile,
+    repo,
+    branch,
+    skills,
+    procs,
+    last_seen_at,
+    client_connected,
+    run_pid,
+  })
 }
 
 fn parse_skills(v: Option<&Value>) -> Vec<SkillMeta> {
@@ -325,6 +343,7 @@ mod tests {
       }],
       last_seen_at: 105,
       client_connected: false,
+      run_pid: None,
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
     let s = parse_session_json(&session_json_api(&session)).unwrap();
@@ -376,6 +395,7 @@ mod tests {
         procs: vec![],
         last_seen_at: 100,
         client_connected: false,
+        run_pid: None,
       },
     );
     let light = tick_json_light(&store, 105);
