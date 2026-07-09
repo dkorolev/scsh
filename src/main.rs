@@ -2787,6 +2787,12 @@ fn build_and_run(
     }
   }
 
+  // Repeat the session deep link as one of the LAST lines: when a coding agent drives
+  // `scsh run`, the tail of the output is what it relays to the human — the clickable
+  // link to this run's recordings must be there, not only in the opening lines.
+  if let Some(c) = &daemon_session.client {
+    ok(&format!("session recordings & live board: {}", c.session_url()));
+  }
   if failed == 0 {
     ok(&format!("all {n} skill{} completed successfully", plural(n)));
     0
@@ -5500,6 +5506,11 @@ fn print_help_run() {
     7. the runtime engine is running  (scsh prints how to start it)
 "#
   );
+  println!();
+  println!("{}", h_head("Watch it live"));
+  println!("{}", h_dim("  Every run registers with the session browser and prints a clickable deep link"));
+  println!("{}", h_dim("  (http://127.0.0.1:7274/session/<id>, port from SCSH_DAEMON_PORT) at the start"));
+  println!("{}", h_dim("  AND as one of the last lines — recordings, logs, and live TUIs live there."));
   println!();
   println!("{}", h_head("What `run` does (summary)"));
   println!("{}", h_dim("  Builds one image per harness needed (`scsh-opencode`, `scsh-claude`), then runs"));
