@@ -2283,6 +2283,26 @@ TAG
     assert!(agent_at < user_at, "the agent user must exist before USER agent");
   }
 
+  /// Harness install RUNs run as root and may scribble into /home/agent (npm cache,
+  /// cursor-agent --version → ~/.cursor). Without a chown, USER agent cannot create
+  /// $HOME/.cursor/projects for the workspace-trust marker (session kuovup failure).
+  #[test]
+  fn dockerfile_reclaims_agent_home_after_harness_installs() {
+    let df = dockerfile();
+    let chowns = df.matches("chown -R agent:agent /home/agent").count();
+    assert!(
+      chowns >= 5,
+      "each harness stage must chown /home/agent after its install (found {chowns})"
+    );
+    // Version probes must not write into the real agent home as root.
+    for cli in ["opencode", "claude", "codex", "grok", "cursor-agent"] {
+      assert!(
+        df.contains(&format!("HOME=/tmp {cli} --version")),
+        "{cli} --version must run with HOME=/tmp"
+      );
+    }
+  }
+
   #[test]
   fn harness_command_builds_opencode_invocation() {
     // opencode now runs as a recorded interactive TUI (`opencode --prompt`), not headless.

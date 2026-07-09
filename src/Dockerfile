@@ -211,7 +211,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g opencode-ai; \
     chmod -R a+rX "$(npm root -g)"; \
-    opencode --version
+    HOME=/tmp opencode --version; \
+    chown -R agent:agent /home/agent
 ENV OPENCODE_YOLO=true
 ENV OPENCODE_DANGEROUSLY_SKIP_PERMISSIONS=true
 # on macOS rejects), same as claude/codex/grok/cursor.
@@ -227,7 +228,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g @anthropic-ai/claude-code; \
     chmod -R a+rX "$(npm root -g)"; \
-    claude --version
+    HOME=/tmp claude --version; \
+    chown -R agent:agent /home/agent
 ENV CLAUDE_CONFIG_DIR=/home/agent/repo/tmp/.claude-auth/.claude
 USER agent
 
@@ -239,7 +241,8 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g @openai/codex; \
     chmod -R a+rX "$(npm root -g)"; \
-    codex --version
+    HOME=/tmp codex --version; \
+    chown -R agent:agent /home/agent
 ENV CODEX_HOME=/home/agent/repo/tmp/.codex
 USER agent
 
@@ -252,11 +255,14 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/*; \
     npm install -g @xai-official/grok; \
     chmod -R a+rX "$(npm root -g)"; \
-    grok --version
+    HOME=/tmp grok --version; \
+    chown -R agent:agent /home/agent
 ENV GROK_HOME=/home/agent/repo/tmp/.grok
 USER agent
 
 # --- Cursor Agent CLI harness image (install harness last) ---
+# cursor-agent --version (and npm installs above) scribble into $HOME as root; without the
+# chown, agent cannot mkdir $HOME/.cursor/projects for the workspace-trust marker.
 FROM scsh-base AS scsh-cursor
 ARG CURSOR_AGENT_VERSION=2026.07.01-41b2de7
 ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent
@@ -275,7 +281,8 @@ RUN set -eux; \
     rm -rf "$tmp"; \
     ln -sf "$CURSOR_AGENT_HOME/cursor-agent" /usr/local/bin/cursor-agent; \
     ln -sf "$CURSOR_AGENT_HOME/cursor-agent" /usr/local/bin/agent; \
-    cursor-agent --version
+    HOME=/tmp cursor-agent --version; \
+    chown -R agent:agent /home/agent
 ENV CURSOR_CONFIG_DIR=/home/agent/repo/tmp/.cursor
 ENV XDG_CONFIG_HOME=/home/agent/repo/tmp/.config
 USER agent
