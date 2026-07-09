@@ -76,6 +76,19 @@ function sessionStartedCell(session, nowUnix) {
     '<span class="session-started-abs">' + esc(abs) + '</span><br>' +
     '<span class="dim session-started-rel">' + esc(rel) + '</span></span>';
 }
+// Mirrors harness_chips_html in index.rs — keep the markup identical.
+function harnessChipsHtml(session) {
+  let out = '';
+  (session.procs || []).forEach((p) => {
+    if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
+    const done = (p.status === 'ok' || p.status === 'fail');
+    const skill = p.skill_name || p.label || '';
+    out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" title="' +
+      esc(p.harness + ': ' + skill + ' (' + p.status + ')') + '">' +
+      esc(p.harness.charAt(0).toUpperCase()) + '</span>';
+  });
+  return out;
+}
 function indexRowHtml(id, session, nowUnix) {
   const lifecycle = sessionLifecycle(session, nowUnix);
   const profile = session.profile || 'default';
@@ -85,7 +98,8 @@ function indexRowHtml(id, session, nowUnix) {
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
-    '<td>' + esc(profile) + '</td><td>' + n + '</td>' +
+    '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + harnessChipsHtml(session) +
+    '<span class="chip-count">' + n + '</span></td>' +
     '<td class="dim repo-path">' + esc(session.repo || '') + '</td></tr>';
 }
 function syncIndexRow(row, session, nowUnix) {
@@ -96,6 +110,11 @@ function syncIndexRow(row, session, nowUnix) {
   if (startedCell) startedCell.innerHTML = sessionStartedCell(session, nowUnix);
   const durationCell = row.querySelector('.session-duration-cell');
   if (durationCell) setTextUnlessSelecting(durationCell, sessionDurationLabel(session, nowUnix, lifecycle));
+  const procsCell = row.querySelector('.session-procs-cell');
+  if (procsCell) {
+    const next = harnessChipsHtml(session) + '<span class="chip-count">' + (session.procs || []).length + '</span>';
+    if (procsCell.innerHTML !== next) procsCell.innerHTML = next;
+  }
 }
 function emptyOutputLabel(status) {
   return (status === 'ok' || status === 'fail') ? 'No output.' : 'No output yet.';

@@ -286,6 +286,21 @@ const PAGE_CSS: &str = r#"
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
   .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
+  /* single-letter harness chips: same letter, different hue (claude vs codex vs cursor) */
+  .session-procs-cell { white-space: nowrap; }
+  .hchip {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
+    font-size: 0.7rem; font-weight: 700; color: #0d1117; background: var(--hchip-bg, #8b949e);
+    vertical-align: middle; cursor: default;
+  }
+  .hchip--opencode { --hchip-bg: #58a6ff; }
+  .hchip--claude { --hchip-bg: #d97757; }
+  .hchip--codex { --hchip-bg: #3fb950; }
+  .hchip--grok { --hchip-bg: #d4a72c; }
+  .hchip--cursor { --hchip-bg: #a371f7; }
+  .hchip--done { opacity: 0.35; }
+  .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .proc-kill {
     margin-left: auto; align-self: center; flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;

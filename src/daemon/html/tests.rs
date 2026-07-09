@@ -58,6 +58,36 @@ fn esc_handles_basic_html() {
 }
 
 #[test]
+fn index_page_shows_colored_harness_chips_per_proc() {
+  let mut store = store_with_cast_proc(ProcStatus::Running);
+  // A second, finished proc on another harness: its chip renders dimmed.
+  {
+    let session = store.sessions.get_mut("castab").unwrap();
+    let mut done = session.procs[0].clone();
+    done.index = 1;
+    done.status = ProcStatus::Ok;
+    done.harness = Some("grok".into());
+    done.label = "grok: add".into();
+    session.procs.push(done);
+    // Build procs never get a chip — only skill runs count.
+    let mut build = session.procs[0].clone();
+    build.index = 2;
+    build.kind = ProcKind::Build;
+    build.harness = Some("codex".into());
+    session.procs.push(build);
+  }
+  let html = super::index_page(&store);
+  assert!(html.contains(r#"<span class="hchip hchip--claude" title="claude: add (running)">C</span>"#), "got: {html}");
+  assert!(html.contains(r#"<span class="hchip hchip--grok hchip--done" title="grok: add (ok)">G</span>"#), "got: {html}");
+  assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
+  // The stylesheet distinguishes the same letter by harness color, and the client JS
+  // mirrors the markup for live re-renders.
+  assert!(html.contains(".hchip--claude"));
+  assert!(html.contains(".hchip--codex"));
+  assert!(html.contains("function harnessChipsHtml"));
+}
+
+#[test]
 fn index_page_carries_the_images_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);

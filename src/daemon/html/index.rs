@@ -203,15 +203,43 @@ fn index_session_row(session: &Session, now: u64) -> String {
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
-<td>{profile}</td><td>{n_procs}</td><td class=\"dim repo-path\">{repo}</td></tr>\n",
+<td>{profile}</td><td class=\"session-procs-cell\">{chips}<span class=\"chip-count\">{n_procs}</span></td><td class=\"dim repo-path\">{repo}</td></tr>\n",
     id = id,
     status = status,
     started = started,
     duration = esc(&duration),
     profile = profile,
+    chips = harness_chips_html(session),
     n_procs = n_procs,
     repo = esc(&session.repo),
   )
+}
+
+/// Colored single-letter harness chips, one per skill proc — C in Anthropic orange is claude,
+/// C in green is codex, C in violet is cursor — so a row shows at a glance what it runs and
+/// what is still running (finished chips dim out). Tooltip: `harness: skill (status)`.
+/// Mirrored byte-for-byte by `harnessChipsHtml` in the client JS (`client_js.rs`).
+fn harness_chips_html(session: &Session) -> String {
+  use crate::daemon::model::{ProcKind, ProcStatus};
+  let mut chips = String::new();
+  for p in &session.procs {
+    if p.kind != ProcKind::Skill {
+      continue;
+    }
+    let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) else {
+      continue;
+    };
+    let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
+    let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail);
+    let skill = p.skill_name.as_deref().unwrap_or(&p.label);
+    chips.push_str(&format!(
+      "<span class=\"hchip hchip--{h}{done}\" title=\"{title}\">{letter}</span>",
+      h = esc(h),
+      done = if done { " hchip--done" } else { "" },
+      title = esc(&format!("{h}: {skill} ({status})", status = p.status.as_str())),
+    ));
+  }
+  chips
 }
 
 fn index_duration_label(session: &Session, now: u64, lifecycle: SessionLifecycle) -> String {
