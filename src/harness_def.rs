@@ -20,15 +20,16 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review` (workflows) are always
-/// available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 5] {
+/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review`/`arith` (workflows) are
+/// always available regardless of the repo. `(name, yaml)`.
+pub fn builtin_defs() -> [(&'static str, &'static str); 6] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
     ("research", include_str!("harness_defs/research.yml")),
     ("fruits", include_str!("harness_defs/fruits.yml")),
     ("code-review", include_str!("harness_defs/code-review.yml")),
+    ("arith", include_str!("harness_defs/arith.yml")),
   ]
 }
 
@@ -1051,6 +1052,26 @@ fn opt_scalar(fm: &BTreeMap<&str, &Node>, param: &str, field: &str, errors: &mut
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn builtin_arith_runs_three_steps_on_three_harnesses() {
+    let def = builtin("arith");
+    assert!(def.is_workflow());
+    assert_eq!(def.steps.len(), 3);
+    // Every param has a default, so the bundle runs on any opened directory with zero setup.
+    assert_eq!(def.params.len(), 4);
+    assert!(def.params.iter().all(|p| p.default.is_some()));
+    // Three DIFFERENT harnesses — the whole point is watching a heterogeneous fleet.
+    let harnesses: std::collections::BTreeSet<&str> = def.steps.iter().map(|s| s.agent.harness.as_str()).collect();
+    assert_eq!(harnesses.len(), 3, "steps must ride three distinct harnesses");
+    let summarize = def.steps.iter().find(|s| s.id == "summarize").expect("summarize step");
+    assert_eq!(summarize.needs, vec!["add".to_string(), "multiply".to_string()]);
+    assert_eq!(summarize.artifacts, vec!["summary.txt".to_string()]);
+    // The rendered body carries the artifact contract, not just the JSON one.
+    let body = summarize.render_skill_body();
+    assert!(body.contains("Required files"), "got: {body}");
+    assert!(body.contains("`summary.txt`"), "got: {body}");
+  }
 
   #[test]
   fn step_artifacts_must_be_plain_filenames() {

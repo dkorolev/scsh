@@ -1,0 +1,73 @@
+# Built-in workflow: the default "watch a bundle of tasks run" demo, runnable on ANY opened
+# directory with zero setup (every param has a default). Three steps on THREE different
+# harnesses — the images build first, as their own tracked rows, then the steps run as
+# `step k/n` rows in the session browser: claude adds, codex multiplies, and grok folds both
+# results into a single plain-English summary.txt artifact copied back beside the results.
+description: "Three harnesses, three tracked steps: claude adds A+B, codex multiplies X*Y, grok writes a plain-English summary.txt of both."
+params:
+  A:
+    type: int
+    default: "2"
+    description: "First addend"
+  B:
+    type: int
+    default: "3"
+    description: "Second addend"
+  X:
+    type: int
+    default: "4"
+    description: "First factor"
+  Y:
+    type: int
+    default: "5"
+    description: "Second factor"
+steps:
+  add:
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      A: params.A
+      B: params.B
+    prompt: |
+      Read the integers A and B from the environment and compute their sum. Do nothing
+      else — no commits, no network, no other files.
+    output:
+      sum:
+        type: int
+  multiply:
+    agent:
+      harness: codex
+      model: gpt-5.5
+    inputs:
+      X: params.X
+      Y: params.Y
+    prompt: |
+      Read the integers X and Y from the environment and compute their product. Do nothing
+      else — no commits, no network, no other files.
+    output:
+      product:
+        type: int
+  summarize:
+    needs: add, multiply
+    agent:
+      harness: grok
+      model: grok-4.5
+    inputs:
+      A: params.A
+      B: params.B
+      X: params.X
+      Y: params.Y
+      SUM: add.sum
+      PRODUCT: multiply.product
+    prompt: |
+      Two earlier steps computed SUM = A + B and PRODUCT = X * Y; all six values are in the
+      environment. Write `summary.txt`: one short plain-English paragraph stating both
+      computations and their results in full sentences (for example: "Adding 2 and 3 gives
+      5, and multiplying 4 by 5 gives 20."), suitable for a human to read on its own. Put
+      the same paragraph in the `summary` result field. Do nothing else — no commits, no
+      network, no other files.
+    output:
+      summary:
+        type: string
+    artifacts: summary.txt
