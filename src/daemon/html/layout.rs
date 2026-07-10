@@ -85,7 +85,9 @@ const PAGE_CSS: &str = r#"
     padding: 20px 22px;
     margin-bottom: 20px;
   }
+  .card { position: relative; }
   .card--accent-left-cyan { border-left: 3px solid var(--cyan); }
+  .card--accent-left-purple { border-left: 3px solid var(--purple); }
   .card--accent-left-green { border-left: 3px solid var(--green); }
   .card--accent-left-orange { border-left: 3px solid var(--orange); }
   .card--accent-top-magenta { border-top: 3px solid var(--magenta); }
@@ -153,7 +155,9 @@ const PAGE_CSS: &str = r#"
     font-size: 0.72rem; font-weight: 700; letter-spacing: 0.04em;
     text-transform: uppercase; position: relative;
   }
-  .badge > span, .session-status > span { position: relative; z-index: 1; }
+  /* Chamfer badges paint their fill, then a ::before surface overlay; the inner text must
+     sit ABOVE that overlay or it is invisible (the empty-rectangle bug). */
+  .badge > span, .session-status > span, .agent-badge > span { position: relative; z-index: 1; }
   .session-status.running, .badge--cyan {
     background: var(--cyan); color: var(--cyan);
   }
@@ -197,6 +201,8 @@ const PAGE_CSS: &str = r#"
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
   }
   .daemon-status .crumbs { font-weight: 700; font-size: 1rem; }
+  .crumbs a { color: inherit; text-decoration: none; }
+  .crumbs a:hover { color: var(--cyan); }
   .crumb-sep { color: var(--text-muted); margin: 0 0.4rem; font-weight: 400; }
   .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
   .daemon-status .dot {
@@ -284,6 +290,10 @@ const PAGE_CSS: &str = r#"
   details.proc:not([open]) summary .triangle::before { content: '▶'; }
   details.proc[open] summary .triangle::before { content: '▼'; }
   .glyph { font-weight: 600; }
+  /* Each proc island wears its status: orange while running, green when ok, red on failure. */
+  details.proc.fail summary .glyph, details.proc.fail summary .label { color: var(--red); }
+  details.proc.ok summary .glyph, details.proc.ok summary .label { color: var(--green); }
+  details.proc.running summary .glyph, details.proc.running summary .label { color: var(--orange); }
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
   .running .glyph { color: var(--cyan); }
@@ -418,7 +428,8 @@ const PAGE_CSS: &str = r#"
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }
-  .session-actions { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; margin: 0 0 0.85rem; }
+  /* Pinned to the meta island's top-right corner (the card is the positioning context). */
+  .session-actions { position: absolute; top: 0.7rem; right: 0.85rem; display: flex; gap: 0.6rem; align-items: center; margin: 0; z-index: 2; }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
     grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem 1rem;
@@ -430,15 +441,16 @@ const PAGE_CSS: &str = r#"
 "#;
 
 /// The location path shown bold on the LEFT of the top island — `scsh` on the index,
-/// `scsh › sessions › <id>` on a session page. Plain text, deliberately not links: it says
-/// where you are; the daemon status cluster keeps the island's right side.
+/// `scsh › sessions › <id>` on a session page. Every segment is a permalink (the id links
+/// to its own session page); the daemon status cluster keeps the island's right side.
 fn crumbs_html(session_id: Option<&str>) -> String {
   match session_id {
     Some(id) => format!(
-      "scsh<span class=\"crumb-sep\">›</span>sessions<span class=\"crumb-sep\">›</span>{}",
-      crate::daemon::html::escape::esc(id)
+      "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">sessions</a>\
+<span class=\"crumb-sep\">›</span><a href=\"/session/{id}\">{id}</a>",
+      id = crate::daemon::html::escape::esc(id)
     ),
-    None => "scsh".to_string(),
+    None => "<a href=\"/\">scsh</a>".to_string(),
   }
 }
 
@@ -487,8 +499,8 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 <body>
 <div id="daemon-status" class="daemon-status connecting">
 <span class="crumbs">{crumbs}</span>
-<span class="daemon-right"><span class="dot" aria-hidden="true"></span><span id="status-label">connecting…</span>
-<span id="status-uptime" class="dim"></span>{scsh_version}</span></div>
+<span class="daemon-right"><span id="status-label">connecting…</span>
+<span id="status-uptime" class="dim"></span>{scsh_version}<span class="dot" aria-hidden="true"></span></span></div>
 {body}
 {player_js}
 <script>

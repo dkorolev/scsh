@@ -7,7 +7,7 @@ use super::proc::{
   autoscroll_ctl_html, cast_embed_html, empty_output_html, proc_elapsed_secs, proc_has_cast, proc_meta_html,
   status_glyph, summary_stats_html,
 };
-use crate::daemon::model::{Session, SessionLifecycle, Store};
+use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::{now_unix_secs, session_url};
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
@@ -19,7 +19,11 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let glyph = status_glyph(proc.status);
     let detail = proc.detail.as_deref().unwrap_or("");
     let elapsed = proc_elapsed_secs(proc, now).map(|e| format_elapsed_clock(e)).unwrap_or_else(|| "—".to_string());
-    let note = proc.note.as_deref().unwrap_or("");
+    // The collapsed row's trailing text: once the proc FINISHED we know its answer (the
+    // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
+    // "<harness> run…" note is only for rows still working.
+    let finished = !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
+    let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
     let container = proc.container_name.as_deref().unwrap_or("");
     // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
     // build fallbacks (no asciinema on PATH) keep the timestamped output with auto-scroll.
@@ -114,8 +118,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let kind = session.kind.as_deref().unwrap_or("profile");
   let body = format!(
     "<p class=\"subtitle\">{kind} <strong>{profile}</strong></p>\n\
-<div class=\"session-actions\">{stop_btn}{export_btn}</div>\n\
-<div class=\"card card--accent-left-cyan\">{session_meta}\n{skills}</div>\n\
+<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>{session_meta}\n{skills}</div>\n\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
 <p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
     id = id,

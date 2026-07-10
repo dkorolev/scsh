@@ -217,8 +217,9 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"class="proc skipped""#), "got: {procs}");
   assert!(procs.contains("⊘"), "skipped glyph: {procs}");
-  assert!(procs.contains("step 2/2 · needs probe_credentials"), "step note: {procs}");
-  assert!(procs.contains("skipped — its when: gate is false"), "skip reason: {procs}");
+  // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
+  // not the transient step note — same rule that puts a finished skill's answer in the row.
+  assert!(procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#), "skip reason in the collapsed row: {procs}");
   assert!(!procs.contains("data-proc-stop"), "a skipped step offers no kill button: {procs}");
   // The client knows the glyph too (live updates keep ⊘ when a tick arrives).
   let js = live_client_js();
@@ -249,6 +250,34 @@ fn running_cast_preview_starts_near_the_end() {
 }
 
 #[test]
+fn ui_review_fixes_hold() {
+  // 1. Agent-route badges: the chamfer overlay must not swallow the text (the
+  //    empty-rectangle bug — .agent-badge's inner span needs the z-index lift too).
+  let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
+  assert!(
+    html.contains(".badge > span, .session-status > span, .agent-badge > span"),
+    "agent-badge text must sit above the chamfer overlay"
+  );
+  // 2. Clicking something that renders inputs further down scrolls there.
+  let js = live_client_js();
+  assert_eq!(js.matches("scrollIntoView").count() >= 2, true, "def form + defs panel scroll into view");
+  // 3. A finished proc's collapsed row shows its ANSWER, not the stale run note.
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  {
+    let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
+    p.detail = Some("2 + 3 = 5".into());
+    p.note = Some("claude run…".into());
+  }
+  let page = session_page(&store, "castab").expect("session renders");
+  assert!(page.contains(r#"<span class="note dim">2 + 3 = 5</span>"#), "the answer rides the collapsed row");
+  assert!(!page.contains(r#"<span class="note dim">claude run…</span>"#), "the stale note does not");
+  // 4. The meta island is purple and owns the action buttons (top-right corner).
+  assert!(page.contains(r#"<div class="card card--accent-left-purple"><div class="session-actions">"#));
+  // 5. Proc islands wear their status color.
+  assert!(html.contains("details.proc.running summary .glyph, details.proc.running summary .label"));
+}
+
+#[test]
 fn session_header_carries_breadcrumbs_and_honest_kind() {
   // The top island: location path on the left (bold, plain text), daemon status right.
   let mut store = store_with_cast_proc(ProcStatus::Running);
@@ -259,9 +288,11 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   assert!(
-    html.contains(r#"<span class="crumbs">scsh<span class="crumb-sep">›</span>sessions<span class="crumb-sep">›</span>castab</span>"#),
-    "breadcrumb path in the top island"
+    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">sessions</a><span class="crumb-sep">›</span><a href="/session/castab">castab</a>"#),
+    "breadcrumb permalinks in the top island"
   );
+  // The status dot sits at the very RIGHT edge of the island.
+  assert!(html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")), "dot last in the island");
   assert!(html.contains(r#"<span class="daemon-right">"#), "daemon status keeps the island's right side");
   assert!(!html.contains("<h1>"), "the body no longer duplicates the path as an h1");
   // A workflow session says so — not "profile".
@@ -273,7 +304,7 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   assert!(html.contains(r#"<p class="subtitle">profile <strong>default</strong></p>"#), "got: {html}");
   // The index island shows just "scsh".
   let html = super::index_page(&store);
-  assert!(html.contains(r#"<span class="crumbs">scsh</span>"#), "got crumbs on index");
+  assert!(html.contains(r#"<span class="crumbs"><a href="/">scsh</a></span>"#), "got crumbs on index");
 }
 
 #[test]

@@ -439,7 +439,10 @@ function updateProcFields(det, p, nowUnix) {
   const meta = det.querySelector('[data-proc-elapsed="' + CSS.escape(String(p.index)) + '"]');
   syncProcElapsed(meta, p, nowUnix, p.status === 'running');
   const noteEl = det.querySelector('summary .note');
-  if (noteEl) noteEl.textContent = p.note || '';
+  // Finished rows show their ANSWER (the finish detail) in the collapsed summary; only
+  // rows still working show the transient note.
+  const finished = p.status !== 'running' && p.status !== 'waiting';
+  if (noteEl) noteEl.textContent = (finished && p.detail) ? p.detail : (p.note || '');
   // The per-proc kill button only makes sense while the proc still runs.
   const killEl = det.querySelector('button[data-proc-stop]');
   if (killEl && p.status !== 'running' && p.status !== 'waiting') killEl.remove();
@@ -1221,7 +1224,7 @@ function handleRepoOpened(resp, note) {
     OPEN_REPO_RUNNABLE = !!resp.runnable;
     OPEN_REPOS[resp.repo] = { clean: resp.runnable };
     const panel = document.getElementById('defs-panel');
-    if (panel) panel.hidden = false;
+    if (panel) { panel.hidden = false; panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
     const label = document.getElementById('open-repo-path');
     if (label) label.textContent = resp.repo;
     // Show any blockers prominently; Start stays disabled until they are cleared.
@@ -1295,6 +1298,9 @@ function selectDef(name) {
     disabled + '><span>Start job</span></button>' +
     '<span id="def-note" class="dim">' + hint + '</span></div>';
   document.getElementById('def-start')?.addEventListener('click', () => startJob(name));
+  // The form renders below the definitions list — bring it to the user instead of making
+  // them hunt for what their click produced.
+  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
 }
 function collectParams(def) {
   const out = {};
