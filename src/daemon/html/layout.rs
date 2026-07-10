@@ -428,6 +428,13 @@ pub(crate) const PAGE_CSS: &str = r#"
      toolbar siblings — a chamfered .btn in this row read as a misfit. */
   .cast-toolbar a[data-cast-export] { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar a[data-cast-export]:hover { background: rgba(88, 166, 255, 0.12); }
+  /* The job-level snapshot download wears the SAME style — one download family. */
+  .dl-snap {
+    display: inline-block; font: inherit; font-size: 0.8rem; line-height: 1.5;
+    color: var(--cyan); background: none; border: 1px solid var(--cyan);
+    border-radius: 4px; padding: 0.15rem 0.55rem; text-decoration: none; cursor: pointer;
+  }
+  .dl-snap:hover { background: rgba(88, 166, 255, 0.12); }
   .cast-keys { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
   .cast-summary {
     padding: 0.45rem 0.65rem; font-size: 0.9rem; line-height: 1.4;

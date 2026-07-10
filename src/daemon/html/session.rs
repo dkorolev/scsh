@@ -92,9 +92,11 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   };
   let id = esc(&session.id);
   let session_meta = session_meta_placeholder(session);
+  // Same style as the per-run "⬇ Download run snapshot" in the cast toolbar (.dl-snap):
+  // the two downloads read as one family, not a chamfered button next to a plain link.
   let export_btn = if session.procs.iter().any(proc_has_cast) {
     format!(
-      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ Download job snapshot</span></a>\n",
+      "<a class=\"dl-snap session-export\" href=\"/session/{id}/export.html\" download>⬇ Download job snapshot</a>\n",
       id = id
     )
   } else {
