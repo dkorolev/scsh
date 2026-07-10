@@ -100,20 +100,27 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   } else {
     String::new()
   };
-  // While the session genuinely runs, offer Force stop; once it is over (ended, or a dead
-  // client's Terminated zombie), show the resting lifecycle badge instead — a finished run
-  // reads "completed" in gray, not like a button that stopped something.
+  // While the session genuinely runs, offer Force stop top-right; once it is over (ended,
+  // or a dead client's Terminated zombie), the resting lifecycle badge follows the heading
+  // instead — the kind/name stays flush-left with the meta labels below it, the status
+  // reads right after it, and neither sits beside the taller download button.
   let lifecycle = session.lifecycle_status(now);
-  let stop_btn = if lifecycle == SessionLifecycle::Running {
-    format!(
-      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"><span>Force stop</span></button>\n",
-      id = id
+  let (status_chip, stop_btn) = if lifecycle == SessionLifecycle::Running {
+    (
+      String::new(),
+      format!(
+        "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"><span>Force stop</span></button>\n",
+        id = id
+      ),
     )
   } else {
-    format!(
-      "<span class=\"chamfer session-status {}\"><span>{}</span></span>\n",
-      lifecycle.css_class(),
-      esc(lifecycle.label())
+    (
+      format!(
+        " <span class=\"chamfer session-status {}\"><span>{}</span></span>",
+        lifecycle.css_class(),
+        esc(lifecycle.label())
+      ),
+      String::new(),
     )
   };
   // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
@@ -121,11 +128,12 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let kind = session.kind.as_deref().unwrap_or("profile");
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
-<p class=\"session-kind\">{kind} <strong>{profile}</strong></p>{session_meta}\n{skills}</div>\n\
+<p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     kind = esc(kind),
     profile = esc(profile),
     export_btn = export_btn,
+    status_chip = status_chip,
     stop_btn = stop_btn,
     session_meta = session_meta,
     skills = skills_html,

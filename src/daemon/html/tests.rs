@@ -299,13 +299,14 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   assert!(html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")), "dot last in the island");
   assert!(html.contains(r#"<span class="daemon-right">"#), "daemon status keeps the island's right side");
   assert!(!html.contains("<h1>"), "the body no longer duplicates the path as an h1");
-  // A workflow session says so — not "profile" — inside the purple island.
-  assert!(html.contains(r#"<p class="session-kind">workflow <strong>arith</strong></p>"#), "got: {html}");
+  // A workflow session says so — not "profile" — inside the purple island. (The heading
+  // stays flush-left; the resting lifecycle badge may follow it, so don't pin the </p>.)
+  assert!(html.contains(r#"<p class="session-kind">workflow <strong>arith</strong>"#), "got: {html}");
   // A session with no kind (persisted by an older build) still reads as a profile.
   let mut old = store_with_cast_proc(ProcStatus::Running);
   old.sessions.get_mut("castab").unwrap().profile = Some("default".into());
   let html = session_page(&old, "castab").expect("session renders");
-  assert!(html.contains(r#"<p class="session-kind">profile <strong>default</strong></p>"#), "got: {html}");
+  assert!(html.contains(r#"<p class="session-kind">profile <strong>default</strong>"#), "got: {html}");
   // The index island shows just "scsh".
   let html = super::index_page(&store);
   assert!(html.contains(r#"<span class="crumbs"><a href="/">scsh</a></span>"#), "got crumbs on index");
@@ -566,8 +567,18 @@ fn ended_session_hides_force_stop_button() {
   );
   let html = session_page(&store, "done01").expect("session page");
   assert!(!html.contains(r#"id="session-stop""#), "ended session must not offer Force stop");
-  // In its place: the resting lifecycle badge (an ended clean session reads "completed").
+  // The resting lifecycle badge FOLLOWS the heading — the kind/name stays flush-left with
+  // the meta labels below it — not the top-right actions slot, where it sat awkwardly
+  // against the taller download button. The actions slot keeps only the buttons.
   assert!(html.contains(r#"session-status completed"#), "ended session shows the completed badge");
+  assert!(
+    html.contains(r#"</strong> <span class="chamfer session-status completed">"#),
+    "the badge follows the session-kind heading: {html}"
+  );
+  assert!(
+    !html.contains(r#"session-actions"><span class="chamfer session-status"#),
+    "no badge in the top-right actions slot"
+  );
 }
 
 #[test]
@@ -640,9 +651,11 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
   assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
   // Link-at-time left the inline toolbar (the /play page keeps deep links); the run
-  // snapshot download wears the same blue as the job-level one.
+  // snapshot download is cyan but the SAME size and shape as its toolbar siblings —
+  // no chamfered .btn misfit in this row.
   assert!(!procs.contains("data-cast-link"), "no link-at-time in the inline toolbar");
-  assert!(procs.contains(r#"<a class="chamfer btn btn--cyan btn--sm" href="/cast/castab/2/export.html""#), "blue run snapshot");
+  assert!(procs.contains(r#"<a href="/cast/castab/2/export.html" data-cast-export"#), "run snapshot link");
+  assert!(!procs.contains(r#"btn--cyan" href="/cast/"#), "no .btn styling inside the cast toolbar");
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output / autoscroll control.
   assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
@@ -776,11 +789,11 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
   // server-rendered snippet and in the client JS that regenerates it.
   let session = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   let procs = session_procs_html(&session);
-  assert!(procs.contains(
-    r#"<a class="chamfer btn btn--cyan btn--sm" href="/cast/castab/0/export.html" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>"#
-  ));
+  assert!(
+    procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>"#)
+  );
   let js = live_client_js();
-  assert!(js.contains("/export.html\" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>"));
+  assert!(js.contains("/export.html\" data-cast-export download hidden>⬇ Download run snapshot</a>"));
   assert!(js.contains("exportLink.hidden = !stats.events;"));
 }
 

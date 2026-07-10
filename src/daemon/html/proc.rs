@@ -56,7 +56,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 <button type="button" data-cast-reload>↻ Reload</button>
 <button type="button" data-cast-live{live_hidden}>● Live</button>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
-<a class="chamfer btn btn--cyan btn--sm" href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>
+<a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span>
 </div>
 <div class="cast-player"></div>
