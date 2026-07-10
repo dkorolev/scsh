@@ -528,14 +528,13 @@ function castEmbedHtml(p) {
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
-    '<button type="button" data-cast-fs>⛶ Fullscreen</button>' +
     '<button type="button" data-cast-link>🔗 Link at time</button>' +
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
     '<span class="cast-copied">copied</span>' +
-    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>' +
+    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
@@ -550,10 +549,6 @@ function initCasts(root) {
     else createCastPlayer(box);
     const proc = box.dataset.proc;
     const playUrl = () => location.origin + '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/play';
-    box.querySelector('[data-cast-fs]').addEventListener('click', () => {
-      if (document.fullscreenElement === box) document.exitFullscreen();
-      else box.requestFullscreen && box.requestFullscreen();
-    });
     box.querySelector('[data-cast-reload]').addEventListener('click', () => createCastPlayer(box));
     box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
     box.querySelector('[data-cast-link]').addEventListener('click', () => {
@@ -632,7 +627,9 @@ function createCastPlayer(box, startAt, autoplay) {
     const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
     box._chapters = chapters;
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
-    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers };
+    // fullscreenEl: the player's ⛶ button and `f` key fullscreen the whole cast box, so
+    // scsh's chrome (the fullscreen chapters sidebar) rides along.
+    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers, fullscreenEl: box };
     if (startAt === 'end') startAt = stats.duration;
     if (startAt === 'near-end') startAt = Math.max(0, stats.duration - LIVE_PREVIEW_TAIL_SECS);
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));

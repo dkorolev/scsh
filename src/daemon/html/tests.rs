@@ -549,7 +549,10 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   assert!(html.contains(r#"<script src="/assets/scsh-cast-player.js"></script>"#), "player js");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<div class="cast" data-cast-url="/cast/castab/2""#), "cast embed");
-  assert!(procs.contains("data-cast-fs"), "fullscreen button");
+  // Fullscreen lives in the player's own control bar now (⛶ + the f key, via
+  // fullscreenEl) — the page toolbar carries no fullscreen button of its own.
+  assert!(!procs.contains("data-cast-fs"), "no page-side fullscreen button");
+  assert!(procs.contains("f fullscreen"), "the keys hint teaches f");
   assert!(procs.contains("data-cast-link"), "timestamp deep-link button");
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output / autoscroll control.
