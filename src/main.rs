@@ -5474,7 +5474,7 @@ fn print_help_command(name: &str) {
         ("--json", "Per-cast {input, output, bytes, chapters} JSON; on by default when stdout is not a TTY."),
         ("<stem>.chapters.json", "A summary+chapters sidecar next to the cast renders into the page when present;"),
         ("", "a malformed sidecar is a warning — the cast still exports without it."),
-        ("(license)", "Exported pages embed the first-party scsh-cast-player — everything is MIT,"),
+        ("(license)", "Exported pages embed the first-party beecast-player — everything is MIT,"),
         ("", "no third-party code or license in any page. See LICENSE.md."),
       ],
     ),

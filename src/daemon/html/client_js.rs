@@ -830,7 +830,7 @@ function fmtClock(t) {
   const m = Math.floor(t / 60), s = t % 60;
   return m + ':' + (s < 10 ? '0' : '') + s;
 }
-// Entering/exiting fullscreen changes the box size: refit the player (scsh-cast-player
+// Entering/exiting fullscreen changes the box size: refit the player (beecast-player
 // re-lays-out on window resize) and decide whether the chapters sidebar has room.
 document.addEventListener('fullscreenchange', () => {
   const box = document.fullscreenElement;

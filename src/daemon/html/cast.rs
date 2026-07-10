@@ -18,11 +18,11 @@ use super::escape::{esc, quote_js};
 use super::layout::FAVICON_LINK;
 use crate::daemon::model::{ProcStatus, Store};
 
-/// The first-party scsh-cast-player (see `player/README.md` — clean-room, no third-party
-/// code, MIT like the rest of scsh): the DOM-free VT core plus the DOM half, concatenated
-/// and served as one asset.
-pub const PLAYER_JS: &str = concat!(include_str!("player/vt.js"), "\n", include_str!("player/player.js"));
-pub const PLAYER_CSS: &str = include_str!("player/player.css");
+/// The first-party player (clean-room, no third-party code, MIT), from the
+/// `beecast-player` crate where the component — born here as scsh-cast-player —
+/// now canonically lives: the DOM-free VT core plus the DOM half as one bundle.
+pub const PLAYER_JS: &str = beecast_player::PLAYER_JS;
+pub const PLAYER_CSS: &str = beecast_player::PLAYER_CSS;
 
 pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> Option<String> {
   let session = store.sessions.get(session_id)?;

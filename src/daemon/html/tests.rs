@@ -61,9 +61,8 @@ fn esc_handles_basic_html() {
 
 #[test]
 fn browser_player_is_first_party_and_carries_no_third_party_license() {
-  // The whole point of scsh-cast-player: the session browser ships NO third-party code.
-  // (Exported .html pages still embed asciinema-player via beecast-page — that attribution
-  // is pinned separately in tests/cli.rs.)
+  // The whole point of the first-party beecast-player: neither the session browser nor
+  // the exported pages (same crate family) ship ANY third-party code.
   let js = super::PLAYER_JS;
   let css = super::PLAYER_CSS;
   assert!(js.contains("BeeCastPlayer"), "the first-party player global must be defined");

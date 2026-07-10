@@ -34,7 +34,7 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }
 
-/// Inline scsh-cast-player embed for a proc's recording: a toolbar (fullscreen, timestamp
+/// Inline beecast-player embed for a proc's recording: a toolbar (fullscreen, timestamp
 /// deep-link, reload, live toggle, `.cast` + self-contained `.html` downloads) above an
 /// empty `.cast-player` box the client JS mounts the player into. Works mid-run too — the
 /// cast endpoint serves the partial file, and the Live toggle (visible only while the proc

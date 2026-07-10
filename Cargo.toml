@@ -26,13 +26,13 @@ crossterm = { version = "0.29.0", default-features = false, features = ["events"
 # DB (`~/.scsh/daemon-<port>.redb`), written per-session rather than rewriting one growing
 # JSON file every tick. redb is single-purpose, dependency-light, and needs no server.
 redb = "4.1"
-# `beecast-page` turns a recorded cast (+ chapters) into one self-contained offline HTML
-# player page (`scsh export-cast`). It earns its place: zero transitive dependencies (a
-# one-line `cargo tree`), it *is* the page pipeline scsh would otherwise have to duplicate
-# — the page template, the embedded first-party `scsh-cast-player` (0.3.0 dropped the
-# Apache-2.0 asciinema-player; everything is MIT now), and the strict `<script>`-safe
-# escaping — and its pages are byte-identical to the ones `beecast` itself exports.
-beecast-page = "0.3"
+# The first-party clean-room asciicast player + VT emulator, zero dependencies, MIT: the
+# session browser inlines its `PLAYER_JS`/`PLAYER_CSS` constants.
+beecast-player = "0.4"
+# The page pipeline for `scsh export-cast`: one self-contained offline `.html` per
+# recording, embedding the same player as the live pages. Its only dependency is
+# `beecast-player`, so nothing third-party rides in.
+beecast-page = "0.4"
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.
