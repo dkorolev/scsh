@@ -130,16 +130,20 @@ mod tests {
     previous_port: Option<String>,
     previous_home: Option<String>,
     home_dir: std::path::PathBuf,
+    /// Held for the guard's whole lifetime: SCSH_HOME is process-global, and every other
+    /// test that reads or writes it serializes on the same lock (see `runtime::test_env_lock`).
+    _env: std::sync::MutexGuard<'static, ()>,
   }
 
   impl RestoreDaemonPortEnv {
     fn set(port: u16) -> Self {
+      let env = crate::runtime::test_env_lock();
       let previous_port = std::env::var(paths::PORT_ENV).ok();
       let previous_home = std::env::var(paths::HOME_ENV).ok();
       let home_dir = std::env::temp_dir().join(format!("scsh-home-{}", crate::runtime::random_nonce_6()));
       std::env::set_var(paths::PORT_ENV, port.to_string());
       std::env::set_var(paths::HOME_ENV, &home_dir);
-      Self { previous_port, previous_home, home_dir }
+      Self { previous_port, previous_home, home_dir, _env: env }
     }
   }
 

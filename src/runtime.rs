@@ -1078,6 +1078,15 @@ pub fn host_logs_dir() -> std::path::PathBuf {
   scsh_home().join("logs")
 }
 
+/// Serializes tests that mutate process-global environment variables (`SCSH_HOME`, `HOME`):
+/// Rust runs tests on threads in ONE process, so an unsynchronized `set_var` races every
+/// concurrent reader. Take this guard in any test that sets either variable.
+#[cfg(test)]
+pub(crate) fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+  static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+  LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// scsh's durable home on the host (`$SCSH_HOME`, else `~/.scsh`, else a temp fallback).
 /// Same root the daemon store and build casts already use.
 pub fn scsh_home() -> std::path::PathBuf {
@@ -3226,6 +3235,7 @@ TAG
 
   #[test]
   fn check_claude_harness_errors_without_token_or_credentials_file() {
+    let _env = test_env_lock();
     let key = CLAUDE_OAUTH_TOKEN_ENV;
     let prev = std::env::var_os(key);
     let prev_home = std::env::var_os("HOME");

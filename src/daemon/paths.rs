@@ -164,6 +164,13 @@ pub fn read_live_pid(port: u16) -> Option<u32> {
   }
 }
 
+/// Where browser-created PROJECTS live: `$SCSH_HOME/projects/<name>` — fresh git repos the
+/// daemon scaffolds so tests and demos can start from the web UI with no terminal at all.
+/// Created on the fly; a bare (slash-free) name in the "open" box resolves here.
+pub fn projects_dir() -> std::path::PathBuf {
+  crate::runtime::scsh_home().join("projects")
+}
+
 /// Base URL for the daemon on localhost.
 pub fn base_url(port: u16) -> String {
   format!("http://127.0.0.1:{port}")

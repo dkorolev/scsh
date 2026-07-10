@@ -3501,8 +3501,8 @@ impl Drop for GitTransport {
 /// LOCAL-ONLY by design (scsh rebases them onto your branch, it never pushes), so if this
 /// author ever shows up in a code review or a pushed commit list, you pushed something
 /// you shouldn't have. See `scsh help cache`.
-const SCSH_COMMIT_NAME: &str = "dkorolev-neon-elon-bot";
-const SCSH_COMMIT_EMAIL: &str = "dmitry.korolev+elon-presley@gmail.com";
+pub(crate) const SCSH_COMMIT_NAME: &str = "dkorolev-neon-elon-bot";
+pub(crate) const SCSH_COMMIT_EMAIL: &str = "dmitry.korolev+elon-presley@gmail.com";
 
 /// Give the clone a *local* commit identity so a commit-enabled skill can `git commit`
 /// inside the container — the mounted `.git/config` carries it, and the container's base
@@ -5910,6 +5910,7 @@ mod tests {
 
   #[test]
   fn persist_run_artifacts_copies_cast_and_logs_with_shared_stem() {
+    let _env = runtime::test_env_lock();
     let base = std::env::temp_dir().join(format!("scsh-persist-test-{}", runtime::random_nonce_6()));
     let home = base.join("scsh-home");
     let run_dir = base.join("run");
