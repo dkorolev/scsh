@@ -1,7 +1,7 @@
 // beecast-player: the DOM half (see the crate README). Renders BeeCastVT snapshots,
 // drives the playback clock, and exposes the public BeeCastPlayer API.
 //
-// Clean-room implementation, MIT like the rest of BeeCast. The time axis is ALWAYS
+// Clean-room implementation, MIT like the rest of beecast. The time axis is ALWAYS
 // recording time: idle compression (idleTimeLimit) only changes pacing, never the clock
 // the API speaks. The pacing map itself lives in the DOM-free core (vt.js).
 'use strict';
@@ -90,7 +90,11 @@ function Player(src, mount, opts) {
   this.cast = cast;
   this.term = new VT.Term(cast.cols, cast.rows);
   this.pacing = VT.buildPacing(cast.events, cast.duration, opts.idleTimeLimit);
+  // Chapter ticks come from BOTH the embedder (opts.markers) and the recording's own
+  // in-band "m" events — including ones that arrive later through append(), so the seek
+  // bar shows the same chapters live as it would after a reload.
   this.markers = (opts.markers || []).map(function (m) { return { t: Number(m[0]) || 0, label: String(m[1] || '') }; });
+  this.absorbMarkers(0);
   this.speed = SPEEDS.indexOf(Number(opts.speed)) >= 0 ? Number(opts.speed) : 1;
   this.playing = false;
   this.pacedPos = 0;   // the playback clock, in paced seconds
@@ -160,6 +164,18 @@ Player.prototype.buildDom = function (mount, controls) {
   this.keyHandler = function (ev) { self.onKey(ev); };
   root.addEventListener('keydown', this.keyHandler);
   root.addEventListener('click', function () { try { root.focus({ preventScroll: true }); } catch (_) { root.focus(); } });
+};
+
+// Fold the recording's in-band "m" (marker) events from cast.events[fromIdx..] into
+// this.markers, kept sorted (jumpMarker walks them in time order; opts.markers may sit
+// anywhere relative to in-band ones).
+Player.prototype.absorbMarkers = function (fromIdx) {
+  let grew = false;
+  for (let i = fromIdx; i < this.cast.events.length; i++) {
+    const ev = this.cast.events[i];
+    if (ev.type === 'm') { this.markers.push({ t: ev.t, label: ev.data }); grew = true; }
+  }
+  if (grew) this.markers.sort(function (a, b) { return a.t - b.t; });
 };
 
 // (Re)place the chapter ticks: their positions are percentages of the duration, so a
@@ -331,6 +347,7 @@ Player.prototype.append = function (text) {
   VT.appendCast(this.cast, text);
   if (this.cast.events.length === fromIdx && this.cast.duration === prevDuration) return;
   VT.extendPacing(this.pacing, this.cast.events, fromIdx, this.cast.duration);
+  this.absorbMarkers(fromIdx);
   if (this.durEl) this.durEl.textContent = fmtClock(this.cast.duration);
   this.layoutMarkers();
   if (atEdge) {

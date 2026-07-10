@@ -1,5 +1,5 @@
 /* beecast-player chrome + terminal palette (see the crate README).
-   Clean-room, MIT like the rest of BeeCast. Every color is a variable so embedding pages can theme it. */
+   Clean-room, MIT like the rest of beecast. Every color is a variable so embedding pages can theme it. */
 .beecast-player {
   --sp-bg: #121417;
   --sp-fg: #cdd3dc;
