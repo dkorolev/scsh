@@ -8,11 +8,13 @@ This is a guided, English walkthrough that **builds a tiny `scsh` project from s
 
 ## What you'll see
 
-- `scsh init-demo-project` scaffolds a two-skill project and **commits** it.
+- `scsh init-demo-project` scaffolds a three-skill project and **commits** it.
 
 - **`add`** (A + B) runs by default on **two routes** — `add-opencode-gpt-5.4-mini-fast` and `add-claude-sonnet-4-6` — with the built-in defaults, and with values you pass.
 
-- **`add` is commit-enabled**: it records each sum as a git commit, and `scsh` **rebases that commit onto your branch**. The commit is journaled in the cache too, so even a **cached** re-run replays it — the commit side effect is never lost to a cache hit.
+- **`add` is commit-enabled**: it records each sum as a git commit — plus a `PR-DESCRIPTION.md` companion commit, authored as the scsh bot, which `packdiff` lifts into a **Description panel** on the step's diff page — and `scsh` **rebases those commits onto your branch**. The commits are journaled in the cache too, so even a **cached** re-run replays them — the commit side effect is never lost to a cache hit.
+
+- **`subtract`** (C − D) is a **second commit-enabled step** in the default profile (one route, `subtract-opencode-gpt-5.4-mini-fast`): it commits `subtract_log.txt` the same way `add` commits `add_log.txt` — so one default run brings in **two commits from two different steps**, and (with `packdiff` installed) the job page shows a browsable **⇄ commits diff** on each of those steps.
 
 - **`multiply`** (X · Y) lives in the **`multiply` profile** and **requires** X and Y: provide them and it works; omit them and **`scsh` itself refuses it**, before any container starts.
 
@@ -40,6 +42,9 @@ command -v git  >/dev/null && echo "git: ok"  || echo "git: MISSING (required)"
 command -v scsh >/dev/null && echo "scsh: on PATH" || echo "scsh: build it (cargo build --release), or put it on PATH"
 { command -v docker || command -v podman || command -v container; } >/dev/null 2>&1 \
   && echo "container runtime: ok" || echo "container runtime: none — real runs will be skipped"
+command -v packdiff >/dev/null 2>&1 \
+  && echo "packdiff: ok — commit-enabled steps get browsable diffs on the job page" \
+  || echo "packdiff: not found (optional) — install with \`cargo install packdiff\` to see per-step commit diffs"
 
 DEMO_ROUTES_AVAILABLE=0
 DEMO_ROUTE_GPT=N/A
@@ -138,36 +143,40 @@ $SCSH init-demo-project
 BASE=$(git rev-parse HEAD)   # remember the scaffold commit — the cache demo (step 11) returns here
 ```
 
-**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with four invocations (`add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `multiply-opencode-gpt-5.4-mini-fast`, `multiply-claude-sonnet-4-6`) over two skill folders (`.skills/add/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
+**Confirm** the output reports `✓ committed the scaffold`. It has written `.scsh.yml` with five invocations (`add-opencode-gpt-5.4-mini-fast`, `add-claude-sonnet-4-6`, `subtract-opencode-gpt-5.4-mini-fast`, `multiply-opencode-gpt-5.4-mini-fast`, `multiply-claude-sonnet-4-6`) over three skill folders (`.skills/add/`, `.skills/subtract/`, `.skills/multiply/`), harness discovery symlinks, and a `/tmp` gitignore.
 
 `$BASE` is the **scaffold commit** — the repo state the first `add` run (step 6) caches its result against. We return to it in step 11 to get a cache hit; capturing it now (not later) matters, because each `add` run commits and moves `HEAD`.
 
 ---
 
-## 6. Run `add` — all available routes
+## 6. Run the default profile — `add` on all available routes, plus `subtract`
 
-Run the default profile. `scsh` tries **every** `add` invocation in parallel, **skipping** routes whose harness was N/A in step 1:
+Run the default profile. `scsh` tries **every** default-profile invocation in parallel, **skipping** routes whose harness was N/A in step 1:
 
 ```sh
 $SCSH run
 ```
 
-**Confirm** a success line for **each route that probed ok** in step 1 (skip lines you don't expect):
+**Confirm** a success line for **each route that probed ok** in step 1 (skip lines you don't expect; `subtract` rides the gpt route, so it appears exactly when `add-opencode-…` does):
 
 ```
 ✓ opencode: add-opencode-gpt-5.4-mini-fast       …s   2 + 3 = 5      # gpt-5.4-mini-fast
 ✓ claude: add-claude-sonnet-4-6        …s   2 + 3 = 5      # sonnet-4-6
+✓ opencode: subtract-opencode-gpt-5.4-mini-fast  …s   10 - 4 = 6     # gpt-5.4-mini-fast
 ```
 
 Unavailable harnesses print `⚠ skipping '…' — … harness unavailable` and are not run.
 
-Result files land in `tmp/add_opencode_gpt_5_4_mini_fast_result.json` and/or `tmp/add_claude_sonnet_4_6_result.json`. Only **`add-opencode-gpt-5.4-mini-fast`** is commit-enabled — if it ran, confirm the git commit:
+Result files land in `tmp/add_opencode_gpt_5_4_mini_fast_result.json`, `tmp/add_claude_sonnet_4_6_result.json`, and/or `tmp/subtract_opencode_gpt_5_4_mini_fast_result.json`. **`add-opencode-gpt-5.4-mini-fast`** and **`subtract-opencode-gpt-5.4-mini-fast`** are commit-enabled — if the gpt route ran, confirm **commits from two different steps** (`add` makes two: the log line plus a `PR-DESCRIPTION.md` companion; `subtract` makes one):
 
 ```sh
-git log --oneline -2
+git log --oneline -4
 cat add_log.txt
+cat subtract_log.txt
 git status --porcelain
 ```
+
+**With `packdiff` installed** (step 1), each integration also prints a `commits diff packed — …` line, and the job page (the `session recordings & live board` link `scsh run` printed) shows a **⇄ commits diff** chip on each committing step's row — click it to browse that step's commits as a self-contained review page: files, LOC, side-by-side or unified. On **add**'s page, the `PR-DESCRIPTION.md` the skill committed (authored as the scsh bot — packdiff's notes-author convention) is lifted out of the diff and rendered as the commentable **Description** panel on top, like the pull request this branch would become; **subtract**'s page shows a plain diff with its commit listed.
 
 If a route was **N/A** in step 1, expect `scsh run` to skip it — not fail the whole run.
 
@@ -219,10 +228,10 @@ $SCSH list --verbose   # the same, plus the image Dockerfile and the exact build
 
 ## 10. Commits come back — and stack up (the important part)
 
-`add` is marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its sum to `add_log.txt` and commits inside its own clone; after the run, `scsh` **rebases that commit onto your current branch**. By now you've already run `add` twice (steps 6 and 7 — step 8 ran only `multiply`), so your branch already carries two `add: …` commits:
+`add` and `subtract` are marked **`commits: true`** in `.scsh.yml`. Each run, the skill appends its line to its log file (`add_log.txt` / `subtract_log.txt`) and commits inside its own clone (`add` also regenerates and commits `PR-DESCRIPTION.md`); after the run, `scsh` **rebases those commits onto your current branch** — and, with `packdiff` installed, **packs each step's commits into a review page** the job page links as **⇄ commits diff**. By now you've already run the default profile twice (steps 6 and 7 — step 8 ran only `multiply`), so your branch already carries two `add: …` pairs and (if the gpt route probed ok) two `subtract: …` commits:
 
 ```sh
-git log --oneline             # two "add: …" commits on top of the scaffold
+git log --oneline             # "add: …" and "subtract: …" commits on top of the scaffold
 cat add_log.txt               # 2 + 3 = 5 / 10 + 20 = 30
 git log -1 --format='%an <%ae>'   # author: dkorolev-neon-elon-bot <dmitry.korolev+elon-presley@gmail.com>
 ```
@@ -232,8 +241,8 @@ git log -1 --format='%an <%ae>'   # author: dkorolev-neon-elon-bot <dmitry.korol
 **Run it once more to see commits are a side effect, not a cached no-op:**
 
 ```sh
-$SCSH run                     # add again → "✓ add: brought in 1 commit (rebased onto main)"
-git log --oneline | head -1   # a NEW "add: 2 + 3 = 5" commit, even though the inputs repeat
+$SCSH run                     # add again → "✓ add: brought in 2 commits (rebased onto main)"
+git log --oneline | head -2   # NEW "add: …" commits, even though the inputs repeat
 ```
 
 Running again **adds another commit** — because the repo changed (a new `add_log.txt` line was committed), the next run sees a different state, so it's a fresh run. (Reset to the *same* state and re-run and you'll get a cache **hit** — instant, no model — that **still replays the commit**, so a cached re-run reproduces the side effect too. That's step 11.)
@@ -263,11 +272,11 @@ $SCSH run                     # SAME content + skill + env (defaults A=2 B=3) as
 
 > Capture `$BASE` at step 5, **not here** — by now `HEAD` has moved forward with each `add` commit, so `BASE=$(git rev-parse HEAD)` at this point would reset to *nowhere* (a no-op) and you'd get a cache miss. It must be the scaffold commit.
 
-**Confirm** the `add` line ends with **`(cached)`** and finishes in ~0s (no clone, no container, no model) — **and** that `scsh` still **replays the journaled commit**, so `git log` shows a fresh `add: 2 + 3 = 5` on top:
+**Confirm** the `add` line ends with **`(cached)`** and finishes in ~0s (no clone, no container, no model) — **and** that `scsh` still **replays the journaled commit**, so `git log` shows a fresh `add: 2 + 3 = 5` on top (`subtract`, cached from the same state, replays its commit the same way):
 
 ```
 ✓ opencode: add  0.0s  2 + 3 = 5  (cached)
-✓ add: brought in 1 commit (rebased onto main)
+✓ add: brought in 2 commits (rebased onto main)
 ```
 
 The cache records **both** halves of a run — the result file *and* the commits the skill made — so a hit reproduces the commit side effect, not just the result. (`git log` before vs. after this cached run makes the replayed commit obvious.)
@@ -303,7 +312,7 @@ You'll see `scsh` install the reviewer skills and add them to your `.scsh.yml` u
 ✓ added 5 skills to .scsh.yml: conventions-reviewer, …
 ```
 
-Your existing `add`/`multiply` entries are left untouched — the merge is **append-only**, and re-running `installskills` is idempotent (already-present skills are reported, never duplicated). The new skills are now first-class; commit them, then a real run needs a clean tree:
+Your existing `add`/`subtract`/`multiply` entries are left untouched — the merge is **append-only**, and re-running `installskills` is idempotent (already-present skills are reported, never duplicated). The new skills are now first-class; commit them, then a real run needs a clean tree:
 
 ```sh
 git add -A && git commit -m "install code-review skills"
@@ -325,6 +334,7 @@ echo "  sonnet-4-6         (add-claude-sonnet-4-6):      probed $DEMO_ROUTE_SONN
 echo "  routes available at start: $DEMO_ROUTES_AVAILABLE / 2"
 test -f tmp/add_opencode_gpt_5_4_mini_fast_result.json       && echo "  add-opencode-gpt-5.4-mini-fast ran → tmp/add_opencode_gpt_5_4_mini_fast_result.json" || true
 test -f tmp/add_claude_sonnet_4_6_result.json      && echo "  add-claude-sonnet-4-6 ran → tmp/add_claude_sonnet_4_6_result.json" || true
+test -f tmp/subtract_opencode_gpt_5_4_mini_fast_result.json && echo "  subtract-opencode-gpt-5.4-mini-fast ran → tmp/subtract_opencode_gpt_5_4_mini_fast_result.json" || true
 ```
 
 Agents following this demo should end with an explicit **PASS** only if `DEMO_ROUTES_AVAILABLE ≥ 1` and every route that probed **ok** also reported `2 + 3 = 5` in step 6.
@@ -350,7 +360,9 @@ rm -rf "$STAMP"          # inside the scsh repo it was created as tmp/$STAMP —
 
 - **Profiles** keep a skill that needs inputs (`multiply`) out of the default run, and **`scsh` enforces required variables itself**: a clear, early failure at the `scsh` level instead of a confusing one deep inside a container.
 
-- **Commit-enabled skills contribute back**: `scsh` rebases a skill's commits onto your branch (or saves them to a `scsh/incoming/…` branch if they don't apply cleanly), and treats adding a commit as a real, repeatable side effect — run twice, two commits.
+- **Commit-enabled skills contribute back**: `scsh` rebases a skill's commits onto your branch (or saves them to a `scsh/incoming/…` branch if they don't apply cleanly), and treats adding a commit as a real, repeatable side effect — run twice, two commits. Two commit-enabled steps in one run (`add` + `subtract`) each land their own commit.
+
+- **Each step's commits are browsable**: with `packdiff` installed, `scsh` packs every step's integrated commits into one self-contained HTML review page (under `$SCSH_HOME/sessions/<job>/diffs/`) and the job page in the session browser links it as **⇄ commits diff** on that step's row. `add`'s bot-authored `PR-DESCRIPTION.md` commit demonstrates packdiff's notes convention: lifted out of the diff, rendered as the page's Description panel.
 
 - **Results are content-addressed and cached**: same repo content + skill + env returns the cached result instantly (`(cached)`); change any of them and it re-runs. The cache lives in `tmp/.sccache/`.
 

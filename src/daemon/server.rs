@@ -319,6 +319,11 @@ fn handle_connection(
     )?;
     return Ok((false, None));
   }
+  if req.method == "GET" && req.path.starts_with("/diff/") {
+    let (status, body, disposition) = diff_response(&req.path, store);
+    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
+    return Ok((false, None));
+  }
   let (status, body, content_type, mutated) = route(&req, store, prune);
   write_response(&mut stream, status, &body, content_type)?;
   let session_id = if mutated { mutated_session_id(&req) } else { None };
@@ -384,6 +389,36 @@ fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
     .split('&')
     .any(|kv| kv == "dl=1")
     .then(|| format!("attachment; filename=\"scsh-{session_id}-p{proc_index}.cast\""));
+  (200, body, disposition)
+}
+
+/// `GET /diff/<session>/<proc>[?dl=1]` — the packdiff-packed review page for the commits
+/// this step brought into the caller's branch. The page is self-contained (CSS, the diff,
+/// and the comment engine are all inside the one file), so without `dl=1` it renders
+/// inline in a new tab; `dl=1` turns it into a download attachment.
+fn diff_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+  let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+  let Some((session_id, proc_index)) = parse_cast_route(path.strip_prefix("/diff/").unwrap_or("")) else {
+    return (404, "not found".into(), None);
+  };
+  let diff_path = {
+    let store = lock_store(store);
+    store
+      .sessions
+      .get(session_id)
+      .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
+      .and_then(|p| p.diff_path.clone())
+  };
+  let Some(diff_path) = diff_path else {
+    return (404, "no commits diff packed for this step".into(), None);
+  };
+  let Ok(body) = std::fs::read_to_string(&diff_path) else {
+    return (404, "diff page not available (pruned or moved)".into(), None);
+  };
+  let disposition = query
+    .split('&')
+    .any(|kv| kv == "dl=1")
+    .then(|| format!("attachment; filename=\"scsh-job-{session_id}-p{proc_index}-diff.html\""));
   (200, body, disposition)
 }
 
@@ -843,6 +878,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           elapsed: None,
           container_name: None,
           cast_path: None,
+          diff_path: None,
           lines: Vec::new(),
         });
       }
@@ -881,6 +917,18 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let path = field_str(&obj, "path").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.cast_path = if path.is_empty() { None } else { Some(path) };
+        true
+      } else {
+        false
+      }
+    }
+    "/api/v1/proc/diff" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let path = field_str(&obj, "path").unwrap_or_default();
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        p.diff_path = if path.is_empty() { None } else { Some(path) };
         true
       } else {
         false
@@ -1483,6 +1531,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       lines: Vec::new(),
       container_name: None,
       cast_path: None,
+      diff_path: None,
     });
   }
 }
@@ -2036,6 +2085,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2082,6 +2132,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -2130,6 +2181,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -2198,6 +2250,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2252,6 +2305,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2297,6 +2351,7 @@ mod tests {
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       cast_path: None,
+      diff_path: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -2405,6 +2460,7 @@ mod tests {
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       cast_path: None,
+      diff_path: None,
     };
     let now = now_unix_secs();
     let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
@@ -2619,6 +2675,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: None,
+            diff_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2657,6 +2714,29 @@ mod tests {
     assert_eq!(cast_response("/cast/castab/9", &store).0, 404);
     std::fs::remove_file(&path).unwrap();
     assert_eq!(cast_response("/cast/castab/0", &store).0, 404);
+
+    // The commits-diff endpoint mirrors the cast one: 404 until the run posts a packed
+    // page, then the self-contained HTML inline (renders in a tab) or as a download.
+    assert_eq!(diff_response("/diff/castab/0", &store).0, 404);
+    let diff = std::env::temp_dir().join(format!("scsh-test-diff-{}.html", std::process::id()));
+    std::fs::write(&diff, "<html>packed diff</html>").unwrap();
+    let body = format!(r#"{{"session":"castab","proc":0,"path":{}}}"#, crate::json::quote(&diff.to_string_lossy()));
+    assert!(handle_api_post("/api/v1/proc/diff", &body, &store, &prune));
+    assert_eq!(
+      store.lock().unwrap().sessions.get("castab").unwrap().procs[0].diff_path.as_deref(),
+      Some(diff.to_string_lossy().as_ref())
+    );
+    let (status, served, disposition) = diff_response("/diff/castab/0", &store);
+    assert_eq!(status, 200);
+    assert_eq!(served, "<html>packed diff</html>");
+    assert!(disposition.is_none(), "inline by default — the page renders in a new tab");
+    let (status, _, disposition) = diff_response("/diff/castab/0?dl=1", &store);
+    assert_eq!(status, 200);
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-castab-p0-diff.html\""));
+    assert_eq!(diff_response("/diff/nosuch/0", &store).0, 404);
+    assert_eq!(diff_response("/diff/castab/9", &store).0, 404);
+    std::fs::remove_file(&diff).unwrap();
+    assert_eq!(diff_response("/diff/castab/0", &store).0, 404);
   }
 
   #[test]
@@ -2694,6 +2774,7 @@ mod tests {
             lines: Vec::new(),
             container_name: None,
             cast_path: Some(cast_path.to_string_lossy().into_owned()),
+            diff_path: None,
           }],
           last_seen_at: 50,
           client_connected: false,
@@ -2755,6 +2836,7 @@ mod tests {
       lines: Vec::new(),
       container_name: None,
       cast_path,
+      diff_path: None,
     }
   }
 

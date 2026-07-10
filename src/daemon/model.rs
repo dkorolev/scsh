@@ -163,6 +163,10 @@ pub struct ProcRecord {
   /// container runs (grows in real time; a prefix is a valid partial cast), then the
   /// durable copy under the daemon dir after the skill finishes.
   pub cast_path: Option<String>,
+  /// Host path of the packdiff-packed review page for the commits this step brought into
+  /// the caller's branch (`$SCSH_HOME/sessions/<session>/diffs/…`). Set after the run
+  /// integrates a commit-enabled skill's commits; `None` for steps that committed nothing.
+  pub diff_path: Option<String>,
 }
 
 /// One skill listed in a session's start payload.
@@ -406,6 +410,7 @@ mod tests {
         lines: Vec::new(),
         container_name: None,
         cast_path: None,
+        diff_path: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -462,6 +467,7 @@ mod tests {
         lines: Vec::new(),
         container_name: None,
         cast_path: None,
+        diff_path: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -498,6 +504,7 @@ mod tests {
           lines: Vec::new(),
           container_name: None,
           cast_path: None,
+          diff_path: None,
         },
         ProcRecord {
           index: 1,
@@ -515,6 +522,7 @@ mod tests {
           lines: Vec::new(),
           container_name: None,
           cast_path: None,
+          diff_path: None,
         },
       ],
       last_seen_at: 1,

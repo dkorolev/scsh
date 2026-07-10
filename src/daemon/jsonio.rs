@@ -128,6 +128,7 @@ fn proc_json(p: &ProcRecord) -> String {
   };
   let container = opt_str(&p.container_name);
   let cast = opt_str(&p.cast_path);
+  let diff = opt_str(&p.diff_path);
   let lines: Vec<String> =
     p.lines.iter().map(|l| format!("{{ \"at\": {}, \"text\": {} }}", format_f64_json(l.at), quote(&l.text))).collect();
   let started_at = match p.started_at {
@@ -137,7 +138,7 @@ fn proc_json(p: &ProcRecord) -> String {
   format!(
     "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
-\"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"lines\": [{}] }}",
+\"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"diff_path\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -151,6 +152,7 @@ fn proc_json(p: &ProcRecord) -> String {
     elapsed,
     container,
     cast,
+    diff,
     lines.join(", ")
   )
 }
@@ -226,6 +228,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   let elapsed = field_num(obj, "elapsed");
   let container_name = field_str(obj, "container_name");
   let cast_path = field_str(obj, "cast_path");
+  let diff_path = field_str(obj, "diff_path"); // absent on sessions persisted by older builds
   let lines = match field_value(obj, "lines")? {
     Value::Array(arr) => arr.iter().map(parse_line).collect::<Result<Vec<_>, _>>()?,
     _ => Vec::new(),
@@ -245,6 +248,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     elapsed,
     container_name,
     cast_path,
+    diff_path,
     lines,
   })
 }
@@ -313,6 +317,7 @@ mod tests {
       lines: vec![OutputLine { at: f64::INFINITY, text: "x".into() }],
       container_name: None,
       cast_path: None,
+      diff_path: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -347,6 +352,7 @@ mod tests {
         elapsed: Some(1.5),
         container_name: None,
         cast_path: Some("/tmp/scsh-daemon/casts/abcdef-p0.cast".into()),
+        diff_path: Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html".into()),
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
       }],
       last_seen_at: 105,
@@ -358,6 +364,7 @@ mod tests {
     assert_eq!(s.procs[0].lines[0].text, "step 1");
     assert_eq!(s.procs[0].detail.as_deref(), Some("up to date"));
     assert_eq!(s.procs[0].cast_path.as_deref(), Some("/tmp/scsh-daemon/casts/abcdef-p0.cast"));
+    assert_eq!(s.procs[0].diff_path.as_deref(), Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html"));
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
   }

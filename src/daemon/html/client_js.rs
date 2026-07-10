@@ -477,6 +477,15 @@ function updateProcFields(det, p, nowUnix) {
   // The per-proc kill button only makes sense while the proc still runs.
   const killEl = det.querySelector('button[data-proc-stop]');
   if (killEl && p.status !== 'running' && p.status !== 'waiting') killEl.remove();
+  // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
+  // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
+  if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
+    const summary = det.querySelector('summary');
+    if (summary) {
+      summary.insertAdjacentHTML('beforeend', procDiffBtnHtml(p));
+      wireProcDiff(summary.querySelector('a[data-proc-diff]'));
+    }
+  }
   const detailEl = det.querySelector('.detail');
   if (detailEl) detailEl.textContent = p.detail || '';
   const containerEl = det.querySelector('.container');
@@ -521,6 +530,18 @@ function updateProcFields(det, p, nowUnix) {
   syncAutoscrollCtl(det, p);
 }
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
+// Mirrors proc_diff_btn_html in session.rs.
+function procDiffBtnHtml(p) {
+  return '<a class="proc-diff" data-proc-diff href="/diff/' + encodeURIComponent(SESSION_ID) + '/' + p.index +
+    '" title="Browse the commits this step brought into your branch — one self-contained review page">⇄ commits diff</a>';
+}
+// The chip lives inside the <summary>; keep a click on it from toggling the details row.
+function wireProcDiff(a) {
+  if (a) a.addEventListener('click', (ev) => ev.stopPropagation());
+}
+function initProcDiffs(root) {
+  (root || document).querySelectorAll('a[data-proc-diff]').forEach(wireProcDiff);
+}
 function castEmbedHtml(p) {
   const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
   const ended = (p.started_at && p.elapsed != null && p.status !== 'running' && p.status !== 'waiting')
@@ -985,6 +1006,7 @@ startProcClock();
   initCasts(root);
   initSessionStop();
   initProcKills(root);
+  initProcDiffs(root);
   initHarnessStops();
 })();
 function syncSessionStopButton(session) {

@@ -171,6 +171,7 @@ mod tests {
         fail_reason: None,
         container_name: Some(container.into()),
         cast_path: None,
+        diff_path: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
