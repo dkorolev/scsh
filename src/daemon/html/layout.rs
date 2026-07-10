@@ -5,7 +5,7 @@ use super::escape::{esc, quote_js};
 
 /// Page chrome for the session browser — tokens and components from the prnui stylebook
 /// (Ubuntu, dark surfaces, chamfered buttons/badges/inputs).
-const PAGE_CSS: &str = r#"
+pub(crate) const PAGE_CSS: &str = r#"
   *,*::before,*::after{box-sizing:border-box}
   :root {
     --bg: #0d1117;
