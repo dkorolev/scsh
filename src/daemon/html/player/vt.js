@@ -1,11 +1,14 @@
-// scsh-cast-player: the portable, DOM-free core (see README.md in this directory).
+// beecast-player: the portable, DOM-free core (see the crate README).
 //
 // Clean-room implementation against public documentation only: the asciicast v1/v2/v3
-// format descriptions and ECMA-48 / xterm control-sequence references. MIT, like scsh.
+// format descriptions and ECMA-48 / xterm control-sequence references. MIT, like the
+// rest of BeeCast.
 //
-// Two exports (attached to `ScshVT`, plus CommonJS for the Node self-test):
-//   parseCast(text)      -> { cols, rows, events, duration }  (times in recording seconds)
-//   new Term(cols, rows) -> .write(text), .resize(c, r), .snapshot()
+// The exports (attached to `BeeCastVT`, plus CommonJS for the Node self-test):
+//   parseCast(text)         -> { cols, rows, events, duration, … }  (times in recording seconds)
+//   appendCast(cast, text)  -> grow a parsed cast with newly produced lines (live-follow)
+//   buildPacing / extendPacing / mapTime -> the recording-time ↔ paced-time map
+//   new Term(cols, rows)    -> .write(text), .resize(c, r), .snapshot()
 'use strict';
 (function (root) {
 
@@ -28,12 +31,18 @@ function parseCast(text) {
         t += Number(pair[0]) || 0;
         events.push({ t: t, type: 'o', data: String(pair[1]) });
       }
-      return { cols: num(v1.width, 80), rows: num(v1.height, 24), events: events, duration: t };
+      return { cols: num(v1.width, 80), rows: num(v1.height, 24), events: events, duration: t, version: 1, tail: '' };
     }
   }
   let cols = 80, rows = 24, version = 3, abs = 0;
   const events = [];
-  for (const raw of src.split('\n')) {
+  // A live producer can hand over a prefix cut mid-line: when the text ends in a partial
+  // line that does not parse, hold it back as `tail` so `appendCast` can complete it.
+  let body = src, tail = '';
+  const cut = src.lastIndexOf('\n');
+  const last = src.slice(cut + 1).trim();
+  if (last && !tryJson(last)) { body = src.slice(0, cut + 1); tail = src.slice(cut + 1); }
+  for (const raw of body.split('\n')) {
     const line = raw.trim();
     if (!line || line[0] === '#') continue;
     if (line[0] === '{') {
@@ -54,10 +63,72 @@ function parseCast(text) {
     if (type !== 'o' && type !== 'r' && type !== 'm') continue; // input/exit don't render
     events.push({ t: abs, type: type, data: ev.length > 2 ? String(ev[2]) : '' });
   }
-  return { cols: cols, rows: rows, events: events, duration: abs };
+  return { cols: cols, rows: rows, events: events, duration: abs, version: version, tail: tail };
 }
 function tryJson(s) { try { return JSON.parse(s); } catch (_) { return null; } }
 function num(v, dflt) { const n = Number(v); return Number.isFinite(n) && n > 0 ? Math.floor(n) : dflt; }
+
+// Live-follow: append newly produced NDJSON lines to a cast returned by `parseCast`.
+// Chunk boundaries are free — only complete (newline-terminated) lines are consumed, and
+// a trailing partial line is buffered on `cast.tail` until its remainder arrives. Event
+// times read exactly as at load (v2 absolute, v3 intervals); stray header or `#` comment
+// lines are skipped. A v1 cast is one JSON document with no line to append to, so it
+// never grows. Returns the number of renderable events appended.
+function appendCast(cast, text) {
+  const buf = (cast.tail || '') + String(text == null ? '' : text);
+  if (cast.version === 1) { cast.tail = ''; return 0; }
+  const cut = buf.lastIndexOf('\n');
+  if (cut < 0) { cast.tail = buf; return 0; }
+  cast.tail = buf.slice(cut + 1);
+  let added = 0;
+  for (const raw of buf.slice(0, cut).split('\n')) {
+    const line = raw.trim();
+    if (!line || line[0] !== '[') continue; // headers, comments, and noise all skip
+    const ev = tryJson(line);
+    if (!Array.isArray(ev) || ev.length < 2 || typeof ev[0] !== 'number') continue;
+    cast.duration = cast.version >= 3 ? cast.duration + ev[0] : Math.max(cast.duration, ev[0]);
+    const type = String(ev[1]);
+    if (type !== 'o' && type !== 'r' && type !== 'm') continue; // input/exit don't render
+    cast.events.push({ t: cast.duration, type: type, data: ev.length > 2 ? String(ev[2]) : '' });
+    added++;
+  }
+  return added;
+}
+
+// ---- pacing map ------------------------------------------------------------------------
+// Playback runs on a "paced" clock where every silent gap longer than `limit` is shortened
+// to exactly `limit`. Both directions of the piecewise-linear map recording-time ↔ paced-
+// time derive from the event times: built once at load, extended in place as a live
+// recording grows (`extendPacing` from the first new event after each `appendCast`).
+function buildPacing(events, duration, limit) {
+  const pacing = { rec: [0], paced: [0], limit: limit == null ? null : limit, pacedDuration: 0 };
+  extendPacing(pacing, events, 0, duration);
+  return pacing;
+}
+function extendPacing(pacing, events, fromIdx, duration) {
+  let lastRec = pacing.rec[pacing.rec.length - 1];
+  let lastPaced = pacing.paced[pacing.paced.length - 1];
+  const push = function (t) {
+    if (t <= lastRec) return;
+    const gap = t - lastRec;
+    lastPaced += pacing.limit != null && gap > pacing.limit ? pacing.limit : gap;
+    lastRec = t;
+    pacing.rec.push(lastRec);
+    pacing.paced.push(lastPaced);
+  };
+  for (let i = fromIdx; i < events.length; i++) push(events[i].t);
+  push(duration);
+  pacing.pacedDuration = lastPaced;
+}
+function mapTime(from, to, t) {
+  if (t <= 0) return 0;
+  let lo = 0, hi = from.length - 1;
+  if (t >= from[hi]) return to[hi] + (t - from[hi]);
+  while (lo + 1 < hi) { const mid = (lo + hi) >> 1; if (from[mid] <= t) lo = mid; else hi = mid; }
+  const span = from[hi] - from[lo];
+  const frac = span > 0 ? (t - from[lo]) / span : 0;
+  return to[lo] + frac * (to[hi] - to[lo]);
+}
 
 // ---- terminal emulator ----------------------------------------------------------------
 // Cell colors: null = default, 0..255 = indexed, '#rrggbb' = truecolor.
@@ -464,11 +535,15 @@ function color256(idx) {
 
 const api = {
   parseCast: parseCast,
+  appendCast: appendCast,
+  buildPacing: buildPacing,
+  extendPacing: extendPacing,
+  mapTime: mapTime,
   Term: Term,
   color256: color256,
   A_BOLD: A_BOLD, A_DIM: A_DIM, A_ITALIC: A_ITALIC, A_UNDER: A_UNDER, A_INVERSE: A_INVERSE, A_STRIKE: A_STRIKE,
 };
-root.ScshVT = api;
+root.BeeCastVT = api;
 if (typeof module !== 'undefined' && module.exports) module.exports = api;
 
 })(typeof window !== 'undefined' ? window : globalThis);

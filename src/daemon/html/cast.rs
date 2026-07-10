@@ -7,11 +7,12 @@
 //! timeline scrubbing (native player controls), `#t=<seconds>` / `#t=<mm:ss>` deep links,
 //! a copy-link-at-current-time button, download links for the raw `.cast` and the
 //! self-contained offline `.html` export (hidden until the recording has frames — the
-//! export endpoint 404s on a frameless cast), and a reload button for live runs. While the proc
+//! export endpoint 404s on a frameless cast), and a manual reload button. While the proc
 //! is still running, the page listens for the daemon's `cast_growth` WebSocket
 //! notifications: a cast with no frames yet shows a placeholder that upgrades in place,
-//! growth surfaces an unobtrusive "Recording grew … — reload" button, and a Live toggle
-//! follows the tail of the recording until the proc finishes.
+//! and every later growth is APPENDED to the mounted player in place (`player.append`) —
+//! smooth, no re-creation, no reload banner. The Live toggle just parks the playhead at
+//! the live edge, where the player's tail-f-style follow policy renders each append.
 
 use super::escape::{esc, quote_js};
 use super::layout::FAVICON_LINK;
@@ -105,7 +106,6 @@ header code {{
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
 <button id="reload">↻ reload recording</button>
 <button id="live-toggle"{live_toggle_hidden}>● Live</button>
-<button id="grew" hidden></button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
 <div id="summary" class="dim"></div>
@@ -147,13 +147,14 @@ function castEventStats(text) {{
 // calm placeholder instead of a player error on the empty/404 cast; the player mounts over
 // the inline text ({{ data }}) once frames exist, and never re-fetches what we just loaded.
 let loadedDuration = null;
+let loadedChars = 0;
 function create(startAt, autoplay) {{
   if (player) {{ player.dispose(); player = null; }}
-  hideGrew();
   const mount = document.getElementById('player');
   fetch(CAST_URL + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).catch(() => null).then(text => {{
     const stats = text == null ? {{ events: 0, duration: 0 }} : castEventStats(text);
     loadedDuration = stats.events ? stats.duration : null;
+    loadedChars = text == null ? 0 : text.length;
     // The .html export needs at least one complete frame (the server 404s otherwise), so
     // the download link rides the same no-frames state as the placeholder.
     document.getElementById('dl-html').hidden = !stats.events;
@@ -167,7 +168,7 @@ function create(startAt, autoplay) {{
     if (startAt === 'end') startAt = stats.duration;
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
-    player = ScshCastPlayer.create({{ data: text }}, mount, opts);
+    player = BeeCastPlayer.create({{ data: text }}, mount, opts);
     if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
   }});
 }}
@@ -188,33 +189,38 @@ function connectWs() {{
 function onWsMessage(msg) {{
   if (msg.type !== 'cast_growth' || msg.session !== SESSION || msg.proc !== PROC) return;
   if (msg.running === false) {{ finishCast(); return; }}
-  if (liveMode) {{ create(loadedDuration != null ? loadedDuration : 'end', true); return; }}
   if (loadedDuration == null) {{ create(hashStart()); return; }} // placeholder upgrades to a player
-  showGrew(msg.duration);
+  follow();
 }}
-// Live mode mechanism, chosen deliberately: rather than a dedicated per-cast streaming
-// endpoint next to the daemon's single JSON broadcast hub, live mode rides the hub's
-// cast_growth notifications: each one re-fetches the cast, re-creates the player seeked
-// to where the previous load ended, and plays the newly appended tail.
+// Smooth live-follow: fetch the (local, append-only) recording and hand the player only
+// the bytes it has not seen (`player.append` buffers partial trailing lines internally).
+// The player grows in place — no re-creation, no seek, no reload banner. A playhead parked
+// at the live edge renders each append immediately; one paused or seeked back is never
+// yanked forward.
+let appending = false;
+function follow() {{
+  if (!player || appending) return;
+  appending = true;
+  fetch(CAST_URL + '?ts=' + Date.now()).then(r => r.ok ? r.text() : null).then(text => {{
+    appending = false;
+    if (text == null || !player) return;
+    if (text.length <= loadedChars) return;
+    player.append(text.slice(loadedChars));
+    loadedChars = text.length;
+    loadedDuration = player.cast.duration;
+  }}).catch(() => {{ appending = false; }});
+}}
+// The Live toggle parks the playhead at the live edge (the follow policy is positional).
 let liveMode = false;
 function setLiveMode(on) {{
   liveMode = !!on && castRunning;
   document.getElementById('live-toggle').classList.toggle('on', liveMode);
-  if (liveMode) create('end');
+  if (liveMode && player) {{ follow(); player.pause(); player.seek(1e9); }}
 }}
 document.getElementById('live-toggle').addEventListener('click', () => setLiveMode(!liveMode));
-function showGrew(available) {{
-  if (loadedDuration == null || !(available > loadedDuration + 0.05)) return;
-  const btn = document.getElementById('grew');
-  const delta = Math.max(1, Math.round(available - loadedDuration));
-  btn.textContent = 'Recording grew: +' + delta + 's (loaded ' + fmtClock(loadedDuration) +
-    ', available ' + fmtClock(available) + ') — reload';
-  btn.hidden = false;
-}}
-function hideGrew() {{ document.getElementById('grew').hidden = true; }}
 // The proc finished: one last reload picks up the complete cast (keeping the current
-// position), live mode ends cleanly (toggle off + disabled), the growth banner retires,
-// and the WS is no longer needed.
+// position — the durable copy may live at a different path than the live file), live mode
+// ends cleanly (toggle off + disabled), and the WS is no longer needed.
 function finishCast() {{
   castRunning = false;
   if (ws) {{ try {{ ws.close(); }} catch (_) {{}} ws = null; }}
@@ -225,9 +231,6 @@ function finishCast() {{
   if (note) note.innerHTML = '<span class="dim">recording finished</span>';
   create(player ? player.getCurrentTime() : hashStart());
 }}
-document.getElementById('grew').addEventListener('click', () => {{
-  create(player ? player.getCurrentTime() : hashStart());
-}});
 connectWs();
 // Load the summary + chapters sidecar, then build the player with chapter markers.
 fetch(CAST_URL + '/chapters').then(r => r.ok ? r.json() : {{}}).catch(() => ({{}})).then(meta => {{

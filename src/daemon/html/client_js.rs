@@ -541,7 +541,7 @@ function castEmbedHtml(p) {
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
 // fit:'both' scales the terminal to fit its box in both dimensions (inline and fullscreen).
 function initCasts(root) {
-  if (typeof ScshCastPlayer === 'undefined') return;
+  if (typeof BeeCastPlayer === 'undefined') return;
   root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
     box.dataset.ready = '1';
     // A cast inside a collapsed <details> has zero width; size its pane on expand.
@@ -602,11 +602,10 @@ function castPlaceholderHtml(status) {
 // How far before the current end a still-running recording starts its preview.
 const LIVE_PREVIEW_TAIL_SECS = 3;
 function createCastPlayer(box, startAt, autoplay) {
-  if (typeof ScshCastPlayer === 'undefined') return;
+  if (typeof BeeCastPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
   box._loading = true;
-  hideCastGrowth(box);
   const proc = box.dataset.proc;
   const chaptersUrl = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/chapters';
   Promise.all([
@@ -641,8 +640,10 @@ function createCastPlayer(box, startAt, autoplay) {
     if (startAt === 'near-end') startAt = Math.max(0, stats.duration - LIVE_PREVIEW_TAIL_SECS);
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
-    // vs player, so the player must not fetch it a second time.
-    box._player = ScshCastPlayer.create({ data: text }, mount, opts);
+    // vs player, so the player must not fetch it a second time. `_loadedChars` marks how
+    // much of the recording the player holds; live growth appends only the suffix.
+    box._player = BeeCastPlayer.create({ data: text }, mount, opts);
+    box._loadedChars = text.length;
     if (autoplay) { try { box._player.play(); } catch (_) {} }
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
@@ -693,45 +694,43 @@ function setCastLive(box, on) {
   box._live = !!on;
   const btn = box.querySelector('[data-cast-live]');
   if (btn) btn.classList.toggle('on', box._live);
-  if (box._live) createCastPlayer(box, 'end');
+  // Jump to the live edge; parked there, every append renders immediately (the player's
+  // follow policy is positional, like `tail -f`), so following needs no further driving.
+  if (box._live && box._player) {
+    followCastGrowth(box);
+    box._player.pause && box._player.pause();
+    box._player.seek(1e9); // clamps to the current end of the recording
+  }
 }
 // A server-pushed cast_growth notification for this session: upgrade a placeholder to a
-// player as soon as the first frames exist, otherwise offer an unobtrusive reload banner.
-// The final running:false notice just retires the banner — the finish reload is already
-// driven by the proc's status change in the tick payload.
+// player as soon as the first frames exist, otherwise append the newly recorded suffix in
+// place — the player grows smoothly, with no re-creation, no seek, and no reload banner.
+// A viewer parked at the live edge sees the new frames immediately; one who paused or
+// seeked back just watches the duration grow. The final running:false notice needs no
+// action — the finish reload is driven by the proc's status change in the tick payload.
 function onCastGrowth(msg) {
   if (!SESSION_ID || msg.session !== SESSION_ID) return;
   const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(msg.proc)) + '"]');
   const box = det && det.querySelector('.cast[data-ready]');
   if (!box || box._loading) return;
-  if (msg.running === false) { hideCastGrowth(box); return; }
-  if (box._live) { createCastPlayer(box, box._loadedDuration ?? 'end', true); return; }
+  if (msg.running === false) return;
   if (box._loadedDuration == null) { createCastPlayer(box); return; }
-  showCastGrowth(box, msg.duration);
+  followCastGrowth(box);
 }
-function growthLabel(loaded, available) {
-  const delta = Math.max(1, Math.round(available - loaded));
-  return 'Recording grew: +' + delta + 's (loaded ' + fmtClock(loaded) + ', available ' + fmtClock(available) + ')';
-}
-function showCastGrowth(box, available) {
-  const loaded = box._loadedDuration;
-  if (loaded == null || !(available > loaded + 0.05)) return;
-  let bar = box.querySelector('.cast-grew');
-  if (!bar) {
-    bar = document.createElement('div');
-    bar.className = 'cast-grew';
-    bar.innerHTML = '<span class="cast-grew-text"></span> <button type="button" data-cast-grew>↻ Reload</button>';
-    // Reload preserves the viewer's current position in the recording.
-    bar.querySelector('[data-cast-grew]').addEventListener('click', () => {
-      createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
-    });
-    box.querySelector('.cast-toolbar').insertAdjacentElement('afterend', bar);
-  }
-  setTextUnlessSelecting(bar.querySelector('.cast-grew-text'), growthLabel(loaded, available));
-}
-function hideCastGrowth(box) {
-  const bar = box.querySelector('.cast-grew');
-  if (bar) bar.remove();
+// Fetch the (local, append-only) recording and hand the player only the bytes it has not
+// seen; partial trailing lines are the player's problem (it buffers them internally).
+function followCastGrowth(box) {
+  if (!box._player || box._appending) return;
+  box._appending = true;
+  fetch(box.dataset.castUrl).then(r => r.ok ? r.text() : null).then(text => {
+    box._appending = false;
+    if (text == null || !box._player) return;
+    const prev = box._loadedChars || 0;
+    if (text.length <= prev) return;
+    box._player.append(text.slice(prev));
+    box._loadedChars = text.length;
+    box._loadedDuration = box._player.cast.duration;
+  }).catch(() => { box._appending = false; });
 }
 // Seek the player to a chapter and flash its title (shared by chips, sidebar, and [ ] keys).
 function seekToChapter(box, c) {

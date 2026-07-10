@@ -66,8 +66,8 @@ fn browser_player_is_first_party_and_carries_no_third_party_license() {
   // is pinned separately in tests/cli.rs.)
   let js = super::PLAYER_JS;
   let css = super::PLAYER_CSS;
-  assert!(js.contains("ScshCastPlayer"), "the first-party player global must be defined");
-  assert!(js.contains("ScshVT"), "the DOM-free core must be bundled first");
+  assert!(js.contains("BeeCastPlayer"), "the first-party player global must be defined");
+  assert!(js.contains("BeeCastVT"), "the DOM-free core must be bundled first");
   assert!(js.contains("Clean-room implementation"), "the clean-room statement rides in the asset");
   for banned in ["asciinema-player", "AsciinemaPlayer", "@license", "Apache"] {
     assert!(!js.contains(banned), "browser player JS must not carry '{banned}'");
@@ -91,7 +91,7 @@ fn vt_core_node_selftest() {
     r#"
 const assert = require('assert');
 require({bundle:?});
-const VT = globalThis.ScshVT;
+const VT = globalThis.BeeCastVT;
 
 // v3: intervals sum; term size from header; resize + marker events survive; # comments skip.
 let c = VT.parseCast('{{"version":3,"term":{{"cols":10,"rows":3}}}}\n# note\n[0.5,"o","hi"]\n[0.5,"m","chapter"]\n[1.0,"r","20x5"]\n');
@@ -628,23 +628,28 @@ fn empty_cast_shows_placeholder_instead_of_player_error() {
 }
 
 #[test]
-fn cast_growth_notifications_drive_the_reload_banner() {
-  // The session page routes WS messages by type: cast_growth feeds the banner, everything
-  // else stays on the tick path.
+fn cast_growth_notifications_append_in_place() {
+  // The session page routes WS messages by type: cast_growth appends the newly recorded
+  // suffix to the mounted player IN PLACE (no re-creation, no seek, no reload banner) —
+  // smooth live following. Everything else stays on the tick path.
   let js = live_client_js();
   assert!(js.contains("if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }"));
   assert!(js.contains("onWsMessage(JSON.parse(ev.data))"));
-  assert!(js.contains("Recording grew: +"));
-  assert!(js.contains("data-cast-grew"));
+  assert!(js.contains("function followCastGrowth"));
+  assert!(js.contains("box._player.append(text.slice(prev))"));
+  assert!(!js.contains("Recording grew: +"), "the reload banner is gone — growth is invisible and smooth");
   // The standalone player page listens on its own WS connection — but only while the proc
-  // runs, and it degrades to the manual reload button when the WS is unavailable.
+  // runs — and follows growth the same way.
   let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
   assert!(page.contains("'cast_growth'"));
   assert!(page.contains("const SESSION = 'castab';"));
   assert!(page.contains("const PROC = 0;"));
-  assert!(page.contains(r#"<button id="grew" hidden></button>"#));
-  assert!(page.contains("Recording grew: +"));
+  assert!(page.contains("player.append(text.slice(loadedChars))"));
+  assert!(!page.contains("Recording grew: +"));
   assert!(page.contains("if (!castRunning) return;"), "no WS connect once the proc finished");
+  // The player bundle itself carries the live-follow API the pages rely on.
+  assert!(super::PLAYER_JS.contains("Player.prototype.append"), "the vendored player must have append");
+  assert!(super::PLAYER_JS.contains("appendCast"), "the DOM-free core must parse appends");
 }
 
 #[test]
@@ -654,10 +659,11 @@ fn live_toggle_renders_only_while_the_proc_runs() {
   assert!(running.contains(r#"<button type="button" data-cast-live>● Live</button>"#));
   let done = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Ok).sessions["castab"].procs[0]);
   assert!(done.contains(r#"<button type="button" data-cast-live hidden>● Live</button>"#));
-  // The client JS follows the tail via cast_growth reloads (see the mechanism comment).
+  // The toggle just parks the playhead at the live edge; the player's positional follow
+  // policy then renders each appended chunk (no reloads, no re-creation).
   let js = live_client_js();
   assert!(js.contains("function setCastLive(box, on)"));
-  assert!(js.contains("if (box._live) { createCastPlayer(box, box._loadedDuration ?? 'end', true); return; }"));
+  assert!(js.contains("box._player.seek(1e9)"));
   // Standalone page: toggle present while running, hidden for finished procs, and the
   // finish notice disables it after the final reload.
   let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");

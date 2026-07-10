@@ -1,6 +1,6 @@
-/* scsh-cast-player chrome + terminal palette (see README.md in this directory).
-   Clean-room, MIT like scsh. Every color is a variable so embedding pages can theme it. */
-.scsh-player {
+/* beecast-player chrome + terminal palette (see the crate README).
+   Clean-room, MIT like the rest of BeeCast. Every color is a variable so embedding pages can theme it. */
+.beecast-player {
   --sp-bg: #121417;
   --sp-fg: #cdd3dc;
   /* ANSI 0–7 */
@@ -16,7 +16,7 @@
   outline: none;
   overflow: hidden;
 }
-.scsh-player:focus-visible { box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.5); }
+.beecast-player:focus-visible { box-shadow: 0 0 0 2px rgba(88, 166, 255, 0.5); }
 .sp-screen-box { overflow: hidden; }
 .sp-screen {
   margin: 0;
@@ -26,6 +26,13 @@
   transform-origin: top left;
   width: max-content;
 }
+/* Styled runs render as inline-blocks so a run's background paints the FULL 1.25 line box.
+   A plain inline span's background only covers the font's content area (ascent + descent,
+   less than the line box), which left unpainted gaps between the rows of a multi-row
+   colored panel — visible as dark lines cutting through what a TUI drew as one solid
+   block. Runs never span rows (rows are separate lines in the <pre>), so inline-block
+   cannot change any line breaking. */
+.sp-screen span { display: inline-block; }
 .sp-probe { visibility: hidden; position: absolute; }
 .sp-b { font-weight: 700; }
 .sp-d { opacity: 0.6; }

@@ -1,43 +1,15 @@
-// scsh-cast-player: the DOM half (see README.md in this directory). Renders ScshVT
-// snapshots, drives the playback clock, and exposes the public ScshCastPlayer API.
+// beecast-player: the DOM half (see the crate README). Renders BeeCastVT snapshots,
+// drives the playback clock, and exposes the public BeeCastPlayer API.
 //
-// Clean-room implementation, MIT like scsh. The time axis is ALWAYS recording time:
-// idle compression (idleTimeLimit) only changes pacing, never the clock the API speaks.
+// Clean-room implementation, MIT like the rest of BeeCast. The time axis is ALWAYS
+// recording time: idle compression (idleTimeLimit) only changes pacing, never the clock
+// the API speaks. The pacing map itself lives in the DOM-free core (vt.js).
 'use strict';
 (function (root) {
 
-const VT = root.ScshVT;
+const VT = root.BeeCastVT;
 const SEEK_STEP_SECS = 5;
 const SPEEDS = [0.5, 1, 1.5, 2, 3, 5];
-
-// ---- pacing map ------------------------------------------------------------------------
-// Playback runs on a "paced" clock where every silent gap longer than `limit` is shortened
-// to exactly `limit`. Both directions of the piecewise-linear map recording-time ↔ paced-
-// time are derived from the event times once, at load.
-function buildPacing(events, duration, limit) {
-  const rec = [0], paced = [0];
-  let lastRec = 0, lastPaced = 0;
-  const push = function (t) {
-    if (t <= lastRec) return;
-    const gap = t - lastRec;
-    lastPaced += limit != null && gap > limit ? limit : gap;
-    lastRec = t;
-    rec.push(lastRec);
-    paced.push(lastPaced);
-  };
-  for (const ev of events) push(ev.t);
-  push(duration);
-  return { rec: rec, paced: paced, pacedDuration: lastPaced };
-}
-function mapTime(from, to, t) {
-  if (t <= 0) return 0;
-  let lo = 0, hi = from.length - 1;
-  if (t >= from[hi]) return to[hi] + (t - from[hi]);
-  while (lo + 1 < hi) { const mid = (lo + hi) >> 1; if (from[mid] <= t) lo = mid; else hi = mid; }
-  const span = from[hi] - from[lo];
-  const frac = span > 0 ? (t - from[lo]) / span : 0;
-  return to[lo] + frac * (to[hi] - to[lo]);
-}
 
 // ---- rendering -------------------------------------------------------------------------
 const ATTR_CLASSES = [
@@ -117,7 +89,7 @@ function Player(src, mount, opts) {
   const cast = VT.parseCast(src && src.data);
   this.cast = cast;
   this.term = new VT.Term(cast.cols, cast.rows);
-  this.pacing = buildPacing(cast.events, cast.duration, opts.idleTimeLimit);
+  this.pacing = VT.buildPacing(cast.events, cast.duration, opts.idleTimeLimit);
   this.markers = (opts.markers || []).map(function (m) { return { t: Number(m[0]) || 0, label: String(m[1] || '') }; });
   this.speed = SPEEDS.indexOf(Number(opts.speed)) >= 0 ? Number(opts.speed) : 1;
   this.playing = false;
@@ -144,7 +116,7 @@ function Player(src, mount, opts) {
 Player.prototype.buildDom = function (mount, controls) {
   const self = this;
   const root = document.createElement('div');
-  root.className = 'scsh-player';
+  root.className = 'beecast-player';
   root.tabIndex = 0;
   root.innerHTML =
     '<div class="sp-screen-box"><pre class="sp-screen"></pre></div>' +
@@ -182,19 +154,27 @@ Player.prototype.buildDom = function (mount, controls) {
       document.addEventListener('mousemove', move);
       document.addEventListener('mouseup', up);
     });
-    const marks = root.querySelector('.sp-markers');
-    for (const m of this.markers) {
-      if (!(this.cast.duration > 0)) break;
-      const tick = document.createElement('div');
-      tick.className = 'sp-marker';
-      tick.style.left = Math.min(100, (m.t / this.cast.duration) * 100) + '%';
-      tick.title = fmtClock(m.t) + (m.label ? ' ' + m.label : '');
-      marks.appendChild(tick);
-    }
+    this.marksEl = root.querySelector('.sp-markers');
+    this.layoutMarkers();
   }
   this.keyHandler = function (ev) { self.onKey(ev); };
   root.addEventListener('keydown', this.keyHandler);
   root.addEventListener('click', function () { try { root.focus({ preventScroll: true }); } catch (_) { root.focus(); } });
+};
+
+// (Re)place the chapter ticks: their positions are percentages of the duration, so a
+// growing live recording shifts them left as it lengthens.
+Player.prototype.layoutMarkers = function () {
+  if (!this.marksEl) return;
+  this.marksEl.innerHTML = '';
+  if (!(this.cast.duration > 0)) return;
+  for (const m of this.markers) {
+    const tick = document.createElement('div');
+    tick.className = 'sp-marker';
+    tick.style.left = Math.min(100, (m.t / this.cast.duration) * 100) + '%';
+    tick.title = fmtClock(m.t) + (m.label ? ' ' + m.label : '');
+    this.marksEl.appendChild(tick);
+  }
 };
 
 Player.prototype.onKey = function (ev) {
@@ -256,10 +236,15 @@ Player.prototype.applyEventsUpTo = function (t) {
 
 Player.prototype.render = function () {
   this.screenEl.innerHTML = screenHtml(this.term.snapshot());
+  this.renderBar();
+  if (this.layoutPending) { this.layoutPending = false; this.layout(); }
+};
+
+// The control bar alone — cheap enough for every live append even when the screen is not moving.
+Player.prototype.renderBar = function () {
   const t = this.getCurrentTime();
   if (this.timeEl) this.timeEl.textContent = fmtClock(t);
   if (this.fillEl) this.fillEl.style.width = (this.cast.duration > 0 ? Math.min(100, (t / this.cast.duration) * 100) : 0) + '%';
-  if (this.layoutPending) { this.layoutPending = false; this.layout(); }
 };
 
 // fit: scale the fixed-metric terminal down (never up) to the containing box's width —
@@ -281,11 +266,11 @@ Player.prototype.layout = function () {
     if (availH > 40 && naturalH * scale > availH + 2) scale = Math.min(scale, availH / naturalH);
   }
   this.screenEl.style.transform = scale < 1 ? 'scale(' + scale + ')' : '';
+  box.style.height = naturalH * scale + 'px';
   // Center the (possibly scaled) terminal in the pane; the layout box keeps its unscaled
   // width, so flex centering would be off — compute the margin from the DISPLAY width.
   const displayW = naturalW * scale;
   this.screenEl.style.marginLeft = availW > displayW ? (availW - displayW) / 2 + 'px' : '';
-  box.style.height = naturalH * scale + 'px';
 };
 
 Player.prototype.tick = function (nowMs) {
@@ -320,13 +305,41 @@ Player.prototype.toggle = function () { if (this.playing) this.pause(); else thi
 
 Player.prototype.seek = function (t) {
   t = Math.min(this.cast.duration, Math.max(0, parseTime(t)));
-  this.pacedPos = mapTime(this.pacing.rec, this.pacing.paced, t);
+  this.pacedPos = VT.mapTime(this.pacing.rec, this.pacing.paced, t);
   this.applyEventsUpTo(t);
   this.render();
 };
 
 Player.prototype.getCurrentTime = function () {
-  return mapTime(this.pacing.paced, this.pacing.rec, this.pacedPos);
+  return VT.mapTime(this.pacing.paced, this.pacing.rec, this.pacedPos);
+};
+
+// Live-follow: feed newly produced cast lines (v2/v3 NDJSON) into a mounted player as the
+// recording grows — how the data arrives (WebSocket, polling, a tailed file) is the
+// caller's business. Chunk boundaries are free; a partial trailing line is buffered until
+// its remainder arrives. The follow policy is positional, like `tail -f`: a playhead
+// resting at the live edge stays pinned to it and renders each append immediately, while a
+// viewer who paused earlier or seeked back is never yanked forward — they just watch the
+// duration grow. A *playing* player keeps its own clock; the longer recording simply no
+// longer auto-pauses it at the old end (and once playback catches the edge and parks,
+// subsequent appends pick it up and follow).
+Player.prototype.append = function (text) {
+  if (this.disposed) return;
+  const atEdge = !this.playing && this.pacedPos >= this.pacing.pacedDuration - 1e-9;
+  const fromIdx = this.cast.events.length;
+  const prevDuration = this.cast.duration;
+  VT.appendCast(this.cast, text);
+  if (this.cast.events.length === fromIdx && this.cast.duration === prevDuration) return;
+  VT.extendPacing(this.pacing, this.cast.events, fromIdx, this.cast.duration);
+  if (this.durEl) this.durEl.textContent = fmtClock(this.cast.duration);
+  this.layoutMarkers();
+  if (atEdge) {
+    this.pacedPos = this.pacing.pacedDuration;
+    this.applyEventsUpTo(this.getCurrentTime());
+    this.render();
+  } else {
+    this.renderBar(); // same playhead, longer recording: only the bar's proportions move
+  }
 };
 
 Player.prototype.dispose = function () {
@@ -336,7 +349,7 @@ Player.prototype.dispose = function () {
   if (this.root && this.root.parentNode) this.root.parentNode.removeChild(this.root);
 };
 
-root.ScshCastPlayer = {
+root.BeeCastPlayer = {
   create: function (src, mount, opts) { return new Player(src, mount, opts); },
 };
 

@@ -101,18 +101,20 @@ does not error on it. Instead:
 - **Placeholder** — until the recording has at least one complete event line, the player
   box (inline embed and standalone page alike) shows a calm *"Recording in progress — no
   frames yet."* note. The moment frames exist, it upgrades to a real player in place.
-- **Reload suggestion** — while a proc runs, the daemon probes its recording cheaply on
+- **Smooth live growth** — while a proc runs, the daemon probes its recording cheaply on
   the WebSocket tick (a stat plus a tail-parse from a cached offset — tolerant of a
   truncated trailing line) and pushes `cast_growth` messages: `{ "type": "cast_growth",
-  "session", "proc", "duration", "running" }`. The player shows an unobtrusive
-  *"Recording grew: +Ns (loaded Xs, available Ys)"* banner whose Reload button re-fetches
-  the cast and re-creates the player at your current position. No client-side polling —
-  the server pushes, and only while someone is subscribed.
-- **Live mode** — a **● Live** toggle (visible only while the proc runs) follows the tail:
-  each growth notification reloads the cast, seeks to where the previous load ended, and
-  plays the newly appended output. When the proc finishes, a final `running: false` notice
-  ends live mode cleanly — one last reload picks up the complete cast and the toggle is
-  disabled.
+  "session", "proc", "duration", "running" }`. Each one makes the page fetch the recording
+  and **append only the new suffix to the mounted player in place** (`player.append`) — no
+  re-creation, no seek, no banner. The seek bar and duration simply grow; a viewer parked
+  at the live edge sees the new frames as they land, and one who paused or seeked back is
+  never yanked forward. No client-side polling — the server pushes, and only while someone
+  is subscribed.
+- **Live mode** — a **● Live** toggle (visible only while the proc runs) parks the
+  playhead at the live edge, where the player's positional (`tail -f`-style) follow policy
+  renders every append immediately. When the proc finishes, a final `running: false`
+  notice ends live mode cleanly — one last reload picks up the complete durable cast and
+  the toggle is disabled.
 
 All of it degrades gracefully without the WebSocket: pages still load, finished casts
 play exactly as before, and the manual ↻ reload button keeps working.

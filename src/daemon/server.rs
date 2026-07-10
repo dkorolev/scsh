@@ -2727,6 +2727,8 @@ mod tests {
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"rec.html\""));
     assert!(page.contains("<title>rec</title>"), "cast stem is the title");
     assert!(
+      // Exported pages embed beecast-page 0.3.0's player (still Scsh-named); this pin
+      // flips to BeeCastPlayer when scsh bumps to beecast-page 0.4.0.
       page.contains("ScshCastPlayer") && !page.contains("@license"),
       "first-party player, no third-party attribution"
     );
@@ -2826,6 +2828,7 @@ mod tests {
     // survives the assembly at least once.
     assert_eq!(page.matches("<iframe").count(), 2, "one iframe per exportable cast");
     assert!(page.matches("loading=\"lazy\"").count() >= 2, "iframes load lazily");
+    // beecast-page 0.3.0's player is still Scsh-named; flips with the 0.4.0 bump.
     assert!(page.matches("ScshCastPlayer").count() >= 2, "each embedded page carries the first-party player");
     assert!(!page.contains("@license"), "no third-party attribution anywhere in the assembled page");
     // Every proc section is a native <details> block — collapsible offline, no JS — open

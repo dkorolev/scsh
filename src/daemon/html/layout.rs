@@ -426,15 +426,6 @@ const PAGE_CSS: &str = r#"
   .cast-chapters button:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-player { width: 100%; height: 42vh; max-height: 460px; }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
-  .cast-grew {
-    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap;
-    padding: 0.35rem 0.55rem; background: #111820; font-size: 0.8rem; color: var(--text-muted);
-  }
-  .cast-grew button {
-    font: inherit; color: var(--cyan); background: none; border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.1rem 0.5rem; cursor: pointer;
-  }
-  .cast-grew button:hover { border-color: var(--cyan); }
   .cast-toast {
     position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);
     max-width: 80%; padding: 0.4rem 0.9rem; border-radius: 7px; z-index: 5;
