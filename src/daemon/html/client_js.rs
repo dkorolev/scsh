@@ -564,9 +564,15 @@ function initCasts(root) {
     // Opening a section hands its player the keyboard: space plays, f fullscreens.
     const det = box.closest('details');
     if (det) det.addEventListener('toggle', () => { if (det.open) focusCastPlayer(box); });
-    // A still-running recording previews from its tail — the last few seconds are what the
-    // viewer came to see — while a finished one still opens at the start.
-    if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
+    // The player owns live-mode state (a rewind drops it): mirror it onto the toggle.
+    box.addEventListener('beecast-livechange', (e) => {
+      box._live = !!(e.detail && e.detail.live);
+      const b = box.querySelector('[data-cast-live]');
+      if (b) b.classList.toggle('on', box._live);
+    });
+    // A still-running recording is LIVE by default: parked at the growing edge, the bar
+    // pinned full-width in live green — not a playhead chasing a moving duration.
+    if (box.dataset.status === 'running') { box._live = true; createCastPlayer(box, 'end'); }
     else createCastPlayer(box);
     box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
   });
@@ -601,8 +607,6 @@ function castPlaceholderHtml(status) {
 // cast with no complete event lines yet (a run that just started) — show a calm placeholder
 // instead of letting the player error on the empty/404 cast. The placeholder upgrades to a
 // real player on the next reload (a WS cast_growth notification, or the finish reload).
-// How far before the current end a still-running recording starts its preview.
-const LIVE_PREVIEW_TAIL_SECS = 3;
 function createCastPlayer(box, startAt, autoplay) {
   if (typeof BeeCastPlayer === 'undefined') return;
   const mount = box.querySelector('.cast-player');
@@ -637,7 +641,6 @@ function createCastPlayer(box, startAt, autoplay) {
     // scsh's chrome (the summary line, the toolbar) rides along.
     const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers, fullscreenEl: box };
     if (startAt === 'end') startAt = stats.duration;
-    if (startAt === 'near-end') startAt = Math.max(0, stats.duration - LIVE_PREVIEW_TAIL_SECS);
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
     // vs player, so the player must not fetch it a second time. `_loadedChars` marks how
@@ -652,6 +655,7 @@ function createCastPlayer(box, startAt, autoplay) {
     const det = box.closest('details');
     const active = document.activeElement;
     if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
+    if (box._live) setCastLive(box, true);
     renderCastSummary(box, meta.summary);
     // Chapters are written by the annotation pass AFTER the run ends; a finished cast with
     // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
@@ -704,12 +708,15 @@ function setCastLive(box, on) {
   box._live = !!on;
   const btn = box.querySelector('[data-cast-live]');
   if (btn) btn.classList.toggle('on', box._live);
-  // Jump to the live edge; parked there, every append renders immediately (the player's
-  // follow policy is positional, like `tail -f`), so following needs no further driving.
-  if (box._live && box._player) {
+  // Declared-live (player.setLive): parked at the growing edge, appends pinned
+  // unconditionally, the bar full-width in live green. The player drops it itself on a
+  // rewind, and the livechange listener above re-syncs the toggle.
+  if (!box._player) return;
+  if (box._live) {
     followCastGrowth(box);
-    box._player.pause && box._player.pause();
-    box._player.seek(1e9); // clamps to the current end of the recording
+    box._player.setLive(true);
+  } else {
+    box._player.setLive(false);
   }
 }
 // A server-pushed cast_growth notification for this session: upgrade a placeholder to a
