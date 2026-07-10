@@ -400,6 +400,33 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
   consumer of itself, so there is nothing to run against it. `scsh init-demo-project` (and
   `installskills`) is what writes a `.scsh.yml` into a demo or target repo.
 
+## Environment variables
+
+The one place they are all listed. Host-side knobs, all optional:
+
+| Variable | Default | Meaning |
+| --- | --- | --- |
+| `SCSH_HOME` | `~/.scsh` | scsh's durable home: the daemon session store, permanent `recordings/`, build `casts/`, `logs/`, and browser-created `projects/`. Created on demand (by the daemon too) wherever it points. |
+| `SCSH_DAEMON_PORT` | `7274` | Session browser port (localhost only). |
+| `SCSH_RUNTIME` | auto | Force the container runtime: `container` (Apple), `docker`, or `podman`. |
+| `SCSH_GIT_TRANSPORT` | auto | `1` forces the git push/clone transport, `0` forces the bind-mount clone (ignored on Apple Containers, which always use the transport). |
+| `SCSH_GIT_HOST` | route gateway | Git-daemon host IP as seen from inside the container. |
+| `SCSH_GIT_PORT` | ephemeral | Git-daemon port on the host. |
+| `SCSH_KEEP_RUNS` | off | `1` keeps every `/tmp/scsh-*-run-*` clone (and skips the stale sweep). |
+| `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
+| `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
+| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
+| `SCSH_ANNOTATE_MODEL` | Composer | Model `scsh annotate-cast` drives via cursor-agent. |
+| `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |
+| `SCSH_HARNESS_HOME` | `~/.harness` | User-level harness-definition directory. |
+| `SCSH_BIN` | self | Path to the scsh binary the daemon re-execs (tests/packaging override). |
+
+Host credentials scsh reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`,
+`OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY` — plus each CLI's own login files.
+
+Inside every container, scsh sets the skill contract: `SCSH=1`, `SCSH_RESULT` (the result
+file path), and `SCSH_RUN_LOG` (the teed harness log).
+
 ## Learn more
 
 - **[DEMO.md](DEMO.md)** — the invocation test suite in plain English: follow it (or

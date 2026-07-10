@@ -190,7 +190,9 @@ Image-**build** casts are scratch by comparison and live apart in `~/.scsh/casts
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SCSH_DAEMON_PORT` | `7274` | HTTP listen port (localhost only) |
-| `SCSH_HOME` | `~/.scsh` | Dir for the persistent session store (`daemon-<port>.redb`), permanent `recordings/`, build `casts/`, and `logs/` |
+| `SCSH_HOME` | `~/.scsh` | Dir for the persistent session store (`daemon-<port>.redb`), permanent `recordings/`, build `casts/`, `logs/`, and browser-created `projects/` — created on demand wherever it points |
+
+(Every scsh environment variable is listed in one place: README “Environment variables”.)
 
 ## Where state lives
 

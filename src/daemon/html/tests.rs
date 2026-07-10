@@ -225,6 +225,20 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
 }
 
 #[test]
+fn start_panel_offers_project_creation_and_the_client_wires_it() {
+  let store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let html = super::index_page(&store);
+  for id in ["project-name", "project-create"] {
+    assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
+  }
+  assert!(html.contains("~/.scsh/projects/"), "the panel explains where projects live");
+  let js = live_client_js();
+  assert!(js.contains("/api/v1/projects/create"), "client js posts project creation");
+  assert!(js.contains("function createProject"), "client js wires the button");
+  assert!(js.contains("function handleRepoOpened"), "open and create share the response path");
+}
+
+#[test]
 fn running_cast_preview_starts_near_the_end() {
   let js = live_client_js();
   // A still-running proc's player opens ~3s before the current tail (autoplaying), not at 0.

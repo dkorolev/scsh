@@ -1191,6 +1191,30 @@ function openRepo() {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path: path }),
   }).then(r => r.json()).then(resp => {
+    handleRepoOpened(resp, note);
+  }).catch(() => { if (note) note.textContent = 'could not open'; });
+}
+// Create a fresh project under ~/.scsh/projects/<name> — a new git repo born runnable — and
+// open it in place, so a demo job can start seconds later with no terminal involved.
+function createProject() {
+  const input = document.getElementById('project-name');
+  const note = document.getElementById('repo-note');
+  const name = (input?.value || '').trim();
+  if (!name) { if (note) note.textContent = 'enter a project name'; return; }
+  if (note) note.textContent = 'creating…';
+  fetch('/api/v1/projects/create', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: name }),
+  }).then(r => r.json()).then(resp => {
+    handleRepoOpened(resp, note);
+    if (resp.ok) {
+      const pathInput = document.getElementById('repo-path');
+      if (pathInput) pathInput.value = resp.repo;
+    }
+  }).catch(() => { if (note) note.textContent = 'could not create'; });
+}
+// Shared tail of open/create: surface blockers, render definitions, remember the repo.
+function handleRepoOpened(resp, note) {
     if (!resp.ok) { if (note) note.textContent = resp.error || 'could not open'; return; }
     OPEN_REPO = resp.repo;
     OPEN_REPO_RUNNABLE = !!resp.runnable;
@@ -1212,12 +1236,14 @@ function openRepo() {
         bl.innerHTML = '';
       }
     }
-    if (note) note.textContent = resp.runnable ? 'opened — ready to run' : 'opened, but not ready to run (see below)';
+    if (note) {
+      const verb = resp.created ? 'created' : 'opened';
+      note.textContent = resp.runnable ? verb + ' — ready to run' : verb + ', but not ready to run (see below)';
+    }
     renderDefs(resp.defs || []);
     const form = document.getElementById('def-form');
     if (form) form.innerHTML = '';
     renderRepoJobs(liveSessions, Date.now() / 1000);
-  }).catch(() => { if (note) note.textContent = 'could not open'; });
 }
 function renderDefs(defs) {
   const list = document.getElementById('defs-list');
@@ -1323,6 +1349,8 @@ function renderRepoJobs(sessions, nowUnix) {
 (function initReposPanel() {
   if (!document.getElementById('repo-path')) return;
   document.getElementById('repo-open')?.addEventListener('click', openRepo);
+  document.getElementById('project-create')?.addEventListener('click', createProject);
+  document.getElementById('project-name')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') createProject(); });
   document.getElementById('repo-pick')?.addEventListener('click', pickRepo);
   document.getElementById('repo-path')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openRepo(); });
   renderRepoJobs(liveSessions, Date.now() / 1000);

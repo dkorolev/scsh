@@ -144,16 +144,26 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
 fn start_panel() -> &'static str {
   r##"<div class="card card--accent-left-green">
 <p class="section-label">Start a job</p>
-<p class="dim">Open a git repository to configure and start a harness-definition job in it —
-the daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a
-gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job per repository at a time.</p>
+<p class="dim">Open a git repository — an absolute path, or the bare name of a project under
+<code>~/.scsh/projects/</code> — to configure and start a harness-definition job in it; the
+daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a
+gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job per repository at a time.
+Or <strong>create a new project</strong>: a fresh git repository under
+<code>~/.scsh/projects/&lt;name&gt;</code>, born runnable (its first commit gitignores
+<code>/tmp</code>) — tests and demos start right here, no terminal needed.</p>
 <div class="images-controls">
 <div class="chamfer input-wrap" style="flex:1;min-width:16rem">
-<input class="input" type="text" id="repo-path" placeholder="/path/to/a/git/repo (type, paste, or Pick…)">
+<input class="input" type="text" id="repo-path" placeholder="/path/to/a/git/repo, or a project name (type, paste, or Pick…)">
 </div>
 <button type="button" class="chamfer btn btn--purple btn--sm" id="repo-pick"><span>Pick…</span></button>
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="repo-open"><span>Open</span></button>
 <span id="repo-note" class="dim"></span>
+</div>
+<div class="images-controls">
+<div class="chamfer input-wrap" style="flex:1;min-width:16rem">
+<input class="input" type="text" id="project-name" placeholder="new project name (created under ~/.scsh/projects/)">
+</div>
+<button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New project</span></button>
 </div>
 <div id="repo-blockers" class="blockers" hidden></div>
 <div id="defs-panel" hidden>

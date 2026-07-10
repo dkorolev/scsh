@@ -569,6 +569,10 @@ fn route(
     let (status, body, mutated) = repos_open_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/projects/create" {
+    let (status, body, mutated) = projects_create_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/harness-defs" {
     let (status, body) = harness_defs_response(&req.body);
     return (status, body, "application/json", false);
@@ -1089,8 +1093,21 @@ fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     Some(p) if !p.trim().is_empty() => p.trim().to_string(),
     _ => return (400, err_body("give a repository path"), false),
   };
-  let abs = super::paths::absolutize_repo_path(std::path::Path::new(&path));
-  let Some(root) = crate::git_root_of(std::path::Path::new(&abs)) else {
+  // A bare (slash-free) name is a PROJECT: it resolves under `$SCSH_HOME/projects/`, where
+  // the "New project" flow scaffolds fresh repos — so the open box takes either form.
+  let abs = if !path.contains('/') {
+    super::paths::projects_dir().join(&path).to_string_lossy().into_owned()
+  } else {
+    super::paths::absolutize_repo_path(std::path::Path::new(&path))
+  };
+  open_validated_repo(&abs, store, false)
+}
+
+/// Validate `abs` as a runnable repo, record it as opened, and answer the browser with its
+/// blockers + discovered definitions. Shared by "open" and "create project" (which differ only
+/// in how the path came to exist). `created` is echoed so the UI can word its note.
+fn open_validated_repo(abs: &str, store: &Arc<Mutex<Store>>, created: bool) -> (u16, String, bool) {
+  let Some(root) = crate::git_root_of(std::path::Path::new(abs)) else {
     return (200, err_body(&format!("not a git repository: {abs}")), false);
   };
   // A repo is runnable only if the run itself would accept it (committed, clean, gitignored
@@ -1108,7 +1125,7 @@ fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   }
   let blockers_arr: Vec<String> = blockers.iter().map(|b| quote(b)).collect();
   let body = format!(
-    "{{\"ok\":true,\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}]}}",
+    "{{\"ok\":true,\"created\":{created},\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}]}}",
     quote(&repo),
     runnable,
     clean,
@@ -1116,6 +1133,78 @@ fn repos_open_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     defs_json(&discovery.defs).join(",")
   );
   (200, body, true)
+}
+
+/// `POST /api/v1/projects/create` — body `{"name":"…"}`. Scaffold a fresh PROJECT at
+/// `$SCSH_HOME/projects/<name>`: a new git repository whose FIRST commit gitignores `/tmp`
+/// (plus the physical `tmp/` dir), i.e. born runnable — so tests and demos start from the
+/// web UI with no terminal at all. The reply is the same shape as `repos/open` (the project
+/// is opened immediately), with `"created":true`. An existing name is a 409: open it instead.
+fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object with a 'name'"), false),
+  };
+  let name = match field_str(&obj, "name") {
+    Some(n) if !n.trim().is_empty() => n.trim().to_string(),
+    _ => return (400, err_body("give a project name"), false),
+  };
+  let valid = name.len() <= 64
+    && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
+    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+  if !valid {
+    return (
+      400,
+      err_body("project names are 1–64 chars: letters, digits, '-', '_', '.' (starting alphanumeric)"),
+      false,
+    );
+  }
+  let projects = super::paths::projects_dir();
+  if let Err(e) = std::fs::create_dir_all(&projects) {
+    return (500, err_body(&format!("could not create {}: {e}", projects.display())), false);
+  }
+  let path = projects.join(&name);
+  if path.exists() {
+    return (409, err_body(&format!("project '{name}' already exists — open it instead")), false);
+  }
+  if let Err(e) = scaffold_project(&path) {
+    let _ = std::fs::remove_dir_all(&path); // leave nothing half-made; a retry starts clean
+    return (500, err_body(&e), false);
+  }
+  open_validated_repo(&path.to_string_lossy(), store, true)
+}
+
+/// Create the project directory as a git repo whose first commit is the gitignored-`/tmp`
+/// contract every `scsh run` preflight requires (committed, clean, scratch ignored).
+fn scaffold_project(path: &std::path::Path) -> Result<(), String> {
+  let git = |args: &[&str]| -> Result<(), String> {
+    let out = std::process::Command::new("git")
+      .arg("-C")
+      .arg(path)
+      .args(args)
+      .output()
+      .map_err(|e| format!("git {}: {e}", args.first().unwrap_or(&"")))?;
+    if out.status.success() {
+      Ok(())
+    } else {
+      Err(format!("git {} failed: {}", args.first().unwrap_or(&""), String::from_utf8_lossy(&out.stderr).trim()))
+    }
+  };
+  std::fs::create_dir(path).map_err(|e| format!("could not create {}: {e}", path.display()))?;
+  git(&["init", "-q"])?;
+  std::fs::write(path.join(".gitignore"), "# scsh scratch — results, logs, cache. Never tracked.\n/tmp\n")
+    .map_err(|e| format!("could not write .gitignore: {e}"))?;
+  std::fs::create_dir_all(path.join("tmp")).map_err(|e| format!("could not create tmp/: {e}"))?;
+  git(&["add", ".gitignore"])?;
+  git(&[
+    "-c",
+    &format!("user.name={}", crate::SCSH_COMMIT_NAME),
+    "-c",
+    &format!("user.email={}", crate::SCSH_COMMIT_EMAIL),
+    "commit",
+    "-qm",
+    "Init.",
+  ])
 }
 
 /// `POST /api/v1/repos/pick` — pop the host's native folder chooser (the daemon is local) and
@@ -2174,6 +2263,51 @@ mod tests {
     // Unknown proc index → 404.
     let (status3, _, _) = proc_stop_response(r#"{"session":"kill01","proc":9}"#, &store);
     assert_eq!(status3, 404);
+  }
+
+  #[test]
+  fn projects_create_scaffolds_a_runnable_repo_and_bare_names_open_it() {
+    let _env = crate::runtime::test_env_lock();
+    let home = std::env::temp_dir().join(format!("scsh-projects-test-{}", crate::runtime::random_nonce_6()));
+    let prev = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", &home);
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+
+    // Create: the project is born runnable — one commit, /tmp gitignored, clean.
+    let (status, body, mutated) = projects_create_response(r#"{"name":"demo-1"}"#, &store);
+    assert_eq!(status, 200, "got: {body}");
+    assert!(mutated);
+    assert!(body.contains(r#""created":true"#) && body.contains(r#""runnable":true"#), "got: {body}");
+    let path = crate::daemon::paths::projects_dir().join("demo-1");
+    assert!(path.join(".git").is_dir() && path.join("tmp").is_dir());
+    assert!(std::fs::read_to_string(path.join(".gitignore")).unwrap().contains("/tmp"));
+    let log = std::process::Command::new("git")
+      .args(["-C", &path.to_string_lossy(), "log", "--format=%s|%an"])
+      .output()
+      .unwrap();
+    assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), format!("Init.|{}", crate::SCSH_COMMIT_NAME));
+
+    // A bare (slash-free) name in the open box resolves under $SCSH_HOME/projects/.
+    let (status2, body2, _) = repos_open_response(r#"{"path":"demo-1"}"#, &store);
+    assert_eq!(status2, 200, "got: {body2}");
+    assert!(body2.contains(r#""runnable":true"#) && body2.contains("demo-1"), "got: {body2}");
+
+    // Same name again → 409, not a silent clobber.
+    let (status3, body3, _) = projects_create_response(r#"{"name":"demo-1"}"#, &store);
+    assert_eq!(status3, 409, "got: {body3}");
+    assert!(body3.contains("already exists"), "got: {body3}");
+
+    // Hostile names are rejected before any filesystem work.
+    for bad in [r#"{"name":"../escape"}"#, r#"{"name":"a/b"}"#, r#"{"name":".hidden"}"#, r#"{"name":""}"#] {
+      let (st, b, _) = projects_create_response(bad, &store);
+      assert_eq!(st, 400, "{bad} got: {b}");
+    }
+
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
   }
 
   #[test]
