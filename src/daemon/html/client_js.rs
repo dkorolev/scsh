@@ -83,8 +83,10 @@ function harnessChipsHtml(session) {
     if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
     const done = (p.status === 'ok' || p.status === 'fail' || p.status === 'skipped');
     const skill = p.skill_name || p.label || '';
+    const statusText = (p.status === 'running' || p.status === 'waiting') ? 'still running'
+      : (p.status === 'ok' ? 'finished ok' : p.status);
     out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" title="' +
-      esc(p.harness + ': ' + skill + ' (' + p.status + ')') + '">' +
+      esc(p.harness + ' · ' + skill + ' — ' + statusText + ' (bright = running, dim = done)') + '">' +
       esc(p.harness.charAt(0).toUpperCase()) + '</span>';
   });
   return out;
@@ -121,6 +123,11 @@ function emptyOutputLabel(status) {
 }
 function emptyOutputHtml(status) {
   return '<div class="dim">' + emptyOutputLabel(status) + '</div>';
+}
+// A bare repo-relative artifact path (a system pointer like tmp/scsh/<id>/add.json), as
+// opposed to an agent's prose answer. Mirrored by the server-side renderer in session.rs.
+function looksLikeArtifactPath(text) {
+  return /^(\/|tmp\/|\.harness\/)\S+$/.test(text || '');
 }
 function glyph(status) {
   return ({waiting:'○',running:'◉',ok:'✓',fail:'✗',skipped:'⊘'})[status] || '?';
@@ -440,9 +447,14 @@ function updateProcFields(det, p, nowUnix) {
   syncProcElapsed(meta, p, nowUnix, p.status === 'running');
   const noteEl = det.querySelector('summary .note');
   // Finished rows show their ANSWER (the finish detail) in the collapsed summary; only
-  // rows still working show the transient note.
+  // rows still working show the transient note. A bare artifact path is SYSTEM info and
+  // renders as code; anything else is the agent's own text.
   const finished = p.status !== 'running' && p.status !== 'waiting';
-  if (noteEl) noteEl.textContent = (finished && p.detail) ? p.detail : (p.note || '');
+  if (noteEl) {
+    const text = (finished && p.detail) ? p.detail : (p.note || '');
+    if (finished && looksLikeArtifactPath(text)) noteEl.innerHTML = '<code>' + esc(text) + '</code>';
+    else noteEl.textContent = text;
+  }
   // The per-proc kill button only makes sense while the proc still runs.
   const killEl = det.querySelector('button[data-proc-stop]');
   if (killEl && p.status !== 'running' && p.status !== 'waiting') killEl.remove();
@@ -499,7 +511,7 @@ function castEmbedHtml(p) {
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
-    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ .html</a>' +
+    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
     '<span class="cast-copied">copied</span>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>' +
     '</div><div class="cast-player"></div></div>';
@@ -608,7 +620,34 @@ function createCastPlayer(box, startAt, autoplay) {
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
     buildFsSidebar(box, meta.summary, chapters);
+    // Chapters are written by the annotation pass AFTER the run ends; a finished cast with
+    // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
+    // sidecar lands — no browser refresh. (Polling stops quietly if annotation never comes,
+    // e.g. no cursor-agent on the host.)
+    if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl);
   });
+}
+function pollForChapters(box, chaptersUrl) {
+  if (box._chapPoll) return;
+  const bar = box.querySelector('.cast-toolbar');
+  const pending = document.createElement('span');
+  pending.className = 'dim chap-pending';
+  pending.textContent = '⏳ chapters: summarizing…';
+  if (bar) bar.appendChild(pending);
+  let tries = 0;
+  box._chapPoll = setInterval(() => {
+    tries += 1;
+    if (tries > 36) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); return; }
+    fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
+      const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
+      if (!chapters.length) return;
+      clearInterval(box._chapPoll);
+      box._chapPoll = null;
+      pending.remove();
+      // Re-create at the same position so the timeline gains its markers too.
+      createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
+    }).catch(() => {});
+  }, 5000);
 }
 // Live mode: while the proc runs, follow the tail of the recording as it grows.
 //
@@ -1048,17 +1087,12 @@ function markImagesChecking() {
   if (btn) btn.disabled = true;
 }
 function imageRowHtml(img) {
-  const checkbox = img.name === 'base' ? '' :
-    '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
-  // Per-row build: "Rebuild" (forced) once the image is up to date, "Build" otherwise.
-  // The base row rebuilds the shared base — and, since every harness image sits on it,
-  // everything on top.
+  const checkbox = '<input type="checkbox" class="image-select" value="' + esc(img.name) + '">';
+  // Per-row build: "Rebuild" (forced) once the image is up to date, "Build" otherwise —
+  // the base row included: `base` is a first-class image name, buildable on its own.
   const upToDate = !!(img.exists && img.up_to_date);
-  const label = img.name === 'base' ? (upToDate ? 'Rebuild base + all' : 'Build base + all')
-    : (upToDate ? 'Rebuild' : 'Build');
-  const title = img.name === 'base'
-    ? 'Rebuild the shared base image, then every harness image on top of it'
-    : (upToDate ? 'Force-rebuild this image' : 'Build this image');
+  const label = upToDate ? 'Rebuild' : 'Build';
+  const title = upToDate ? 'Force-rebuild this image' : 'Build this image';
   const action = '<button type="button" class="image-build-btn" data-image-build="' + esc(img.name) +
     '" data-uptodate="' + (upToDate ? '1' : '0') + '" title="' + title + '">' + label + '</button>';
   return '<tr data-image="' + esc(img.name) + '"><td class="image-select-cell">' + checkbox + '</td>' +
@@ -1100,16 +1134,36 @@ function renderImages(data) {
   }
   body.innerHTML = (data.images || []).map(imageRowHtml).join('');
   if (note) note.textContent = data.runtime ? ('runtime: ' + data.runtime) : '';
+  renderRuntimeSelector(data);
   wireImageSelectButtons(body);
   wireImageBuildButtons(body);
 }
 function refreshImages() {
   markImagesChecking();
-  fetch('/api/v1/images').then(r => r.json()).then(renderImages).catch(() => {
+  const url = '/api/v1/images' + (IMAGES_RUNTIME ? '?runtime=' + encodeURIComponent(IMAGES_RUNTIME) : '');
+  fetch(url).then(r => r.json()).then(renderImages).catch(() => {
     renderImages({ error: 'images unavailable (daemon error)' });
   });
 }
+let IMAGES_RUNTIME = ''; // '' = the host default; set by the selector in the panel
+function renderRuntimeSelector(data) {
+  const box = document.getElementById('images-runtimes');
+  if (!box) return;
+  const available = data.available || [];
+  if (available.length < 2) { box.innerHTML = ''; return; }
+  // Apple `container` and docker/podman keep SEPARATE image stores — the selector says
+  // which world the table (and the Build buttons) talk to.
+  const label = (r) => r === 'container' ? 'Apple Containers' : r;
+  box.innerHTML = available.map(r =>
+    '<button type="button" class="chamfer btn btn--sm ' + (r === data.runtime ? 'btn--purple' : '') +
+    '" data-runtime="' + esc(r) + '"><span>' + esc(label(r)) + '</span></button>').join(' ');
+  box.querySelectorAll('[data-runtime]').forEach(b => b.addEventListener('click', () => {
+    IMAGES_RUNTIME = b.dataset.runtime;
+    refreshImages();
+  }));
+}
 function postImagesBuild(req) {
+  if (IMAGES_RUNTIME) req.runtime = IMAGES_RUNTIME;
   const note = document.getElementById('images-note');
   if (note) note.textContent = 'starting build…';
   fetch('/api/v1/images/build', {
@@ -1134,11 +1188,7 @@ function startImagesBuild(all) {
   });
 }
 function startImageBuildOne(name, upToDate) {
-  if (name === 'base') {
-    // Rebuilding the base implies rebuilding every harness image layered on it.
-    postImagesBuild({ harnesses: [], rebuild_base: true, force: true });
-    return;
-  }
+  // `base` rides the same path: harnesses:["base"] builds ONLY the shared base.
   postImagesBuild({ harnesses: [name], rebuild_base: false, force: upToDate });
 }
 (function initImagesPanel() {
@@ -1300,6 +1350,10 @@ function selectDef(name) {
     disabled + '><span>Start job</span></button>' +
     '<span id="def-note" class="dim">' + hint + '</span></div>';
   document.getElementById('def-start')?.addEventListener('click', () => startJob(name));
+  // Cmd/Ctrl+Enter anywhere in the form is the default button.
+  form.addEventListener('keydown', (e) => {
+    if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') document.getElementById('def-start')?.click();
+  });
   // The form renders below the definitions list — bring it to the user instead of making
   // them hunt for what their click produced.
   form.scrollIntoView({ behavior: 'smooth', block: 'start' });
@@ -1341,9 +1395,14 @@ function renderRepoJobs(sessions, nowUnix) {
   });
   const repos = Object.keys(byRepo).sort();
   if (!repos.length) {
-    body.innerHTML = '<tr><td colspan="2" class="dim">No repositories open yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="2" class="dim">No projects open yet.</td></tr>';
     return;
   }
+  const repoLabel = (repo) => {
+    const root = PROJECTS_DIR ? PROJECTS_DIR + '/' : null;
+    if (root && repo.startsWith(root)) return 'project · ' + repo.slice(root.length);
+    return repo;
+  };
   body.innerHTML = repos.map(repo => {
     const jobs = (byRepo[repo] || []).sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
     const cells = jobs.length ? jobs.map(s => {
@@ -1352,7 +1411,7 @@ function renderRepoJobs(sessions, nowUnix) {
         '"><span>' + esc(lc.label) + '</span></span> ' + esc(s.id) +
         (s.profile ? ' · ' + esc(s.profile) : '') + '</a>';
     }).join('<br>') : '<span class="dim">no jobs yet</span>';
-    return '<tr><td class="repo-path">' + esc(repo) + '</td><td>' + cells + '</td></tr>';
+    return '<tr><td class="repo-path" title="' + esc(repo) + '">' + esc(repoLabel(repo)) + '</td><td>' + cells + '</td></tr>';
   }).join('');
 }
 (function initReposPanel() {

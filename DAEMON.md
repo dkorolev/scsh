@@ -368,7 +368,7 @@ run never dirties the tracked tree.
 
 ## Start a job from the browser
 
-The session index page is organized into tabs: **Jobs** (every run), **Directories** (opened
+The session index page is organized into tabs: **Jobs** (every run), **Projects** (current jobs grouped by project/repository; opened
 repos and their jobs), **Start a job**, and **Containers** (the images panel).
 
 Under **Start a job**: type or paste a path (or click **Pick…** for the native folder chooser)

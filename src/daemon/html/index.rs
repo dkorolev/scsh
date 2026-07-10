@@ -4,7 +4,7 @@ use super::escape::esc;
 use super::format::{format_duration_secs, format_relative_age};
 use super::layout::wrap_page;
 use crate::daemon::model::{sessions_for_index, Session, SessionLifecycle, Store};
-use crate::daemon::paths::{base_url, now_unix_secs};
+use crate::daemon::paths::now_unix_secs;
 
 pub fn index_page(store: &Store) -> String {
   let port = store.port;
@@ -19,11 +19,9 @@ pub fn index_page(store: &Store) -> String {
       .to_string();
   }
   let body = format!(
-    "<h1>scsh</h1>\n\
-<p class=\"subtitle\">Daemon on {url} · mode {mode}</p>\n\
-<nav class=\"tabs\">\
+    "<nav class=\"tabs\">\
 <button class=\"tab active\" data-tab=\"jobs\">Jobs</button>\
-<button class=\"tab\" data-tab=\"dirs\">Directories</button>\
+<button class=\"tab\" data-tab=\"dirs\">Projects</button>\
 <button class=\"tab\" data-tab=\"start\">Start a job</button>\
 <button class=\"tab\" data-tab=\"images\">Containers</button>\
 </nav>\n\
@@ -39,8 +37,6 @@ pub fn index_page(store: &Store) -> String {
 <section class=\"tab-panel\" id=\"tab-dirs\">\n{dirs}</section>\n\
 <section class=\"tab-panel\" id=\"tab-start\">\n{start}</section>\n\
 <section class=\"tab-panel\" id=\"tab-images\">\n{images}</section>\n",
-    url = base_url(port),
-    mode = store.mode.as_str(),
     rows = rows,
     harness_stops = harness_stop_strip(store, now),
     dirs = dirs_panel(),
@@ -95,7 +91,7 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
 /// only their status is pending.
 fn images_panel() -> String {
   let mut rows = String::new();
-  rows.push_str(&images_skeleton_row("base", crate::runtime::BASE_IMAGE_TAG, false));
+  rows.push_str(&images_skeleton_row("base", crate::runtime::BASE_IMAGE_TAG, true));
   for h in crate::config::Harness::ALL {
     rows.push_str(&images_skeleton_row(h.as_str(), &crate::runtime::image_tag(h), true));
   }
@@ -111,6 +107,7 @@ rebuild it here.</p>
 {rows}</tbody>
 </table></div>
 <div class="images-controls">
+<span id="images-runtimes" class="images-runtimes"></span>
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="images-build-selected" disabled><span>Build selected</span></button>
 <button type="button" class="chamfer btn btn--orange btn--sm" id="images-build-all"><span>Build all</span></button>
 <label><input type="checkbox" id="images-rebuild-base"> also rebuild the base image (--no-cache)</label>
@@ -181,12 +178,13 @@ Or <strong>create a new project</strong>: a fresh git repository under
 /// The "Directories" tab: a table of every opened repository and any repo with jobs, its jobs
 /// grouped underneath — built client-side from the live WebSocket session snapshot.
 fn dirs_panel() -> &'static str {
-  r##"<div class="card card--accent-top-magenta">
-<p class="section-label">Directories</p>
-<p class="dim">Repositories you have opened, and every repository that has jobs, with their jobs.</p>
+  r##"<div class="card card--accent-left-magenta">
+<p class="section-label">Projects</p>
+<p class="dim">Current jobs, grouped by where they run: a project under <code>~/.scsh/projects/</code> shows its
+name; anything else shows its repository path.</p>
 <div class="table-scroll"><table>
-<thead><tr><th>Repository</th><th>Jobs</th></tr></thead>
-<tbody id="repos-body"><tr><td colspan="2" class="dim">No repositories open yet — open one under “Start a job”.</td></tr></tbody>
+<thead><tr><th>Project / repository</th><th>Jobs</th></tr></thead>
+<tbody id="repos-body"><tr><td colspan="2" class="dim">No projects open yet — open or create one under “Start a job”.</td></tr></tbody>
 </table></div>
 </div>
 "##
@@ -245,11 +243,17 @@ fn harness_chips_html(session: &Session) -> String {
     let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
     let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped);
     let skill = p.skill_name.as_deref().unwrap_or(&p.label);
+    let status_text = match p.status {
+      ProcStatus::Running | ProcStatus::Waiting => "still running",
+      ProcStatus::Ok => "finished ok",
+      ProcStatus::Fail => "failed",
+      ProcStatus::Skipped => "skipped",
+    };
     chips.push_str(&format!(
       "<span class=\"hchip hchip--{h}{done}\" title=\"{title}\">{letter}</span>",
       h = esc(h),
       done = if done { " hchip--done" } else { "" },
-      title = esc(&format!("{h}: {skill} ({status})", status = p.status.as_str())),
+      title = esc(&format!("{h} · {skill} — {status_text} (bright = running, dim = done)")),
     ));
   }
   chips

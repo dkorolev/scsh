@@ -49,7 +49,8 @@ fn session_procs_html(html: &str) -> &str {
   let needle = r#"<div class="procs" id="session-procs">"#;
   let start = html.find(needle).expect("session-procs") + needle.len();
   let tail = &html[start..];
-  let end = tail.find(r#"<p class="permalink">"#).expect("permalink");
+  // The procs div is the body's last element; the page footer is the script block.
+  let end = tail.find("<script").expect("script block after procs");
   &tail[..end]
 }
 
@@ -298,13 +299,13 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   assert!(html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")), "dot last in the island");
   assert!(html.contains(r#"<span class="daemon-right">"#), "daemon status keeps the island's right side");
   assert!(!html.contains("<h1>"), "the body no longer duplicates the path as an h1");
-  // A workflow session says so — not "profile".
-  assert!(html.contains(r#"<p class="subtitle">workflow <strong>arith</strong></p>"#), "got: {html}");
+  // A workflow session says so — not "profile" — inside the purple island.
+  assert!(html.contains(r#"<p class="session-kind">workflow <strong>arith</strong></p>"#), "got: {html}");
   // A session with no kind (persisted by an older build) still reads as a profile.
   let mut old = store_with_cast_proc(ProcStatus::Running);
   old.sessions.get_mut("castab").unwrap().profile = Some("default".into());
   let html = session_page(&old, "castab").expect("session renders");
-  assert!(html.contains(r#"<p class="subtitle">profile <strong>default</strong></p>"#), "got: {html}");
+  assert!(html.contains(r#"<p class="session-kind">profile <strong>default</strong></p>"#), "got: {html}");
   // The index island shows just "scsh".
   let html = super::index_page(&store);
   assert!(html.contains(r#"<span class="crumbs"><a href="/">scsh</a></span>"#), "got crumbs on index");
@@ -352,8 +353,14 @@ fn index_page_shows_colored_harness_chips_per_proc() {
     session.procs.push(build);
   }
   let html = super::index_page(&store);
-  assert!(html.contains(r#"<span class="hchip hchip--claude" title="claude: add (running)">C</span>"#), "got: {html}");
-  assert!(html.contains(r#"<span class="hchip hchip--grok hchip--done" title="grok: add (ok)">G</span>"#), "got: {html}");
+  assert!(
+    html.contains(r#"<span class="hchip hchip--claude" title="claude · add — still running (bright = running, dim = done)">C</span>"#),
+    "got: {html}"
+  );
+  assert!(
+    html.contains(r#"<span class="hchip hchip--grok hchip--done" title="grok · add — finished ok (bright = running, dim = done)">G</span>"#),
+    "got: {html}"
+  );
   assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
   // The stylesheet distinguishes the same letter by harness color, and the client JS
   // mirrors the markup for live re-renders.
@@ -668,9 +675,9 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
   // server-rendered snippet and in the client JS that regenerates it.
   let session = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   let procs = session_procs_html(&session);
-  assert!(procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ .html</a>"#));
+  assert!(procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>"#));
   let js = live_client_js();
-  assert!(js.contains("/export.html\" data-cast-export download hidden>⬇ .html</a>"));
+  assert!(js.contains("/export.html\" data-cast-export download hidden>⬇ Download run snapshot</a>"));
   assert!(js.contains("exportLink.hidden = !stats.events;"));
 }
 

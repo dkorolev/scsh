@@ -91,6 +91,7 @@ const PAGE_CSS: &str = r#"
   .card--accent-left-green { border-left: 3px solid var(--green); }
   .card--accent-left-orange { border-left: 3px solid var(--orange); }
   .card--accent-top-magenta { border-top: 3px solid var(--magenta); }
+  .card--accent-left-magenta { border-left: 3px solid var(--magenta); }
 
   /* ── buttons ── */
   .btn, button.btn {
@@ -162,9 +163,8 @@ const PAGE_CSS: &str = r#"
     background: var(--cyan); color: var(--cyan);
   }
   .session-status.running::before, .badge--cyan::before { background: var(--surface); }
-  /* Completed is a RESTING state — gray, not celebratory green (badge--green stays green). */
   .session-status.completed {
-    background: var(--text-muted); color: var(--text-muted);
+    background: var(--green); color: var(--green);
   }
   .session-status.completed::before { background: var(--surface); }
   .badge--green {
@@ -209,6 +209,8 @@ const PAGE_CSS: &str = r#"
   .crumbs a:hover { color: var(--cyan); }
   .crumb-sep { color: var(--text-muted); margin: 0 0.4rem; font-weight: 400; }
   .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
+  .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
+  .session-kind strong { color: var(--text); }
   .daemon-status .dot {
     width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
   }
@@ -308,9 +310,16 @@ const PAGE_CSS: &str = r#"
   }
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
+  summary .note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; opacity: 0.85; }
   .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
   /* single-letter harness chips: same letter, different hue (claude vs codex vs cursor) */
   .session-procs-cell { white-space: nowrap; }
+  #sessions-body td, #sessions-body th { white-space: nowrap; }
+  /* Long repo paths keep their TAIL visible (rtl flips the ellipsis to the front). */
+  td.repo-path {
+    max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; direction: rtl; text-align: left;
+  }
   .hchip {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
@@ -323,6 +332,8 @@ const PAGE_CSS: &str = r#"
   .hchip--grok { --hchip-bg: #d4a72c; }
   .hchip--cursor { --hchip-bg: #a371f7; }
   .hchip--done { opacity: 0.35; }
+  .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
+  .hchip:hover { transform: scale(1.3); opacity: 1; }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .image-build-btn {
     font: inherit; font-size: 0.75rem; line-height: 1.5; cursor: pointer; white-space: nowrap;
@@ -509,6 +520,7 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 {player_js}
 <script>
 const WS_PORT = {port};
+const PROJECTS_DIR = {projects_dir};
 {session_js}
 {live_js}
 </script>
@@ -521,6 +533,7 @@ const WS_PORT = {port};
     css = PAGE_CSS,
     scsh_version = scsh_version_html(),
     crumbs = crumbs_html(session_id),
+    projects_dir = quote_js(&crate::daemon::paths::projects_dir().to_string_lossy()),
     body = body,
     player_js = player_js,
     port = port,
