@@ -2375,7 +2375,7 @@ impl DaemonSession {
     if let Some(c) = self.client.take() {
       if self.registered {
         c.finish_session();
-        ok(&format!("session {}", c.session_url()));
+        ok(&format!("job {}", c.session_url()));
       } else {
         c.flush();
       }

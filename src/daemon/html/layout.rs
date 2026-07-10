@@ -334,6 +334,13 @@ const PAGE_CSS: &str = r#"
   .hchip--done { opacity: 0.35; }
   .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
   .hchip:hover { transform: scale(1.3); opacity: 1; }
+  .ui-tip {
+    position: fixed; z-index: 100; pointer-events: none;
+    background: #1c2128; border: 1px solid var(--border); border-radius: 6px;
+    color: var(--text); font-size: 0.75rem; line-height: 1.35;
+    padding: 0.3rem 0.55rem; width: max-content; max-width: 44ch;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+  }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .image-build-btn {
     font: inherit; font-size: 0.75rem; line-height: 1.5; cursor: pointer; white-space: nowrap;
@@ -456,12 +463,12 @@ const PAGE_CSS: &str = r#"
 "#;
 
 /// The location path shown bold on the LEFT of the top island — `scsh` on the index,
-/// `scsh › sessions › <id>` on a session page. Every segment is a permalink (the id links
-/// to its own session page); the daemon status cluster keeps the island's right side.
+/// `scsh › jobs › <id>` on a job page. Every segment is a permalink (the id links
+/// to its own job page); the daemon status cluster keeps the island's right side.
 fn crumbs_html(session_id: Option<&str>) -> String {
   match session_id {
     Some(id) => format!(
-      "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">sessions</a>\
+      "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">jobs</a>\
 <span class=\"crumb-sep\">›</span><a href=\"/session/{id}\">{id}</a>",
       id = crate::daemon::html::escape::esc(id)
     ),

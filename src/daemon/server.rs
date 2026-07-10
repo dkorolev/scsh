@@ -130,7 +130,7 @@ impl Server {
           let ws_hub = Arc::clone(&self.ws_hub);
           std::thread::spawn(move || {
             let (mutated, session_id) = catch_unwind(AssertUnwindSafe(|| {
-              handle_connection(stream, &store, &prune, &ws_hub).unwrap_or((false, None))
+              handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty).unwrap_or((false, None))
             }))
             .unwrap_or((false, None));
             if mutated {
@@ -253,6 +253,7 @@ impl Server {
 /// write through to the store DB — so a mutation persists just that session, not the store.
 fn handle_connection(
   mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
+  ws_dirty: &AtomicBool,
 ) -> std::io::Result<(bool, Option<String>)> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
@@ -261,6 +262,9 @@ fn handle_connection(
   if websocket::wants_upgrade(&req.method, &req.path, &req.headers) {
     websocket::accept_handshake(&mut stream, &req.headers)?;
     let rx = ws_hub.subscribe();
+    // A fresh client needs a full snapshot on its first tick — on a quiet daemon nothing
+    // else would ever mark the store dirty, and the page would get light ticks forever.
+    ws_dirty.store(true, Ordering::Relaxed);
     websocket::serve(stream, rx);
     return Ok((false, None));
   }
@@ -1109,7 +1113,7 @@ const BUILD_IMAGES_PROFILE: &str = "build-images";
 
 /// The synthetic `repo` label image-build sessions carry, so they never appear as a real
 /// repository in the jobs-per-directory view or block a repo's one-job guard.
-const IMAGE_BUILDS_REPO: &str = "(image builds)";
+pub(crate) const IMAGE_BUILDS_REPO: &str = "(image builds)";
 
 // ---------------------------------------------------------------------------
 // Harness definitions: open a repo, list its definitions, start a job in it.
