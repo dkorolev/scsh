@@ -80,12 +80,6 @@ header code {{
 #copied {{ color: var(--green); visibility: hidden; }}
 #summary {{ padding: 0 20px 8px; font-size: 14px; max-width: 70ch; }}
 #summary:empty {{ display: none; }}
-#chapters {{ padding: 0 20px 10px; display: flex; flex-wrap: wrap; gap: 6px; }}
-#chapters button {{
-  font: inherit; font-size: 12px; color: var(--text); background: var(--surface);
-  border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; cursor: pointer;
-}}
-#chapters button:hover {{ border-color: var(--cyan); color: var(--cyan); }}
 /* Fill the viewport below the header/controls so fit:'both' fits vertically too. */
 #player-wrap {{ padding: 0 20px 20px; height: calc(100vh - 200px); min-height: 300px; }}
 #player, .ap-player {{ width: 100%; height: 100%; max-width: 100%; }}
@@ -104,12 +98,10 @@ header code {{
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
 <a id="dl-html" href="{cast_url}/export.html" download hidden>⬇ download .html</a>
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
-<button id="reload">↻ reload recording</button>
 <button id="live-toggle"{live_toggle_hidden}>● Live</button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
 <div id="summary" class="dim"></div>
-<div id="chapters"></div>
 <div id="player-wrap"><div id="player"></div></div>
 <script src="/assets/scsh-cast-player.js"></script>
 <script>
@@ -123,7 +115,6 @@ function hashStart() {{
   const m = location.hash.match(/^#t=([0-9:.]+)$/);
   return m ? m[1] : null;
 }}
-function fmtClock(t) {{ t = Math.max(0, Math.floor(t)); const m = Math.floor(t/60), s = t%60; return m + ':' + (s<10?'0':'') + s; }}
 // Available duration + event count of the fetched asciicast text (complete lines only).
 // scsh records asciicast v3 (intervals → sum); a legacy v2 header (absolute times) takes max.
 function castEventStats(text) {{
@@ -177,7 +168,7 @@ function create(startAt, autoplay) {{
 }}
 // Growth notifications for this proc's recording arrive over the daemon's WebSocket
 // (server-pushed — no JS polling loop). Without the WS the page degrades gracefully:
-// finished casts play as always and the manual ↻ reload button still works.
+// finished casts play as always; only live-follow needs the socket.
 let castRunning = LIVE;
 let ws = null;
 let wsDelay = 400;
@@ -236,14 +227,12 @@ function finishCast() {{
 }}
 connectWs();
 // Load the summary + chapters sidecar, then build the player with chapter markers.
+// Chapters are player chrome (the ☰ panel + seek-bar ticks + [/] keys) — the markers
+// are all the wiring they need.
 fetch(CAST_URL + '/chapters').then(r => r.ok ? r.json() : {{}}).catch(() => ({{}})).then(meta => {{
   const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
   MARKERS = chapters.map(c => [c.t, String(c.title || '')]);
   if (meta.summary) document.getElementById('summary').textContent = meta.summary;
-  const cbar = document.getElementById('chapters');
-  cbar.innerHTML = chapters.map((c, i) => '<button data-seek="' + c.t + '">' + fmtClock(c.t) + ' ' +
-    (c.title || ('Chapter ' + (i+1))).replace(/[<&]/g, x => x === '<' ? '&lt;' : '&amp;') + '</button>').join('');
-  cbar.querySelectorAll('[data-seek]').forEach(b => b.addEventListener('click', () => {{ if (player) {{ player.seek(Number(b.dataset.seek)); player.play(); }} }}));
   create(hashStart());
 }});
 window.addEventListener('hashchange', () => {{
@@ -258,10 +247,6 @@ document.getElementById('copy-t').addEventListener('click', () => {{
   const note = document.getElementById('copied');
   note.style.visibility = 'visible';
   setTimeout(() => {{ note.style.visibility = 'hidden'; }}, 1200);
-}});
-document.getElementById('reload').addEventListener('click', () => {{
-  const t = player ? player.getCurrentTime() : null;
-  create(t);
 }});
 </script>
 </body>

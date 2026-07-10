@@ -430,54 +430,20 @@ pub(crate) const PAGE_CSS: &str = r#"
     padding: 0.45rem 0.65rem; font-size: 0.9rem; line-height: 1.4;
     background: #111820; border-bottom: 1px solid var(--border);
   }
-  .cast-chapters {
-    display: flex; flex-wrap: wrap; gap: 0.35rem; padding: 0.4rem 0.55rem;
-    background: #111820; border-bottom: 1px solid var(--border);
-  }
-  .cast-chapters button {
-    font: inherit; font-size: 0.78rem; color: var(--text); background: var(--surface);
-    border: 1px solid var(--border); border-radius: 4px; padding: 0.1rem 0.5rem; cursor: pointer;
-  }
-  .cast-chapters button:hover { border-color: var(--cyan); color: var(--cyan); }
   /* No fixed height: the player sizes its own box to the recording's aspect at full
-     width (fit never scales up), so the pane is exactly as tall as the terminal wants. */
+     width (fit never scales up), so the pane is exactly as tall as the terminal wants.
+     Chapters, the big play button, the speed menu — all player chrome (beecast-player). */
   .cast-player { width: 100%; }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
-  .cast-toast {
-    position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);
-    max-width: 80%; padding: 0.4rem 0.9rem; border-radius: 7px; z-index: 5;
-    background: #000c; color: #fff; font-size: 1rem; white-space: nowrap;
-    overflow: hidden; text-overflow: ellipsis; pointer-events: none;
-    opacity: 0; transition: opacity 0.6s ease;
-  }
-  .cast-toast.show { opacity: 1; transition: opacity 0.12s ease; }
   .cast:fullscreen {
     display: grid; background: #000;
-    grid-template-columns: 1fr 0; grid-template-rows: auto 1fr;
+    grid-template-columns: 1fr; grid-template-rows: auto 1fr;
   }
-  .cast:fullscreen.has-side { grid-template-columns: 1fr var(--side-w, 360px); }
-  .cast:fullscreen .cast-toolbar { grid-column: 1 / -1; }
-  .cast:fullscreen .cast-summary, .cast:fullscreen .cast-chapters { display: none; }
+  .cast:fullscreen .cast-toolbar { grid-column: 1; }
+  .cast:fullscreen .cast-summary { display: none; }
   /* !important: whatever height the pane carries inline, fullscreen must override it and
      let the grid row size the player. */
   .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto !important; max-height: none !important; min-height: 0; }
-  .cast-fs-chapters { display: none; }
-  .cast:fullscreen.has-side .cast-fs-chapters {
-    display: block; grid-column: 2; grid-row: 2; overflow-y: auto;
-    background: var(--surface); border-left: 1px solid var(--border); padding: 0.6rem;
-  }
-  .cast-fs-chapters .fs-summary { font-size: 0.9rem; line-height: 1.45; margin-bottom: 0.8rem; opacity: 0.9; }
-  .cast-fs-chapters .fs-head {
-    font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em;
-    color: var(--text-muted); margin-bottom: 0.4rem;
-  }
-  .cast-fs-chapters button {
-    display: block; width: 100%; text-align: left; font: inherit; font-size: 0.85rem;
-    color: var(--text); background: none; border: 0; border-radius: 4px;
-    padding: 0.35rem 0.5rem; cursor: pointer;
-  }
-  .cast-fs-chapters button:hover { background: rgba(88,166,255,0.12); color: var(--cyan); }
-  .cast-fs-chapters .fs-t { color: var(--cyan); margin-right: 0.4rem; font-variant-numeric: tabular-nums; }
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }

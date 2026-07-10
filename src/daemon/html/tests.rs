@@ -647,7 +647,16 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   // section focuses its player, so space and f work with no click first.
   assert!(!procs.contains("data-cast-fs"), "no page-side fullscreen button");
   assert!(procs.contains("f fullscreen"), "the keys hint teaches f");
+  // Streaming drives itself (WS growth appends + the finish reload), so there is no manual
+  // Reload button; chapters are the player's own chrome (☰ panel + c key + seek ticks) —
+  // no scsh-side chip row or fullscreen sidebar.
+  assert!(!procs.contains("data-cast-reload"), "no manual reload in a streaming toolbar");
+  assert!(procs.contains("c chapters"), "the keys hint teaches the chapters panel");
   let js = live_client_js();
+  assert!(!js.contains("data-cast-reload"), "client js builds no reload button");
+  assert!(!js.contains("cast-chapters"), "no scsh-side chapter chips");
+  assert!(!js.contains("cast-fs-chapters"), "no scsh-side fullscreen chapters sidebar");
+  assert!(js.contains("markers"), "chapters reach the player as markers");
   assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
   assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
   // Link-at-time left the inline toolbar (the /play page keeps deep links); the run
