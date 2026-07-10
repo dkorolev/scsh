@@ -21,7 +21,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      # PRs only: with auto-publish, a merged bump IS on crates.io moments later, so this
+      # check on main would go red the moment the release it demanded succeeds.
       - name: Version is strictly above crates.io
+        if: github.event_name == 'pull_request'
         run: python3 scripts/check-version-above-crates-io.py
 
       - name: Format
