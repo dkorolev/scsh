@@ -140,9 +140,6 @@ function emptyOutputHtml(status) {
 function looksLikeArtifactPath(text) {
   return /^(\/|tmp\/|\.harness\/)\S+$/.test(text || '');
 }
-function glyph(status) {
-  return ({waiting:'○',running:'◉',ok:'✓',fail:'✗',skipped:'⊘'})[status] || '?';
-}
 // Compact single-unit age for dense lists — mirrors format_short_age in format.rs.
 function formatShortAge(secsAgo) {
   secsAgo = Math.max(0, Math.floor(secsAgo || 0));
@@ -178,6 +175,20 @@ function setTextUnlessSelecting(el, text) {
 function formatElapsedClock(elapsed) {
   if (elapsed == null) return '—';
   return String(Math.floor(elapsed)) + 's';
+}
+// Mirrors elapsed_phrase in proc.rs — status-aware text before the timer.
+function elapsedPhrase(status, elapsed, failReason) {
+  const clock = elapsed == null ? null : formatElapsedClock(elapsed);
+  if (status === 'waiting') return clock ? 'waiting · ' + clock : 'waiting';
+  if (status === 'running') return clock ? 'running for ' + clock : 'running';
+  if (status === 'ok') return clock ? 'done in ' + clock : 'done';
+  if (status === 'skipped') return 'skipped';
+  if (status === 'fail') {
+    if (failReason === 'container_inactive') return clock ? 'stalled after ' + clock : 'stalled';
+    if (failReason === 'container_timeout') return clock ? 'timed out after ' + clock : 'timed out';
+    return clock ? 'failed in ' + clock : 'failed';
+  }
+  return clock || '—';
 }
 function formatIdleClock(secs) {
   if (secs == null || secs < 1) return '';
@@ -325,7 +336,7 @@ function syncProcStat(stat, p, nowUnix, skipIdle) {
 function syncProcElapsed(meta, p, nowUnix, liveClock) {
   if (!meta) return;
   if (liveClock && p.status === 'running') return;
-  setTextUnlessSelecting(meta, formatElapsedClock(procElapsed(p, nowUnix)));
+  setTextUnlessSelecting(meta, elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason));
 }
 function updateProcClocks(nowUnixSec) {
   if (nowUnixSec === lastProcClockSec) return;
@@ -342,7 +353,7 @@ function updateProcClocks(nowUnixSec) {
     syncProcStat(stat, p, nowUnixSec, false);
     setTextUnlessSelecting(stat && stat.querySelector('.idle'), formatIdleClock(idleSinceLine(p, nowUnixSec)));
     const meta = det.querySelector('[data-proc-elapsed="' + CSS.escape(String(p.index)) + '"]');
-    setTextUnlessSelecting(meta, formatElapsedClock(procElapsed(p, nowUnixSec)));
+    setTextUnlessSelecting(meta, elapsedPhrase(p.status, procElapsed(p, nowUnixSec), p.fail_reason));
   });
 }
 function startProcClock() {
@@ -456,8 +467,6 @@ function syncProcOutput(det, p) {
 }
 function updateProcFields(det, p, nowUnix) {
   det.className = 'proc ' + p.status;
-  const glyphEl = det.querySelector('summary .glyph');
-  if (glyphEl) glyphEl.textContent = glyph(p.status);
   const labelEl = det.querySelector('summary .label');
   if (labelEl) labelEl.textContent = p.label || '';
   const stat = det.querySelector('[data-proc-stat="' + CSS.escape(String(p.index)) + '"]');
@@ -767,11 +776,10 @@ function procHtml(p, isOpen, nowUnix) {
   const body = hasCast(p)
     ? castEmbedHtml(p)
     : autoscrollCtlHtml(p) + '<div class="output">' + ((p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status)) + '</div>';
-  const elapsed = procElapsed(p, nowUnix);
-  const elapsedText = formatElapsedClock(elapsed);
+  const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' +
     (isOpen ? ' open' : '') + '><summary>' +
-    '<span class="triangle" aria-hidden="true"></span><span class="glyph">' + glyph(p.status) + '</span> ' +
+    '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span> ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';

@@ -310,10 +310,18 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fleet-jump:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); }
   .fleet-jump-cell { width: 2.5rem; text-align: right; }
   details.proc {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
-    margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
+    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border);
+    border-radius: 6px; margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
   }
-  details.proc[open] { border-color: #3a4558; }
+  details.proc[open] {
+    border-top-color: #3a4558; border-right-color: #3a4558; border-bottom-color: #3a4558;
+  }
+  /* Status lives on the left accent bar (same language as the purple meta card). */
+  details.proc.ok { border-left-color: var(--green); }
+  details.proc.fail { border-left-color: var(--red); }
+  details.proc.running { border-left-color: var(--orange); }
+  details.proc.waiting { border-left-color: var(--cyan); }
+  details.proc.skipped { border-left-color: var(--text-muted); }
   summary {
     cursor: pointer; list-style: none; display: flex; gap: 0.5rem;
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;
@@ -326,20 +334,25 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc:not([open]) summary .triangle::before { content: '▶'; }
   details.proc[open] summary .triangle::before { content: '▼'; }
   .glyph { font-weight: 600; }
-  /* Each proc island wears its status: orange while running, green when ok, red on failure. */
-  details.proc.fail summary .glyph, details.proc.fail summary .label { color: var(--red); }
-  details.proc.ok summary .glyph, details.proc.ok summary .label { color: var(--green); }
-  details.proc.running summary .glyph, details.proc.running summary .label { color: var(--orange); }
+  /* Label (and fleet glyphs) still tint with status; the row bar carries the primary cue. */
+  details.proc.fail summary .label { color: var(--red); }
+  details.proc.ok summary .label { color: var(--green); }
+  details.proc.running summary .label { color: var(--orange); }
+  details.proc.waiting summary .label { color: var(--cyan); }
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
   .running .glyph { color: var(--cyan); }
-  .skipped .glyph, .skipped .label { color: var(--text-muted); }
+  .skipped .glyph, details.proc.skipped summary .label { color: var(--text-muted); }
   .proc-meta {
     font-size: 0.85rem; margin: 0.35rem 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem;
     color: var(--text-muted);
   }
   .proc-meta strong { font-weight: 600; margin-right: 0.25rem; color: var(--text); }
   .proc-stat { font-size: 0.8rem; color: var(--text-muted); }
+  summary .meta {
+    font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap;
+    color: var(--text);
+  }
   summary .note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; opacity: 0.85; }
   .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
   /* single-letter harness chips: same letter, different hue (claude vs codex vs cursor) */

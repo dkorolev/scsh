@@ -221,14 +221,17 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   let html = session_page(&store, "castab").expect("session renders");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"class="proc skipped""#), "got: {procs}");
-  assert!(procs.contains("⊘"), "skipped glyph: {procs}");
+  assert!(!procs.contains("class=\"glyph\""), "proc rows no longer carry a status glyph: {procs}");
+  assert!(procs.contains(">skipped</span>"), "skipped elapsed phrase: {procs}");
   // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
   // not the transient step note — same rule that puts a finished skill's answer in the row.
   assert!(procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#), "skip reason in the collapsed row: {procs}");
   assert!(!procs.contains("data-proc-stop"), "a skipped step offers no kill button: {procs}");
-  // The client knows the glyph too (live updates keep ⊘ when a tick arrives).
+  // Live updates speak the same phrases (no glyph map).
   let js = live_client_js();
-  assert!(js.contains("skipped:'⊘'"));
+  assert!(js.contains("function elapsedPhrase"));
+  assert!(js.contains("'skipped'"));
+  assert!(!js.contains("skipped:'⊘'"));
 }
 
 #[test]
@@ -280,8 +283,20 @@ fn ui_review_fixes_hold() {
   assert!(!page.contains(r#"<span class="note dim">claude run…</span>"#), "the stale note does not");
   // 4. The meta island is purple and owns the action buttons (top-right corner).
   assert!(page.contains(r#"<div class="card card--accent-left-purple"><div class="session-actions">"#));
-  // 5. Proc islands wear their status color.
-  assert!(html.contains("details.proc.running summary .glyph, details.proc.running summary .label"));
+  // 5. Proc islands wear status on the left accent bar (and tint the label).
+  assert!(html.contains("details.proc.ok { border-left-color: var(--green); }"));
+  assert!(html.contains("details.proc.running { border-left-color: var(--orange); }"));
+  assert!(html.contains("details.proc.running summary .label { color: var(--orange); }"));
+  {
+    let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
+    p.elapsed = Some(18.0);
+  }
+  let page_with_elapsed = session_page(&store, "castab").expect("session renders");
+  assert!(
+    page_with_elapsed.contains(r#"data-proc-elapsed="0">done in 18s</span>"#),
+    "ok rows say done in N: {page_with_elapsed}"
+  );
+  assert!(!page_with_elapsed.contains(r#"class="glyph""#), "no status glyph on proc rows");
   // 6. The builtin source badge wears purple.
   assert!(html.contains(".badge--purple"), "purple badge class ships");
   assert!(live_client_js().contains(r#"chamfer badge badge--purple"><span>builtin"#), "builtin badge is purple");

@@ -13,9 +13,8 @@
 //! `srcdoc` iframes so the snapshot stays a single file.
 
 use super::escape::esc;
-use super::format::format_elapsed_clock;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
-use super::proc::{proc_meta_html, status_glyph};
+use super::proc::{elapsed_phrase, proc_meta_html};
 use crate::daemon::model::{ProcRecord, Session, SessionLifecycle};
 use crate::json::quote;
 
@@ -139,10 +138,6 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
   )
 }
 
-fn duration_label(proc: &ProcRecord) -> String {
-  proc.elapsed.map(format_elapsed_clock).unwrap_or_else(|| "—".to_string())
-}
-
 /// Escape packed-diff HTML for an iframe `srcdoc="…"` attribute: quote/amp for the
 /// attribute, and break `</` sequences the same way CASTS JSON does, so a hostile page
 /// cannot close the attribute or confuse surrounding markup.
@@ -169,10 +164,11 @@ fn diff_chip_html(has_diff: bool) -> String {
   }
 }
 
-/// One per-run row: the SAME `details.proc` markup as the live job page (triangle, glyph,
-/// label, elapsed, note), with the cast box carrying only the keys hint — no live controls.
+/// One per-run row: the SAME `details.proc` markup as the live job page (triangle,
+/// label, elapsed phrase, note), with the cast box carrying only the keys hint — no live controls.
 fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
+  let elapsed = elapsed_phrase(proc.status, proc.elapsed, proc.fail_reason.as_deref());
   let diff = export.diff_html();
   let body = match export {
     CastExport::Cast { summary, .. } => {
@@ -195,7 +191,7 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
   format!(
     r#"<details open class="proc {status}" data-index="{idx}">
 <summary>
-<span class="triangle" aria-hidden="true"></span><span class="glyph">{glyph}</span>
+<span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>
 <span class="meta">{elapsed}</span>
 <span class="note dim">{note}</span>
@@ -205,9 +201,8 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
 "#,
     status = proc.status.as_str(),
     idx = proc.index,
-    glyph = status_glyph(proc.status),
     label = esc(&proc.label),
-    elapsed = esc(&duration_label(proc)),
+    elapsed = esc(&elapsed),
     note = esc(note),
     diff_chip = diff_chip_html(diff.is_some()),
     meta = proc_meta_html(proc),

@@ -2,11 +2,10 @@
 
 use super::escape::esc;
 use super::fleet::fleet_sections_html;
-use super::format::format_elapsed_clock;
 use super::layout::wrap_page;
 use super::proc::{
-  autoscroll_ctl_html, cast_embed_html, empty_output_html, proc_elapsed_secs, proc_has_cast, proc_meta_html,
-  status_glyph, summary_stats_html,
+  autoscroll_ctl_html, cast_embed_html, elapsed_phrase, empty_output_html, proc_elapsed_secs, proc_has_cast,
+  proc_meta_html, summary_stats_html,
 };
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
@@ -17,9 +16,8 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let now = now_unix_secs();
   let mut procs_html = String::new();
   for proc in &session.procs {
-    let glyph = status_glyph(proc.status);
     let detail = proc.detail.as_deref().unwrap_or("");
-    let elapsed = proc_elapsed_secs(proc, now).map(|e| format_elapsed_clock(e)).unwrap_or_else(|| "—".to_string());
+    let elapsed = elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref());
     // The collapsed row's trailing text: once the proc FINISHED we know its answer (the
     // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
     // "<harness> run…" note is only for rows still working. A bare artifact path is SYSTEM
@@ -50,7 +48,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     procs_html.push_str(&format!(
       r#"<details class="proc {status_class}" data-index="{index}">
 <summary>
-<span class="triangle" aria-hidden="true"></span><span class="glyph">{glyph}</span>
+<span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span> {proc_stat}
 <span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
 <span class="note dim">{note}</span>
@@ -63,13 +61,12 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 "#,
       status_class = proc.status.as_str(),
       index = proc.index,
-      glyph = glyph,
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       diff_btn = proc_diff_btn_html(&session.id, proc),
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
-      elapsed = elapsed,
+      elapsed = esc(&elapsed),
       note = note_html,
       detail = esc(detail),
       container_line = if container.is_empty() {

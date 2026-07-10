@@ -1,7 +1,7 @@
 //! Proc row snippets for the session detail page.
 
 use super::escape::esc;
-use super::format::{format_idle, line_count_label};
+use super::format::{format_elapsed_clock, format_idle, line_count_label};
 use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus};
 
 pub(crate) fn empty_output_label(status: ProcStatus) -> &'static str {
@@ -74,6 +74,42 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
     ProcStatus::Ok => "✓",
     ProcStatus::Fail => "✗",
     ProcStatus::Skipped => "⊘",
+  }
+}
+
+/// Collapsed-row duration phrase: "done in 18s", "running for 12s", "failed in 9s",
+/// "stalled after 120s" (inactivity kill), "timed out after …", "waiting", "skipped".
+pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reason: Option<&str>) -> String {
+  let clock = elapsed.map(format_elapsed_clock);
+  match status {
+    ProcStatus::Waiting => match clock {
+      Some(c) => format!("waiting · {c}"),
+      None => "waiting".into(),
+    },
+    ProcStatus::Running => match clock {
+      Some(c) => format!("running for {c}"),
+      None => "running".into(),
+    },
+    ProcStatus::Ok => match clock {
+      Some(c) => format!("done in {c}"),
+      None => "done".into(),
+    },
+    ProcStatus::Fail => {
+      let prefix = match fail_reason {
+        Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled after",
+        Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out after",
+        _ => "failed in",
+      };
+      match clock {
+        Some(c) => format!("{prefix} {c}"),
+        None => match fail_reason {
+          Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled".into(),
+          Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out".into(),
+          _ => "failed".into(),
+        },
+      }
+    }
+    ProcStatus::Skipped => "skipped".into(),
   }
 }
 
@@ -151,5 +187,23 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
       }
       format!(r#"<div class="proc-meta">{parts}</div>"#, parts = parts.join(" · "))
     }
+  }
+}
+
+#[cfg(test)]
+mod elapsed_phrase_tests {
+  use super::elapsed_phrase;
+  use crate::daemon::model::ProcStatus;
+  use crate::failure::reason;
+
+  #[test]
+  fn phrases_match_status() {
+    assert_eq!(elapsed_phrase(ProcStatus::Ok, Some(18.0), None), "done in 18s");
+    assert_eq!(elapsed_phrase(ProcStatus::Running, Some(12.0), None), "running for 12s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(9.0), None), "failed in 9s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(120.0), Some(reason::CONTAINER_INACTIVE)), "stalled after 120s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(60.0), Some(reason::CONTAINER_TIMEOUT)), "timed out after 60s");
+    assert_eq!(elapsed_phrase(ProcStatus::Waiting, None, None), "waiting");
+    assert_eq!(elapsed_phrase(ProcStatus::Skipped, None, None), "skipped");
   }
 }
