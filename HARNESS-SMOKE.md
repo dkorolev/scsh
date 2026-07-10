@@ -7,7 +7,7 @@ steps; running the script and following this doc are equivalent.
 
 It exercises the **claude**, **codex**, and **cursor** container harnesses end to end via the
 minimal skill [`.skills/harness-smoke/SKILL.md`](.skills/harness-smoke/SKILL.md): each harness
-runs its real interactive TUI (recorded to `~/.scsh/recordings/`) and must write a tiny JSON
+runs its real interactive TUI (recorded to `~/.scsh/sessions/<session>/casts/`) and must write a tiny JSON
 `{"result":{"status":"OK",…}}` file. scsh itself probes host auth and **skips** any harness
 that is not logged in, so the run succeeds as long as every *available* harness does.
 
@@ -44,7 +44,7 @@ these harnesses.
    (`claude-opus-4-8`, `codex-gpt-5.5`, `cursor-composer-fast`): `jq .result.status <file>`
    - **Predict:** every present file reads `"OK"`, and **at least one** file is present.
 
-6. **Screencasts recorded.** `ls -t ~/.scsh/recordings/harness-smoke-*.cast`
+6. **Screencasts recorded.** `ls -t ~/.scsh/sessions/*/casts/harness-smoke-*.cast`
    - **Predict:** one fresh `<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` per succeeded route
      (real interactive TUI; replay with `asciinema play <file>` or the session browser).
 

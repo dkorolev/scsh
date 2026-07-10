@@ -56,7 +56,9 @@ impl Client {
     super::paths::session_url(self.inner.port, &self.inner.session_id)
   }
 
-  pub fn register_session(&self, repo: &str, branch: &str, profile: Option<&str>, skills: &[(&str, &str)]) -> bool {
+  pub fn register_session(
+    &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
+  ) -> bool {
     let skill_parts: Vec<String> = skills
       .iter()
       .map(|(name, harness)| format!("{{ \"name\": {}, \"harness\": {} }}", quote(name), quote(harness)))
@@ -66,11 +68,12 @@ impl Client {
       None => "null".to_string(),
     };
     let body = format!(
-      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"skills\": [{}], \"run_pid\": {} }}",
+      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {} }}",
       quote(&self.inner.session_id),
       quote(repo),
       quote(branch),
       profile_json,
+      quote(kind),
       skill_parts.join(", "),
       std::process::id(),
     );

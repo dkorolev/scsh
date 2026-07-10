@@ -42,7 +42,7 @@ pub fn index_page(store: &Store) -> String {
     url = base_url(port),
     mode = store.mode.as_str(),
     rows = rows,
-    harness_stops = harness_stop_strip(store),
+    harness_stops = harness_stop_strip(store, now),
     dirs = dirs_panel(),
     start = start_panel(),
     images = images_panel()
@@ -53,11 +53,14 @@ pub fn index_page(store: &Store) -> String {
 /// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a
 /// misbehaving harness (say, grok out of quota) can be cut across every live session at once
 /// (`POST /api/v1/harness/stop`). Empty when nothing is running.
-fn harness_stop_strip(store: &Store) -> String {
+fn harness_stop_strip(store: &Store, now: u64) -> String {
   use crate::daemon::model::{ProcKind, ProcStatus};
   let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
   for s in store.sessions.values() {
-    if s.ended_at.is_some() {
+    // Lifecycle, not `ended_at`: a client that died without deregistering leaves its session
+    // un-ended (and its procs "running") FOREVER — those are Terminated zombies, and offering
+    // to stop their long-gone containers is noise. Only genuinely live sessions count.
+    if s.lifecycle_status(now) != SessionLifecycle::Running {
       continue;
     }
     for p in &s.procs {

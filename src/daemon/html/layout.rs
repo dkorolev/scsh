@@ -158,10 +158,15 @@ const PAGE_CSS: &str = r#"
     background: var(--cyan); color: var(--cyan);
   }
   .session-status.running::before, .badge--cyan::before { background: var(--surface); }
-  .session-status.completed, .badge--green {
+  /* Completed is a RESTING state — gray, not celebratory green (badge--green stays green). */
+  .session-status.completed {
+    background: var(--text-muted); color: var(--text-muted);
+  }
+  .session-status.completed::before { background: var(--surface); }
+  .badge--green {
     background: var(--green); color: var(--green);
   }
-  .session-status.completed::before, .badge--green::before { background: var(--surface); }
+  .badge--green::before { background: var(--surface); }
   .session-status.failed, .session-status.terminated, .badge--red {
     background: var(--red); color: var(--red);
   }
@@ -191,6 +196,9 @@ const PAGE_CSS: &str = r#"
     font-size: 0.85rem; margin-bottom: 1.25rem; padding: 0.55rem 0.85rem;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
   }
+  .daemon-status .crumbs { font-weight: 700; font-size: 1rem; }
+  .crumb-sep { color: var(--text-muted); margin: 0 0.4rem; font-weight: 400; }
+  .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
   .daemon-status .dot {
     width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
   }
@@ -421,6 +429,19 @@ const PAGE_CSS: &str = r#"
   .session-meta dd { margin: 0; min-width: 0; }
 "#;
 
+/// The location path shown bold on the LEFT of the top island — `scsh` on the index,
+/// `scsh › sessions › <id>` on a session page. Plain text, deliberately not links: it says
+/// where you are; the daemon status cluster keeps the island's right side.
+fn crumbs_html(session_id: Option<&str>) -> String {
+  match session_id {
+    Some(id) => format!(
+      "scsh<span class=\"crumb-sep\">›</span>sessions<span class=\"crumb-sep\">›</span>{}",
+      crate::daemon::html::escape::esc(id)
+    ),
+    None => "scsh".to_string(),
+  }
+}
+
 fn scsh_version_html() -> String {
   let v = crate::version::pkg_version();
   let git = crate::version::git_stamp();
@@ -465,8 +486,9 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 </head>
 <body>
 <div id="daemon-status" class="daemon-status connecting">
-<span class="dot" aria-hidden="true"></span><span id="status-label">connecting…</span>
-<span id="status-uptime" class="dim"></span>{scsh_version}</div>
+<span class="crumbs">{crumbs}</span>
+<span class="daemon-right"><span class="dot" aria-hidden="true"></span><span id="status-label">connecting…</span>
+<span id="status-uptime" class="dim"></span>{scsh_version}</span></div>
 {body}
 {player_js}
 <script>
@@ -482,6 +504,7 @@ const WS_PORT = {port};
     player_css = player_css,
     css = PAGE_CSS,
     scsh_version = scsh_version_html(),
+    crumbs = crumbs_html(session_id),
     body = body,
     player_js = player_js,
     port = port,

@@ -107,7 +107,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
     return annotate_error(
       as_json,
       2,
-      "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/recordings/foo.cast",
+      "give one or more .cast files, e.g. scsh annotate-cast ~/.scsh/sessions/<session>/casts/foo.cast",
     );
   }
   if !annotate::host_can_annotate() {
@@ -167,7 +167,11 @@ fn export_casts_cmd(paths: &[String], output: Option<&str>, json_flag: bool) -> 
   let streaming = output == Some("-");
   let as_json = !streaming && (json_flag || !std::io::stdout().is_terminal());
   if paths.is_empty() {
-    return export_error(as_json, 2, "give one or more .cast files, e.g. scsh export-cast ~/.scsh/recordings/foo.cast");
+    return export_error(
+      as_json,
+      2,
+      "give one or more .cast files, e.g. scsh export-cast ~/.scsh/sessions/<session>/casts/foo.cast",
+    );
   }
   if output.is_some() && paths.len() != 1 {
     return export_error(as_json, 2, &format!("-o applies to exactly one cast ({} given)", paths.len()));
@@ -225,7 +229,10 @@ fn export_one_cast(
   };
   let stem = export::cast_stem(cast_path);
   let page = export::render_page(&ndjson, &stem, annotation.as_ref()).map_err(|e| {
-    (e.to_string(), "give an asciinema recording (asciicast v1/v2/v3), e.g. one under ~/.scsh/recordings/".to_string())
+    (
+      e.to_string(),
+      "give an asciinema recording (asciicast v1/v2/v3), e.g. one under ~/.scsh/sessions/<session>/casts/".to_string(),
+    )
   })?;
   let chapters = annotation.as_ref().map(|a| a.chapters.len()).unwrap_or(0);
   let out_name = if output == Some("-") {
@@ -1056,10 +1063,9 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
     return 1;
   }
 
-  let cast_dir = runtime::host_recordings_dir();
-  let before = casts_snapshot(&cast_dir);
-  let code = build_and_run(&rt, &root, &runnable, Some(name), session);
-  annotate_run_casts(new_casts_since(&cast_dir, &before));
+  let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
+  let code = build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition");
+  annotate_run_casts(session_skill_casts(&session_id));
   code
 }
 
@@ -1204,7 +1210,7 @@ fn step_invocation(
 /// build proc row. Returns the first build failure, if any.
 fn ensure_workflow_images(
   rt: &Runtime, ui: &ui::screen::LiveUi, daemon_client: &Option<std::sync::Arc<daemon::Client>>,
-  harnesses: &[config::Harness],
+  harnesses: &[config::Harness], session_id: &str,
 ) -> Result<(), (String, i32)> {
   let (uid, gid) = runtime::host_ids();
   let df = runtime::dockerfile_for_runtime(&rt.name);
@@ -1221,7 +1227,7 @@ fn ensure_workflow_images(
       }
       p.start();
       let stem = harness.map(|h| h.as_str()).unwrap_or("base");
-      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem) {
+      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
         Ok(()) => {
           p.finish_ok(None);
           Ok(())
@@ -1271,7 +1277,13 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
     let skill_meta: Vec<(&str, &str)> = def.steps.iter().map(|s| (s.id.as_str(), s.agent.harness.as_str())).collect();
-    if client.register_session(&repo_path_for_session(root), &current_branch(root), Some(&def.name), &skill_meta) {
+    if client.register_session(
+      &repo_path_for_session(root),
+      &current_branch(root),
+      Some(&def.name),
+      "workflow",
+      &skill_meta,
+    ) {
       ok(&format!("track progress at {}", client.session_url()));
       let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
       let ping_flag = std::sync::Arc::clone(&ping_active);
@@ -1297,7 +1309,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       harnesses.push(s.agent.harness);
     }
   }
-  if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses) {
+  if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses, &session_id) {
     ui.finish();
     fail(&msg);
     return code;
@@ -1390,7 +1402,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           let dc = daemon_client.clone();
           let base_ref = base.as_deref();
           let id = inv.name.clone();
-          scope.spawn(move || (id, run_one_skill(inv, rt, root, secs, p, base_ref, dc)))
+          let sid = session_id.as_str();
+          scope.spawn(move || (id, run_one_skill(inv, rt, root, secs, p, base_ref, dc, sid)))
         })
         .collect();
       handles
@@ -1555,11 +1568,10 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
         hint("see DEMO.md step 1 — probe add-opencode-gpt-5.4-mini-fast and add-claude-sonnet-4-6");
         return 1;
       }
-      let cast_dir = runtime::host_recordings_dir();
-      let before = casts_snapshot(&cast_dir);
-      let code = build_and_run(&rt, &root, &runnable, profile, None);
+      let session_id = daemon::new_session_id();
+      let code = build_and_run(&rt, &root, &runnable, profile, &session_id, "profile");
       // Annotate the recordings this run just produced (best-effort; no-op without cursor).
-      annotate_run_casts(new_casts_since(&cast_dir, &before));
+      annotate_run_casts(session_skill_casts(&session_id));
       code
     }
   }
@@ -1640,22 +1652,19 @@ fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_r
   Ok(())
 }
 
-/// The set of `.cast` files currently in `dir` (for detecting a run's new recordings).
-fn casts_snapshot(dir: &std::path::Path) -> std::collections::BTreeSet<std::path::PathBuf> {
-  std::fs::read_dir(dir)
-    .into_iter()
-    .flatten()
-    .flatten()
-    .map(|e| e.path())
-    .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("cast"))
-    .collect()
-}
-
-/// `.cast` files that appeared in `dir` since `before` was snapshotted.
-fn new_casts_since(
-  dir: &std::path::Path, before: &std::collections::BTreeSet<std::path::PathBuf>,
-) -> Vec<std::path::PathBuf> {
-  casts_snapshot(dir).into_iter().filter(|p| !before.contains(p)).collect()
+/// A session's SKILL recordings (its `sessions/<id>/casts/` minus `build-*` image-build
+/// casts) — the set worth annotating after a run. The dir is per-session, so everything in
+/// it belongs to this run; no before/after snapshot dance needed.
+fn session_skill_casts(session_id: &str) -> Vec<std::path::PathBuf> {
+  std::fs::read_dir(runtime::session_casts_dir(session_id))
+    .map(|entries| {
+      entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "cast"))
+        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("build-")))
+        .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// Compact one-line preflight summary for `list` (no run-only guards).
@@ -2381,20 +2390,21 @@ impl Drop for DaemonSession {
 }
 
 fn build_and_run(
-  rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>, session: Option<&str>,
+  rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>, session: &str,
+  kind: &str,
 ) -> i32 {
   ui::signals::install();
 
-  // Session browser daemon — `scsh run` always tries to attach; ephemeral auto-start when needed.
-  // Honor a daemon-assigned session id (so its pre-created session and deep link line up),
-  // else mint a fresh one.
-  let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
+  // Session browser daemon — `scsh run` always tries to attach; ephemeral auto-start when
+  // needed. The caller minted (or was handed) the session id, so artifacts and the deep link
+  // agree on it before anything runs.
+  let session_id = session.to_string();
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   match daemon::ensure_for_run() {
     Ok(()) => {
       let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
       let skill_meta: Vec<(&str, &str)> = skills.iter().map(|s| (s.name.as_str(), s.harness.as_str())).collect();
-      if client.register_session(&repo_path_for_session(root), &current_branch(root), profile, &skill_meta) {
+      if client.register_session(&repo_path_for_session(root), &current_branch(root), profile, kind, &skill_meta) {
         ok(&format!("track progress at {}", client.session_url()));
         let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ping_flag = std::sync::Arc::clone(&ping_active);
@@ -2544,6 +2554,7 @@ fn build_and_run(
       false,
       daemon_client.as_deref(),
       "base",
+      &session_id,
     ) {
       Ok(()) => {
         base.finish_ok(None);
@@ -2563,6 +2574,7 @@ fn build_and_run(
     // (one thread per image, same scoped-thread idiom as the skill runs below). All
     // builds run to completion; the first failure is the one reported.
     build_failed = std::thread::scope(|scope| {
+      let session_ref = session_id.as_str();
       let handles: Vec<_> = harness_build_procs
         .iter()
         .zip(harness_builds.iter())
@@ -2584,6 +2596,7 @@ fn build_and_run(
               false,
               daemon_client.as_deref(),
               spec.harness.as_str(),
+              session_ref,
             ) {
               Ok(()) => {
                 build.finish_ok(None);
@@ -2626,7 +2639,7 @@ fn build_and_run(
         let dc = dc.clone();
         scope.spawn(move || {
           let attempt_started = std::time::Instant::now();
-          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone());
+          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone(), session_ref);
           first.duration_secs = attempt_started.elapsed().as_secs_f64();
           if first.ok {
             return first;
@@ -2656,7 +2669,7 @@ fn build_and_run(
             );
           }
           let retry_started = std::time::Instant::now();
-          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, dc);
+          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, dc, session_ref);
           second.duration_secs = retry_started.elapsed().as_secs_f64();
           second.attempts = 2;
           second
@@ -2921,7 +2934,7 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
 fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
-  daemon_client: Option<std::sync::Arc<daemon::Client>>,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -3126,7 +3139,7 @@ fn run_one_skill(
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
   // and logs under $SCSH_HOME (default ~/.scsh) so session export survives throwaway clones.
-  let durable_cast = persist_run_artifacts(&run_dir, &skill.name, secs);
+  let durable_cast = persist_run_artifacts(session_id, &run_dir, &skill.name, secs);
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
   }
@@ -3232,25 +3245,27 @@ fn run_one_skill(
   }
 }
 
-/// Preserve a run's artifacts under `$SCSH_HOME` (default `~/.scsh`) before the run dir is
-/// pruned: the asciinema recording to `recordings/<stem>.cast` and the harness run log (plus
-/// any verbose `.debug`/`.last` logs) to `logs/<stem>.{log,debug.log,last.log}`. All share one
-/// `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name.
+/// Preserve a run's artifacts under its session's permanent home,
+/// `$SCSH_HOME/sessions/<session>/`, before the run dir is pruned: the asciinema recording
+/// to `casts/<stem>.cast` and the harness run log (plus any verbose `.debug`/`.last` logs)
+/// to `logs/<stem>.{log,debug.log,last.log}`. All share one
+/// `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>` stem so a run's cast and logs correlate by name —
+/// and the enclosing session dir names the run, so one `ls` finds everything a session made
+/// and one `rm -rf` forgets exactly one run.
 ///
 /// These live **outside** the caller repo on purpose: review skills often run in a throwaway
 /// clone under `tmp/` and delete it afterward — recordings must still be exportable from the
-/// session browser. `recordings/` is permanent and separate from the cleanable build-cast
-/// `casts/` dir, so cleaning build scratch can never lose an agent run's recording.
+/// session browser. scsh never deletes anything under `sessions/`.
 ///
 /// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
 /// the random nonce prevents same-second runs from overwriting each other. Returns the durable
 /// cast path (for the session browser) when a recording was copied.
-fn persist_run_artifacts(run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
+fn persist_run_artifacts(session_id: &str, run_dir: &Path, skill_name: &str, epoch_secs: u64) -> Option<String> {
   let stem = format!("{skill_name}-{}-utc-{}", runtime::format_utc_timestamp(epoch_secs), runtime::random_nonce_6());
 
   // Logs: kept for every run (including failures, when they matter most). RUN_LOG_REL is the
   // teed harness output; `.debug` (claude/grok) and `.last` (codex) appear only in verbose runs.
-  let logs_dir = runtime::host_logs_dir();
+  let logs_dir = runtime::session_logs_dir(session_id);
   if std::fs::create_dir_all(&logs_dir).is_ok() {
     for (rel, ext) in [
       (runtime::RUN_LOG_REL.to_string(), "log"),
@@ -3272,7 +3287,7 @@ fn persist_run_artifacts(run_dir: &Path, skill_name: &str, epoch_secs: u64) -> O
   if !cast_src.is_file() {
     return None;
   }
-  let casts_dir = runtime::host_recordings_dir();
+  let casts_dir = runtime::session_casts_dir(session_id);
   std::fs::create_dir_all(&casts_dir).ok()?;
   let dest = casts_dir.join(format!("{stem}.cast"));
   std::fs::copy(&cast_src, &dest).ok()?;
@@ -4208,7 +4223,7 @@ fn now_secs() -> u64 {
 /// `no_cache` forces every layer to rebuild (`build-images --force` / `--rebuild-base`).
 fn run_build(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
-  fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
+  fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str, session_id: &str,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
   let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
@@ -4232,6 +4247,7 @@ fn run_build(
       no_cache,
       daemon_client,
       cast_stem,
+      session_id,
     );
   }
 
@@ -4292,8 +4308,9 @@ fn image_build_failure(
 fn run_build_tui(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
   tz: &str, fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
+  session_id: &str,
 ) -> Result<(), (String, i32)> {
-  let casts_dir = runtime::host_casts_dir();
+  let casts_dir = runtime::session_casts_dir(session_id);
   std::fs::create_dir_all(&casts_dir)
     .map_err(|e| (format!("could not create cast dir {}: {e}", casts_dir.display()), 1))?;
   let cast_path = casts_dir.join(format!(
@@ -4341,7 +4358,7 @@ fn run_build_tui(
   let _ = std::fs::remove_dir_all(&dir);
 
   if let Some(c) = daemon_client {
-    // Re-register in case the path was cleared; durable path is already under ~/.scsh/recordings.
+    // Re-register in case the path was cleared; durable path is already under sessions/<id>/casts/.
     c.proc_cast(build.index(), &cast_path_str);
   }
 
@@ -4409,7 +4426,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   match daemon::ensure_for_run() {
     Ok(()) => {
       let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
-      if client.register_session("(image builds)", "", Some("build-images"), &[]) {
+      if client.register_session("(image builds)", "", Some("build-images"), "build", &[]) {
         ok(&format!("track progress at {}", client.session_url()));
         let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
         let ping_flag = std::sync::Arc::clone(&ping_active);
@@ -4495,6 +4512,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
       rebuild_base,
       daemon_client.as_deref(),
       "base",
+      &session_id,
     ) {
       Ok(()) => {
         base.finish_ok(None);
@@ -4514,6 +4532,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     // (now fresh) base, so one thread each. All builds run to completion; the first
     // failure is the one reported.
     build_failed = std::thread::scope(|scope| {
+      let session_ref = session_id.as_str();
       let handles: Vec<_> = harness_build_procs
         .iter()
         .zip(harness_builds.iter())
@@ -4535,6 +4554,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
               force,
               daemon_client.as_deref(),
               spec.harness.as_str(),
+              session_ref,
             ) {
               Ok(()) => {
                 build.finish_ok(None);
@@ -5387,7 +5407,10 @@ fn print_help_command(name: &str) {
         ("restart", "Stop then start (persistent)."),
         ("status", "Exit 0 when the daemon is listening."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
-        ("SCSH_HOME", "Dir for the session store, permanent recordings, build casts, and logs (default ~/.scsh)."),
+        (
+          "SCSH_HOME",
+          "Dir for the session store and permanent per-session artifacts (sessions/<id>/casts|logs; default ~/.scsh).",
+        ),
       ],
     ),
     "failures" => (
@@ -5923,18 +5946,19 @@ mod tests {
     // Pin SCSH_HOME so the durable dirs land under our temp tree (not the developer's ~/.scsh).
     let prev = std::env::var_os("SCSH_HOME");
     std::env::set_var("SCSH_HOME", &home);
-    let cast = persist_run_artifacts(&run_dir, "add", 1_700_000_000).unwrap();
+    let cast = persist_run_artifacts("sessab", &run_dir, "add", 1_700_000_000).unwrap();
     match prev {
       Some(v) => std::env::set_var("SCSH_HOME", v),
       None => std::env::remove_var("SCSH_HOME"),
     }
 
-    let casts_dir = home.join("recordings");
-    assert!(cast.starts_with(casts_dir.to_string_lossy().as_ref()), "cast under SCSH_HOME/recordings: {cast}");
+    // Everything a session produces lives under ITS OWN id: sessions/<id>/{casts,logs}.
+    let casts_dir = home.join("sessions").join("sessab").join("casts");
+    assert!(cast.starts_with(casts_dir.to_string_lossy().as_ref()), "cast under sessions/<id>/casts: {cast}");
     let stem = std::path::Path::new(&cast).file_stem().unwrap().to_string_lossy().into_owned();
     assert!(stem.starts_with("add-"), "stem starts with skill name: {stem}");
     assert_eq!(std::fs::read_to_string(&cast).unwrap(), "cast-bytes");
-    let logs = home.join("logs");
+    let logs = home.join("sessions").join("sessab").join("logs");
     assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.log"))).unwrap(), "log-bytes");
     assert_eq!(std::fs::read_to_string(logs.join(format!("{stem}.debug.log"))).unwrap(), "debug-bytes");
     let _ = std::fs::remove_dir_all(&base);

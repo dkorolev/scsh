@@ -406,7 +406,7 @@ The one place they are all listed. Host-side knobs, all optional:
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
-| `SCSH_HOME` | `~/.scsh` | scsh's durable home: the daemon session store, permanent `recordings/`, build `casts/`, `logs/`, and browser-created `projects/`. Created on demand (by the daemon too) wherever it points. |
+| `SCSH_HOME` | `~/.scsh` | scsh's durable home: the daemon session store, permanent per-session artifacts (`sessions/<session>/casts/` + `logs/` — recordings, build casts, harness logs, keyed by the run that made them), and browser-created `projects/`. Created on demand (by the daemon too) wherever it points. |
 | `SCSH_DAEMON_PORT` | `7274` | Session browser port (localhost only). |
 | `SCSH_RUNTIME` | auto | Force the container runtime: `container` (Apple), `docker`, or `podman`. |
 | `SCSH_GIT_TRANSPORT` | auto | `1` forces the git push/clone transport, `0` forces the bind-mount clone (ignored on Apple Containers, which always use the transport). |

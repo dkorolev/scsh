@@ -910,8 +910,9 @@ function syncSessionStopButton(session) {
   const btn = document.getElementById('session-stop');
   if (!btn) return;
   if (session && session.ended_at) {
-    btn.disabled = true;
-    setBtnLabel(btn, 'Stopped');
+    // The run is over: the control becomes a resting status badge (gray “completed”,
+    // red “failed”, …) — not a disabled button pretending something was stopped.
+    btn.outerHTML = sessionStatusBadge(sessionLifecycle(session, Date.now() / 1000));
   }
 }
 async function forceStopSession(btn) {

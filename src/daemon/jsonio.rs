@@ -76,6 +76,10 @@ fn session_json(s: &Session) -> String {
     Some(p) => quote(p),
     None => "null".to_string(),
   };
+  let kind = match &s.kind {
+    Some(k) => quote(k),
+    None => "null".to_string(),
+  };
   let skills: Vec<String> = s
     .skills
     .iter()
@@ -91,12 +95,13 @@ fn session_json(s: &Session) -> String {
     None => "null".to_string(),
   };
   format!(
-    "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"repo\": {}, \
+    "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
 \"run_pid\": {run_pid} }}",
     quote(&s.id),
     s.started_at,
     profile,
+    kind,
     quote(&s.repo),
     quote(&s.branch),
     skills.join(", "),
@@ -163,6 +168,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   let started_at = field_num(obj, "started_at").unwrap_or(0.0) as u64;
   let ended_at = field_num(obj, "ended_at").and_then(|n| if n > 0.0 { Some(n as u64) } else { None });
   let profile = field_str(obj, "profile");
+  let kind = field_str(obj, "kind"); // absent on sessions persisted by older builds
   let repo = field_str(obj, "repo").unwrap_or_default();
   let branch = field_str(obj, "branch").unwrap_or_default();
   let skills = parse_skills(field_value(obj, "skills").ok());
@@ -178,6 +184,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
     started_at,
     ended_at,
     profile,
+    kind,
     repo,
     branch,
     skills,
@@ -321,6 +328,7 @@ mod tests {
       started_at: 99,
       ended_at: Some(105),
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
       skills: vec![SkillMeta { name: "add".into(), harness: "opencode".into() }],
@@ -389,6 +397,7 @@ mod tests {
         started_at: 100,
         ended_at: None,
         profile: None,
+        kind: None,
         repo: "/tmp".into(),
         branch: "main".into(),
         skills: vec![],

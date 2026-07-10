@@ -66,9 +66,9 @@ profile.
    - **Predict:** every present file reads `OK`; a file is present for exactly the routes
      that were not skipped in step 4; **at least one** file is present.
 
-6. **Casts recorded, chapters annotated.** `ls -t ~/.scsh/recordings/harness-smoke-creds-*.cast`
+6. **Casts recorded, chapters annotated.** `ls -t ~/.scsh/sessions/*/casts/harness-smoke-creds-*.cast`
    and, for each fresh cast, check its sidecar: `ls <cast-basename>.chapters.json`
-   (e.g. `~/.scsh/recordings/harness-smoke-creds-codex-gpt-5.5-<stamp>-utc-<nonce>.chapters.json`).
+   (e.g. `~/.scsh/sessions/<session>/casts/harness-smoke-creds-codex-gpt-5.5-<stamp>-utc-<nonce>.chapters.json`).
    - **Predict:** one fresh `<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` per succeeded
      route. **If cursor/Composer is available on the host**, the run's tail printed
      `scsh: annotating N cast(s) with cursor · composer-2.5-fast …` and every fresh cast

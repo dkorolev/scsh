@@ -1058,24 +1058,24 @@ pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd
   ]
 }
 
-/// Directory for host-recorded **build** casts (`$SCSH_HOME/casts`, default `~/.scsh/casts`).
-/// Disposable: safe to clean whenever — a rebuild recreates them.
-pub fn host_casts_dir() -> std::path::PathBuf {
-  scsh_home().join("casts")
+/// **Permanent** per-session artifact root: `$SCSH_HOME/sessions/<session>/`. EVERYTHING a
+/// session produces — skill recordings, image-build casts, harness logs — lives under its
+/// own session id, so one `ls` names a run's artifacts and one `rm -rf` forgets exactly one
+/// run. scsh never deletes these; they sit outside any caller repo so a throwaway clone
+/// (e.g. code-beautiful-review) cannot take them along.
+pub fn host_sessions_dir() -> std::path::PathBuf {
+  scsh_home().join("sessions")
 }
 
-/// **Permanent** directory for skill-run recordings (`$SCSH_HOME/recordings`, default
-/// `~/.scsh/recordings`). Deliberately separate from the cleanable build-cast dir
-/// [`host_casts_dir`]: these are the recordings of actual agent runs — scsh never deletes
-/// them, and nothing that treats `casts/` as scratch can take them along. Kept outside any
-/// caller repo so a throwaway clone (e.g. code-beautiful-review) cannot delete them either.
-pub fn host_recordings_dir() -> std::path::PathBuf {
-  scsh_home().join("recordings")
+/// A session's recordings — skill casts and image-build casts alike
+/// (`$SCSH_HOME/sessions/<session>/casts/`); annotation sidecars sit next to each cast.
+pub fn session_casts_dir(session: &str) -> std::path::PathBuf {
+  host_sessions_dir().join(session).join("casts")
 }
 
-/// Durable directory for preserved harness run logs (`$SCSH_HOME/logs`).
-pub fn host_logs_dir() -> std::path::PathBuf {
-  scsh_home().join("logs")
+/// A session's preserved harness run logs (`$SCSH_HOME/sessions/<session>/logs/`).
+pub fn session_logs_dir(session: &str) -> std::path::PathBuf {
+  host_sessions_dir().join(session).join("logs")
 }
 
 /// Serializes tests that mutate process-global environment variables (`SCSH_HOME`, `HOME`):

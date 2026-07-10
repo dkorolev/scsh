@@ -7,7 +7,7 @@ use super::proc::{
   autoscroll_ctl_html, cast_embed_html, empty_output_html, proc_elapsed_secs, proc_has_cast, proc_meta_html,
   status_glyph, summary_stats_html,
 };
-use crate::daemon::model::{Session, Store};
+use crate::daemon::model::{Session, SessionLifecycle, Store};
 use crate::daemon::paths::{now_unix_secs, session_url};
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
@@ -58,7 +58,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       glyph = glyph,
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
-      kill_btn = proc_kill_btn_html(&session.id, proc),
+      kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = elapsed,
       note = esc(note),
@@ -93,22 +93,33 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   } else {
     String::new()
   };
-  let stop_btn = if session.ended_at.is_none() {
+  // While the session genuinely runs, offer Force stop; once it is over (ended, or a dead
+  // client's Terminated zombie), show the resting lifecycle badge instead — a finished run
+  // reads "completed" in gray, not like a button that stopped something.
+  let lifecycle = session.lifecycle_status(now);
+  let stop_btn = if lifecycle == SessionLifecycle::Running {
     format!(
       "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"><span>Force stop</span></button>\n",
       id = id
     )
   } else {
-    String::new()
+    format!(
+      "<span class=\"chamfer session-status {}\"><span>{}</span></span>\n",
+      lifecycle.css_class(),
+      esc(lifecycle.label())
+    )
   };
+  // The location breadcrumb lives in the top island (see `wrap_page`); the body starts
+  // with what the session IS: its kind and name, then the controls.
+  let kind = session.kind.as_deref().unwrap_or("profile");
   let body = format!(
-    "<h1><a href=\"/\">scsh</a> › session <code>{id}</code></h1>\n\
-<p class=\"subtitle\">profile {profile}</p>\n\
+    "<p class=\"subtitle\">{kind} <strong>{profile}</strong></p>\n\
 <div class=\"session-actions\">{stop_btn}{export_btn}</div>\n\
 <div class=\"card card--accent-left-cyan\">{session_meta}\n{skills}</div>\n\
 <div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
 <p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
     id = id,
+    kind = esc(kind),
     profile = esc(profile),
     export_btn = export_btn,
     stop_btn = stop_btn,
@@ -123,15 +134,20 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 /// A small per-proc "✕ kill" button, shown only while that proc still runs: it stops just
 /// this container (`POST /api/v1/proc/stop`) — unlike the session-level Force stop, the rest
 /// of the run keeps going.
-fn proc_kill_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord) -> String {
-  use crate::daemon::model::ProcStatus;
+fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
+  use crate::daemon::model::{ProcStatus, SessionLifecycle};
+  // A dead client's session keeps its procs "running" forever; only a genuinely live
+  // session (recent ping) has containers a kill button could reach.
+  if session.lifecycle_status(now) != SessionLifecycle::Running {
+    return String::new();
+  }
   if proc.status != ProcStatus::Running && proc.status != ProcStatus::Waiting {
     return String::new();
   }
   format!(
     "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Kill this container only — the rest of the run continues\">✕ kill</button>",
     index = proc.index,
-    id = esc(session_id),
+    id = esc(&session.id),
   )
 }
 

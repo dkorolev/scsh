@@ -95,6 +95,7 @@ mod tests {
       started_at: 1,
       ended_at: None,
       profile: Some("default".into()),
+      kind: None,
       repo: "/r".into(),
       branch: "main".into(),
       skills: Vec::new(),

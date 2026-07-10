@@ -16,6 +16,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       started_at: 1,
       ended_at: None,
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
       last_seen_at: 1,
@@ -248,6 +249,56 @@ fn running_cast_preview_starts_near_the_end() {
 }
 
 #[test]
+fn session_header_carries_breadcrumbs_and_honest_kind() {
+  // The top island: location path on the left (bold, plain text), daemon status right.
+  let mut store = store_with_cast_proc(ProcStatus::Running);
+  {
+    let s = store.sessions.get_mut("castab").unwrap();
+    s.kind = Some("workflow".into());
+    s.profile = Some("arith".into());
+  }
+  let html = session_page(&store, "castab").expect("session renders");
+  assert!(
+    html.contains(r#"<span class="crumbs">scsh<span class="crumb-sep">›</span>sessions<span class="crumb-sep">›</span>castab</span>"#),
+    "breadcrumb path in the top island"
+  );
+  assert!(html.contains(r#"<span class="daemon-right">"#), "daemon status keeps the island's right side");
+  assert!(!html.contains("<h1>"), "the body no longer duplicates the path as an h1");
+  // A workflow session says so — not "profile".
+  assert!(html.contains(r#"<p class="subtitle">workflow <strong>arith</strong></p>"#), "got: {html}");
+  // A session with no kind (persisted by an older build) still reads as a profile.
+  let mut old = store_with_cast_proc(ProcStatus::Running);
+  old.sessions.get_mut("castab").unwrap().profile = Some("default".into());
+  let html = session_page(&old, "castab").expect("session renders");
+  assert!(html.contains(r#"<p class="subtitle">profile <strong>default</strong></p>"#), "got: {html}");
+  // The index island shows just "scsh".
+  let html = super::index_page(&store);
+  assert!(html.contains(r#"<span class="crumbs">scsh</span>"#), "got crumbs on index");
+}
+
+#[test]
+fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
+  // A dead client's session stays un-ended with "running" procs forever. It must get NO
+  // stop-all-harness button on the index and NO per-proc kill button on its session page —
+  // there is nothing left to stop. (store_with_cast_proc's session was last seen at t=1.)
+  let store = store_with_cast_proc(ProcStatus::Running);
+  let html = super::index_page(&store);
+  // (The embedded client JS always contains the bare attribute selectors, so assert on the
+  // rendered `attr="` form, which only a server-side button carries.)
+  assert!(!html.contains(r#"data-harness-stop=""#), "zombie sessions must not raise stop-all buttons");
+  let page = session_page(&store, "castab").expect("session renders");
+  assert!(!page.contains(r#"data-proc-stop=""#), "zombie sessions must not offer per-proc kill");
+
+  // The same session, seen moments ago, gets both.
+  let mut live = store_with_cast_proc(ProcStatus::Running);
+  live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
+  let html = super::index_page(&live);
+  assert!(html.contains(r#"data-harness-stop="claude""#), "live sessions raise the stop-all button");
+  let page = session_page(&live, "castab").expect("session renders");
+  assert!(page.contains(r#"data-proc-stop="0""#), "live sessions offer per-proc kill");
+}
+
+#[test]
 fn index_page_shows_colored_harness_chips_per_proc() {
   let mut store = store_with_cast_proc(ProcStatus::Running);
   // A second, finished proc on another harness: its chip renders dimmed.
@@ -343,9 +394,10 @@ fn session_proc_html_has_no_stray_backslashes() {
       started_at: 1,
       ended_at: None,
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
-      last_seen_at: 1,
+      last_seen_at: crate::daemon::paths::now_unix_secs(), // live: Force stop only renders for running sessions
       client_connected: false,
       run_pid: None,
       skills: vec![],
@@ -389,6 +441,7 @@ fn ended_session_hides_force_stop_button() {
       started_at: 1,
       ended_at: Some(10),
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
       last_seen_at: 10,
@@ -400,6 +453,8 @@ fn ended_session_hides_force_stop_button() {
   );
   let html = session_page(&store, "done01").expect("session page");
   assert!(!html.contains(r#"id="session-stop""#), "ended session must not offer Force stop");
+  // In its place: the resting lifecycle badge (an ended clean session reads "completed").
+  assert!(html.contains(r#"session-status completed"#), "ended session shows the completed badge");
 }
 
 #[test]
@@ -419,6 +474,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       started_at: 1,
       ended_at: None,
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
       last_seen_at: 1,
@@ -478,6 +534,7 @@ fn session_proc_html_shows_autoscroll_while_running() {
       started_at: 1,
       ended_at: None,
       profile: Some("default".into()),
+      kind: None,
       repo: "/tmp/repo".into(),
       branch: "main".into(),
       last_seen_at: 1,

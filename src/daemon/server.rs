@@ -689,6 +689,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let repo = display_or_absolute_repo(&field_str(&obj, "repo").unwrap_or_default());
       let branch = field_str(&obj, "branch").unwrap_or_default();
       let profile = field_str(&obj, "profile");
+      let kind = field_str(&obj, "kind");
       let skills = parse_skills_array(&obj);
       let run_pid = field_num(&obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
       if id.is_empty() {
@@ -704,6 +705,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           s.branch = branch;
         }
         s.profile = profile;
+        s.kind = kind;
         if !skills.is_empty() {
           s.skills = skills;
         }
@@ -717,6 +719,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         started_at: now,
         ended_at: None,
         profile,
+        kind,
         repo,
         branch,
         skills,
@@ -1045,6 +1048,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           started_at: now,
           ended_at: None,
           profile: Some(BUILD_IMAGES_PROFILE.to_string()),
+          kind: None,
           repo: IMAGE_BUILDS_REPO.to_string(),
           branch: String::new(),
           skills: Vec::new(),
@@ -1368,6 +1372,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           started_at: now,
           ended_at: None,
           profile: Some(def_name.clone()),
+          kind: None,
           repo: repo.clone(),
           branch,
           skills: planned,
@@ -1598,7 +1603,10 @@ fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   {
     let mut store = lock_store(store);
     for (sid, s) in store.sessions.iter_mut() {
-      if s.ended_at.is_some() {
+      // Lifecycle, not `ended_at`: a dead client's session stays un-ended with "running"
+      // procs forever — Terminated zombies have no containers left to stop, and marking
+      // their history force_stopped would be a lie.
+      if s.lifecycle_status(now) != SessionLifecycle::Running {
         continue;
       }
       let mut touched = false;
@@ -1946,6 +1954,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -1991,6 +2000,7 @@ mod tests {
           started_at: 1,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2038,6 +2048,7 @@ mod tests {
           started_at: 10,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2105,6 +2116,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2158,6 +2170,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: Some("doctor".into()),
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2232,6 +2245,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2330,23 +2344,28 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       cast_path: None,
     };
-    let session = |id: &str, procs: Vec<ProcRecord>| Session {
+    let now = now_unix_secs();
+    let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
       id: id.into(),
-      started_at: 50,
+      started_at: last_seen_at.saturating_sub(10),
       ended_at: None,
       profile: None,
+      kind: None,
       repo: "/r".into(),
       branch: "main".into(),
       skills: Vec::new(),
       procs,
-      last_seen_at: 50,
+      last_seen_at,
       client_connected: true,
       run_pid: None,
     };
     {
       let mut s = store.lock().unwrap();
-      s.insert_session("hs01".into(), session("hs01", vec![proc(0, "grok"), proc(1, "opencode")]));
-      s.insert_session("hs02".into(), session("hs02", vec![proc(0, "grok")]));
+      s.insert_session("hs01".into(), session("hs01", vec![proc(0, "grok"), proc(1, "opencode")], now));
+      s.insert_session("hs02".into(), session("hs02", vec![proc(0, "grok")], now));
+      // A zombie: its client died without deregistering — un-ended, procs "running", but
+      // last seen ages ago. It must be invisible to a harness-wide stop.
+      s.insert_session("hs99".into(), session("hs99", vec![proc(0, "grok")], 50));
     }
     let (status, body, mutated) = harness_stop_response(r#"{"harness":"grok"}"#, &store);
     assert_eq!(status, 200, "got: {body}");
@@ -2361,6 +2380,8 @@ mod tests {
       assert_eq!(s1.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
       assert_eq!(s1.procs[1].status, ProcStatus::Running);
       assert_eq!(guard.sessions.get("hs02").unwrap().procs[0].status, ProcStatus::Fail);
+      // The zombie is untouched — no container to stop, no history rewritten.
+      assert_eq!(guard.sessions.get("hs99").unwrap().procs[0].status, ProcStatus::Running);
     }
     // Nothing of that harness left → ok, zero stopped, no mutation.
     let (status2, body2, mutated2) = harness_stop_response(r#"{"harness":"grok"}"#, &store);
@@ -2429,6 +2450,7 @@ mod tests {
           started_at: now,
           ended_at: None,
           profile: Some(BUILD_IMAGES_PROFILE.into()),
+          kind: None,
           repo: "(image builds)".into(),
           branch: String::new(),
           skills: Vec::new(),
@@ -2515,6 +2537,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2589,6 +2612,7 @@ mod tests {
           started_at: 50,
           ended_at: None,
           profile: None,
+          kind: None,
           repo: "/r".into(),
           branch: "main".into(),
           skills: Vec::new(),
@@ -2681,6 +2705,7 @@ mod tests {
         started_at: 50,
         ended_at: Some(60),
         profile: Some("default".into()),
+        kind: None,
         repo: "/r".into(),
         branch: "main".into(),
         skills: Vec::new(),
@@ -2825,6 +2850,7 @@ mod tests {
             started_at: 1,
             ended_at: None,
             profile: None,
+            kind: None,
             repo: "/r".into(),
             branch: "main".into(),
             skills: Vec::new(),
@@ -3017,6 +3043,7 @@ mod tests {
         started_at: 50,
         ended_at: None,
         profile: Some("add".into()),
+        kind: None,
         repo: "/r".into(),
         branch: "main".into(),
         skills: Vec::new(),
@@ -3046,6 +3073,7 @@ mod tests {
         started_at: 50,
         ended_at: Some(55), // already deregistered
         profile: Some("add".into()),
+        kind: None,
         repo: "/r".into(),
         branch: "main".into(),
         skills: Vec::new(),
@@ -3071,6 +3099,7 @@ mod tests {
         started_at: 50,
         ended_at: None,
         profile: Some("add".into()),
+        kind: None,
         repo: "/work/a".into(),
         branch: "main".into(),
         skills: Vec::new(),

@@ -126,7 +126,7 @@ writes a `<cast>.chapters.json` sidecar next to the recording. The player loads 
 `GET /cast/{session}/{proc}/chapters` (returns `{}` when absent). Annotate on demand with:
 
 ```console
-scsh annotate-cast ~/.scsh/recordings/<recording>.cast     # override model via SCSH_ANNOTATE_MODEL
+scsh annotate-cast ~/.scsh/sessions/<session>/casts/<recording>.cast   # override model via SCSH_ANNOTATE_MODEL
 ```
 
 ## Artifact formats
@@ -165,32 +165,33 @@ Field names are `snake_case`; the Rust source of truth for the shape is `CastAnn
 
 While the container runs, the cast is served straight from the run dir
 (`<run_dir>/tmp/scsh-run.log.cast`, bind-mounted and growing live). When the skill ends,
-`scsh run` copies each run's artifacts into **`$SCSH_HOME`** (default `~/.scsh`) — the same
-durable home the daemon store uses — so a throwaway caller clone (e.g. `code-beautiful-review`
-under `tmp/`) cannot wipe session-exportable recordings:
+`scsh run` copies each run's artifacts into that run's own **permanent per-session home**,
+`$SCSH_HOME/sessions/<session>/` (default `~/.scsh/sessions/<session>/`) — so a throwaway
+caller clone (e.g. `code-beautiful-review` under `tmp/`) cannot wipe session-exportable
+recordings, one `ls` names everything a run produced, and one `rm -rf` forgets exactly one run:
 
-| Artifact | Path |
+| Artifact | Path (under `~/.scsh/sessions/<session>/`) |
 | --- | --- |
-| Recording | `~/.scsh/recordings/<stem>.cast` |
-| Annotation sidecar | `~/.scsh/recordings/<stem>.chapters.json` |
-| Harness run log | `~/.scsh/logs/<stem>.log` |
-| Verbose debug log | `~/.scsh/logs/<stem>.debug.log` (claude/grok) · `~/.scsh/logs/<stem>.last.log` (codex) |
+| Skill recording | `casts/<stem>.cast` |
+| Image-build cast | `casts/build-<target>-<stamp>-utc-<nonce>.cast` |
+| Annotation sidecar | `casts/<stem>.chapters.json` |
+| Harness run log | `logs/<stem>.log` |
+| Verbose debug log | `logs/<stem>.debug.log` (claude/grok) · `logs/<stem>.last.log` (codex) |
 
 The stem is `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>`. The timestamp alone is not unique — every
 skill in one `scsh run` shares it — so the random nonce keeps same-second runs from overwriting
 each other. Logs are kept for **every** run (including failures, when they matter most).
 
-`~/.scsh/recordings/` is **permanent**: it holds only skill-run recordings, scsh never deletes
-from it, and nothing else writes there — recordings stay until you remove them yourself.
-Image-**build** casts are scratch by comparison and live apart in `~/.scsh/casts/`; clean
-`~/.scsh/casts/` and `~/.scsh/logs/` whenever you like without touching a single recording.
+`sessions/` is **permanent**: scsh never deletes from it. Delete a session's directory to
+forget that run — nothing else references it (the daemon store keeps its own copy of the
+metadata, and stored cast paths simply stop resolving).
 
 ## Configuration
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `SCSH_DAEMON_PORT` | `7274` | HTTP listen port (localhost only) |
-| `SCSH_HOME` | `~/.scsh` | Dir for the persistent session store (`daemon-<port>.redb`), permanent `recordings/`, build `casts/`, `logs/`, and browser-created `projects/` — created on demand wherever it points |
+| `SCSH_HOME` | `~/.scsh` | Dir for the persistent session store (`daemon-<port>.redb`), permanent per-session artifacts (`sessions/<id>/casts/` + `logs/`), and browser-created `projects/` — created on demand wherever it points |
 
 (Every scsh environment variable is listed in one place: README “Environment variables”.)
 
@@ -428,7 +429,7 @@ rm ~/.scsh/daemon-${SCSH_DAEMON_PORT:-7274}.redb
 scsh daemon start
 ```
 
-This clears session history only; `.cast` recordings live under `~/.scsh/recordings/`
+This clears session history only; `.cast` recordings live under `~/.scsh/sessions/<id>/casts/`
 (override with `SCSH_HOME`) and are unaffected.
 
 ## Demo
