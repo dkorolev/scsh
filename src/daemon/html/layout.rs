@@ -424,7 +424,9 @@ const PAGE_CSS: &str = r#"
     border: 1px solid var(--border); border-radius: 4px; padding: 0.1rem 0.5rem; cursor: pointer;
   }
   .cast-chapters button:hover { border-color: var(--cyan); color: var(--cyan); }
-  .cast-player { width: 100%; height: 42vh; max-height: 460px; }
+  /* No fixed height: the player sizes its own box to the recording's aspect at full
+     width (fit never scales up), so the pane is exactly as tall as the terminal wants. */
+  .cast-player { width: 100%; }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
   .cast-toast {
     position: absolute; left: 50%; bottom: 12%; transform: translateX(-50%);
@@ -441,8 +443,8 @@ const PAGE_CSS: &str = r#"
   .cast:fullscreen.has-side { grid-template-columns: 1fr var(--side-w, 360px); }
   .cast:fullscreen .cast-toolbar { grid-column: 1 / -1; }
   .cast:fullscreen .cast-summary, .cast:fullscreen .cast-chapters { display: none; }
-  /* !important: the inline pane sets style="height: …" from the terminal's aspect
-     (sizeCastPane); fullscreen must override it and let the grid row size the player. */
+  /* !important: whatever height the pane carries inline, fullscreen must override it and
+     let the grid row size the player. */
   .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto !important; max-height: none !important; min-height: 0; }
   .cast-fs-chapters { display: none; }
   .cast:fullscreen.has-side .cast-fs-chapters {

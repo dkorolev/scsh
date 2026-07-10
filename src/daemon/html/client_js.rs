@@ -544,9 +544,6 @@ function initCasts(root) {
   if (typeof BeeCastPlayer === 'undefined') return;
   root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
     box.dataset.ready = '1';
-    // A cast inside a collapsed <details> has zero width; size its pane on expand.
-    const det = box.closest('details');
-    if (det) det.addEventListener('toggle', () => { if (det.open) sizeCastPane(box); });
     // A still-running recording previews from its tail — the last few seconds are what the
     // viewer came to see — while a finished one still opens at the start.
     if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
@@ -627,10 +624,10 @@ function createCastPlayer(box, startAt, autoplay) {
       return;
     }
     // The cast header carries the terminal size; its aspect decides whether fullscreen has
-    // horizontal room for the chapters sidebar (monospace cell ≈ 0.6 wide as tall), and
-    // sizes the inline pane so the terminal fills its full width.
+    // horizontal room for the chapters sidebar (monospace cell ≈ 0.6 wide as tall). The
+    // pane's height needs no management: the player sizes its own box to the terminal's
+    // aspect at the pane's full width.
     try { const h = JSON.parse(text.split('\n', 1)[0]); if (h.width && h.height) box._termAspect = (h.width * 0.6) / h.height; } catch (_) {}
-    sizeCastPane(box);
     mount.innerHTML = '';
     const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
     box._chapters = chapters;
@@ -752,23 +749,6 @@ function showChapterToast(box, title) {
   clearTimeout(box._toastTimer);
   box._toastTimer = setTimeout(() => toast.classList.remove('show'), 1500);
 }
-// The inline pane matches the recording's own shape: full width, exactly the height the
-// terminal's aspect calls for (clamped to most of the viewport for very tall terminals) —
-// no letterboxing above and below a wide terminal, no cropped rows on a tall one.
-// Fullscreen keeps its own grid sizing.
-function sizeCastPane(box) {
-  if (document.fullscreenElement === box) return;
-  const mount = box.querySelector('.cast-player');
-  const A = box._termAspect;
-  if (!mount || !A || !mount.clientWidth) return;
-  const h = Math.max(160, Math.min(Math.round(mount.clientWidth / A), Math.round(window.innerHeight * 0.85)));
-  const cur = Math.round(parseFloat(mount.style.height) || 0);
-  if (cur === h) return;
-  mount.style.height = h + 'px';
-  mount.style.maxHeight = 'none';
-  // The player refits on window resize; only nudge it when the height actually changed.
-  requestAnimationFrame(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} });
-}
 // Vertical chapters panel shown in fullscreen when the terminal leaves horizontal room.
 function buildFsSidebar(box, summary, chapters) {
   let panel = box.querySelector('.cast-fs-chapters');
@@ -841,7 +821,6 @@ document.addEventListener('fullscreenchange', () => {
 window.addEventListener('resize', () => {
   const box = document.fullscreenElement;
   if (box && box.classList && box.classList.contains('cast')) updateFsSidebar(box);
-  document.querySelectorAll('.cast[data-ready]').forEach(sizeCastPane);
 });
 // The player's [ and ] keys jump to the previous/next chapter marker; after the jump,
 // flash the chapter title. The keys reach the focused player, so find its .cast box.
