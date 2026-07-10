@@ -2,7 +2,7 @@
 //
 // Clean-room implementation against public documentation only: the asciicast v1/v2/v3
 // format descriptions and ECMA-48 / xterm control-sequence references. MIT, like the
-// rest of BeeCast.
+// rest of beecast.
 //
 // The exports (attached to `BeeCastVT`, plus CommonJS for the Node self-test):
 //   parseCast(text)         -> { cols, rows, events, duration, … }  (times in recording seconds)
