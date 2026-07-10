@@ -639,7 +639,7 @@ function createCastPlayer(box, startAt, autoplay) {
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
     // fullscreenEl: the player's ⛶ button and `f` key fullscreen the whole cast box, so
     // scsh's chrome (the summary line, the toolbar) rides along.
-    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, markers, fullscreenEl: box };
+    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, markers, fullscreenEl: box, accessibility: 'snapshot' };
     if (startAt === 'end') startAt = stats.duration;
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
@@ -913,7 +913,21 @@ startProcClock();
   initProcKills(root);
   initProcDiffs(root);
   initHarnessStops();
+  initFleetJumps();
 })();
+function initFleetJumps() {
+  document.querySelectorAll('.fleet-jump').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      const idx = btn.getAttribute('data-proc');
+      if (idx == null) return;
+      const det = document.querySelector('details.proc[data-index="' + idx + '"]');
+      if (!det) return;
+      det.open = true;
+      det.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    });
+  });
+}
 function syncSessionStopButton(session) {
   const btn = document.getElementById('session-stop');
   if (!btn) return;

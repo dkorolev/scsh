@@ -1077,9 +1077,8 @@ pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd
 
 /// **Permanent** per-session artifact root: `$SCSH_HOME/sessions/<session>/`. EVERYTHING a
 /// session produces — skill recordings, image-build casts, harness logs — lives under its
-/// own session id, so one `ls` names a run's artifacts and one `rm -rf` forgets exactly one
-/// run. scsh never deletes these; they sit outside any caller repo so a throwaway clone
-/// (e.g. code-beautiful-review) cannot take them along.
+/// own session id, so one `ls` names a run's artifacts and one `rm -rf` (or `scsh gc`)
+/// forgets exactly one run. Ordinary runs never delete these; reclaim with `scsh gc`.
 pub fn host_sessions_dir() -> std::path::PathBuf {
   scsh_home().join("sessions")
 }
@@ -1094,6 +1093,11 @@ pub fn session_casts_dir(session: &str) -> std::path::PathBuf {
 /// brought commits into the caller's branch (`$SCSH_HOME/sessions/<session>/diffs/`).
 pub fn session_diffs_dir(session: &str) -> std::path::PathBuf {
   host_sessions_dir().join(session).join("diffs")
+}
+
+/// A session's durable skill-result JSON (`$SCSH_HOME/sessions/<session>/results/`).
+pub fn session_results_dir(session: &str) -> std::path::PathBuf {
+  host_sessions_dir().join(session).join("results")
 }
 
 /// A session's preserved harness run logs (`$SCSH_HOME/sessions/<session>/logs/`).

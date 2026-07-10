@@ -9,7 +9,8 @@
 //! small boot script mounts the players with the exact options the live page uses
 //! (`fit: 'both'`, idle compression, chapter markers, `fullscreenEl` = the cast box,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads —
-//! simply is not there.
+//! simply is not there. Packed commits-diff pages (when present) ride as sandboxed
+//! `srcdoc` iframes so the snapshot stays a single file.
 
 use super::escape::esc;
 use super::format::format_elapsed_clock;
@@ -20,10 +21,19 @@ use crate::json::quote;
 
 /// What the export gathered for one proc (aligned 1:1 with `session.procs`): the raw
 /// recording plus its sidecar's summary and chapters, or a note explaining why there is
-/// nothing to embed — never an error.
+/// nothing to embed — never an error. Optional packed commits-diff HTML for offline
+/// review (same file the live `⇄ commits diff` chip opens).
 pub(crate) enum CastExport {
-  Cast { ndjson: String, summary: Option<String>, chapters: Vec<(f64, String)> },
-  Note(String),
+  Cast { ndjson: String, summary: Option<String>, chapters: Vec<(f64, String)>, diff_html: Option<String> },
+  Note { text: String, diff_html: Option<String> },
+}
+
+impl CastExport {
+  pub(crate) fn diff_html(&self) -> Option<&str> {
+    match self {
+      CastExport::Cast { diff_html, .. } | CastExport::Note { diff_html, .. } => diff_html.as_deref(),
+    }
+  }
 }
 
 /// Export-only CSS on top of the live stylesheet: the details rows carry the live page's
@@ -34,7 +44,7 @@ const EXPORT_EXTRA_CSS: &str = r#"
 
 /// Assemble the whole-job page from the session's metadata and the per-proc exports
 /// (`exports[i]` belongs to `session.procs[i]` — board order). Pure: all file I/O (casts,
-/// sidecars) happened in the caller.
+/// sidecars, diffs) happened in the caller.
 pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> String {
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
@@ -58,7 +68,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
   let mut data_entries: Vec<String> = Vec::new();
   for (proc, export) in session.procs.iter().zip(exports) {
     sections.push_str(&proc_section(proc, export));
-    if let CastExport::Cast { ndjson, summary, chapters } = export {
+    if let CastExport::Cast { ndjson, summary, chapters, .. } = export {
       let markers: Vec<String> = chapters.iter().map(|(t, title)| format!("[{t}, {}]", quote(title))).collect();
       data_entries.push(format!(
         "{{ \"proc\": {idx}, \"cast\": {cast}, \"summary\": {summary}, \"markers\": [{markers}] }}",
@@ -105,6 +115,7 @@ CASTS.forEach((c) => {{
   // Chapters (c.markers) are player chrome: the ☰ panel, the seek-bar ticks, [/] keys.
   box._player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
     fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers, fullscreenEl: box,
+    accessibility: 'snapshot',
   }});
 }});
 // Opening a row hands its player the keyboard, exactly like the live page.
@@ -132,10 +143,37 @@ fn duration_label(proc: &ProcRecord) -> String {
   proc.elapsed.map(format_elapsed_clock).unwrap_or_else(|| "—".to_string())
 }
 
+/// Escape packed-diff HTML for an iframe `srcdoc="…"` attribute: quote/amp for the
+/// attribute, and break `</` sequences the same way CASTS JSON does, so a hostile page
+/// cannot close the attribute or confuse surrounding markup.
+fn srcdoc_attr(html: &str) -> String {
+  html.replace('&', "&amp;").replace('"', "&quot;").replace("</", "<\\/")
+}
+
+fn diff_embed_html(diff_html: Option<&str>) -> String {
+  let Some(html) = diff_html.filter(|h| !h.is_empty()) else {
+    return String::new();
+  };
+  format!(
+    r#"<details class="proc-diff"><summary>⇄ commits diff</summary><iframe sandbox srcdoc="{srcdoc}"></iframe></details>
+"#,
+    srcdoc = srcdoc_attr(html),
+  )
+}
+
+fn diff_chip_html(has_diff: bool) -> String {
+  if has_diff {
+    r#"<span class="proc-diff" title="Commits diff embedded below">⇄ commits diff</span>"#.into()
+  } else {
+    String::new()
+  }
+}
+
 /// One per-run row: the SAME `details.proc` markup as the live job page (triangle, glyph,
 /// label, elapsed, note), with the cast box carrying only the keys hint — no live controls.
 fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
+  let diff = export.diff_html();
   let body = match export {
     CastExport::Cast { summary, .. } => {
       let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
@@ -145,11 +183,14 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
       format!(
         "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
 <span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span></div>\n\
-<div class=\"cast-player\"></div>\n</div>\n",
+<div class=\"cast-player\"></div>\n</div>\n{diff}",
         idx = proc.index,
+        diff = diff_embed_html(diff),
       )
     }
-    CastExport::Note(text) => format!("<div class=\"detail dim\">{}</div>\n", esc(text)),
+    CastExport::Note { text, .. } => {
+      format!("<div class=\"detail dim\">{}</div>\n{}", esc(text), diff_embed_html(diff))
+    }
   };
   format!(
     r#"<details open class="proc {status}" data-index="{idx}">
@@ -158,7 +199,7 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
 <span class="label">{label}</span>
 <span class="meta">{elapsed}</span>
 <span class="note dim">{note}</span>
-</summary>
+{diff_chip}</summary>
 {meta}
 {body}</details>
 "#,
@@ -168,6 +209,7 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
     label = esc(&proc.label),
     elapsed = esc(&duration_label(proc)),
     note = esc(note),
+    diff_chip = diff_chip_html(diff.is_some()),
     meta = proc_meta_html(proc),
   )
 }

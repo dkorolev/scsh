@@ -1,6 +1,7 @@
 //! Session detail page with per-proc output panels.
 
 use super::escape::esc;
+use super::fleet::fleet_sections_html;
 use super::format::format_elapsed_clock;
 use super::layout::wrap_page;
 use super::proc::{
@@ -128,10 +129,11 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
   // opens with what the session IS — its kind and name — with the controls top-right.
   let kind = session.kind.as_deref().unwrap_or("profile");
+  let fleets = fleet_sections_html(session);
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
 <p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
-<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
+{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     kind = esc(kind),
     profile = esc(profile),
     export_btn = export_btn,
@@ -139,6 +141,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     stop_btn = stop_btn,
     session_meta = session_meta,
     skills = skills_html,
+    fleets = fleets,
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &body))

@@ -167,6 +167,13 @@ pub struct ProcRecord {
   /// the caller's branch (`$SCSH_HOME/sessions/<session>/diffs/…`). Set after the run
   /// integrates a commit-enabled skill's commits; `None` for steps that committed nothing.
   pub diff_path: Option<String>,
+  /// Manifest skill key this invocation came from (`add`, `conventions-reviewer`). Shared
+  /// across a matrix fleet so the job page can group routes side-by-side. `None` for builds.
+  pub skill_source: Option<String>,
+  /// Matrix route name (`codex-gpt-5.5`); `None` for a direct (non-matrix) skill or builds.
+  pub route: Option<String>,
+  /// Durable copy of the skill's result JSON under `$SCSH_HOME/sessions/<id>/results/`.
+  pub result_path: Option<String>,
 }
 
 /// One skill listed in a session's start payload.
@@ -411,6 +418,9 @@ mod tests {
         container_name: None,
         cast_path: None,
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -468,6 +478,9 @@ mod tests {
         container_name: None,
         cast_path: None,
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -505,6 +518,9 @@ mod tests {
           container_name: None,
           cast_path: None,
           diff_path: None,
+          skill_source: None,
+          route: None,
+          result_path: None,
         },
         ProcRecord {
           index: 1,
@@ -523,6 +539,9 @@ mod tests {
           container_name: None,
           cast_path: None,
           diff_path: None,
+          skill_source: None,
+          route: None,
+          result_path: None,
         },
       ],
       last_seen_at: 1,

@@ -184,9 +184,11 @@ The stem is `<skill>-<YYYYMMDD-HHMMSS>-utc-<nonce>`. The timestamp alone is not 
 skill in one `scsh run` shares it — so the random nonce keeps same-second runs from overwriting
 each other. Logs are kept for **every** run (including failures, when they matter most).
 
-`sessions/` is **permanent**: scsh never deletes from it. Delete a session's directory to
-forget that run — nothing else references it (the daemon store keeps its own copy of the
-metadata, and stored cast paths simply stop resolving).
+`sessions/` is durable by default: ordinary runs never delete from it. Use `scsh gc` to
+reclaim old session dirs (dry-run by default; `scsh gc --apply` to delete) — it never
+touches `projects/`, `stats.jsonl`, or the daemon redb files. Delete a session's directory
+manually to forget that run — nothing else references it (the daemon store keeps its own
+copy of the metadata, and stored cast paths simply stop resolving).
 
 ## Configuration
 
@@ -449,7 +451,9 @@ scsh daemon start
 ```
 
 This clears session history only; `.cast` recordings live under `~/.scsh/sessions/<id>/casts/`
-(override with `SCSH_HOME`) and are unaffected.
+(override with `SCSH_HOME`) and are unaffected. To reclaim disk from old session dirs (or
+legacy top-level `casts/` / `recordings/`), use `scsh gc` (dry-run) / `scsh gc --apply`
+(`--legacy` for the pre-sessions layout).
 
 ## Demo
 

@@ -158,7 +158,7 @@ function create(startAt, autoplay) {{
       return;
     }}
     mount.innerHTML = '';
-    const opts = {{ fit: 'both', idleTimeLimit: 2, markers: MARKERS }};
+    const opts = {{ fit: 'both', idleTimeLimit: 2, markers: MARKERS, accessibility: 'snapshot' }};
     if (startAt === 'end') startAt = stats.duration;
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;

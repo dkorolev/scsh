@@ -478,21 +478,27 @@ fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, 
 /// One proc's contribution to the session export: the rendered per-cast page (frames on
 /// disk → the same rendering `/cast/…/export.html` serves, sidecar summary alongside), or
 /// the note explaining why there is nothing to embed. Never an error — a vanished file, a
-/// frameless cast, and a proc that was never recorded all degrade to notes.
+/// frameless cast, and a proc that was never recorded all degrade to notes. When the proc
+/// has a packed commits-diff on disk, its HTML rides along for offline review.
 fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
+  let diff_html = proc
+    .diff_path
+    .as_deref()
+    .filter(|p| std::path::Path::new(p).is_file())
+    .and_then(|p| std::fs::read_to_string(p).ok());
   const NO_RECORDING: &str = "no recording — skipped/failed before output";
   let Some(cast_path) = proc.cast_path.as_deref() else {
     let note = match proc.kind {
       ProcKind::Build => "no recording — image build ran without asciinema on PATH (text log only)",
       ProcKind::Skill => NO_RECORDING,
     };
-    return html::CastExport::Note(note.into());
+    return html::CastExport::Note { text: note.into(), diff_html };
   };
   let Ok(ndjson) = read_complete_cast_lines(cast_path) else {
-    return html::CastExport::Note(NO_RECORDING.into());
+    return html::CastExport::Note { text: NO_RECORDING.into(), diff_html };
   };
   if !ndjson.lines().any(|l| l.trim_start().starts_with('[')) {
-    return html::CastExport::Note(NO_RECORDING.into());
+    return html::CastExport::Note { text: NO_RECORDING.into(), diff_html };
   }
   let sidecar = chapters_sidecar_path(cast_path).and_then(|p| std::fs::read_to_string(p).ok());
   let annotation = sidecar.as_deref().and_then(crate::annotate::parse_annotation);
@@ -500,7 +506,7 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
     Some(a) => (Some(a.summary), a.chapters.into_iter().map(|c| (c.t, c.title)).collect()),
     None => (None, Vec::new()),
   };
-  html::CastExport::Cast { ndjson, summary, chapters }
+  html::CastExport::Cast { ndjson, summary, chapters, diff_html }
 }
 
 /// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar
@@ -856,12 +862,16 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let skill_name = field_str(&obj, "skill_name");
       let harness = field_str(&obj, "harness");
       let model = field_str(&obj, "model");
+      let skill_source = field_str(&obj, "skill_source");
+      let route = field_str(&obj, "route");
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
         p.label = label;
         p.kind = kind;
         p.skill_name = skill_name;
         p.harness = harness;
         p.model = model;
+        p.skill_source = skill_source;
+        p.route = route;
       } else {
         s.procs.push(ProcRecord {
           index: proc_index,
@@ -879,6 +889,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           container_name: None,
           cast_path: None,
           diff_path: None,
+          skill_source,
+          route,
+          result_path: None,
           lines: Vec::new(),
         });
       }
@@ -929,6 +942,18 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let path = field_str(&obj, "path").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.diff_path = if path.is_empty() { None } else { Some(path) };
+        true
+      } else {
+        false
+      }
+    }
+    "/api/v1/proc/result" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let path = field_str(&obj, "path").unwrap_or_default();
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        p.result_path = if path.is_empty() { None } else { Some(path) };
         true
       } else {
         false
@@ -1532,6 +1557,9 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       container_name: None,
       cast_path: None,
       diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
     });
   }
 }
@@ -2086,6 +2114,9 @@ mod tests {
             container_name: None,
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2133,6 +2164,9 @@ mod tests {
             container_name: None,
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -2182,6 +2216,9 @@ mod tests {
             container_name: None,
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -2251,6 +2288,9 @@ mod tests {
             container_name: None,
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2306,6 +2346,9 @@ mod tests {
             container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2352,6 +2395,9 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       cast_path: None,
       diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -2461,6 +2507,9 @@ mod tests {
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
       cast_path: None,
       diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
     };
     let now = now_unix_secs();
     let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
@@ -2676,6 +2725,9 @@ mod tests {
             container_name: None,
             cast_path: None,
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2775,6 +2827,9 @@ mod tests {
             container_name: None,
             cast_path: Some(cast_path.to_string_lossy().into_owned()),
             diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
           }],
           last_seen_at: 50,
           client_connected: false,
@@ -2837,6 +2892,9 @@ mod tests {
       container_name: None,
       cast_path,
       diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
     }
   }
 

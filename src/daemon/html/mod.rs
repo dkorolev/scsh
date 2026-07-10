@@ -5,6 +5,7 @@
 mod cast;
 mod client_js;
 mod escape;
+mod fleet;
 mod format;
 mod index;
 mod layout;
