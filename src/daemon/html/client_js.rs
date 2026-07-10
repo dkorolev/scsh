@@ -549,11 +549,10 @@ function castEmbedHtml(p) {
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
-    '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
-    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span>' +
+    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
@@ -569,7 +568,6 @@ function initCasts(root) {
     // viewer came to see — while a finished one still opens at the start.
     if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
     else createCastPlayer(box);
-    box.querySelector('[data-cast-reload]').addEventListener('click', () => createCastPlayer(box));
     box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
   });
 }
@@ -630,17 +628,13 @@ function createCastPlayer(box, startAt, autoplay) {
       mount.innerHTML = castPlaceholderHtml(box.dataset.status);
       return;
     }
-    // The cast header carries the terminal size; its aspect decides whether fullscreen has
-    // horizontal room for the chapters sidebar (monospace cell ≈ 0.6 wide as tall). The
-    // pane's height needs no management: the player sizes its own box to the terminal's
-    // aspect at the pane's full width.
-    try { const h = JSON.parse(text.split('\n', 1)[0]); if (h.width && h.height) box._termAspect = (h.width * 0.6) / h.height; } catch (_) {}
     mount.innerHTML = '';
     const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
-    box._chapters = chapters;
+    // Chapters are player chrome (the ☰ panel + seek-bar ticks + [/] keys): markers are
+    // ALL the wiring they need. scsh renders only the one-line summary above the player.
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
     // fullscreenEl: the player's ⛶ button and `f` key fullscreen the whole cast box, so
-    // scsh's chrome (the fullscreen chapters sidebar) rides along.
+    // scsh's chrome (the summary line, the toolbar) rides along.
     const opts = { fit: 'both', controls: true, idleTimeLimit: 2, theme: 'asciinema', markers, fullscreenEl: box };
     if (startAt === 'end') startAt = stats.duration;
     if (startAt === 'near-end') startAt = Math.max(0, stats.duration - LIVE_PREVIEW_TAIL_SECS);
@@ -659,8 +653,6 @@ function createCastPlayer(box, startAt, autoplay) {
     const active = document.activeElement;
     if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
     renderCastSummary(box, meta.summary);
-    renderChapterChips(box, chapters);
-    buildFsSidebar(box, meta.summary, chapters);
     // Chapters are written by the annotation pass AFTER the run ends; a finished cast with
     // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
     // sidecar lands — no browser refresh. (Polling stops quietly if annotation never comes,
@@ -750,61 +742,6 @@ function followCastGrowth(box) {
     box._loadedDuration = box._player.cast.duration;
   }).catch(() => { box._appending = false; });
 }
-// Seek the player to a chapter and flash its title (shared by chips, sidebar, and [ ] keys).
-function seekToChapter(box, c) {
-  if (!box._player) return;
-  box._player.seek(c.t);
-  box._player.play && box._player.play();
-  showChapterToast(box, c.title);
-}
-// A brief, fading chapter-name toast at the bottom of the player (bottom of the screen in
-// fullscreen), shown when jumping chapters.
-function showChapterToast(box, title) {
-  if (!title) return;
-  let toast = box.querySelector('.cast-toast');
-  if (!toast) { toast = document.createElement('div'); toast.className = 'cast-toast'; box.appendChild(toast); }
-  toast.textContent = title;
-  toast.classList.remove('show');
-  void toast.offsetWidth; // restart the transition
-  toast.classList.add('show');
-  clearTimeout(box._toastTimer);
-  box._toastTimer = setTimeout(() => toast.classList.remove('show'), 1500);
-}
-// Vertical chapters panel shown in fullscreen when the terminal leaves horizontal room.
-function buildFsSidebar(box, summary, chapters) {
-  let panel = box.querySelector('.cast-fs-chapters');
-  if (!chapters.length) { if (panel) panel.remove(); return; }
-  if (!panel) { panel = document.createElement('div'); panel.className = 'cast-fs-chapters'; box.appendChild(panel); }
-  const head = (summary ? '<div class="fs-summary">' + esc(summary) + '</div>' : '') + '<div class="fs-head">Chapters</div>';
-  panel.innerHTML = head + chapters.map((c, i) =>
-    '<button type="button" data-seek="' + esc(String(c.t)) + '"><span class="fs-t">' + esc(fmtClock(c.t)) + '</span> ' +
-    esc(String(c.title || ('Chapter ' + (i + 1)))) + '</button>'
-  ).join('');
-  panel.querySelectorAll('[data-seek]').forEach((btn, i) => btn.addEventListener('click', () => seekToChapter(box, chapters[i])));
-}
-// Show the fullscreen sidebar only when the fullscreen area is wider than the terminal's
-// aspect (i.e. the terminal is height-limited and leaves >= ~300px of horizontal slack).
-function updateFsSidebar(box) {
-  const inFs = document.fullscreenElement === box;
-  let want = false;
-  if (inFs && (box._chapters || []).length) {
-    const A = box._termAspect || 2.4;
-    const toolbar = box.querySelector('.cast-toolbar');
-    const availH = box.clientHeight - (toolbar ? toolbar.offsetHeight : 0);
-    const slack = box.clientWidth - availH * A;
-    if (slack >= 300) {
-      box.style.setProperty('--side-w', Math.min(Math.round(slack), 440) + 'px');
-      want = true;
-    }
-  }
-  // Only toggle + refit the player when the sidebar's presence actually changes — the
-  // synthetic resize re-enters here, so an unconditional dispatch would loop forever.
-  const has = box.classList.contains('has-side');
-  if (want !== has) {
-    box.classList.toggle('has-side', want);
-    requestAnimationFrame(() => { try { window.dispatchEvent(new Event('resize')); } catch (_) {} });
-  }
-}
 function renderCastSummary(box, summary) {
   let el = box.querySelector('.cast-summary');
   if (summary) {
@@ -812,51 +749,12 @@ function renderCastSummary(box, summary) {
     el.textContent = summary;
   } else if (el) el.remove();
 }
-function renderChapterChips(box, chapters) {
-  let bar = box.querySelector('.cast-chapters');
-  if (!chapters.length) { if (bar) bar.remove(); return; }
-  if (!bar) {
-    bar = document.createElement('div');
-    bar.className = 'cast-chapters';
-    box.querySelector('.cast-toolbar').insertAdjacentElement('afterend', bar);
-  }
-  bar.innerHTML = chapters.map((c, i) =>
-    '<button type="button" data-seek="' + esc(String(c.t)) + '">' +
-    esc(fmtClock(c.t)) + ' ' + esc(String(c.title || ('Chapter ' + (i + 1)))) + '</button>'
-  ).join('');
-  bar.querySelectorAll('[data-seek]').forEach((btn, i) => btn.addEventListener('click', () => seekToChapter(box, chapters[i])));
-}
-function fmtClock(t) {
-  t = Math.max(0, Math.floor(t));
-  const m = Math.floor(t / 60), s = t % 60;
-  return m + ':' + (s < 10 ? '0' : '') + s;
-}
 // Entering/exiting fullscreen changes the box size: refit the player (beecast-player
-// re-lays-out on window resize) and decide whether the chapters sidebar has room.
+// re-lays-out on window resize). Chapters are player chrome now — the ☰ panel rides
+// into fullscreen with the player; no scsh-side sidebar to manage.
 document.addEventListener('fullscreenchange', () => {
-  const box = document.fullscreenElement;
   try { window.dispatchEvent(new Event('resize')); } catch (_) {}
-  if (box && box.classList && box.classList.contains('cast')) updateFsSidebar(box);
-  else document.querySelectorAll('.cast.has-side').forEach(b => b.classList.remove('has-side'));
 });
-window.addEventListener('resize', () => {
-  const box = document.fullscreenElement;
-  if (box && box.classList && box.classList.contains('cast')) updateFsSidebar(box);
-});
-// The player's [ and ] keys jump to the previous/next chapter marker; after the jump,
-// flash the chapter title. The keys reach the focused player, so find its .cast box.
-document.addEventListener('keydown', (e) => {
-  if (e.key !== '[' && e.key !== ']') return;
-  const fs = document.fullscreenElement;
-  const box = (fs && fs.classList && fs.classList.contains('cast')) ? fs : (e.target.closest && e.target.closest('.cast'));
-  if (!box || !box._player || !(box._chapters || []).length) return;
-  setTimeout(() => {
-    const t = box._player.getCurrentTime();
-    let closest = box._chapters[0], best = Infinity;
-    for (const c of box._chapters) { const d = Math.abs(c.t - t); if (d < best) { best = d; closest = c; } }
-    showChapterToast(box, closest.title);
-  }, 80);
-}, true);
 function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
   const body = hasCast(p)

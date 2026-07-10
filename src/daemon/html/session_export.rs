@@ -88,14 +88,10 @@ CASTS.forEach((c) => {{
   const box = document.querySelector('.cast[data-proc="' + c.proc + '"]');
   const mount = box && box.querySelector('.cast-player');
   if (!mount) return;
-  const player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
+  // Chapters (c.markers) are player chrome: the ☰ panel, the seek-bar ticks, [/] keys.
+  box._player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
     fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers, fullscreenEl: box,
   }});
-  box._player = player;
-  box.querySelectorAll('.cast-chapters [data-seek]').forEach((btn) => btn.addEventListener('click', () => {{
-    player.seek(Number(btn.dataset.seek));
-    player.play();
-  }}));
 }});
 // Opening a row hands its player the keyboard, exactly like the live page.
 document.querySelectorAll('details.proc').forEach((det) => det.addEventListener('toggle', () => {{
@@ -126,30 +122,15 @@ fn duration_label(proc: &ProcRecord) -> String {
 fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
   let body = match export {
-    CastExport::Cast { summary, chapters, .. } => {
+    CastExport::Cast { summary, .. } => {
       let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => format!("<div class=\"cast-summary\">{}</div>\n", esc(s)),
         None => String::new(),
       };
-      let chips: Vec<String> = chapters
-        .iter()
-        .map(|(t, title)| {
-          format!(
-            "<button type=\"button\" data-seek=\"{t}\">{clock} {title}</button>",
-            clock = format_clock(*t),
-            title = esc(title),
-          )
-        })
-        .collect();
-      let chapters_html = if chips.is_empty() {
-        String::new()
-      } else {
-        format!("<div class=\"cast-chapters\">{}</div>\n", chips.join(""))
-      };
       format!(
         "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
-<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span></div>\n\
-{chapters_html}<div class=\"cast-player\"></div>\n</div>\n",
+<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span></div>\n\
+<div class=\"cast-player\"></div>\n</div>\n",
         idx = proc.index,
       )
     }
@@ -174,9 +155,4 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
     note = esc(note),
     meta = proc_meta_html(proc),
   )
-}
-
-fn format_clock(t: f64) -> String {
-  let secs = t.max(0.0).floor() as u64;
-  format!("{}:{:02}", secs / 60, secs % 60)
 }
