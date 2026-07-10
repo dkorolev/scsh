@@ -353,12 +353,15 @@ fn index_page_shows_colored_harness_chips_per_proc() {
     session.procs.push(build);
   }
   let html = super::index_page(&store);
+  // A running chip's tip is just `harness · skill`; its start time rides in
+  // data-tip-running, from which the tip module ticks a live "running for …" line.
   assert!(
-    html.contains(r#"<span class="hchip hchip--claude" data-tip="claude · add — still running (bright = running, dim = done)">C</span>"#),
+    html.contains(r#"<span class="hchip hchip--claude" data-tip="claude · add" data-tip-running="1">C</span>"#),
     "got: {html}"
   );
+  // A finished chip's tip is two lines: `harness · skill`, then the plain status word.
   assert!(
-    html.contains(r#"<span class="hchip hchip--grok hchip--done" data-tip="grok · add — finished ok (bright = running, dim = done)">G</span>"#),
+    html.contains("<span class=\"hchip hchip--grok hchip--done\" data-tip=\"grok · add\ndone\">G</span>"),
     "got: {html}"
   );
   assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
@@ -836,4 +839,22 @@ fn review_round_five_fixes_hold() {
   let shtml = session_page(&store, "castab").expect("session renders");
   assert!(shtml.contains("function sizeCastPane"), "pane sizing ships");
   assert!(shtml.contains("height: auto !important"), "fullscreen overrides the inline pane height");
+}
+
+#[test]
+fn review_round_six_fixes_hold() {
+  let store = store_with_cast_proc(ProcStatus::Ok);
+  let html = super::index_page(&store);
+  // Durations can never render backwards: stale tick frames are dropped, and a superseded
+  // WebSocket is fully retired before a reconnect (the "oscillating Duration" bug).
+  assert!(html.contains("lastTickSecs"), "monotonic tick guard ships");
+  assert!(html.contains("Retire any superseded socket"), "socket retirement ships");
+  // The runtime switcher is a segmented control above the images table, not loose buttons
+  // in the action strip; tips are multi-line and can tick a live running-for line.
+  assert!(html.contains(r#"<div id="images-runtimes" class="images-runtimes"></div>"#), "got: {html}");
+  assert!(html.contains(".seg-opt"), "segmented-control CSS ships");
+  assert!(html.contains("data-tip-running"), "live-ticking tip support ships");
+  assert!(html.contains("white-space: pre-line"), "multi-line tip CSS ships");
+  // Both JS chip-count writers share one renderer, so live re-syncs keep the tooltip.
+  assert!(html.contains("function chipCountHtml"), "shared chip-count renderer ships");
 }

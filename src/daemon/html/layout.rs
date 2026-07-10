@@ -320,6 +320,20 @@ const PAGE_CSS: &str = r#"
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; direction: rtl; text-align: left;
   }
+  /* Containers tab: the runtime switcher is a segmented control — a view toggle between
+     the (separate) Apple Containers and docker/podman image stores, not an action. */
+  .images-runtimes { display: block; margin: 0 0 0.75rem; }
+  .seg {
+    display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
+    overflow: hidden; background: var(--surface);
+  }
+  .seg-opt {
+    font: inherit; font-size: 0.85rem; padding: 0.3rem 0.9rem;
+    background: none; border: 0; color: var(--text-muted); cursor: pointer;
+  }
+  .seg-opt + .seg-opt { border-left: 1px solid var(--border); }
+  .seg-opt.active { background: var(--purple); color: #fff; font-weight: 600; }
+  .seg-opt:hover:not(.active) { color: var(--text); }
   /* Projects tab: jobs grouped by the task they ran, one line per job, with breathing
      room between the badge+link lines. */
   .repo-jobgroup { margin: 0.3rem 0 0.8rem; }
@@ -346,6 +360,7 @@ const PAGE_CSS: &str = r#"
     color: var(--text); font-size: 0.75rem; line-height: 1.35;
     padding: 0.3rem 0.55rem; width: max-content; max-width: 44ch;
     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+    white-space: pre-line;
   }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .image-build-btn {

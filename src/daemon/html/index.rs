@@ -101,13 +101,13 @@ fn images_panel() -> String {
 <p class="dim">The base container images scsh builds: the shared base, plus one per harness.
 Stale means the image exists but no longer matches this scsh build's embedded Dockerfile —
 rebuild it here.</p>
+<div id="images-runtimes" class="images-runtimes"></div>
 <div class="table-scroll"><table>
 <thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th><th></th></tr></thead>
 <tbody id="images-body">
 {rows}</tbody>
 </table></div>
 <div class="images-controls">
-<span id="images-runtimes" class="images-runtimes"></span>
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="images-build-selected" disabled><span>Build selected</span></button>
 <button type="button" class="chamfer btn btn--orange btn--sm" id="images-build-all"><span>Build all</span></button>
 <label><input type="checkbox" id="images-rebuild-base"> also rebuild the base image (--no-cache)</label>
@@ -323,8 +323,11 @@ fn index_session_row(session: &Session, now: u64) -> String {
 
 /// Colored single-letter harness chips, one per skill proc — C in Anthropic orange is claude,
 /// C in green is codex, C in violet is cursor — so a row shows at a glance what it runs and
-/// what is still running (finished chips dim out). Tooltip: `harness: skill (status)`.
-/// Mirrored byte-for-byte by `harnessChipsHtml` in the client JS (`client_js.rs`).
+/// what is still running (finished chips dim out). The tooltip is two lines — `harness ·
+/// skill` then the status; a running chip instead carries `data-tip-running` (its start
+/// time), from which the tip module composes a live-ticking "running for …" line without
+/// churning the markup every second. Mirrored byte-for-byte by `harnessChipsHtml` in the
+/// client JS (`client_js.rs`).
 fn harness_chips_html(session: &Session) -> String {
   use crate::daemon::model::{ProcKind, ProcStatus};
   let mut chips = String::new();
@@ -338,17 +341,22 @@ fn harness_chips_html(session: &Session) -> String {
     let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
     let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped);
     let skill = p.skill_name.as_deref().unwrap_or(&p.label);
-    let status_text = match p.status {
-      ProcStatus::Running | ProcStatus::Waiting => "still running",
-      ProcStatus::Ok => "finished ok",
-      ProcStatus::Fail => "failed",
-      ProcStatus::Skipped => "skipped",
+    let base = format!("{h} · {skill}");
+    let (tip, running_attr) = match p.status {
+      ProcStatus::Running => match p.started_at {
+        Some(t) => (base, format!(" data-tip-running=\"{t}\"")),
+        None => (format!("{base}\nrunning"), String::new()),
+      },
+      ProcStatus::Waiting => (format!("{base}\nwaiting"), String::new()),
+      ProcStatus::Ok => (format!("{base}\ndone"), String::new()),
+      ProcStatus::Fail => (format!("{base}\nfailed"), String::new()),
+      ProcStatus::Skipped => (format!("{base}\nskipped"), String::new()),
     };
     chips.push_str(&format!(
-      "<span class=\"hchip hchip--{h}{done}\" data-tip=\"{title}\">{letter}</span>",
+      "<span class=\"hchip hchip--{h}{done}\" data-tip=\"{tip}\"{running_attr}>{letter}</span>",
       h = esc(h),
       done = if done { " hchip--done" } else { "" },
-      title = esc(&format!("{h} · {skill} — {status_text} (bright = running, dim = done)")),
+      tip = esc(&tip),
     ));
   }
   chips

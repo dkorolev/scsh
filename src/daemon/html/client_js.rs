@@ -76,20 +76,31 @@ function sessionStartedCell(session, nowUnix) {
     '<span class="session-started-abs">' + esc(abs) + '</span><br>' +
     '<span class="dim session-started-rel">' + esc(rel) + '</span></span>';
 }
-// Mirrors harness_chips_html in index.rs — keep the markup identical.
+// Mirrors harness_chips_html in index.rs — keep the markup identical. A running chip's
+// tooltip duration lives OUT of the markup (data-tip-running + the tip module's ticker),
+// so live re-renders compare equal and the hover survives.
 function harnessChipsHtml(session) {
   let out = '';
   (session.procs || []).forEach((p) => {
     if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
     const done = (p.status === 'ok' || p.status === 'fail' || p.status === 'skipped');
     const skill = p.skill_name || p.label || '';
-    const statusText = (p.status === 'running' || p.status === 'waiting') ? 'still running'
-      : (p.status === 'ok' ? 'finished ok' : p.status);
+    const base = p.harness + ' · ' + skill;
+    let tip = base, runningAttr = '';
+    if (p.status === 'running' && p.started_at) runningAttr = ' data-tip-running="' + esc(String(p.started_at)) + '"';
+    else if (p.status === 'running') tip = base + '\nrunning';
+    else if (p.status === 'waiting') tip = base + '\nwaiting';
+    else if (p.status === 'ok') tip = base + '\ndone';
+    else if (p.status === 'fail') tip = base + '\nfailed';
+    else tip = base + '\nskipped';
     out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" data-tip="' +
-      esc(p.harness + ' · ' + skill + ' — ' + statusText + ' (bright = running, dim = done)') + '">' +
+      esc(tip) + '"' + runningAttr + '>' +
       esc(p.harness.charAt(0).toUpperCase()) + '</span>';
   });
   return out;
+}
+function chipCountHtml(n) {
+  return '<span class="chip-count" data-tip="' + n + ' run' + (n === 1 ? '' : 's') + ' in this job">' + n + '</span>';
 }
 function indexRowHtml(id, session, nowUnix) {
   const lifecycle = sessionLifecycle(session, nowUnix);
@@ -101,7 +112,7 @@ function indexRowHtml(id, session, nowUnix) {
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
     '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + harnessChipsHtml(session) +
-    '<span class="chip-count" data-tip="' + n + ' run' + (n === 1 ? '' : 's') + ' in this job">' + n + '</span></td>' +
+    chipCountHtml(n) + '</td>' +
     '<td class="dim repo-path">' + esc(session.repo || '') + '</td></tr>';
 }
 function syncIndexRow(row, session, nowUnix) {
@@ -114,7 +125,7 @@ function syncIndexRow(row, session, nowUnix) {
   if (durationCell) setTextUnlessSelecting(durationCell, sessionDurationLabel(session, nowUnix, lifecycle));
   const procsCell = row.querySelector('.session-procs-cell');
   if (procsCell) {
-    const next = harnessChipsHtml(session) + '<span class="chip-count">' + (session.procs || []).length + '</span>';
+    const next = harnessChipsHtml(session) + chipCountHtml((session.procs || []).length);
     if (procsCell.innerHTML !== next) procsCell.innerHTML = next;
   }
 }
@@ -927,8 +938,16 @@ function onWsMessage(msg) {
   if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }
   onTick(msg);
 }
+let lastTickSecs = 0;
 function onTick(msg) {
   if (msg.type !== 'tick') return;
+  // Render time must be monotonic: a stale frame (reconnect backlog, a superseded socket,
+  // a throttled tab flushing its queue) carries an old now_secs AND an old snapshot, and
+  // rendering it verbatim snaps every live duration backwards, then forwards on the next
+  // fresh frame — the "oscillating Duration" bug. Newer snapshots fully supersede older
+  // ones, so dropping stale frames loses nothing.
+  if ((msg.now_secs || 0) < lastTickSecs) return;
+  lastTickSecs = msg.now_secs || lastTickSecs;
   const alive = msg.alive_clients ?? msg.active_clients ?? 0;
   const nowUnix = msg.now_secs ?? (Date.now() / 1000);
   if (msg.sessions) {
@@ -958,6 +977,9 @@ function onTick(msg) {
 let ws;
 let reconnectMs = 400;
 function connectWs() {
+  // Retire any superseded socket completely — two live sockets would interleave a fresh
+  // stream with a lagging one and make every duration on the page see-saw.
+  if (ws) { try { ws.onclose = null; ws.onmessage = null; ws.onerror = null; ws.close(); } catch (_) {} }
   setDaemonStatus('connecting', 'connecting…', null);
   ws = new WebSocket('ws://127.0.0.1:' + WS_PORT + '/ws');
   ws.onopen = () => { reconnectMs = 400; setDaemonStatus('connecting', 'connecting…', null); };
@@ -1190,13 +1212,16 @@ function renderRuntimeSelector(data) {
   if (!box) return;
   const available = data.available || [];
   if (available.length < 2) { box.innerHTML = ''; return; }
-  // Apple `container` and docker/podman keep SEPARATE image stores — the selector says
-  // which world the table (and the Build buttons) talk to.
-  const label = (r) => r === 'container' ? 'Apple Containers' : r;
-  box.innerHTML = available.map(r =>
-    '<button type="button" class="chamfer btn btn--sm ' + (r === data.runtime ? 'btn--purple' : '') +
-    '" data-runtime="' + esc(r) + '"><span>' + esc(label(r)) + '</span></button>').join(' ');
+  // Apple `container` and docker/podman keep SEPARATE image stores — this segmented
+  // control says which world the whole tab (table + Build buttons) talks to.
+  const label = (r) => r === 'container' ? 'Apple Containers' : r === 'docker' ? 'Docker' : r === 'podman' ? 'Podman' : r;
+  box.innerHTML = '<span class="seg" data-tip="Each runtime keeps its own image store — the table and the Build buttons apply to the selected one">' +
+    available.map(r =>
+      '<button type="button" class="seg-opt' + (r === data.runtime ? ' active' : '') +
+      '" data-runtime="' + esc(r) + '">' + esc(label(r)) + '</button>').join('') +
+    '</span>';
   box.querySelectorAll('[data-runtime]').forEach(b => b.addEventListener('click', () => {
+    if (b.classList.contains('active')) return;
     IMAGES_RUNTIME = b.dataset.runtime;
     refreshImages();
   }));
@@ -1246,15 +1271,20 @@ function startImageBuildOne(name, upToDate) {
   tip.className = 'ui-tip';
   tip.hidden = true;
   document.body.appendChild(tip);
-  let anchor = null;
-  const hide = () => { anchor = null; tip.hidden = true; };
-  document.addEventListener('mouseover', (e) => {
-    const el = e.target.closest ? e.target.closest('[data-tip]') : null;
-    if (el === anchor) return;
-    if (!el) { hide(); return; }
-    anchor = el;
-    tip.textContent = el.dataset.tip;
-    tip.hidden = false;
+  let anchor = null, timer = null;
+  const hide = () => {
+    anchor = null;
+    tip.hidden = true;
+    if (timer) { clearInterval(timer); timer = null; }
+  };
+  // Tips are multi-line (pre-line CSS). A running chip carries data-tip-running (its start
+  // time) instead of baking the duration into the markup, so the "running for …" line
+  // ticks live here while live re-renders keep comparing the row's HTML as unchanged.
+  const render = (el) => {
+    let text = el.dataset.tip;
+    const started = Number(el.dataset.tipRunning || 0);
+    if (started) text += '\nrunning for ' + formatDuration(Date.now() / 1000 - started);
+    tip.textContent = text;
     tip.style.left = '0px';
     tip.style.top = '0px';
     const r = el.getBoundingClientRect();
@@ -1264,6 +1294,21 @@ function startImageBuildOne(name, upToDate) {
     if (y < 6) y = r.bottom + 8;
     tip.style.left = x + 'px';
     tip.style.top = y + 'px';
+  };
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (el === anchor) return;
+    if (timer) { clearInterval(timer); timer = null; }
+    if (!el) { hide(); return; }
+    anchor = el;
+    tip.hidden = false;
+    render(el);
+    if (el.dataset.tipRunning) {
+      timer = setInterval(() => {
+        if (!document.contains(el)) { hide(); return; }
+        render(el);
+      }, 1000);
+    }
   });
   document.addEventListener('scroll', hide, true);
 })();
