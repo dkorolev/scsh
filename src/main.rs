@@ -3136,7 +3136,7 @@ fn run_one_skill(
   // Screen-inactivity watchdog: the bind-mounted cast grows on every TUI redraw, so a frozen
   // cast means a stuck harness (hung login, exhausted quota, dead TUI) — kill it rather than
   // waiting out the full wall-clock timeout.
-  let inactivity_secs = skill.inactivity_timeout.unwrap_or(config::DEFAULT_INACTIVITY_TIMEOUT_SECS);
+  let inactivity_secs = config::effective_inactivity_timeout(skill.harness, skill.inactivity_timeout);
   let watch = ui::screen::ActivityWatch {
     file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
@@ -5746,7 +5746,9 @@ fn print_help_config() {
                           #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       inactivity_timeout: 120  # optional; seconds the recorded screen may stay frozen
-                          #       before the run is killed as stuck (default 120)
+                          #       before the run is killed as stuck. Default 120, or 600
+                          #       for grok (silent Build TUI thinking). Per-route override
+                          #       under invocations: is allowed too.
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
         - B: ${B:-5}      #       forward B, or inject the default 5 when unset
@@ -5759,7 +5761,8 @@ fn print_help_config() {
       autoinstall: false  #     optional; default true. false = authoring-only: `installskills`
                           #       won't copy it into a consumer repo (an `internal-` name does the same)
       invocations:        #     optional matrix — each route expands to `{skill}-{route}`
-        opencode-gpt:       #       at run and install time; per-route profile/commits override
+        opencode-gpt:       #       at run and install time; per-route profile/commits/
+                            #       inactivity_timeout override
           harness: opencode
           model: openai/...
       result: tmp/x.json  #     required; use {name} in the path when `invocations:` is set

@@ -32,8 +32,20 @@ pub const DEFAULT_TERMINAL_COLS: u16 = 200;
 pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 
 /// Default seconds of screen inactivity (the recorded cast not growing) before a running
-/// skill is killed as stuck. Per-skill override: `inactivity_timeout:` in `.scsh.yml`.
+/// skill is killed as stuck — used for every harness except Grok (see
+/// [`Harness::default_inactivity_timeout_secs`]). Override with `inactivity_timeout:` on a
+/// skill or an `invocations:` route in `.scsh.yml`.
 pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 120;
+
+/// Grok's Build TUI can think for long stretches without redrawing the cast; a 120s
+/// inactivity kill burns the one transient retry on every code-review fleet run.
+pub const GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 600;
+
+/// Resolve the inactivity watchdog limit: YAML override (route or skill) wins, else the
+/// harness default ([`Harness::default_inactivity_timeout_secs`]).
+pub fn effective_inactivity_timeout(harness: Harness, override_secs: Option<u64>) -> u64 {
+  override_secs.unwrap_or_else(|| harness.default_inactivity_timeout_secs())
+}
 
 impl Default for Terminal {
   fn default() -> Self {
@@ -59,7 +71,7 @@ pub struct Skill {
   pub effort: Option<String>,
   pub timeout: Option<u64>,
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
-  /// (`None` = [`DEFAULT_INACTIVITY_TIMEOUT_SECS`]).
+  /// (`None` = harness default via [`effective_inactivity_timeout`]).
   pub inactivity_timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
@@ -85,6 +97,8 @@ pub struct InvocationRoute {
   pub profile: Option<String>,
   /// When set, overrides the skill-level `commits:` for this route only.
   pub commits: Option<bool>,
+  /// When set, overrides the skill-level `inactivity_timeout:` for this route only.
+  pub inactivity_timeout: Option<u64>,
 }
 
 /// A concrete run invocation after expanding matrix skills — what `scsh run` executes.
@@ -98,7 +112,7 @@ pub struct ResolvedInvocation {
   pub effort: Option<String>,
   pub timeout: Option<u64>,
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
-  /// (`None` = [`DEFAULT_INACTIVITY_TIMEOUT_SECS`]).
+  /// (`None` = harness default via [`effective_inactivity_timeout`] at run time).
   pub inactivity_timeout: Option<u64>,
   pub env: Vec<EnvVar>,
   pub profile: Option<String>,
@@ -185,7 +199,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       model: route.model.clone(),
       effort: effort_for(route.harness, route.effort.as_ref()),
       timeout: skill.timeout,
-      inactivity_timeout: skill.inactivity_timeout,
+      inactivity_timeout: route.inactivity_timeout.or(skill.inactivity_timeout),
       env: skill.env.clone(),
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
       commits: route.commits.unwrap_or(skill.commits),
@@ -278,6 +292,16 @@ impl Harness {
     // cursor, plus opencode (`opencode --prompt`) and grok (`grok "<prompt>"`, its default Build
     // TUI). Headless single-shot modes are not used — the recording must show a genuine terminal.
     matches!(self, Harness::Claude | Harness::Codex | Harness::Cursor | Harness::Opencode | Harness::Grok)
+  }
+
+  /// Seconds of cast inactivity before a run is killed when YAML omits `inactivity_timeout:`.
+  /// Grok's Build TUI thinks silently for long stretches (no redraw → cast does not grow),
+  /// so it gets a longer budget than the global default.
+  pub fn default_inactivity_timeout_secs(self) -> u64 {
+    match self {
+      Harness::Grok => GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS,
+      _ => DEFAULT_INACTIVITY_TIMEOUT_SECS,
+    }
   }
 
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
@@ -809,11 +833,11 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
         errors.push(format!("duplicate key 'skills.{skill}.invocations.{default_name}.{k}'"));
       }
     }
-    const IK: &[&str] = &["name", "harness", "model", "effort", "profile", "commits"];
+    const IK: &[&str] = &["name", "harness", "model", "effort", "profile", "commits", "inactivity_timeout"];
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout)"
         ));
       }
     }
@@ -899,8 +923,10 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
         }
       },
     };
+    let inactivity_timeout =
+      parse_positive_secs(&fm, &format!("{skill}.invocations.{default_name}"), "inactivity_timeout", errors);
     if let Some(harness) = harness {
-      out.push(InvocationRoute { name: route_name, harness, model, effort, profile, commits });
+      out.push(InvocationRoute { name: route_name, harness, model, effort, profile, commits, inactivity_timeout });
     }
   }
   out
@@ -1826,7 +1852,7 @@ mod tests {
     result: tmp/x.json
 "#,
     );
-    // Absent means the run-time default applies (DEFAULT_INACTIVITY_TIMEOUT_SECS).
+    // Absent means the harness default applies at run time (effective_inactivity_timeout).
     assert_eq!(validate(&without).unwrap().skills[0].inactivity_timeout, None);
     let zero = one_skill(
       r#"    harness: opencode
@@ -1848,6 +1874,77 @@ mod tests {
       .unwrap_err()
       .iter()
       .any(|e| e.contains("'skills.s.inactivity_timeout' must be an integer number of seconds")));
+  }
+
+  #[test]
+  fn inactivity_timeout_harness_defaults_and_route_overrides() {
+    assert_eq!(Harness::Grok.default_inactivity_timeout_secs(), GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS);
+    assert_eq!(Harness::Codex.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
+    assert_eq!(Harness::Claude.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
+    assert_eq!(effective_inactivity_timeout(Harness::Grok, None), 600);
+    assert_eq!(effective_inactivity_timeout(Harness::Codex, None), 120);
+    assert_eq!(effective_inactivity_timeout(Harness::Grok, Some(900)), 900);
+
+    // Direct run with no YAML → ResolvedInvocation keeps None; effective uses harness default.
+    let grok = one_skill(
+      r#"    harness: grok
+    model: grok-build
+    result: tmp/x.json
+"#,
+    );
+    let inv = expand_invocations(&validate(&grok).unwrap());
+    assert_eq!(inv[0].inactivity_timeout, None);
+    assert_eq!(effective_inactivity_timeout(inv[0].harness, inv[0].inactivity_timeout), 600);
+
+    // Skill-level override applies to every route.
+    let yaml = r#"skills:
+  review:
+    inactivity_timeout: 400
+    result: tmp/review-{name}.json
+    invocations:
+      codex:
+        harness: codex
+        model: gpt-5.5
+      grok:
+        harness: grok
+        model: grok-build
+"#;
+    let inv = expand_invocations(&validate(yaml).unwrap());
+    assert_eq!(inv[0].inactivity_timeout, Some(400));
+    assert_eq!(inv[1].inactivity_timeout, Some(400));
+
+    // Route-level override wins over skill-level for that route only.
+    let yaml = r#"skills:
+  review:
+    inactivity_timeout: 400
+    result: tmp/review-{name}.json
+    invocations:
+      codex:
+        harness: codex
+        model: gpt-5.5
+      grok:
+        harness: grok
+        model: grok-build
+        inactivity_timeout: 900
+"#;
+    let inv = expand_invocations(&validate(yaml).unwrap());
+    assert_eq!(inv[0].inactivity_timeout, Some(400), "codex inherits skill-level");
+    assert_eq!(inv[1].inactivity_timeout, Some(900), "grok route override wins");
+    assert_eq!(effective_inactivity_timeout(inv[1].harness, inv[1].inactivity_timeout), 900);
+
+    // Invalid route inactivity_timeout is rejected.
+    let yaml = r#"skills:
+  review:
+    result: tmp/review-{name}.json
+    invocations:
+      grok:
+        harness: grok
+        model: grok-build
+        inactivity_timeout: 0
+"#;
+    assert!(validate(yaml).unwrap_err().iter().any(|e| {
+      e.contains("'skills.review.invocations.grok.inactivity_timeout' must be a positive number of seconds")
+    }));
   }
 
   #[test]
