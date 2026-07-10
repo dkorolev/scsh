@@ -15,7 +15,7 @@ use super::escape::esc;
 use super::format::format_elapsed_clock;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{proc_meta_html, status_glyph};
-use crate::daemon::model::{ProcRecord, Session};
+use crate::daemon::model::{ProcRecord, Session, SessionLifecycle};
 use crate::json::quote;
 
 /// What the export gathered for one proc (aligned 1:1 with `session.procs`): the raw
@@ -39,6 +39,20 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
   let kind = esc(session.kind.as_deref().unwrap_or("profile"));
+  // Same resting lifecycle chip as the live job page (COMPLETED / FAILED / … after the
+  // heading). Export is always a finished snapshot, so Running should not appear — but if
+  // it somehow does, omit the chip rather than lie.
+  let now = session.ended_at.unwrap_or(session.last_seen_at);
+  let lifecycle = session.lifecycle_status(now);
+  let status_chip = if lifecycle == SessionLifecycle::Running {
+    String::new()
+  } else {
+    format!(
+      " <span class=\"chamfer session-status {}\"><span>{}</span></span>",
+      lifecycle.css_class(),
+      esc(lifecycle.label())
+    )
+  };
   let when = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
@@ -70,7 +84,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
 </head>
 <body>
 <div class="card card--accent-left-purple">
-<p class="session-kind">{kind} <strong>{profile}</strong></p>
+<p class="session-kind">{kind} <strong>{profile}</strong>{status_chip}</p>
 <dl class="session-meta">
 <dt>Job</dt><dd><code>{id}</code></dd>
 <dt>Started</dt><dd>{when}</dd>
@@ -108,6 +122,7 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     player_css = super::PLAYER_CSS,
     player_js = super::PLAYER_JS,
     extra_css = EXPORT_EXTRA_CSS,
+    status_chip = status_chip,
     branch = esc(&session.branch),
     repo = esc(&session.repo),
   )

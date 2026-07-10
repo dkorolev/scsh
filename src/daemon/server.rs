@@ -2896,7 +2896,12 @@ mod tests {
     assert!(page.contains("<title>scsh job sexabc</title>"), "job title");
     assert!(!page.contains("scsh session"), "the word is job, not session");
     assert!(page.contains("card--accent-left-purple"), "live-page island");
-    assert!(page.contains(r#"<p class="session-kind">profile <strong>default</strong></p>"#), "kind line");
+    assert!(
+      page.contains(
+        r#"<p class="session-kind">profile <strong>default</strong> <span class="chamfer session-status completed"><span>completed</span></span></p>"#
+      ),
+      "kind line with resting lifecycle chip"
+    );
     assert!(page.contains(r#"<code class="repo-path">/r</code>"#), "repo label");
     for label in ["claude: add", "codex: multiply", "cursor: skipped"] {
       assert!(page.contains(label), "a section for {label}");
