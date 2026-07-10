@@ -170,6 +170,9 @@ function create(startAt, autoplay) {{
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
     player = BeeCastPlayer.create({{ data: text }}, mount, opts);
     if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
+    // Keyboard-first: the page IS the player — space and f work without a click.
+    const proot = mount.querySelector('.beecast-player');
+    if (proot) {{ try {{ proot.focus({{ preventScroll: true }}); }} catch (_) {{}} }}
   }});
 }}
 // Growth notifications for this proc's recording arrive over the daemon's WebSocket

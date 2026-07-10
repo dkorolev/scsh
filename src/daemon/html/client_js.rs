@@ -543,6 +543,9 @@ function initCasts(root) {
   if (typeof BeeCastPlayer === 'undefined') return;
   root.querySelectorAll('.cast:not([data-ready])').forEach(box => {
     box.dataset.ready = '1';
+    // Opening a section hands its player the keyboard: space plays, f fullscreens.
+    const det = box.closest('details');
+    if (det) det.addEventListener('toggle', () => { if (det.open) focusCastPlayer(box); });
     // A still-running recording previews from its tail — the last few seconds are what the
     // viewer came to see — while a finished one still opens at the start.
     if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
@@ -639,6 +642,13 @@ function createCastPlayer(box, startAt, autoplay) {
     box._player = BeeCastPlayer.create({ data: text }, mount, opts);
     box._loadedChars = text.length;
     if (autoplay) { try { box._player.play(); } catch (_) {} }
+    // Keyboard-first: a player mounting into an OPEN section takes focus, so space
+    // (play/pause) and f (fullscreen) work immediately. Never steal focus from something
+    // the user is actually in — only take it from the body or from this box's own
+    // (just-disposed) previous player.
+    const det = box.closest('details');
+    const active = document.activeElement;
+    if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
     renderCastSummary(box, meta.summary);
     renderChapterChips(box, chapters);
     buildFsSidebar(box, meta.summary, chapters);
@@ -648,6 +658,11 @@ function createCastPlayer(box, startAt, autoplay) {
     // e.g. no cursor-agent on the host.)
     if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl);
   });
+}
+function focusCastPlayer(box) {
+  const root = box.querySelector('.beecast-player');
+  if (!root) return;
+  try { root.focus({ preventScroll: true }); } catch (_) { try { root.focus(); } catch (_) {} }
 }
 // The annotation pass starts right after the run ends, so chapters land within minutes or
 // never (no annotator on the host, or a recording from before annotation existed). Show the

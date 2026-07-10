@@ -550,9 +550,13 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<div class="cast" data-cast-url="/cast/castab/2""#), "cast embed");
   // Fullscreen lives in the player's own control bar now (⛶ + the f key, via
-  // fullscreenEl) — the page toolbar carries no fullscreen button of its own.
+  // fullscreenEl) — the page toolbar carries no fullscreen button of its own. Opening a
+  // section focuses its player, so space and f work with no click first.
   assert!(!procs.contains("data-cast-fs"), "no page-side fullscreen button");
   assert!(procs.contains("f fullscreen"), "the keys hint teaches f");
+  let js = live_client_js();
+  assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
+  assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
   assert!(procs.contains("data-cast-link"), "timestamp deep-link button");
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output / autoscroll control.
