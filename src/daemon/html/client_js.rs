@@ -528,12 +528,10 @@ function castEmbedHtml(p) {
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
-    '<button type="button" data-cast-link>🔗 Link at time</button>' +
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
-    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
-    '<span class="cast-copied">copied</span>' +
+    '<a class="chamfer btn btn--cyan btn--sm" href="' + esc(base) + '/export.html" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
@@ -550,18 +548,8 @@ function initCasts(root) {
     // viewer came to see — while a finished one still opens at the start.
     if (box.dataset.status === 'running') createCastPlayer(box, 'near-end', true);
     else createCastPlayer(box);
-    const proc = box.dataset.proc;
-    const playUrl = () => location.origin + '/cast/' + encodeURIComponent(SESSION_ID) + '/' + proc + '/play';
     box.querySelector('[data-cast-reload]').addEventListener('click', () => createCastPlayer(box));
     box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
-    box.querySelector('[data-cast-link]').addEventListener('click', () => {
-      const t = box._player ? Math.floor(box._player.getCurrentTime() * 10) / 10 : 0;
-      const url = playUrl() + '#t=' + t;
-      if (navigator.clipboard) navigator.clipboard.writeText(url);
-      const note = box.querySelector('.cast-copied');
-      note.style.visibility = 'visible';
-      setTimeout(() => { note.style.visibility = 'hidden'; }, 1200);
-    });
   });
 }
 // The available duration and event count of loaded asciicast text (complete lines only —
