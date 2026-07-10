@@ -111,6 +111,9 @@ const PROC = {proc_index};
 const LIVE = {live_js};
 let player = null;
 let MARKERS = [];
+// A live recording opens in declared-live mode (parked at the growing edge, green pinned
+// bar) unless a #t= deep link chose a position. The player drops live on a rewind; the
+// livechange listener below re-syncs the toggle.
 function hashStart() {{
   const m = location.hash.match(/^#t=([0-9:.]+)$/);
   return m ? m[1] : null;
@@ -160,6 +163,7 @@ function create(startAt, autoplay) {{
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
     player = BeeCastPlayer.create({{ data: text }}, mount, opts);
+    if (liveMode && player.setLive) player.setLive(true);
     if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
     // Keyboard-first: the page IS the player — space and f work without a click.
     const proot = mount.querySelector('.beecast-player');
@@ -205,13 +209,19 @@ function follow() {{
   }}).catch(() => {{ appending = false; }});
 }}
 // The Live toggle parks the playhead at the live edge (the follow policy is positional).
-let liveMode = false;
+let liveMode = LIVE && !hashStart();
 function setLiveMode(on) {{
   liveMode = !!on && castRunning;
   document.getElementById('live-toggle').classList.toggle('on', liveMode);
-  if (liveMode && player) {{ follow(); player.pause(); player.seek(1e9); }}
+  if (!player || !player.setLive) return;
+  if (liveMode) {{ follow(); player.setLive(true); }}
+  else player.setLive(false);
 }}
 document.getElementById('live-toggle').addEventListener('click', () => setLiveMode(!liveMode));
+document.getElementById('player').addEventListener('beecast-livechange', (e) => {{
+  liveMode = !!(e.detail && e.detail.live);
+  document.getElementById('live-toggle').classList.toggle('on', liveMode);
+}});
 // The proc finished: one last reload picks up the complete cast (keeping the current
 // position — the durable copy may live at a different path than the live file), live mode
 // ends cleanly (toggle off + disabled), and the WS is no longer needed.

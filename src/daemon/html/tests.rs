@@ -244,10 +244,12 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
 #[test]
 fn running_cast_preview_starts_near_the_end() {
   let js = live_client_js();
-  // A still-running proc's player opens ~3s before the current tail (autoplaying), not at 0.
-  assert!(js.contains("const LIVE_PREVIEW_TAIL_SECS = 3"), "tail preview window constant");
-  assert!(js.contains("createCastPlayer(box, 'near-end', true)"), "running casts open near the end");
-  assert!(js.contains("stats.duration - LIVE_PREVIEW_TAIL_SECS"), "near-end resolves against the loaded duration");
+  // A still-running proc's player opens in DECLARED-LIVE mode: parked at the growing edge,
+  // the seek bar pinned full-width in live green (player.setLive) — not a near-end
+  // autoplay whose playhead jitters as the duration grows.
+  assert!(js.contains("box._live = true; createCastPlayer(box, 'end')"), "running casts open live at the edge");
+  assert!(!js.contains("near-end"), "the jittery near-end preview is gone");
+  assert!(js.contains("beecast-livechange"), "the toggle mirrors the player's own live state");
 }
 
 #[test]
@@ -773,11 +775,11 @@ fn live_toggle_renders_only_while_the_proc_runs() {
   assert!(running.contains(r#"<button type="button" data-cast-live>● Live</button>"#));
   let done = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Ok).sessions["castab"].procs[0]);
   assert!(done.contains(r#"<button type="button" data-cast-live hidden>● Live</button>"#));
-  // The toggle just parks the playhead at the live edge; the player's positional follow
-  // policy then renders each appended chunk (no reloads, no re-creation).
+  // The toggle drives the player's declared-live mode (parked at the edge, green pinned
+  // bar); the player renders each appended chunk in place and drops live on a rewind.
   let js = live_client_js();
   assert!(js.contains("function setCastLive(box, on)"));
-  assert!(js.contains("box._player.seek(1e9)"));
+  assert!(js.contains("box._player.setLive(true)"));
   // Standalone page: toggle present while running, hidden for finished procs, and the
   // finish notice disables it after the final reload.
   let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
