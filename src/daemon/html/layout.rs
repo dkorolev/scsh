@@ -320,6 +320,8 @@ const PAGE_CSS: &str = r#"
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; direction: rtl; text-align: left;
   }
+  /* Projects tab: breathing room between the per-job badge+link lines. */
+  #repos-body a { display: inline-block; margin: 0.2rem 0; }
   .hchip {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
