@@ -413,6 +413,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_GIT_HOST` | route gateway | Git-daemon host IP as seen from inside the container. |
 | `SCSH_GIT_PORT` | ephemeral | Git-daemon port on the host. |
 | `SCSH_KEEP_RUNS` | off | `1` keeps every `/tmp/scsh-*-run-*` clone (and skips the stale sweep). |
+| `SCSH_REAP_CONTAINERS` | on | `0` disables the daemon's zombie-container reaper: it destroys `scsh-*-run-*` containers that stay unclaimed by any live job for ~30 consecutive minutes of once-a-minute sweeps — orphans left by a killed `scsh run`. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
 | `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |

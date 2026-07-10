@@ -118,6 +118,13 @@ impl Server {
     let mut last_ws_tick = Instant::now();
     // Per-proc incremental cast probes (parse offsets cached across ticks) — see `castprobe`.
     let mut cast_probes: std::collections::HashMap<(String, usize), CastProbe> = std::collections::HashMap::new();
+    // Zombie-container reaper state: the sweep runs on its own thread (container kills
+    // sleep a second each), one pass at a time, tracking each unclaimed container's
+    // consecutive-sweep count.
+    let mut last_reap = Instant::now();
+    let reap_running = Arc::new(AtomicBool::new(false));
+    let reap_counts: Arc<Mutex<std::collections::HashMap<(String, String), u32>>> =
+      Arc::new(Mutex::new(Default::default()));
 
     loop {
       match listener.accept() {
@@ -148,6 +155,23 @@ impl Server {
 
       self.persist_if_due();
       self.prune_if_due();
+
+      if last_reap.elapsed() >= Duration::from_secs(super::reap::REAP_INTERVAL_SECS) {
+        last_reap = Instant::now();
+        if !super::reap::reaping_disabled() && !reap_running.swap(true, Ordering::SeqCst) {
+          let store = Arc::clone(&self.store);
+          let prune = Arc::clone(&self.prune);
+          let counts = Arc::clone(&reap_counts);
+          let flag = Arc::clone(&reap_running);
+          let port = self.port;
+          std::thread::spawn(move || {
+            let _ = catch_unwind(AssertUnwindSafe(|| {
+              super::reap::reap_pass(&store, &prune, &counts, port, now_unix_secs());
+            }));
+            flag.store(false, Ordering::SeqCst);
+          });
+        }
+      }
 
       if last_ws_tick.elapsed() >= WS_TICK {
         let now = now_unix_secs();

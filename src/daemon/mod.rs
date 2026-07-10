@@ -11,6 +11,7 @@ mod jsonio;
 mod model;
 mod paths;
 pub mod prune;
+pub mod reap;
 mod server;
 mod websocket;
 
