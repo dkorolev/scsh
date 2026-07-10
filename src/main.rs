@@ -4388,16 +4388,23 @@ fn make_temp_dir() -> std::io::Result<PathBuf> {
 /// (cached — their layers chain from the fresh base, so they re-run where it matters).
 fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: Option<String>) -> i32 {
   ui::signals::install();
+  // `base` is a first-class name: `scsh build-images base` builds ONLY the shared base
+  // image (respecting its fingerprint unless --force / --rebuild-base).
+  let mut base_only = false;
   let mut selected: Vec<config::Harness> = Vec::new();
   if names.is_empty() {
     selected.extend(config::Harness::ALL);
   } else {
     for n in names {
+      if n == "base" {
+        base_only = true;
+        continue;
+      }
       match config::Harness::parse(n) {
         Some(h) if selected.contains(&h) => {}
         Some(h) => selected.push(h),
         None => {
-          fail(&format!("unknown harness '{n}' (known: {})", config::Harness::known().join(", ")));
+          fail(&format!("unknown image '{n}' (known: base, {})", config::Harness::known().join(", ")));
           return 2;
         }
       }
@@ -4459,7 +4466,9 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
 
   let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
   let base_stale = !runtime::image_is_up_to_date(&rt_name, runtime::BASE_IMAGE_TAG, &base_fp);
-  let build_base = base_stale || rebuild_base;
+  // An explicit `base` in the names builds the base even when fresh under --force, and by
+  // itself builds ONLY the base (selected stays empty).
+  let build_base = base_stale || rebuild_base || (base_only && force);
   let mut harness_builds: Vec<runtime::ImageBuildSpec> = Vec::new();
   for &h in &selected {
     let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);

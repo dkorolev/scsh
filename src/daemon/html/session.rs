@@ -8,7 +8,7 @@ use super::proc::{
   status_glyph, summary_stats_html,
 };
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
-use crate::daemon::paths::{now_unix_secs, session_url};
+use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let session = store.sessions.get(session_id)?;
@@ -21,9 +21,12 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let elapsed = proc_elapsed_secs(proc, now).map(|e| format_elapsed_clock(e)).unwrap_or_else(|| "—".to_string());
     // The collapsed row's trailing text: once the proc FINISHED we know its answer (the
     // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
-    // "<harness> run…" note is only for rows still working.
+    // "<harness> run…" note is only for rows still working. A bare artifact path is SYSTEM
+    // info and renders as code, so the eye can tell it from an agent's prose answer.
     let finished = !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
     let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
+    let note_html =
+      if finished && looks_like_artifact_path(note) { format!("<code>{}</code>", esc(note)) } else { esc(note) };
     let container = proc.container_name.as_deref().unwrap_or("");
     // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
     // build fallbacks (no asciinema on PATH) keep the timestamped output with auto-scroll.
@@ -65,7 +68,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = elapsed,
-      note = esc(note),
+      note = note_html,
       detail = esc(detail),
       container_line = if container.is_empty() {
         String::new()
@@ -87,11 +90,10 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     format!("<ul class=\"skills\">{}</ul>\n", items.join(""))
   };
   let id = esc(&session.id);
-  let permalink = esc(&session_url(port, &session.id));
   let session_meta = session_meta_placeholder(session);
   let export_btn = if session.procs.iter().any(proc_has_cast) {
     format!(
-      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ session .html</span></a>\n",
+      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ Download session snapshot</span></a>\n",
       id = id
     )
   } else {
@@ -113,15 +115,13 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       esc(lifecycle.label())
     )
   };
-  // The location breadcrumb lives in the top island (see `wrap_page`); the body starts
-  // with what the session IS: its kind and name, then the controls.
+  // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
+  // opens with what the session IS — its kind and name — with the controls top-right.
   let kind = session.kind.as_deref().unwrap_or("profile");
   let body = format!(
-    "<p class=\"subtitle\">{kind} <strong>{profile}</strong></p>\n\
-<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>{session_meta}\n{skills}</div>\n\
-<div class=\"procs\" id=\"session-procs\">\n{procs}</div>\n\
-<p class=\"permalink\">Deep link: <a href=\"/session/{id}\">{permalink}</a></p>",
-    id = id,
+    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
+<p class=\"session-kind\">{kind} <strong>{profile}</strong></p>{session_meta}\n{skills}</div>\n\
+<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     kind = esc(kind),
     profile = esc(profile),
     export_btn = export_btn,
@@ -129,9 +129,16 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     session_meta = session_meta,
     skills = skills_html,
     procs = procs_html,
-    permalink = permalink
   );
   Some(wrap_page(&format!("session {session_id}"), port, Some(session_id), &body))
+}
+
+/// A bare repo-relative artifact path (`tmp/scsh/<id>/add.json`-shaped) — system info, not
+/// an agent's prose. Mirrored by `looksLikeArtifactPath` in the client JS.
+fn looks_like_artifact_path(text: &str) -> bool {
+  !text.is_empty()
+    && (text.starts_with('/') || text.starts_with("tmp/") || text.starts_with(".harness/"))
+    && !text.contains(char::is_whitespace)
 }
 
 /// A small per-proc "✕ kill" button, shown only while that proc still runs: it stops just

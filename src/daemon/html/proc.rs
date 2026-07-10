@@ -52,7 +52,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 <button type="button" data-cast-reload>↻ Reload</button>
 <button type="button" data-cast-live{live_hidden}>● Live</button>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
-<a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>⬇ .html</a>
+<a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>
 <span class="cast-copied">copied</span>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter</span>
 </div>

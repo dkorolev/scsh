@@ -75,6 +75,23 @@ pub fn is_snap_confined(path: &Path) -> bool {
 }
 
 /// Resolve an executable on `$PATH` (like the `which` command).
+/// Container runtimes INSTALLED on this host, in preference order — what the browser's
+/// Containers tab offers. Apple `container` is suggested only on macOS (on Linux it never
+/// appears); docker and podman appear wherever installed.
+pub fn available_runtimes() -> Vec<&'static str> {
+  let mut out = Vec::new();
+  if cfg!(target_os = "macos") && which("container").is_some() {
+    out.push("container");
+  }
+  if which("docker").is_some() {
+    out.push("docker");
+  }
+  if which("podman").is_some() {
+    out.push("podman");
+  }
+  out
+}
+
 pub fn which(cmd: &str) -> Option<PathBuf> {
   let path = std::env::var_os("PATH")?;
   which_in(cmd, &path)

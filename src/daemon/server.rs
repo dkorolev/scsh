@@ -637,7 +637,10 @@ fn route(
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
-    "/api/v1/images" => (200, images_json(), "application/json", false),
+    path if path == "/api/v1/images" || path.starts_with("/api/v1/images?") => {
+      let runtime = path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
+      (200, images_json(runtime), "application/json", false)
+    }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
@@ -947,11 +950,26 @@ fn display_or_absolute_repo(repo: &str) -> String {
 /// `GET /api/v1/images` — status of every scsh image (base + one per harness) on the detected
 /// container runtime, for the dashboard's images panel. No runtime degrades to an `error` field
 /// rather than an HTTP failure, so the panel can render the reason.
-fn images_json() -> String {
-  let Some(rt) = crate::runtime::detect_runtime() else {
-    return r#"{ "error": "no container runtime found (docker, podman, or Apple container)" }"#.to_string();
+fn images_json(runtime_override: Option<&str>) -> String {
+  // Apple `container` and docker/podman are SEPARATE worlds with separate image stores; the
+  // browser picks which to inspect/build. Only installed runtimes are offered (Apple
+  // `container` never appears off macOS).
+  let available = crate::runtime::available_runtimes();
+  let rt_name: String = match runtime_override.filter(|r| !r.is_empty()) {
+    Some(rt) if available.contains(&rt) => rt.to_string(),
+    Some(rt) => {
+      return format!(
+        "{{ \"error\": {} }}",
+        quote(&format!("runtime '{rt}' is not installed (available: {})", available.join(", ")))
+      )
+    }
+    None => match crate::runtime::detect_runtime() {
+      Some(rt) => rt.name,
+      None => return r#"{ "error": "no container runtime found (docker, podman, or Apple container)" }"#.to_string(),
+    },
   };
-  let rows: Vec<String> = crate::runtime::image_statuses(&rt.name)
+  let available_json: Vec<String> = available.iter().map(|r| quote(r)).collect();
+  let rows: Vec<String> = crate::runtime::image_statuses(&rt_name)
     .iter()
     .map(|s| {
       format!(
@@ -965,7 +983,12 @@ fn images_json() -> String {
       )
     })
     .collect();
-  format!("{{ \"runtime\": {}, \"images\": [{}] }}", quote(&rt.name), rows.join(", "))
+  format!(
+    "{{ \"runtime\": {}, \"available\": [{}], \"images\": [{}] }}",
+    quote(&rt_name),
+    available_json.join(", "),
+    rows.join(", ")
+  )
 }
 
 /// `POST /api/v1/images/build` — body `{"harnesses": [name…], "rebuild_base": bool, "force":
@@ -982,13 +1005,23 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   };
   let harnesses = parse_string_array(&obj, "harnesses");
   for h in &harnesses {
-    if crate::config::Harness::parse(h).is_none() {
-      let msg = format!("unknown harness '{h}' (known: {})", crate::config::Harness::known().join(", "));
+    // `base` is a first-class image name — `["base"]` builds only the shared base.
+    if h != "base" && crate::config::Harness::parse(h).is_none() {
+      let msg = format!("unknown image '{h}' (known: base, {})", crate::config::Harness::known().join(", "));
       return (400, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false);
     }
   }
   let rebuild_base = field_bool(&obj, "rebuild_base").unwrap_or(false);
   let force = field_bool(&obj, "force").unwrap_or(false);
+  // Optional runtime override, limited to what is actually installed on this host.
+  let runtime = field_str(&obj, "runtime").filter(|r| !r.is_empty());
+  if let Some(rt) = runtime.as_deref() {
+    if !crate::runtime::available_runtimes().contains(&rt) {
+      let msg =
+        format!("runtime '{rt}' is not installed (available: {})", crate::runtime::available_runtimes().join(", "));
+      return (400, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false);
+    }
+  }
   let now = now_unix_secs();
   let port = {
     let store = lock_store(store);
@@ -1018,6 +1051,9 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     cmd.arg("--rebuild-base");
   }
   cmd.args(["--session", &session_id]);
+  if let Some(rt) = runtime.as_deref() {
+    cmd.env("SCSH_RUNTIME", rt);
+  }
   cmd.env(super::paths::PORT_ENV, port.to_string());
   cmd.env("NO_COLOR", "1"); // plain stderr, so a captured startup failure reads cleanly
   cmd.stdin(std::process::Stdio::null());
@@ -2432,7 +2468,7 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let (status, body, mutated) = images_build_response(r#"{"harnesses":["fancyharness"]}"#, &store);
     assert_eq!(status, 400);
-    assert!(body.contains("unknown harness 'fancyharness'"), "body: {body}");
+    assert!(body.contains("unknown image 'fancyharness'"), "body: {body}");
     assert!(!mutated);
     assert!(store.lock().unwrap().sessions.is_empty(), "no session pre-created on rejection");
   }
