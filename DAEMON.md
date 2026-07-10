@@ -207,6 +207,17 @@ Runtime files — the PID lock and the mode marker (`daemon-<port>.pid`, `daemon
 and the prune queue — live under the **system temp dir** `$TMPDIR/scsh-daemon/`. Session
 history survives a `daemon restart`; the daemon's own uptime/client state starts fresh.
 
+## Zombie-container reaper
+
+A `scsh run` that dies (closed terminal, killed process) takes its inactivity watchdog with
+it, and its containers keep running forever. The daemon sweeps every available runtime
+(docker/podman **and** Apple `container`) about once a minute for `scsh-*-run-*` containers
+that no genuinely live job claims, and stops + removes any that stay unclaimed for ~30
+consecutive sweeps (about half an hour); their `/tmp` run dirs go to the regular prune
+queue. The wide grace is deliberate — no registration lag, daemon restart, or transient
+ping gap can cost a live run its container, while a day-old zombie still dies. A single
+claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
+
 ## API (for scripts)
 
 - `GET /` — HTML session index
