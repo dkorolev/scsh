@@ -10,6 +10,8 @@ mod config;
 mod daemon;
 mod export;
 mod failure;
+mod fleet;
+mod gc;
 mod harness_def;
 mod json;
 #[cfg(test)]
@@ -27,6 +29,10 @@ use std::time::{Duration, Instant};
 
 use config::ResolvedInvocation;
 use runtime::Runtime;
+
+fn fleet_route_name(skill: &ResolvedInvocation) -> Option<&str> {
+  fleet::route_name(&skill.name, &skill.skill_source)
+}
 
 fn main() {
   let args: Vec<String> = std::env::args().skip(1).collect();
@@ -83,6 +89,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
+    Mode::Gc => gc_cmd(&cli.gc),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
     Mode::ExportCasts => export_casts_cmd(&cli.export_paths, cli.output.as_deref(), cli.json),
     Mode::BuildImages => {
@@ -316,6 +323,8 @@ enum Mode {
   Stats,
   /// Show the run-dir prune queue; `--now` forces a janitor pass.
   Prune,
+  /// Reclaim old `$SCSH_HOME/sessions/` dirs (dry-run by default; `--apply` to delete).
+  Gc,
   /// Summarize + chapter cast recordings with cursor/Composer (`annotate-cast <cast>…`).
   AnnotateCasts,
   /// Render cast recordings into self-contained offline HTML player pages
@@ -363,6 +372,7 @@ const COMMAND_NAMES: &[&str] = &[
   "failures",
   "stats",
   "prune",
+  "gc",
   "annotate-cast",
   "export-cast",
   "version",
@@ -383,6 +393,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "failures" => "failures",
     "stats" => "stats",
     "prune" => "prune",
+    "gc" => "gc",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
     "export-cast" | "export-casts" | "export" => "export-cast",
     "version" => "version",
@@ -418,6 +429,8 @@ struct Cli {
   json: bool,
   failures: FailuresOpts,
   prune_now: bool,
+  /// Options for `scsh gc` (dry-run by default).
+  gc: gc::GcOpts,
   /// Harness names for `build-images` (positional; empty = every harness).
   build_harnesses: Vec<String>,
   /// `build-images --force`: rebuild the selected harness images even when up to date.
@@ -468,6 +481,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut frames = false;
   let mut failures = FailuresOpts::default();
   let mut prune_now = false;
+  let mut gc = gc::GcOpts::default();
+  let mut saw_gc_dry_run = false;
+  let mut saw_gc_apply = false;
+  let mut saw_gc_flag = false;
   let mut build_harnesses: Vec<String> = Vec::new();
   let mut build_force = false;
   let mut build_rebuild_base = false;
@@ -601,6 +618,40 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "prune" => Some(Mode::Prune),
       "--now" => {
         prune_now = true;
+        None
+      }
+      // `gc [--dry-run] | --apply [--days N] [--keep N] [--legacy]`: reclaim old session dirs
+      // under $SCSH_HOME/sessions/ (dry-run by default; --apply required to delete).
+      "gc" => Some(Mode::Gc),
+      "--apply" => {
+        saw_gc_flag = true;
+        saw_gc_apply = true;
+        gc.apply = true;
+        None
+      }
+      "--dry-run" => {
+        saw_gc_flag = true;
+        saw_gc_dry_run = true;
+        gc.apply = false;
+        None
+      }
+      "--days" => {
+        saw_gc_flag = true;
+        i += 1;
+        let n = args.get(i).ok_or("--days needs a number (e.g. --days 30)")?;
+        gc.days = n.parse().map_err(|_| format!("bad --days value '{n}'"))?;
+        None
+      }
+      "--keep" => {
+        saw_gc_flag = true;
+        i += 1;
+        let n = args.get(i).ok_or("--keep needs a number (e.g. --keep 50)")?;
+        gc.keep = n.parse().map_err(|_| format!("bad --keep value '{n}'"))?;
+        None
+      }
+      "--legacy" => {
+        saw_gc_flag = true;
+        gc.legacy = true;
         None
       }
       "daemon" => {
@@ -768,6 +819,12 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if prune_now && !matches!(mode, Mode::Prune) {
     return Err("--now only applies to 'prune' (e.g. `scsh prune --now`)".into());
   }
+  if saw_gc_flag && !matches!(mode, Mode::Gc) {
+    return Err("--apply/--dry-run/--days/--keep/--legacy only apply to 'gc'".into());
+  }
+  if saw_gc_apply && saw_gc_dry_run {
+    return Err("pass either --apply or --dry-run, not both".into());
+  }
   if !annotate_paths.is_empty() && !matches!(mode, Mode::AnnotateCasts) {
     return Err("cast paths only apply to 'annotate-cast'".into());
   }
@@ -797,6 +854,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     json,
     failures,
     prune_now,
+    gc,
     build_harnesses,
     build_force,
     build_rebuild_base,
@@ -1223,7 +1281,7 @@ fn ensure_workflow_images(
       // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
       let p = ui.proc(label.clone(), false);
       if let Some(c) = daemon_client {
-        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None);
+        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None, None, None);
       }
       p.start();
       let stem = harness.map(|h| h.as_str()).unwrap_or("base");
@@ -1340,6 +1398,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         Some(&s.id),
         Some(s.agent.harness.as_str()),
         s.agent.model.as_deref(),
+        Some(&s.id),
+        None,
       );
     }
     step_procs.insert(s.id.clone(), p);
@@ -2355,6 +2415,32 @@ fn prune_cmd(now_flag: bool) -> i32 {
   0
 }
 
+/// `scsh gc`: report (default) or delete old `$SCSH_HOME/sessions/` dirs past `--keep` and
+/// `--days`. Never touches `projects/`, `stats.jsonl`, or redb files.
+fn gc_cmd(opts: &gc::GcOpts) -> i32 {
+  let home = runtime::scsh_home();
+  let plan = gc::plan(&home, opts, gc::now_unix_secs());
+  if plan.candidates.is_empty() {
+    ok("nothing to reclaim");
+    return 0;
+  }
+  for c in &plan.candidates {
+    println!("  {}  {}", c.path.display(), gc::human_bytes(c.bytes));
+  }
+  if opts.apply {
+    let freed = gc::apply_plan(&plan);
+    ok(&format!("deleted {} path(s); freed {}", plan.candidates.len(), gc::human_bytes(freed)));
+  } else {
+    ok(&format!(
+      "reclaimable: {} across {} path(s) (dry-run)",
+      gc::human_bytes(plan.total_bytes),
+      plan.candidates.len()
+    ));
+    hint(&format!("delete with: {}", bold("scsh gc --apply")));
+  }
+  0
+}
+
 /// Absolute repo path for the session browser (canonical when possible).
 fn repo_path_for_session(root: &Path) -> String {
   daemon::absolutize_repo_path(root)
@@ -2506,7 +2592,7 @@ fn build_and_run(
     let base_label = format!("using {} · build base", backend_name(&rt.name));
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -2515,7 +2601,7 @@ fn build_and_run(
     let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None);
     }
     harness_build_procs.push(p);
   }
@@ -2531,6 +2617,8 @@ fn build_and_run(
         Some(skill.name.as_str()),
         Some(skill.harness.as_str()),
         skill.model.as_deref(),
+        Some(skill.skill_source.as_str()),
+        fleet_route_name(skill),
       );
     }
     if any_image_build {
@@ -2668,6 +2756,8 @@ fn build_and_run(
               Some(skill.name.as_str()),
               Some(skill.harness.as_str()),
               skill.model.as_deref(),
+              Some(skill.skill_source.as_str()),
+              fleet_route_name(skill),
             );
           }
           let retry_started = std::time::Instant::now();
@@ -2699,6 +2789,41 @@ fn build_and_run(
   // The run is over: restore the terminal and print the persistent ✓/✗ summary (attended; off a
   // TTY the per-proc lines already streamed). Everything below prints to the normal screen.
   ui.finish();
+
+  // Fleet rollups: group multi-route skill_source results into deterministic JSON under the
+  // session. Reconstruct minimal ProcRecords from skills + outcomes + on-disk result paths
+  // (the daemon store is not readable from here).
+  {
+    use daemon::{ProcKind, ProcRecord, ProcStatus};
+    let mut fake_procs = Vec::with_capacity(skills.len());
+    for (skill, o) in skills.iter().zip(outcomes.iter()) {
+      let safe = skill.name.replace('/', "_");
+      let result_path = runtime::session_results_dir(&session_id).join(format!("{safe}.json"));
+      let result_path = result_path.is_file().then(|| result_path.to_string_lossy().into_owned());
+      fake_procs.push(ProcRecord {
+        index: o.proc_index,
+        label: format!("{}: {}", skill.harness.as_str(), skill.name),
+        kind: ProcKind::Skill,
+        status: if o.ok { ProcStatus::Ok } else { ProcStatus::Fail },
+        skill_name: Some(skill.name.clone()),
+        harness: Some(skill.harness.as_str().to_string()),
+        model: skill.model.clone(),
+        started_at: None,
+        note: None,
+        detail: o.result_content.as_deref().and_then(json::message),
+        fail_reason: o.fail_reason.clone(),
+        elapsed: Some(o.duration_secs),
+        lines: vec![],
+        container_name: None,
+        cast_path: None,
+        diff_path: None,
+        skill_source: Some(skill.skill_source.clone()),
+        route: fleet_route_name(skill).map(str::to_string),
+        result_path,
+      });
+    }
+    let _ = fleet::write_rollups(&session_id, &fake_procs);
+  }
 
   // 3. The summary above carries each skill's ✓/✗ and detail; add run-dir/log pointers for any
   //    that failed, then the overall verdict.
@@ -2984,6 +3109,13 @@ fn run_one_skill(
         if let (Some(c), Some(cast)) = (&daemon_client, &entry.cast) {
           c.proc_cast(spinner.index(), &cast.to_string_lossy());
         }
+        // Durable result copy for fleet rollups / job-page comparison (same path as a live run).
+        let host_result = root.join(&skill.result);
+        if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, &host_result) {
+          if let Some(c) = &daemon_client {
+            c.proc_result(spinner.index(), &path);
+          }
+        }
         match entry.elapsed {
           Some(e) => spinner.finish_ok_elapsed(Some(&line), e),
           None => spinner.finish_ok(Some(&line)),
@@ -3248,6 +3380,11 @@ fn run_one_skill(
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       spinner.finish_ok(Some(headline));
+      if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
+        if let Some(c) = &daemon_client {
+          c.proc_result(spinner.index(), &path);
+        }
+      }
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
       SkillRun::ok(log, clone_dir, content)
     }
@@ -3270,7 +3407,7 @@ fn run_one_skill(
 ///
 /// These live **outside** the caller repo on purpose: review skills often run in a throwaway
 /// clone under `tmp/` and delete it afterward — recordings must still be exportable from the
-/// session browser. scsh never deletes anything under `sessions/`.
+/// session browser. Ordinary runs never delete under `sessions/`; use `scsh gc --apply`.
 ///
 /// The timestamp alone is not unique (every skill in one `scsh run` shares `epoch_secs`), so
 /// the random nonce prevents same-second runs from overwriting each other. Returns the durable
@@ -4559,7 +4696,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build base", backend_name(&rt_name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -4568,7 +4705,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None);
     }
     harness_build_procs.push(p);
   }
@@ -5514,6 +5651,18 @@ fn print_help_command(name: &str) {
       "scsh prune [--now]",
       &[("--now", "Force a janitor pass now instead of just showing the queue.")],
     ),
+    "gc" => (
+      "reclaim old session artifact dirs",
+      "scsh gc [--dry-run] | scsh gc --apply [--days N] [--keep N] [--legacy]",
+      &[
+        ("(default)", "Dry-run: list reclaimable paths under $SCSH_HOME/sessions/."),
+        ("--dry-run", "Explicit dry-run (same as the default)."),
+        ("--apply", "Actually delete candidates (required to free disk)."),
+        ("--days N", "Only dirs older than N days by mtime (default 30)."),
+        ("--keep N", "Always retain the N newest session dirs (default 50)."),
+        ("--legacy", "Also remove top-level $SCSH_HOME/casts/ and recordings/."),
+      ],
+    ),
     "build-images" => (
       "build the container images outside a run",
       "scsh build-images [harness…] [--force] [--rebuild-base] [--session <id>]",
@@ -5601,6 +5750,7 @@ fn print_help_overview() {
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
+  help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
   help_row("annotate-cast <cast…>", "Summarize + chapter recordings via cursor/Composer (--json).");
   help_row("export-cast <cast…>", "Render recordings to self-contained offline HTML pages (-o, --json).");
   help_row("version", "Print the version (with the build's git hash).");
@@ -6175,6 +6325,26 @@ mod tests {
     assert!(!c.prune_now);
     assert!(cli(&["prune", "--now"]).unwrap().prune_now);
     assert!(cli(&["run", "--now"]).is_err(), "--now only applies to prune");
+  }
+
+  #[test]
+  fn gc_command_parses_flags() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["gc"]).unwrap();
+    assert!(matches!(c.mode, Mode::Gc));
+    assert!(!c.gc.apply);
+    assert_eq!(c.gc.days, gc::DEFAULT_DAYS);
+    assert_eq!(c.gc.keep, gc::DEFAULT_KEEP);
+    assert!(!c.gc.legacy);
+    let c = cli(&["gc", "--apply", "--days", "7", "--keep", "10", "--legacy"]).unwrap();
+    assert!(c.gc.apply);
+    assert_eq!(c.gc.days, 7);
+    assert_eq!(c.gc.keep, 10);
+    assert!(c.gc.legacy);
+    assert!(!cli(&["gc", "--dry-run"]).unwrap().gc.apply);
+    assert!(cli(&["gc", "--apply", "--dry-run"]).is_err());
+    assert!(cli(&["run", "--apply"]).is_err(), "gc flags don't apply to run");
+    assert!(cli(&["gc", "--days", "x"]).is_err());
   }
 
   #[test]

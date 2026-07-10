@@ -35,6 +35,9 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         container_name: None,
         cast_path: Some("/tmp/x.cast".into()),
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -460,6 +463,9 @@ fn session_proc_html_has_no_stray_backslashes() {
         container_name: None,
         cast_path: None,
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -509,6 +515,9 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           container_name: None,
           cast_path: None,
           diff_path: Some("/tmp/scsh-home/sessions/difjob/diffs/add-p0.html".into()),
+          skill_source: None,
+          route: None,
+          result_path: None,
           harness: Some("opencode".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -527,6 +536,9 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           container_name: None,
           cast_path: None,
           diff_path: None,
+          skill_source: None,
+          route: None,
+          result_path: None,
           harness: Some("claude".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -606,6 +618,135 @@ fn offline_export_shows_lifecycle_chip_after_heading() {
     "export heading carries the same resting lifecycle chip as the live page: {html}"
   );
   assert!(html.contains(r#"profile <strong>code-review</strong>"#), "kind/profile still lead: {html}");
+  assert!(html.contains("accessibility: 'snapshot'"), "export player opts enable a11y snapshot");
+}
+
+#[test]
+fn offline_export_embeds_commits_diff_when_present() {
+  use super::session_export::CastExport;
+  let session = Session {
+    id: "expdf".into(),
+    started_at: 1,
+    ended_at: Some(10),
+    profile: Some("default".into()),
+    kind: Some("profile".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 10,
+    client_connected: false,
+    run_pid: None,
+    skills: vec![],
+    procs: vec![ProcRecord {
+      index: 0,
+      kind: ProcKind::Skill,
+      label: "opencode: add".into(),
+      status: ProcStatus::Ok,
+      note: None,
+      detail: Some("ok".into()),
+      fail_reason: None,
+      container_name: None,
+      cast_path: None,
+      diff_path: Some("/tmp/diff.html".into()),
+      skill_source: None,
+      route: None,
+      result_path: None,
+      harness: Some("opencode".into()),
+      skill_name: Some("add".into()),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(1.0),
+      lines: vec![],
+    }],
+  };
+  let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
+  let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
+  let html = session_export_page(&session, &exports);
+  assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
+  assert!(html.contains(r#"<details class="proc-diff">"#), "body embeds the packed diff");
+  assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
+  assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
+  assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
+}
+
+#[test]
+fn session_page_renders_fleet_comparison_for_shared_skill_source() {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "fleet1".into(),
+    Session {
+      id: "fleet1".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      kind: Some("profile".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![
+        ProcRecord {
+          index: 0,
+          kind: ProcKind::Skill,
+          label: "opencode: add-opencode".into(),
+          status: ProcStatus::Ok,
+          note: None,
+          detail: Some("2 + 3 = 5".into()),
+          fail_reason: None,
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("add".into()),
+          route: Some("opencode".into()),
+          result_path: None,
+          harness: Some("opencode".into()),
+          skill_name: Some("add-opencode".into()),
+          model: None,
+          started_at: Some(1),
+          elapsed: Some(1.0),
+          lines: vec![],
+        },
+        ProcRecord {
+          index: 1,
+          kind: ProcKind::Skill,
+          label: "claude: add-claude".into(),
+          status: ProcStatus::Ok,
+          note: None,
+          detail: Some("2 + 3 = 5".into()),
+          fail_reason: None,
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("add".into()),
+          route: Some("claude".into()),
+          result_path: None,
+          harness: Some("claude".into()),
+          skill_name: Some("add-claude".into()),
+          model: None,
+          started_at: Some(1),
+          elapsed: Some(1.2),
+          lines: vec![],
+        },
+      ],
+    },
+  );
+  let html = session_page(&store, "fleet1").expect("session page");
+  assert!(html.contains(r#"class="fleets""#), "fleet section present: {html}");
+  assert!(html.contains(r#"class="fleet-compare""#), "comparison table present");
+  assert!(html.contains(r#"data-skill-source="add""#), "grouped by skill_source");
+  assert!(html.contains(r#"class="fleet-jump" data-proc="0""#), "jump to first route");
+  assert!(html.contains(r#"class="fleet-jump" data-proc="1""#), "jump to second route");
+  let fleets_at = html.find(r#"class="fleets""#).expect("fleets");
+  let procs_at = html.find(r#"id="session-procs""#).expect("procs");
+  assert!(fleets_at < procs_at, "fleet HTML sits before #session-procs");
+}
+
+#[test]
+fn client_js_wires_fleet_jumps_and_accessibility_snapshot() {
+  let js = live_client_js();
+  assert!(js.contains("function initFleetJumps"), "client js wires fleet jump buttons");
+  assert!(js.contains("accessibility: 'snapshot'"), "live player opts enable a11y snapshot");
 }
 
 #[test]
@@ -654,6 +795,9 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         container_name: None,
         cast_path: Some("/tmp/x.cast".into()),
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -736,6 +880,9 @@ fn session_proc_html_shows_autoscroll_while_running() {
         container_name: None,
         cast_path: None,
         diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,

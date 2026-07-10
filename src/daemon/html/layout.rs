@@ -282,6 +282,33 @@ pub(crate) const PAGE_CSS: &str = r#"
 
   /* ── session procs ── */
   .procs { margin-top: 1rem; width: 100%; }
+  /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
+  .fleets { margin: 1rem 0 0.25rem; width: 100%; }
+  .fleet {
+    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
+  }
+  .fleet-title { margin: 0 0 0.35rem; font-size: 0.95rem; font-weight: 600; }
+  .fleet-summary { margin: 0 0 0.55rem; font-size: 0.85rem; }
+  .fleet-compare {
+    width: 100%; border-collapse: collapse; font-size: 0.85rem;
+  }
+  .fleet-compare th, .fleet-compare td {
+    text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border);
+    vertical-align: top;
+  }
+  .fleet-compare th { color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
+  .fleet-compare tr:last-child td { border-bottom: 0; }
+  .fleet-row.ok .glyph { color: var(--green); }
+  .fleet-row.fail .glyph { color: var(--red); }
+  .fleet-harness { font-size: 0.75rem; margin-top: 0.1rem; }
+  .fleet-jump {
+    font: inherit; font-size: 0.8rem; line-height: 1.3; cursor: pointer;
+    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
+    border-radius: 4px; padding: 0 0.4rem; opacity: 0.85;
+  }
+  .fleet-jump:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); }
+  .fleet-jump-cell { width: 2.5rem; text-align: right; }
   details.proc {
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
     margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
@@ -386,13 +413,25 @@ pub(crate) const PAGE_CSS: &str = r#"
   .proc-kill:disabled { cursor: default; opacity: 0.55; }
   /* The "⇄ commits diff" chip shares the kill button's right-edge slot: the diff appears
      only after a step finished, the kill button only while it runs — never both. */
-  .proc-diff {
+  a.proc-diff, span.proc-diff {
     margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
     color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
     border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
   }
-  .proc-diff:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); text-decoration: none; }
+  a.proc-diff:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); text-decoration: none; }
+  /* Offline export: packed commits-diff embedded as a sandboxed iframe (not the live chip). */
+  details.proc-diff {
+    margin: 0.5rem 0; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--surface); padding: 0.25rem 0.55rem;
+  }
+  details.proc-diff > summary {
+    cursor: pointer; list-style: none; color: var(--cyan); font-size: 0.85rem;
+  }
+  details.proc-diff iframe {
+    width: 100%; min-height: 28rem; border: 1px solid var(--border); border-radius: 4px;
+    margin: 0.4rem 0 0.25rem; background: #fff;
+  }
   .autoscroll-ctl {
     display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
     cursor: pointer; user-select: none; color: var(--text-muted);

@@ -128,7 +128,7 @@ impl Client {
 
   pub fn proc_add(
     &self, proc_index: usize, label: &str, kind: ProcKind, skill_name: Option<&str>, harness: Option<&str>,
-    model: Option<&str>,
+    model: Option<&str>, skill_source: Option<&str>, route: Option<&str>,
   ) {
     let mut extras = Vec::new();
     if let Some(s) = skill_name {
@@ -139,6 +139,12 @@ impl Client {
     }
     if let Some(m) = model {
       extras.push(format!("\"model\": {}", quote(m)));
+    }
+    if let Some(s) = skill_source {
+      extras.push(format!("\"skill_source\": {}", quote(s)));
+    }
+    if let Some(r) = route {
+      extras.push(format!("\"route\": {}", quote(r)));
     }
     let tail = if extras.is_empty() { String::new() } else { format!(", {}", extras.join(", ")) };
     let body = format!(
@@ -191,6 +197,20 @@ impl Client {
     );
     if !self.post_sync_after_flush("/api/v1/proc/diff", &body) {
       log_post_failure("/api/v1/proc/diff", Some(proc_index));
+    }
+  }
+
+  /// Tell the daemon where the durable skill-result JSON for this proc lives
+  /// (`$SCSH_HOME/sessions/<session>/results/…`). Posted after collect, like `proc_diff`.
+  pub fn proc_result(&self, proc_index: usize, path: &str) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"path\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      quote(path)
+    );
+    if !self.post_sync_after_flush("/api/v1/proc/result", &body) {
+      log_post_failure("/api/v1/proc/result", Some(proc_index));
     }
   }
 

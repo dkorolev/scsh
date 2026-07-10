@@ -138,7 +138,8 @@ fn proc_json(p: &ProcRecord) -> String {
   format!(
     "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
-\"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"diff_path\": {}, \"lines\": [{}] }}",
+\"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"diff_path\": {}, \
+\"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -153,6 +154,9 @@ fn proc_json(p: &ProcRecord) -> String {
     container,
     cast,
     diff,
+    opt_str(&p.skill_source),
+    opt_str(&p.route),
+    opt_str(&p.result_path),
     lines.join(", ")
   )
 }
@@ -229,6 +233,9 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   let container_name = field_str(obj, "container_name");
   let cast_path = field_str(obj, "cast_path");
   let diff_path = field_str(obj, "diff_path"); // absent on sessions persisted by older builds
+  let skill_source = field_str(obj, "skill_source");
+  let route = field_str(obj, "route");
+  let result_path = field_str(obj, "result_path");
   let lines = match field_value(obj, "lines")? {
     Value::Array(arr) => arr.iter().map(parse_line).collect::<Result<Vec<_>, _>>()?,
     _ => Vec::new(),
@@ -249,6 +256,9 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     container_name,
     cast_path,
     diff_path,
+    skill_source,
+    route,
+    result_path,
     lines,
   })
 }
@@ -318,6 +328,9 @@ mod tests {
       container_name: None,
       cast_path: None,
       diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -353,6 +366,9 @@ mod tests {
         container_name: None,
         cast_path: Some("/tmp/scsh-daemon/casts/abcdef-p0.cast".into()),
         diff_path: Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html".into()),
+        skill_source: None,
+        route: None,
+        result_path: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
       }],
       last_seen_at: 105,
