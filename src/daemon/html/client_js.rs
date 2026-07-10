@@ -1165,7 +1165,9 @@ const DEFS_BY_NAME = {};  // name -> definition
   }));
 })();
 function defSourceBadge(src) {
-  const cls = src === 'repo' ? 'completed' : (src === 'home' ? 'cancelled' : 'running');
+  // builtin wears purple (the setup color); repo/home keep the muted status hues.
+  if (src === 'builtin') return '<span class="chamfer badge badge--purple"><span>builtin</span></span>';
+  const cls = src === 'repo' ? 'completed' : 'cancelled';
   return '<span class="chamfer session-status ' + cls + '"><span>' + esc(src) + '</span></span>';
 }
 function pickRepo() {

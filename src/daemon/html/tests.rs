@@ -275,6 +275,9 @@ fn ui_review_fixes_hold() {
   assert!(page.contains(r#"<div class="card card--accent-left-purple"><div class="session-actions">"#));
   // 5. Proc islands wear their status color.
   assert!(html.contains("details.proc.running summary .glyph, details.proc.running summary .label"));
+  // 6. The builtin source badge wears purple.
+  assert!(html.contains(".badge--purple"), "purple badge class ships");
+  assert!(live_client_js().contains(r#"chamfer badge badge--purple"><span>builtin"#), "builtin badge is purple");
 }
 
 #[test]

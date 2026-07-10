@@ -171,6 +171,10 @@ const PAGE_CSS: &str = r#"
     background: var(--green); color: var(--green);
   }
   .badge--green::before { background: var(--surface); }
+  .badge--purple {
+    background: var(--purple); color: var(--purple);
+  }
+  .badge--purple::before { background: var(--surface); }
   .session-status.failed, .session-status.terminated, .badge--red {
     background: var(--red); color: var(--red);
   }
