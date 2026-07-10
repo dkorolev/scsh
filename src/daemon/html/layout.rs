@@ -342,7 +342,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .repo-jobgroup { margin: 0.3rem 0 0.8rem; }
   .repo-jobgroup:last-child { margin-bottom: 0.3rem; }
   .repo-jobgroup-name { display: block; font-weight: 700; font-size: 0.85rem; margin-bottom: 0.15rem; }
-  .repo-jobgroup a { display: block; margin: 0.3rem 0; }
+  .repo-job { margin: 0.3rem 0; }
+  /* Six-letter job ids are identifiers: fixed font everywhere, and the link (color +
+     underline) covers exactly those six letters — never the badge or the age stamp. */
+  .job-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .hchip {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
@@ -466,7 +469,7 @@ fn crumbs_html(session_id: Option<&str>) -> String {
   match session_id {
     Some(id) => format!(
       "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">jobs</a>\
-<span class=\"crumb-sep\">›</span><a href=\"/session/{id}\">{id}</a>",
+<span class=\"crumb-sep\">›</span><a class=\"job-id\" href=\"/session/{id}\">{id}</a>",
       id = crate::daemon::html::escape::esc(id)
     ),
     None => "<a href=\"/\">scsh</a>".to_string(),
