@@ -759,9 +759,11 @@ fn review_round_four_fixes_hold() {
   store.open_repo(OpenRepo { path: "/work/empty".into(), opened_at: 9, clean: true });
   let html = super::index_page(&store);
   assert!(html.contains(r#"<td class="repo-path" title="/tmp/repo">/tmp/repo</td>"#), "got: {html}");
+  // Jobs are grouped by the task they ran, with a compact age stamp per job (the exact
+  // age depends on the wall clock, so pin up to the stamp).
   assert!(
     html.contains(
-      r#"<a href="/session/castab"><span class="chamfer session-status completed"><span>completed</span></span> castab · default</a>"#
+      r#"<div class="repo-jobgroup"><span class="repo-jobgroup-name">default</span><a href="/session/castab"><span class="chamfer session-status completed"><span>completed</span></span> castab <span class="dim">"#
     ),
     "got: {html}"
   );
@@ -797,4 +799,41 @@ fn review_round_four_fixes_hold() {
   assert!(shtml.contains("✕ Force stop"), "got: {shtml}");
   assert!(!shtml.contains("✕ kill"));
   assert!(shtml.contains("⬇ Download job snapshot"), "got: {shtml}");
+}
+
+#[test]
+fn review_round_five_fixes_hold() {
+  // Projects: running jobs sort above completed ones, grouped by the task that ran, each
+  // line stamped with a compact age; the launch tab reads "New job".
+  let now = crate::daemon::paths::now_unix_secs();
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  store.sessions.get_mut("castab").unwrap().ended_at = Some(5);
+  {
+    let done = store.sessions.get("castab").unwrap().clone();
+    let mut live = done.clone();
+    live.id = "livejb".into();
+    live.ended_at = None;
+    live.last_seen_at = now;
+    live.profile = Some("arith".into());
+    live.procs[0].status = ProcStatus::Running;
+    store.sessions.insert("livejb".into(), live);
+  }
+  let html = super::index_page(&store);
+  let arith = html.find(r#"<span class="repo-jobgroup-name">arith</span>"#).expect("arith group");
+  let default = html.find(r#"<span class="repo-jobgroup-name">default</span>"#).expect("default group");
+  assert!(arith < default, "the group with a running job sorts above the finished one: {html}");
+  assert!(html.contains(r#"<span class="chamfer session-status running"><span>running</span></span> livejb <span class="dim">"#), "got: {html}");
+  assert!(html.contains(r#"data-tab="start">New job</button>"#), "got: {html}");
+  assert!(!html.contains("Start a job"));
+  // Short ages are single-unit; both renderers ship the same helper and group markup.
+  assert_eq!(super::format::format_short_age(45), "45s");
+  assert_eq!(super::format::format_short_age(200), "3m");
+  assert_eq!(super::format::format_short_age(7300), "2h");
+  assert_eq!(super::format::format_short_age(200_000), "2d");
+  assert!(html.contains("function formatShortAge"), "JS mirror ships");
+  assert!(html.contains(".repo-jobgroup"), "group CSS ships");
+  // The inline player pane sizes itself to the recording's terminal aspect.
+  let shtml = session_page(&store, "castab").expect("session renders");
+  assert!(shtml.contains("function sizeCastPane"), "pane sizing ships");
+  assert!(shtml.contains("height: auto !important"), "fullscreen overrides the inline pane height");
 }

@@ -320,8 +320,12 @@ const PAGE_CSS: &str = r#"
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; direction: rtl; text-align: left;
   }
-  /* Projects tab: breathing room between the per-job badge+link lines. */
-  #repos-body a { display: inline-block; margin: 0.2rem 0; }
+  /* Projects tab: jobs grouped by the task they ran, one line per job, with breathing
+     room between the badge+link lines. */
+  .repo-jobgroup { margin: 0.3rem 0 0.8rem; }
+  .repo-jobgroup:last-child { margin-bottom: 0.3rem; }
+  .repo-jobgroup-name { display: block; font-weight: 700; font-size: 0.85rem; margin-bottom: 0.15rem; }
+  .repo-jobgroup a { display: block; margin: 0.3rem 0; }
   .hchip {
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
@@ -431,7 +435,9 @@ const PAGE_CSS: &str = r#"
   .cast:fullscreen.has-side { grid-template-columns: 1fr var(--side-w, 360px); }
   .cast:fullscreen .cast-toolbar { grid-column: 1 / -1; }
   .cast:fullscreen .cast-summary, .cast:fullscreen .cast-chapters { display: none; }
-  .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto; max-height: none; min-height: 0; }
+  /* !important: the inline pane sets style="height: …" from the terminal's aspect
+     (sizeCastPane); fullscreen must override it and let the grid row size the player. */
+  .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto !important; max-height: none !important; min-height: 0; }
   .cast-fs-chapters { display: none; }
   .cast:fullscreen.has-side .cast-fs-chapters {
     display: block; grid-column: 2; grid-row: 2; overflow-y: auto;

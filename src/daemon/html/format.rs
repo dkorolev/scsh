@@ -13,6 +13,21 @@ pub(crate) fn format_duration_secs(secs: u64) -> String {
   format!("{h}h {}m {s}s", (secs % 3600) / 60)
 }
 
+/// Compact single-unit age for dense lists ("32s", "5m", "3h", "2d"). Mirrored by
+/// `formatShortAge` in the client JS.
+pub(crate) fn format_short_age(secs_ago: u64) -> String {
+  if secs_ago < 60 {
+    return format!("{secs_ago}s");
+  }
+  if secs_ago < 3600 {
+    return format!("{}m", secs_ago / 60);
+  }
+  if secs_ago < 86400 {
+    return format!("{}h", secs_ago / 3600);
+  }
+  format!("{}d", secs_ago / 86400)
+}
+
 pub(crate) fn format_relative_age(secs_ago: u64) -> String {
   if secs_ago < 60 {
     return format!("{secs_ago}s ago");

@@ -1,7 +1,7 @@
 //! Session index table page.
 
 use super::escape::esc;
-use super::format::{format_duration_secs, format_relative_age};
+use super::format::{format_duration_secs, format_relative_age, format_short_age};
 use super::layout::wrap_page;
 use crate::daemon::model::{sessions_for_index, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
@@ -22,7 +22,7 @@ pub fn index_page(store: &Store) -> String {
     "<nav class=\"tabs\">\
 <button class=\"tab active\" data-tab=\"jobs\">Jobs</button>\
 <button class=\"tab\" data-tab=\"dirs\">Projects</button>\
-<button class=\"tab\" data-tab=\"start\">Start a job</button>\
+<button class=\"tab\" data-tab=\"start\">New job</button>\
 <button class=\"tab\" data-tab=\"images\">Containers</button>\
 </nav>\n\
 <section class=\"tab-panel active\" id=\"tab-jobs\">\n\
@@ -137,13 +137,13 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
   )
 }
 
-/// The "Start a job" tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
+/// The "New job" tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
 /// runnable and why not), pick a harness definition, fill the rendered param form, and start a
 /// job (POST `/api/v1/jobs/start`, deep-linking to the spawned session). Start is disabled until
 /// the repo is runnable.
 fn start_panel() -> &'static str {
   r##"<div class="card card--accent-left-green">
-<p class="section-label">Start a job</p>
+<p class="section-label">New job</p>
 <p class="dim">Open a git repository — an absolute path, or the bare name of a project under
 <code>~/.scsh/projects/</code> — to configure and start a harness-definition job in it; the
 daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a
@@ -195,7 +195,9 @@ name; anything else shows its repository path.</p>
   )
 }
 
-/// Rows of the Projects table. Mirrored by `renderRepoJobs` in the client JS
+/// Rows of the Projects table. Within a repository the jobs are grouped by the task they
+/// ran (the workflow/profile name), running groups above finished ones, newest first, each
+/// job with a compact age stamp. Mirrored by `renderRepoJobs` in the client JS
 /// (`client_js.rs`) — keep the markup identical.
 fn repo_jobs_rows(store: &Store, now: u64) -> String {
   let mut by_repo: std::collections::BTreeMap<&str, Vec<&Session>> = std::collections::BTreeMap::new();
@@ -209,32 +211,59 @@ fn repo_jobs_rows(store: &Store, now: u64) -> String {
     by_repo.entry(&s.repo).or_default().push(s);
   }
   if by_repo.is_empty() {
-    return "<tr><td colspan=\"2\" class=\"dim\">No jobs yet — open or create a project under “Start a job”.</td></tr>"
+    return "<tr><td colspan=\"2\" class=\"dim\">No jobs yet — open or create a project under “New job”.</td></tr>"
       .to_string();
   }
+  // A job's "activity" moment: when it finished, or when it started if still going.
+  let activity = |s: &Session| s.ended_at.unwrap_or(s.started_at);
   let projects_root = format!("{}/", crate::daemon::paths::projects_dir().display());
   let mut rows = String::new();
-  for (repo, mut jobs) in by_repo {
-    jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+  for (repo, jobs) in by_repo {
     let cells = if jobs.is_empty() {
       "<span class=\"dim\">no jobs yet</span>".to_string()
     } else {
-      jobs
+      let mut groups: std::collections::BTreeMap<&str, Vec<&Session>> = std::collections::BTreeMap::new();
+      for s in jobs {
+        groups.entry(s.profile.as_deref().unwrap_or("default")).or_default().push(s);
+      }
+      let mut ordered: Vec<(&str, Vec<&Session>)> = groups.into_iter().collect();
+      for (_, g) in &mut ordered {
+        g.sort_by_key(|s| {
+          (std::cmp::Reverse(s.lifecycle_status(now) == SessionLifecycle::Running), std::cmp::Reverse(activity(s)))
+        });
+      }
+      // Groups with something running come first, then by most recent activity.
+      ordered.sort_by_key(|(_, g)| {
+        (
+          std::cmp::Reverse(g.iter().any(|s| s.lifecycle_status(now) == SessionLifecycle::Running)),
+          std::cmp::Reverse(g.iter().map(|s| activity(s)).max().unwrap_or(0)),
+        )
+      });
+      ordered
         .iter()
-        .map(|s| {
-          let lc = s.lifecycle_status(now);
-          let profile =
-            s.profile.as_deref().filter(|p| !p.is_empty()).map(|p| format!(" · {}", esc(p))).unwrap_or_default();
+        .map(|(task, g)| {
+          let links = g
+            .iter()
+            .map(|s| {
+              let lc = s.lifecycle_status(now);
+              format!(
+                "<a href=\"/session/{id}\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> {id} <span class=\"dim\">{age}</span></a>",
+                id = esc(&s.id),
+                cls = lc.css_class(),
+                label = lc.label(),
+                age = format_short_age(now.saturating_sub(activity(s))),
+              )
+            })
+            .collect::<Vec<_>>()
+            .join("");
           format!(
-            "<a href=\"/session/{id}\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> {id}{profile}</a>",
-            id = esc(&s.id),
-            cls = lc.css_class(),
-            label = lc.label(),
-            profile = profile,
+            "<div class=\"repo-jobgroup\"><span class=\"repo-jobgroup-name\">{task}</span>{links}</div>",
+            task = esc(task),
+            links = links,
           )
         })
         .collect::<Vec<_>>()
-        .join("<br>")
+        .join("")
     };
     rows.push_str(&format!(
       "<tr><td class=\"repo-path\" title=\"{repo}\">{label}</td><td>{cells}</td></tr>",
