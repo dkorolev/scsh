@@ -174,9 +174,12 @@ mod tests {
     }
   }
 
-  fn wait_daemon_ready() {
-    for _ in 0..40 {
-      if Client::daemon_alive() {
+  /// Wait until a daemon answers on the port AND has persisted the EXPECTED mode. TCP
+  /// aliveness alone races the persistent-replaces-ephemeral handover: during the swap
+  /// the OUTGOING daemon still answers while the mode file lags behind the new one.
+  fn wait_daemon_mode(port: u16, mode: DaemonMode) {
+    for _ in 0..100 {
+      if paths::read_persisted_mode(port) == Some(mode) && Client::daemon_alive() {
         return;
       }
       std::thread::sleep(std::time::Duration::from_millis(50));
@@ -191,7 +194,7 @@ mod tests {
     let _guard = EphemeralDaemonGuard { port };
     let _ = stop();
     ensure_for_run().expect("ensure_for_run");
-    wait_daemon_ready();
+    wait_daemon_mode(port, DaemonMode::Ephemeral);
     assert!(Client::daemon_alive(), "daemon should accept TCP on {}", port);
     assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Ephemeral));
   }
@@ -204,10 +207,10 @@ mod tests {
     let _guard = EphemeralDaemonGuard { port };
     let _ = stop();
     ensure_for_run().expect("ensure_for_run");
-    wait_daemon_ready();
+    wait_daemon_mode(port, DaemonMode::Ephemeral);
     assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Ephemeral));
     start_persistent().expect("start_persistent");
-    wait_daemon_ready();
+    wait_daemon_mode(port, DaemonMode::Persistent);
     assert!(Client::daemon_alive(), "persistent daemon should accept TCP on {}", port);
     assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Persistent));
   }
