@@ -292,8 +292,8 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   assert!(
-    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a href="/session/castab">castab</a>"#),
-    "breadcrumb permalinks in the top island"
+    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a class="job-id" href="/session/castab">castab</a>"#),
+    "breadcrumb permalinks in the top island (the id in a fixed font)"
   );
   // The status dot sits at the very RIGHT edge of the island.
   assert!(html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")), "dot last in the island");
@@ -885,10 +885,12 @@ fn review_round_four_fixes_hold() {
   let html = super::index_page(&store);
   assert!(html.contains(r#"<td class="repo-path" title="/tmp/repo">/tmp/repo</td>"#), "got: {html}");
   // Jobs are grouped by the task they ran, with a compact age stamp per job (the exact
-  // age depends on the wall clock, so pin up to the stamp).
+  // age depends on the wall clock, so pin up to the stamp). The link — color and
+  // underline — covers EXACTLY the six-letter id, in a fixed font (.job-id): never the
+  // badge or the age stamp.
   assert!(
     html.contains(
-      r#"<div class="repo-jobgroup"><span class="repo-jobgroup-name">default</span><a href="/session/castab"><span class="chamfer session-status completed"><span>completed</span></span> castab <span class="dim">"#
+      r#"<div class="repo-jobgroup"><span class="repo-jobgroup-name">default</span><div class="repo-job"><span class="chamfer session-status completed"><span>completed</span></span> <a class="job-id" href="/session/castab">castab</a> <span class="dim">"#
     ),
     "got: {html}"
   );
@@ -947,7 +949,7 @@ fn review_round_five_fixes_hold() {
   let arith = html.find(r#"<span class="repo-jobgroup-name">arith</span>"#).expect("arith group");
   let default = html.find(r#"<span class="repo-jobgroup-name">default</span>"#).expect("default group");
   assert!(arith < default, "the group with a running job sorts above the finished one: {html}");
-  assert!(html.contains(r#"<span class="chamfer session-status running"><span>running</span></span> livejb <span class="dim">"#), "got: {html}");
+  assert!(html.contains(r#"<span class="chamfer session-status running"><span>running</span></span> <a class="job-id" href="/session/livejb">livejb</a> <span class="dim">"#), "got: {html}");
   assert!(html.contains(r#"data-tab="start">New job</button>"#), "got: {html}");
   assert!(!html.contains("Start a job"));
   // Short ages are single-unit; both renderers ship the same helper and group markup.

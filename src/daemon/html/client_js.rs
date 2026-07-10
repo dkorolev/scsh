@@ -107,7 +107,7 @@ function indexRowHtml(id, session, nowUnix) {
   const profile = session.profile || 'default';
   const n = (session.procs || []).length;
   const duration = sessionDurationLabel(session, nowUnix, lifecycle);
-  return '<tr data-session-id="' + esc(id) + '"><td><a href="/session/' + esc(id) + '">' + esc(id) + '</a></td>' +
+  return '<tr data-session-id="' + esc(id) + '"><td><a class="job-id" href="/session/' + esc(id) + '">' + esc(id) + '</a></td>' +
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
@@ -1445,9 +1445,9 @@ function renderRepoJobs(sessions, nowUnix) {
       cells = ordered.map(([task, g]) => {
         const links = g.map(s => {
           const lc = sessionLifecycle(s, nowUnix);
-          return '<a href="/session/' + esc(s.id) + '"><span class="chamfer session-status ' + lc.class +
-            '"><span>' + esc(lc.label) + '</span></span> ' + esc(s.id) +
-            ' <span class="dim">' + esc(formatShortAge(nowUnix - activity(s))) + '</span></a>';
+          return '<div class="repo-job"><span class="chamfer session-status ' + lc.class +
+            '"><span>' + esc(lc.label) + '</span></span> <a class="job-id" href="/session/' + esc(s.id) + '">' + esc(s.id) +
+            '</a> <span class="dim">' + esc(formatShortAge(nowUnix - activity(s))) + '</span></div>';
         }).join('');
         return '<div class="repo-jobgroup"><span class="repo-jobgroup-name">' + esc(task) + '</span>' + links + '</div>';
       }).join('');

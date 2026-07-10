@@ -247,7 +247,7 @@ fn repo_jobs_rows(store: &Store, now: u64) -> String {
             .map(|s| {
               let lc = s.lifecycle_status(now);
               format!(
-                "<a href=\"/session/{id}\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> {id} <span class=\"dim\">{age}</span></a>",
+                "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/session/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
                 id = esc(&s.id),
                 cls = lc.css_class(),
                 label = lc.label(),
@@ -304,7 +304,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
   );
   let duration = index_duration_label(session, now, lifecycle);
   format!(
-    "<tr data-session-id=\"{id}\"><td><a href=\"/session/{id}\">{id}</a></td>\
+    "<tr data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/session/{id}\">{id}</a></td>\
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
