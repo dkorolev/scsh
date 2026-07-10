@@ -840,10 +840,13 @@ fn review_round_five_fixes_hold() {
   assert_eq!(super::format::format_short_age(200_000), "2d");
   assert!(html.contains("function formatShortAge"), "JS mirror ships");
   assert!(html.contains(".repo-jobgroup"), "group CSS ships");
-  // The inline player pane sizes itself to the recording's terminal aspect.
+  // The inline player pane has NO forced height — the player sizes its own box to the
+  // recording's aspect at full width, so the pane is exactly as tall as the terminal wants
+  // (the page-side sizeCastPane workaround is gone).
   let shtml = session_page(&store, "castab").expect("session renders");
-  assert!(shtml.contains("function sizeCastPane"), "pane sizing ships");
-  assert!(shtml.contains("height: auto !important"), "fullscreen overrides the inline pane height");
+  assert!(!shtml.contains("sizeCastPane"), "the pane-sizing workaround must stay gone");
+  assert!(!shtml.contains(".cast-player { width: 100%; height:"), "no forced pane height");
+  assert!(shtml.contains("height: auto !important"), "fullscreen overrides any inline pane height");
 }
 
 #[test]
