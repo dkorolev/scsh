@@ -93,7 +93,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let session_meta = session_meta_placeholder(session);
   let export_btn = if session.procs.iter().any(proc_has_cast) {
     format!(
-      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ Download session snapshot</span></a>\n",
+      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download><span>⬇ Download job snapshot</span></a>\n",
       id = id
     )
   } else {
@@ -130,7 +130,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     skills = skills_html,
     procs = procs_html,
   );
-  Some(wrap_page(&format!("session {session_id}"), port, Some(session_id), &body))
+  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &body))
 }
 
 /// A bare repo-relative artifact path (`tmp/scsh/<id>/add.json`-shaped) — system info, not
@@ -141,9 +141,9 @@ fn looks_like_artifact_path(text: &str) -> bool {
     && !text.contains(char::is_whitespace)
 }
 
-/// A small per-proc "✕ kill" button, shown only while that proc still runs: it stops just
-/// this container (`POST /api/v1/proc/stop`) — unlike the session-level Force stop, the rest
-/// of the run keeps going.
+/// A small per-proc "✕ Force stop" button, shown only while that proc still runs: it stops
+/// just this container (`POST /api/v1/proc/stop`) — unlike the job-level Force stop, the
+/// rest of the job keeps going.
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::{ProcStatus, SessionLifecycle};
   // A dead client's session keeps its procs "running" forever; only a genuinely live
@@ -155,7 +155,7 @@ fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::
     return String::new();
   }
   format!(
-    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Kill this container only — the rest of the run continues\">✕ kill</button>",
+    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Force-stop this container only — the rest of the job continues\">✕ Force stop</button>",
     index = proc.index,
     id = esc(&session.id),
   )

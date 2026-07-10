@@ -44,8 +44,14 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
 pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
   let idx = proc.index;
+  // `data-ended` (unix seconds) tells the client how long ago a finished recording ended,
+  // so the "chapters: summarizing…" poll only runs while annotation can still arrive.
+  let ended = match (proc.started_at, proc.elapsed) {
+    (Some(s), Some(e)) if !proc_is_live(proc.status) => format!(" data-ended=\"{}\"", s + e.round() as u64),
+    _ => String::new(),
+  };
   format!(
-    r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}">
+    r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}"{ended}>
 <div class="cast-toolbar">
 <button type="button" data-cast-fs>⛶ Fullscreen</button>
 <button type="button" data-cast-link>🔗 Link at time</button>

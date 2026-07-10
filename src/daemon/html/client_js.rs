@@ -85,7 +85,7 @@ function harnessChipsHtml(session) {
     const skill = p.skill_name || p.label || '';
     const statusText = (p.status === 'running' || p.status === 'waiting') ? 'still running'
       : (p.status === 'ok' ? 'finished ok' : p.status);
-    out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" title="' +
+    out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" data-tip="' +
       esc(p.harness + ' · ' + skill + ' — ' + statusText + ' (bright = running, dim = done)') + '">' +
       esc(p.harness.charAt(0).toUpperCase()) + '</span>';
   });
@@ -101,7 +101,7 @@ function indexRowHtml(id, session, nowUnix) {
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
     '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + harnessChipsHtml(session) +
-    '<span class="chip-count">' + n + '</span></td>' +
+    '<span class="chip-count" data-tip="' + n + ' run' + (n === 1 ? '' : 's') + ' in this job">' + n + '</span></td>' +
     '<td class="dim repo-path">' + esc(session.repo || '') + '</td></tr>';
 }
 function syncIndexRow(row, session, nowUnix) {
@@ -249,7 +249,7 @@ function renderIndex(sessions, nowUnix) {
   const ids = sortSessionIds(sessions, nowUnix);
   if (!ids.length) {
     body.innerHTML =
-      '<tr><td colspan="7" class="dim">No sessions yet — run <code>scsh run</code> to create one.</td></tr>';
+      '<tr><td colspan="7" class="dim">No jobs yet — run <code>scsh run</code> to start one.</td></tr>';
     return;
   }
   const existing = new Map();
@@ -485,6 +485,7 @@ function updateProcFields(det, p, nowUnix) {
     const liveBtn = castEl.querySelector('[data-cast-live]');
     if (liveBtn) liveBtn.hidden = p.status !== 'running';
     if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
+      castEl.dataset.ended = String(Math.round(Date.now() / 1000));
       if (castEl._live) setCastLive(castEl, false);
       createCastPlayer(castEl, castEl._player ? castEl._player.getCurrentTime() : null);
     }
@@ -503,8 +504,10 @@ function updateProcFields(det, p, nowUnix) {
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
 function castEmbedHtml(p) {
   const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
+  const ended = (p.started_at && p.elapsed != null && p.status !== 'running' && p.status !== 'waiting')
+    ? ' data-ended="' + Math.round(p.started_at + p.elapsed) + '"' : '';
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
-    '" data-status="' + esc(p.status) + '">' +
+    '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
     '<button type="button" data-cast-fs>⛶ Fullscreen</button>' +
     '<button type="button" data-cast-link>🔗 Link at time</button>' +
@@ -627,17 +630,22 @@ function createCastPlayer(box, startAt, autoplay) {
     if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl);
   });
 }
+// The annotation pass starts right after the run ends, so chapters land within minutes or
+// never (no annotator on the host, or a recording from before annotation existed). Show the
+// indicator and poll only inside that window — an old cast gets neither.
+const CHAPTERS_WAIT_SECS = 300;
 function pollForChapters(box, chaptersUrl) {
   if (box._chapPoll) return;
+  const endedAt = Number(box.dataset.ended || 0);
+  const sinceEnd = () => Date.now() / 1000 - endedAt;
+  if (!endedAt || sinceEnd() > CHAPTERS_WAIT_SECS) return;
   const bar = box.querySelector('.cast-toolbar');
   const pending = document.createElement('span');
   pending.className = 'dim chap-pending';
   pending.textContent = '⏳ chapters: summarizing…';
   if (bar) bar.appendChild(pending);
-  let tries = 0;
   box._chapPoll = setInterval(() => {
-    tries += 1;
-    if (tries > 36) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); return; }
+    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); return; }
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
       const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
       if (!chapters.length) return;
@@ -960,7 +968,7 @@ function syncSessionStopButton(session) {
 async function forceStopSession(btn) {
   const id = btn.getAttribute('data-session') || SESSION_ID;
   if (!id) return;
-  if (!confirm('Force-stop this session? Running containers will be killed.')) return;
+  if (!confirm('Force-stop this job? Running containers will be killed.')) return;
   btn.disabled = true;
   setBtnLabel(btn, 'Stopping…');
   try {
@@ -993,9 +1001,9 @@ async function killProc(btn) {
   const session = btn.getAttribute('data-session');
   const proc = parseInt(btn.getAttribute('data-proc-stop'), 10);
   if (!session || Number.isNaN(proc)) return;
-  if (!confirm('Kill this container? Only this proc stops; the rest of the run continues.')) return;
+  if (!confirm('Force-stop this container? Only this run stops; the rest of the job continues.')) return;
   btn.disabled = true;
-  btn.textContent = 'killing\u2026';
+  btn.textContent = 'stopping\u2026';
   try {
     const resp = await fetch('/api/v1/proc/stop', {
       method: 'POST',
@@ -1005,14 +1013,14 @@ async function killProc(btn) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
-      btn.textContent = '\u2715 kill';
-      alert(data.error || ('kill failed (HTTP ' + resp.status + ')'));
+      btn.textContent = '\u2715 Force stop';
+      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
-    btn.textContent = data.already_ended ? 'already ended' : 'killed';
+    btn.textContent = data.already_ended ? 'already ended' : 'stopped';
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '\u2715 kill';
+    btn.textContent = '\u2715 Force stop';
     alert(String(e));
   }
 }
@@ -1020,7 +1028,7 @@ async function killProc(btn) {
 async function stopHarness(btn) {
   const harness = btn.getAttribute('data-harness-stop');
   if (!harness) return;
-  if (!confirm('Stop ALL running ' + harness + ' containers, in every session?')) return;
+  if (!confirm('Stop ALL running ' + harness + ' containers, in every job?')) return;
   btn.disabled = true;
   setBtnLabel(btn, 'stopping\u2026');
   try {
@@ -1197,6 +1205,36 @@ function startImageBuildOne(name, upToDate) {
   document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild(false));
   document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
   document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshImages(); });
+})();
+// ---- instant tooltips ----
+// One floating tip for every [data-tip] element, wired by delegation so it works for
+// server-rendered and live-re-rendered markup alike, with none of the native title
+// tooltip's hover delay (which live table re-renders kept resetting anyway).
+(function initTips() {
+  const tip = document.createElement('div');
+  tip.className = 'ui-tip';
+  tip.hidden = true;
+  document.body.appendChild(tip);
+  let anchor = null;
+  const hide = () => { anchor = null; tip.hidden = true; };
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (el === anchor) return;
+    if (!el) { hide(); return; }
+    anchor = el;
+    tip.textContent = el.dataset.tip;
+    tip.hidden = false;
+    tip.style.left = '0px';
+    tip.style.top = '0px';
+    const r = el.getBoundingClientRect();
+    let x = r.left + r.width / 2 - tip.offsetWidth / 2;
+    x = Math.max(6, Math.min(x, window.innerWidth - tip.offsetWidth - 6));
+    let y = r.top - tip.offsetHeight - 8;
+    if (y < 6) y = r.bottom + 8;
+    tip.style.left = x + 'px';
+    tip.style.top = y + 'px';
+  });
+  document.addEventListener('scroll', hide, true);
 })();
 // ---- repositories panel (index page only) ----
 let OPEN_REPO = null;
@@ -1382,20 +1420,22 @@ function startJob(name) {
     else if (note) note.textContent = resp.error || 'could not start job';
   }).catch(() => { if (note) note.textContent = 'could not start job'; });
 }
+// Mirrors repo_jobs_rows in index.rs — keep the markup identical. The tbody arrives
+// server-rendered, so a null snapshot (no full tick yet) must leave it untouched.
 function renderRepoJobs(sessions, nowUnix) {
   const body = document.getElementById('repos-body');
-  if (!body) return;
+  if (!body || !sessions) return;
   nowUnix = nowUnix ?? (Date.now() / 1000);
   const byRepo = {};
   Object.keys(OPEN_REPOS).forEach(r => { byRepo[r] = []; });
-  Object.keys(sessions || {}).forEach(id => {
+  Object.keys(sessions).forEach(id => {
     const s = sessions[id];
     if (!s || !s.repo || s.repo === '(image builds)') return;
     (byRepo[s.repo] = byRepo[s.repo] || []).push(Object.assign({ id: id }, s));
   });
   const repos = Object.keys(byRepo).sort();
   if (!repos.length) {
-    body.innerHTML = '<tr><td colspan="2" class="dim">No projects open yet.</td></tr>';
+    body.innerHTML = '<tr><td colspan="2" class="dim">No jobs yet — open or create a project under “Start a job”.</td></tr>';
     return;
   }
   const repoLabel = (repo) => {
@@ -1421,7 +1461,12 @@ function renderRepoJobs(sessions, nowUnix) {
   document.getElementById('project-name')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') createProject(); });
   document.getElementById('repo-pick')?.addEventListener('click', pickRepo);
   document.getElementById('repo-path')?.addEventListener('keydown', (e) => { if (e.key === 'Enter') openRepo(); });
-  renderRepoJobs(liveSessions, Date.now() / 1000);
+  // Seed the opened-repo set from the daemon so repos opened before this page load keep
+  // their "no jobs yet" rows across live re-renders of the Projects table.
+  fetch('/api/v1/repos').then(r => r.json()).then(resp => {
+    (resp.repos || []).forEach(r => { if (r.path && !(r.path in OPEN_REPOS)) OPEN_REPOS[r.path] = { clean: r.clean }; });
+    renderRepoJobs(liveSessions, Date.now() / 1000);
+  }).catch(() => {});
 })();
 "#
 }

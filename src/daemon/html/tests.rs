@@ -292,7 +292,7 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   assert!(
-    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">sessions</a><span class="crumb-sep">›</span><a href="/session/castab">castab</a>"#),
+    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a href="/session/castab">castab</a>"#),
     "breadcrumb permalinks in the top island"
   );
   // The status dot sits at the very RIGHT edge of the island.
@@ -354,11 +354,11 @@ fn index_page_shows_colored_harness_chips_per_proc() {
   }
   let html = super::index_page(&store);
   assert!(
-    html.contains(r#"<span class="hchip hchip--claude" title="claude · add — still running (bright = running, dim = done)">C</span>"#),
+    html.contains(r#"<span class="hchip hchip--claude" data-tip="claude · add — still running (bright = running, dim = done)">C</span>"#),
     "got: {html}"
   );
   assert!(
-    html.contains(r#"<span class="hchip hchip--grok hchip--done" title="grok · add — finished ok (bright = running, dim = done)">G</span>"#),
+    html.contains(r#"<span class="hchip hchip--grok hchip--done" data-tip="grok · add — finished ok (bright = running, dim = done)">G</span>"#),
     "got: {html}"
   );
   assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
@@ -746,4 +746,55 @@ fn wrap_page_serves_valid_css_braces() {
   assert!(html.contains(":root {"));
   assert!(!html.contains(":root {{"));
   assert!(html.contains(".daemon-status {"));
+}
+
+#[test]
+fn review_round_four_fixes_hold() {
+  use crate::daemon::model::OpenRepo;
+  // (1) The Projects tab is populated server-side — jobs grouped by repository, plus a
+  // "no jobs yet" row for repos opened with none — so it shows on first paint instead of
+  // waiting for a full WebSocket snapshot a quiet daemon never sends.
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  store.sessions.get_mut("castab").unwrap().ended_at = Some(5);
+  store.open_repo(OpenRepo { path: "/work/empty".into(), opened_at: 9, clean: true });
+  let html = super::index_page(&store);
+  assert!(html.contains(r#"<td class="repo-path" title="/tmp/repo">/tmp/repo</td>"#), "got: {html}");
+  assert!(
+    html.contains(
+      r#"<a href="/session/castab"><span class="chamfer session-status completed"><span>completed</span></span> castab · default</a>"#
+    ),
+    "got: {html}"
+  );
+  assert!(
+    html.contains(r#"<td class="repo-path" title="/work/empty">/work/empty</td><td><span class="dim">no jobs yet</span></td>"#),
+    "got: {html}"
+  );
+  // (2) Chips and counts carry instant data-tip tooltips, served by the shared floating tip
+  // (native title tooltips were reset by every live table re-render).
+  assert!(html.contains(r#"<span class="chip-count" data-tip="1 run in this job">1</span>"#), "got: {html}");
+  assert!(html.contains(".ui-tip"), "tooltip CSS ships");
+  assert!(html.contains("initTips"), "tooltip delegation ships");
+  assert!(!super::index_page(&store).contains(r#"hchip--claude hchip--done" title="#), "chips use data-tip, not title");
+  // (3) The UI speaks "jobs": table header, breadcrumb, empty states.
+  assert!(html.contains("<th>Job</th>"), "got: {html}");
+  assert!(!html.contains("<th>Session</th>"));
+  // (4) A finished recording advertises WHEN it ended, and the chapters poll is bounded by
+  // it — no more eternal "summarizing…" on casts that will never gain chapters.
+  let mut ended = store_with_cast_proc(ProcStatus::Ok);
+  ended.sessions.get_mut("castab").unwrap().procs[0].elapsed = Some(30.0);
+  let shtml = session_page(&ended, "castab").expect("session renders");
+  assert!(shtml.contains(r#" data-status="ok" data-ended="31">"#), "got: {shtml}");
+  assert!(shtml.contains("CHAPTERS_WAIT_SECS"), "bounded summarizing window ships");
+  // A still-running recording has no end yet (the session-meta dl has its own unrelated
+  // data-ended, so pin the cast box's tag specifically).
+  let running = session_page(&store_with_cast_proc(ProcStatus::Running), "castab").expect("session renders");
+  assert!(running.contains(r#" data-status="running">"#), "got: {running}");
+  assert!(!running.contains(r#" data-status="running" data-ended"#), "got: {running}");
+  // (5) The per-container button reads "Force stop", not "kill".
+  let mut live = store_with_cast_proc(ProcStatus::Running);
+  live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
+  let shtml = session_page(&live, "castab").expect("session renders");
+  assert!(shtml.contains("✕ Force stop"), "got: {shtml}");
+  assert!(!shtml.contains("✕ kill"));
+  assert!(shtml.contains("⬇ Download job snapshot"), "got: {shtml}");
 }

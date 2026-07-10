@@ -15,7 +15,7 @@ pub fn index_page(store: &Store) -> String {
     rows.push_str(&index_session_row(session, now));
   }
   if rows.is_empty() {
-    rows = "<tr><td colspan=\"7\" class=\"dim\">No sessions yet — run <code>scsh run</code> to create one.</td></tr>\n"
+    rows = "<tr><td colspan=\"7\" class=\"dim\">No jobs yet — run <code>scsh run</code> to start one.</td></tr>\n"
       .to_string();
   }
   let body = format!(
@@ -29,7 +29,7 @@ pub fn index_page(store: &Store) -> String {
 <div class=\"card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
-<thead><tr><th>Session</th><th>Status</th><th>Started</th><th>Duration</th>\
+<thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
 <tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
 </div>\n\
@@ -39,7 +39,7 @@ pub fn index_page(store: &Store) -> String {
 <section class=\"tab-panel\" id=\"tab-images\">\n{images}</section>\n",
     rows = rows,
     harness_stops = harness_stop_strip(store, now),
-    dirs = dirs_panel(),
+    dirs = dirs_panel(store, now),
     start = start_panel(),
     images = images_panel()
   );
@@ -74,7 +74,7 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
   let mut buttons = String::new();
   for (harness, n) in &counts {
     buttons.push_str(&format!(
-      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" data-harness-stop=\"{h}\" title=\"Stop every running {h} container, in every session\"><span>✕ stop all {h} ({n})</span></button>\n",
+      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" data-harness-stop=\"{h}\" title=\"Stop every running {h} container, in every job\"><span>✕ stop all {h} ({n})</span></button>\n",
       h = esc(harness),
     ));
   }
@@ -175,19 +175,84 @@ Or <strong>create a new project</strong>: a fresh git repository under
 "##
 }
 
-/// The "Directories" tab: a table of every opened repository and any repo with jobs, its jobs
-/// grouped underneath — built client-side from the live WebSocket session snapshot.
-fn dirs_panel() -> &'static str {
-  r##"<div class="card card--accent-left-magenta">
+/// The "Projects" tab: every job the daemon knows about, grouped by the repository it runs
+/// in (plus repositories opened from the UI that have no jobs yet). Rendered server-side so
+/// the tab is populated on first paint; `renderRepoJobs` in the client JS re-renders the
+/// same markup from live tick snapshots — keep the two byte-identical.
+fn dirs_panel(store: &Store, now: u64) -> String {
+  format!(
+    r##"<div class="card card--accent-left-magenta">
 <p class="section-label">Projects</p>
 <p class="dim">Current jobs, grouped by where they run: a project under <code>~/.scsh/projects/</code> shows its
 name; anything else shows its repository path.</p>
 <div class="table-scroll"><table>
 <thead><tr><th>Project / repository</th><th>Jobs</th></tr></thead>
-<tbody id="repos-body"><tr><td colspan="2" class="dim">No projects open yet — open or create one under “Start a job”.</td></tr></tbody>
+<tbody id="repos-body">{rows}</tbody>
 </table></div>
 </div>
-"##
+"##,
+    rows = repo_jobs_rows(store, now)
+  )
+}
+
+/// Rows of the Projects table. Mirrored by `renderRepoJobs` in the client JS
+/// (`client_js.rs`) — keep the markup identical.
+fn repo_jobs_rows(store: &Store, now: u64) -> String {
+  let mut by_repo: std::collections::BTreeMap<&str, Vec<&Session>> = std::collections::BTreeMap::new();
+  for path in store.open_repos.keys() {
+    by_repo.entry(path).or_default();
+  }
+  for s in store.sessions.values() {
+    if s.repo.is_empty() || s.repo == crate::daemon::server::IMAGE_BUILDS_REPO {
+      continue;
+    }
+    by_repo.entry(&s.repo).or_default().push(s);
+  }
+  if by_repo.is_empty() {
+    return "<tr><td colspan=\"2\" class=\"dim\">No jobs yet — open or create a project under “Start a job”.</td></tr>"
+      .to_string();
+  }
+  let projects_root = format!("{}/", crate::daemon::paths::projects_dir().display());
+  let mut rows = String::new();
+  for (repo, mut jobs) in by_repo {
+    jobs.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    let cells = if jobs.is_empty() {
+      "<span class=\"dim\">no jobs yet</span>".to_string()
+    } else {
+      jobs
+        .iter()
+        .map(|s| {
+          let lc = s.lifecycle_status(now);
+          let profile =
+            s.profile.as_deref().filter(|p| !p.is_empty()).map(|p| format!(" · {}", esc(p))).unwrap_or_default();
+          format!(
+            "<a href=\"/session/{id}\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> {id}{profile}</a>",
+            id = esc(&s.id),
+            cls = lc.css_class(),
+            label = lc.label(),
+            profile = profile,
+          )
+        })
+        .collect::<Vec<_>>()
+        .join("<br>")
+    };
+    rows.push_str(&format!(
+      "<tr><td class=\"repo-path\" title=\"{repo}\">{label}</td><td>{cells}</td></tr>",
+      repo = esc(repo),
+      label = esc(&repo_display_label(repo, &projects_root)),
+      cells = cells,
+    ));
+  }
+  rows
+}
+
+/// A repo under `~/.scsh/projects/` displays as `project · <name>`; anything else shows its
+/// full path. Mirrors `repoLabel` inside `renderRepoJobs` in the client JS.
+fn repo_display_label(repo: &str, projects_root: &str) -> String {
+  match repo.strip_prefix(projects_root) {
+    Some(name) => format!("project · {name}"),
+    None => repo.to_string(),
+  }
 }
 
 fn index_session_row(session: &Session, now: u64) -> String {
@@ -214,7 +279,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
-<td>{profile}</td><td class=\"session-procs-cell\">{chips}<span class=\"chip-count\">{n_procs}</span></td><td class=\"dim repo-path\">{repo}</td></tr>\n",
+<td>{profile}</td><td class=\"session-procs-cell\">{chips}<span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span></td><td class=\"dim repo-path\">{repo}</td></tr>\n",
     id = id,
     status = status,
     started = started,
@@ -222,6 +287,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
     profile = profile,
     chips = harness_chips_html(session),
     n_procs = n_procs,
+    plural = if n_procs == 1 { "" } else { "s" },
     repo = esc(&session.repo),
   )
 }
@@ -250,7 +316,7 @@ fn harness_chips_html(session: &Session) -> String {
       ProcStatus::Skipped => "skipped",
     };
     chips.push_str(&format!(
-      "<span class=\"hchip hchip--{h}{done}\" title=\"{title}\">{letter}</span>",
+      "<span class=\"hchip hchip--{h}{done}\" data-tip=\"{title}\">{letter}</span>",
       h = esc(h),
       done = if done { " hchip--done" } else { "" },
       title = esc(&format!("{h} · {skill} — {status_text} (bright = running, dim = done)")),
