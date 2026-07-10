@@ -3,6 +3,7 @@ use super::client_js::live_client_js;
 use super::escape::esc;
 use super::proc::{empty_output_html, empty_output_label};
 use super::session::session_page;
+use super::session_export::session_export_page;
 use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, Store};
 
 /// A one-proc store for the cast player page tests: the proc has a registered cast and
@@ -581,6 +582,30 @@ fn ended_session_hides_force_stop_button() {
     !html.contains(r#"session-actions"><span class="chamfer session-status"#),
     "no badge in the top-right actions slot"
   );
+}
+
+#[test]
+fn offline_export_shows_lifecycle_chip_after_heading() {
+  let session = Session {
+    id: "exp01".into(),
+    started_at: 1,
+    ended_at: Some(10),
+    profile: Some("code-review".into()),
+    kind: Some("profile".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 10,
+    client_connected: false,
+    run_pid: None,
+    skills: vec![],
+    procs: vec![],
+  };
+  let html = session_export_page(&session, &[]);
+  assert!(
+    html.contains(r#"</strong> <span class="chamfer session-status completed"><span>completed</span></span>"#),
+    "export heading carries the same resting lifecycle chip as the live page: {html}"
+  );
+  assert!(html.contains(r#"profile <strong>code-review</strong>"#), "kind/profile still lead: {html}");
 }
 
 #[test]
