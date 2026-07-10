@@ -433,11 +433,11 @@ fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, 
     return (404, "session not found".into(), None);
   };
   let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
-  if !exports.iter().any(|e| matches!(e, html::CastExport::Page { .. })) {
+  if !exports.iter().any(|e| matches!(e, html::CastExport::Cast { .. })) {
     return (404, "no exportable recordings in this session — retry once a skill's recording has output".into(), None);
   }
   let page = html::session_export_page(&session, &exports);
-  (200, page, Some(format!("attachment; filename=\"scsh-session-{id}.html\"")))
+  (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
 }
 
 /// One proc's contribution to the session export: the rendered per-cast page (frames on
@@ -460,14 +460,12 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
     return html::CastExport::Note(NO_RECORDING.into());
   }
   let sidecar = chapters_sidecar_path(cast_path).and_then(|p| std::fs::read_to_string(p).ok());
-  let stem = crate::export::cast_stem(std::path::Path::new(cast_path));
-  match crate::export::render_page_from_texts(&ndjson, sidecar.as_deref(), &stem) {
-    Ok(page) => {
-      let summary = sidecar.as_deref().and_then(crate::annotate::parse_annotation).map(|a| a.summary);
-      html::CastExport::Page { page, summary }
-    }
-    Err(_) => html::CastExport::Note(NO_RECORDING.into()),
-  }
+  let annotation = sidecar.as_deref().and_then(crate::annotate::parse_annotation);
+  let (summary, chapters) = match annotation {
+    Some(a) => (Some(a.summary), a.chapters.into_iter().map(|c| (c.t, c.title)).collect()),
+    None => (None, Vec::new()),
+  };
+  html::CastExport::Cast { ndjson, summary, chapters }
 }
 
 /// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar
@@ -2784,9 +2782,6 @@ mod tests {
 
   /// Every `srcdoc="…"` attribute value in the page. `esc` turns every embedded `"` into
   /// `&quot;`, so the first literal quote after `srcdoc="` is the attribute terminator.
-  fn srcdoc_values(page: &str) -> Vec<&str> {
-    page.split("srcdoc=\"").skip(1).map(|tail| tail.split('"').next().unwrap()).collect()
-  }
 
   #[test]
   fn session_export_assembles_every_recording_into_one_page() {
@@ -2813,32 +2808,34 @@ mod tests {
     );
     let (status, page, disposition) = session_export_response("/session/sexabc/export.html", &store);
     assert_eq!(status, 200);
-    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-session-sexabc.html\""));
-    // The header: session id, repo, profile, and the per-proc summary table in board order.
-    assert!(page.contains("scsh session <code>sexabc</code>"), "header session id");
-    assert!(page.contains("<code>/r</code>"), "repo label");
-    assert!(page.contains("<strong>profile</strong> default"), "profile");
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-sexabc.html\""));
+    // The header: the page says JOB, wears the live page's purple island, and carries the
+    // job's metadata.
+    assert!(page.contains("<title>scsh job sexabc</title>"), "job title");
+    assert!(!page.contains("scsh session"), "the word is job, not session");
+    assert!(page.contains("card--accent-left-purple"), "live-page island");
+    assert!(page.contains(r#"<p class="session-kind">profile <strong>default</strong></p>"#), "kind line");
+    assert!(page.contains(r#"<code class="repo-path">/r</code>"#), "repo label");
     for label in ["claude: add", "codex: multiply", "cursor: skipped"] {
-      assert!(page.contains(label), "summary table + section for {label}");
+      assert!(page.contains(label), "a section for {label}");
     }
-    // Both recordings embed as iframes, each carrying its own full player copy (the
-    // deliberate srcdoc-composition tradeoff), and the vendored player's license marker
-    // survives the assembly at least once.
-    assert_eq!(page.matches("<iframe").count(), 2, "one iframe per exportable cast");
-    assert!(page.matches("loading=\"lazy\"").count() >= 2, "iframes load lazily");
-    assert!(page.matches("BeeCastPlayer").count() >= 2, "each embedded page carries the first-party player");
+    // ONE shared player bundle, one mounted player per recording — no iframes, no
+    // per-cast page copies; recordings ride inline in the boot script's JSON.
+    assert!(!page.contains("<iframe"), "no iframes — the players mount from inline data");
+    assert_eq!(page.matches("Player.prototype.append").count(), 1, "exactly one player bundle");
+    assert_eq!(page.matches("\"cast\":").count(), 2, "one inline recording per exportable cast");
+    assert!(page.contains("BeeCastPlayer.create"), "the boot script mounts the first-party player");
+    assert!(page.contains("fullscreenEl: box"), "fullscreen wraps the cast box, like live");
     assert!(!page.contains("@license"), "no third-party attribution anywhere in the assembled page");
-    // Every proc section is a native <details> block — collapsible offline, no JS — open
-    // by default with the informative head as its <summary>; and the page has the favicon.
-    assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible section per proc");
-    assert_eq!(page.matches("<summary class=\"proc-head\"").count(), 3, "each section head is the summary");
+    // Every proc section is the live page's details.proc row, open by default.
+    assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible row per proc");
+    assert_eq!(page.matches("<span class=\"triangle\"").count(), 3, "live-page row chrome");
     assert!(page.contains("data:image/svg+xml"), "inline favicon");
-    // The annotated cast contributes its chapter title and its one-sentence summary (the
-    // latter both in the section head and inside the embedded page).
+    // The annotated cast contributes its chapter chip and its one-sentence summary.
     assert!(page.contains("Start"), "chapter title folded in");
-    assert!(page.contains(r#"<div class="proc-summary">Ran the demo.</div>"#), "sidecar summary shown");
+    assert!(page.contains(r#"<div class="cast-summary">Ran the demo.</div>"#), "sidecar summary shown");
     // The cast-less proc degrades to a styled note row, never an error.
-    assert!(page.contains(r#"<div class="proc-note">no recording — skipped/failed before output</div>"#));
+    assert!(page.contains(r#"<div class="detail dim">no recording — skipped/failed before output</div>"#));
     let _ = std::fs::remove_dir_all(&dir);
   }
 
@@ -2859,15 +2856,13 @@ mod tests {
     );
     let (status, page, _) = session_export_response("/session/hostil/export.html", &store);
     assert_eq!(status, 200);
-    // The attribute-escaped srcdoc can neither terminate early nor open a tag: no raw `<`
-    // (or `"` — by construction of the extraction) survives inside the attribute value.
-    let srcdocs = srcdoc_values(&page);
-    assert_eq!(srcdocs.len(), 1);
-    assert!(!srcdocs[0].contains('<'), "no raw '<' inside srcdoc");
-    assert!(srcdocs[0].contains("&lt;"), "embedded page markup is entity-escaped");
-    // The payload never becomes live markup in the outer page.
+    // The recording rides inside a JSON string in the boot script, with every `</`
+    // escaped as `<\/` — a literal `</script>` in the cast can neither terminate the
+    // script block nor become live markup.
     assert!(!page.contains("<script>alert(1)</script>"), "script payload must not go live");
-    assert_eq!(page.matches("<iframe").count(), page.matches("</iframe>").count(), "iframes stay balanced");
+    assert!(page.contains("<\\/iframe>"), "the payload's closing tags are JSON-escaped");
+    assert!(page.contains("<\\/script>"), "the payload's </script> is JSON-escaped");
+    assert_eq!(page.matches("</script>").count(), 2, "only the page's own two script blocks close");
     let _ = std::fs::remove_dir_all(&dir);
   }
 

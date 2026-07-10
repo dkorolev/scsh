@@ -1,76 +1,63 @@
-//! Session export: EVERY recording of a session assembled into ONE self-contained
-//! offline `.html` page, served at `/session/<id>/export.html` as a download attachment.
+//! Job export: EVERY recording of a job assembled into ONE self-contained offline `.html`
+//! page, served at `/session/<id>/export.html` as a download attachment.
 //!
-//! Composition is deliberate: each proc's recording is the EXACT per-cast export page
-//! ([`crate::export::render_page_from_texts`] — the same bytes `/cast/…/export.html`
-//! serves), embedded as an `<iframe srcdoc="…">` whose value is HTML-attribute-escaped
-//! with [`super::escape::esc`]. That keeps the per-cast pipeline (beecast-page template,
-//! vendored player, strict script-safe escaping) the single source of truth for how a
-//! recording renders, and makes the session page pure assembly: a header, a per-proc
-//! summary table, and one section per proc in board order.
-//!
-//! Honest tradeoff: each iframe carries its own copy of the vendored asciinema player
-//! (~300KB), so an N-cast session page weighs roughly N player copies. A shared-bundle
-//! multi-player page (one player, many casts) would need a beecast-page API extension —
-//! noted as future work, not attempted here.
+//! The page is a REPLICA of the live job page: the same stylesheet (`layout::PAGE_CSS`),
+//! the same purple island and collapsible per-run rows, and the same `beecast-player` —
+//! one shared bundle, one player per recording, mounted from inline data (no iframes, no
+//! per-cast page copies). What the live page does over HTTP the export inlines: the cast
+//! text, the sidecar summary, and the chapter markers ride in a single JSON block, and a
+//! small boot script mounts the players with the exact options the live page uses
+//! (`fit: 'both'`, idle compression, chapter markers, `fullscreenEl` = the cast box,
+//! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads —
+//! simply is not there.
 
 use super::escape::esc;
 use super::format::format_elapsed_clock;
-use super::layout::FAVICON_LINK;
-use super::proc::status_glyph;
+use super::layout::{FAVICON_LINK, PAGE_CSS};
+use super::proc::{proc_meta_html, status_glyph};
 use crate::daemon::model::{ProcRecord, Session};
+use crate::json::quote;
 
-/// What the export gathered for one proc (aligned 1:1 with `session.procs`):
-/// a rendered per-cast page (plus the sidecar's one-sentence summary, when annotated),
-/// or a note explaining why there is nothing to embed — never an error.
+/// What the export gathered for one proc (aligned 1:1 with `session.procs`): the raw
+/// recording plus its sidecar's summary and chapters, or a note explaining why there is
+/// nothing to embed — never an error.
 pub(crate) enum CastExport {
-  /// The full self-contained per-cast player page, to embed as an iframe `srcdoc`.
-  Page { page: String, summary: Option<String> },
-  /// No cast / no frames: a styled note row instead of an iframe.
+  Cast { ndjson: String, summary: Option<String>, chapters: Vec<(f64, String)> },
   Note(String),
 }
 
-/// The inline CSS shell: same dark aesthetic as the daemon's pages, but fully
-/// self-contained — an exported file must render offline with NO external requests.
-const EXPORT_CSS: &str = r#"
-  :root { color-scheme: dark; }
-  body { margin: 0; background: #121317; color: #d7d9df; font: 14px/1.5 system-ui, sans-serif; }
-  header { padding: 16px 20px 4px; }
-  h1 { font-size: 1.25rem; font-weight: 600; margin: 0 0 0.25rem; }
-  h2 { font-size: 1.05rem; font-weight: 600; margin: 0 0 0.25rem; }
-  code { background: #1d1f26; padding: 1px 5px; border-radius: 4px; font-size: 0.85em; }
-  .dim { color: #8a8d97; }
-  .meta { display: flex; gap: 0.5rem 1.25rem; flex-wrap: wrap; font-size: 0.9rem; margin: 0.25rem 0 0.75rem; }
-  .meta strong { font-weight: 600; margin-right: 0.3rem; }
-  table { border-collapse: collapse; font-size: 0.9rem; margin: 0 20px 1rem; }
-  thead tr, tbody tr { border-bottom: 1px solid #2a2d36; }
-  th, td { text-align: left; padding: 0.3rem 0.75rem 0.3rem 0; vertical-align: top; }
-  .glyph { font-weight: 600; }
-  .ok .glyph { color: #3a8; }
-  .fail .glyph { color: #e55; }
-  details.proc { margin: 0 20px 1.5rem; border: 1px solid #2a2d36; border-radius: 6px; overflow: hidden; }
-  details.proc > .proc-head { padding: 0.5rem 0.75rem; background: #1d1f26; display: flex; gap: 0.75rem; align-items: baseline; flex-wrap: wrap; cursor: pointer; }
-  details.proc > .proc-head::marker { color: #8a8d97; }
-  details.proc[open] > .proc-head { border-bottom: 1px solid #2a2d36; }
-  .proc-summary { padding: 0.4rem 0.75rem; font-size: 0.9rem; background: #1a1c22; border-bottom: 1px solid #2a2d36; }
-  .proc-note { padding: 1rem 0.75rem; color: #8a8d97; border-top: 1px dashed #2a2d36; }
-  iframe.cast-page { display: block; width: 100%; height: 560px; border: 0; background: #000; }
+/// Export-only CSS on top of the live stylesheet: the details rows carry the live page's
+/// classes, so only the few live-control gaps need filling.
+const EXPORT_EXTRA_CSS: &str = r#"
+  .snapshot-note { color: var(--text-muted); font-size: 0.85rem; margin: -8px 0 16px; }
 "#;
 
-/// Assemble the whole-session page from the session's metadata and the per-proc exports
-/// gathered by the endpoint (`exports[i]` belongs to `session.procs[i]` — board order).
-/// Pure: all file I/O (casts, sidecars) happened in the caller.
+/// Assemble the whole-job page from the session's metadata and the per-proc exports
+/// (`exports[i]` belongs to `session.procs[i]` — board order). Pure: all file I/O (casts,
+/// sidecars) happened in the caller.
 pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> String {
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
-  let repo = esc(&session.repo);
+  let kind = esc(session.kind.as_deref().unwrap_or("profile"));
   let when = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
-  let mut rows = String::new();
   let mut sections = String::new();
+  let mut data_entries: Vec<String> = Vec::new();
   for (proc, export) in session.procs.iter().zip(exports) {
-    rows.push_str(&summary_row(proc));
     sections.push_str(&proc_section(proc, export));
+    if let CastExport::Cast { ndjson, summary, chapters } = export {
+      let markers: Vec<String> = chapters.iter().map(|(t, title)| format!("[{t}, {}]", quote(title))).collect();
+      data_entries.push(format!(
+        "{{ \"proc\": {idx}, \"cast\": {cast}, \"summary\": {summary}, \"markers\": [{markers}] }}",
+        idx = proc.index,
+        cast = quote(ndjson),
+        summary = summary.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+        markers = markers.join(", "),
+      ));
+    }
   }
+  // `</` never appears in the inline script: JSON strings escape it as `<\/`, so a hostile
+  // recording (a literal `</script>`) cannot terminate the block.
+  let data = format!("[{}]", data_entries.join(",\n")).replace("</", "<\\/");
   format!(
     r#"<!DOCTYPE html>
 <html lang="en">
@@ -78,28 +65,55 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {favicon}
-<title>scsh session {id}</title>
-<style>{css}</style>
+<title>scsh job {id}</title>
+<style>{css}{player_css}{extra_css}</style>
 </head>
 <body>
-<header>
-<h1>scsh session <code>{id}</code></h1>
-<div class="meta">
-<span><strong>repo</strong> <code>{repo}</code></span>
-<span><strong>profile</strong> {profile}</span>
-<span><strong>when</strong> {when}</span>
+<div class="card card--accent-left-purple">
+<p class="session-kind">{kind} <strong>{profile}</strong></p>
+<dl class="session-meta">
+<dt>Job</dt><dd><code>{id}</code></dd>
+<dt>Started</dt><dd>{when}</dd>
+<dt>Branch</dt><dd><code>{branch}</code></dd>
+<dt>Repo</dt><dd><code class="repo-path">{repo}</code></dd>
+</dl>
 </div>
-</header>
-<table>
-<thead><tr><th>Proc</th><th>Status</th><th>Duration</th></tr></thead>
-<tbody>
-{rows}</tbody>
-</table>
-{sections}</body>
+<p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
+<div class="procs">
+{sections}</div>
+<script>{player_js}</script>
+<script>
+const CASTS = {data};
+CASTS.forEach((c) => {{
+  const box = document.querySelector('.cast[data-proc="' + c.proc + '"]');
+  const mount = box && box.querySelector('.cast-player');
+  if (!mount) return;
+  const player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
+    fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers, fullscreenEl: box,
+  }});
+  box._player = player;
+  box.querySelectorAll('.cast-chapters [data-seek]').forEach((btn) => btn.addEventListener('click', () => {{
+    player.seek(Number(btn.dataset.seek));
+    player.play();
+  }}));
+}});
+// Opening a row hands its player the keyboard, exactly like the live page.
+document.querySelectorAll('details.proc').forEach((det) => det.addEventListener('toggle', () => {{
+  if (!det.open) return;
+  const root = det.querySelector('.beecast-player');
+  if (root) {{ try {{ root.focus({{ preventScroll: true }}); }} catch (_) {{}} }}
+}}));
+</script>
+</body>
 </html>
 "#,
     favicon = FAVICON_LINK,
-    css = EXPORT_CSS,
+    css = PAGE_CSS,
+    player_css = super::PLAYER_CSS,
+    player_js = super::PLAYER_JS,
+    extra_css = EXPORT_EXTRA_CSS,
+    branch = esc(&session.branch),
+    repo = esc(&session.repo),
   )
 }
 
@@ -107,40 +121,62 @@ fn duration_label(proc: &ProcRecord) -> String {
   proc.elapsed.map(format_elapsed_clock).unwrap_or_else(|| "—".to_string())
 }
 
-fn summary_row(proc: &ProcRecord) -> String {
+/// One per-run row: the SAME `details.proc` markup as the live job page (triangle, glyph,
+/// label, elapsed, note), with the cast box carrying only the keys hint — no live controls.
+fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
+  let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
+  let body = match export {
+    CastExport::Cast { summary, chapters, .. } => {
+      let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => format!("<div class=\"cast-summary\">{}</div>\n", esc(s)),
+        None => String::new(),
+      };
+      let chips: Vec<String> = chapters
+        .iter()
+        .map(|(t, title)| {
+          format!(
+            "<button type=\"button\" data-seek=\"{t}\">{clock} {title}</button>",
+            clock = format_clock(*t),
+            title = esc(title),
+          )
+        })
+        .collect();
+      let chapters_html = if chips.is_empty() {
+        String::new()
+      } else {
+        format!("<div class=\"cast-chapters\">{}</div>\n", chips.join(""))
+      };
+      format!(
+        "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
+<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span></div>\n\
+{chapters_html}<div class=\"cast-player\"></div>\n</div>\n",
+        idx = proc.index,
+      )
+    }
+    CastExport::Note(text) => format!("<div class=\"detail dim\">{}</div>\n", esc(text)),
+  };
   format!(
-    "<tr class=\"{status}\"><td>{label}</td><td><span class=\"glyph\">{glyph}</span></td><td>{duration}</td></tr>\n",
+    r#"<details open class="proc {status}" data-index="{idx}">
+<summary>
+<span class="triangle" aria-hidden="true"></span><span class="glyph">{glyph}</span>
+<span class="label">{label}</span>
+<span class="meta">{elapsed}</span>
+<span class="note dim">{note}</span>
+</summary>
+{meta}
+{body}</details>
+"#,
     status = proc.status.as_str(),
-    label = esc(&proc.label),
+    idx = proc.index,
     glyph = status_glyph(proc.status),
-    duration = esc(&duration_label(proc)),
+    label = esc(&proc.label),
+    elapsed = esc(&duration_label(proc)),
+    note = esc(note),
+    meta = proc_meta_html(proc),
   )
 }
 
-/// One per-proc section: a native `<details>` block — collapsible with zero JavaScript, so
-/// the page stays pure self-contained HTML. The `<summary>` is the labelled head (glyph,
-/// label, duration), informative while collapsed; sections default to open. The `srcdoc`
-/// value is the whole per-cast page passed through [`esc`] — its `&`/`<`/`>`/`"` escaping
-/// is exactly what a double-quoted HTML attribute needs, so a hostile recording (`"`, `&`,
-/// `<`, even a literal `</iframe>`) can neither terminate the attribute nor leak markup
-/// into the outer page.
-fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
-  let head = format!(
-    "<summary class=\"proc-head\"><span class=\"glyph\">{glyph}</span> <strong>{label}</strong> \
-<span class=\"dim\">{duration}</span></summary>\n",
-    glyph = status_glyph(proc.status),
-    label = esc(&proc.label),
-    duration = esc(&duration_label(proc)),
-  );
-  let body = match export {
-    CastExport::Page { page, summary } => {
-      let summary_html = match summary {
-        Some(s) => format!("<div class=\"proc-summary\">{}</div>\n", esc(s)),
-        None => String::new(),
-      };
-      format!("{summary_html}<iframe class=\"cast-page\" loading=\"lazy\" srcdoc=\"{}\"></iframe>\n", esc(page))
-    }
-    CastExport::Note(note) => format!("<div class=\"proc-note\">{}</div>\n", esc(note)),
-  };
-  format!("<details open class=\"proc {status}\">\n{head}{body}</details>\n", status = proc.status.as_str())
+fn format_clock(t: f64) -> String {
+  let secs = t.max(0.0).floor() as u64;
+  format!("{}:{:02}", secs / 60, secs % 60)
 }
