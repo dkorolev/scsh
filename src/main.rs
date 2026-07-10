@@ -22,7 +22,7 @@ mod ui;
 mod version;
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use config::ResolvedInvocation;
@@ -2637,10 +2637,12 @@ fn build_and_run(
       .zip(skill_procs)
       .map(|(&skill, p)| {
         let dc = dc.clone();
+        let first_index = p.index();
         scope.spawn(move || {
           let attempt_started = std::time::Instant::now();
           let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone(), session_ref);
           first.duration_secs = attempt_started.elapsed().as_secs_f64();
+          first.proc_index = first_index;
           if first.ok {
             return first;
           }
@@ -2669,9 +2671,11 @@ fn build_and_run(
             );
           }
           let retry_started = std::time::Instant::now();
+          let second_index = p2.index();
           let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, dc, session_ref);
           second.duration_secs = retry_started.elapsed().as_secs_f64();
           second.attempts = 2;
+          second.proc_index = second_index;
           second
         })
       })
@@ -2806,17 +2810,23 @@ fn build_and_run(
       };
       match integration {
         Ok(None) => {}
-        Ok(Some(Integration::Applied { count })) => ok(&format!(
-          "{}: brought in {count} commit{} (rebased onto {})",
-          skill.name,
-          plural(count),
-          current_branch(root)
-        )),
-        Ok(Some(Integration::Saved { branch, count })) => warn(&format!(
-          "{}: {count} commit{} didn't rebase cleanly — saved to branch {branch} (inspect, then merge/cherry-pick)",
-          skill.name,
-          plural(count)
-        )),
+        Ok(Some(Integration::Applied { count, range })) => {
+          ok(&format!(
+            "{}: brought in {count} commit{} (rebased onto {})",
+            skill.name,
+            plural(count),
+            current_branch(root)
+          ));
+          pack_step_diff(root, &session_id, skill, o, range, daemon_session.client.as_deref());
+        }
+        Ok(Some(Integration::Saved { branch, count, range })) => {
+          warn(&format!(
+            "{}: {count} commit{} didn't rebase cleanly — saved to branch {branch} (inspect, then merge/cherry-pick)",
+            skill.name,
+            plural(count)
+          ));
+          pack_step_diff(root, &session_id, skill, o, range, daemon_session.client.as_deref());
+        }
         Err(e) => warn(&format!("{}: could not bring in commits — {e}", skill.name)),
       }
     }
@@ -2854,6 +2864,10 @@ fn build_and_run(
 /// residue the orchestrator still needs afterward — run-dir/log pointers and commit replay.
 struct SkillRun {
   ok: bool,
+  /// The live-board row this outcome belongs to (the retry's row when a retry ran) — set
+  /// by the orchestrator, so post-run residue (the packed commits diff) lands on the row
+  /// that actually produced it.
+  proc_index: usize,
   /// Stable reason code when `ok == false`.
   fail_reason: Option<String>,
   /// Served from the content-addressed cache (no clone, no container).
@@ -2884,6 +2898,7 @@ impl SkillRun {
   fn base() -> SkillRun {
     SkillRun {
       ok: false,
+      proc_index: 0,
       fail_reason: None,
       cached: false,
       duration_secs: 0.0,
@@ -3978,13 +3993,16 @@ fn current_branch(root: &Path) -> String {
     .unwrap_or_else(|| "HEAD".into())
 }
 
-/// What happened when bringing a commit-enabled skill's commits back.
+/// What happened when bringing a commit-enabled skill's commits back. `range` is the
+/// `(from, to)` SHA pair in the CALLER repo that spans exactly the integrated commits —
+/// what `pack_step_diff` renders into a review page. `None` when the before-state could
+/// not be read (the diff is then simply not packed; the integration itself still counts).
 enum Integration {
   /// The commits were rebased (cherry-picked) onto the caller's current branch.
-  Applied { count: usize },
+  Applied { count: usize, range: Option<(String, String)> },
   /// They didn't apply cleanly, so they were saved to a distinct branch instead;
-  /// the caller's branch was left untouched.
-  Saved { branch: String, count: usize },
+  /// the caller's branch was left untouched (the objects are fetched, so SHAs resolve).
+  Saved { branch: String, count: usize, range: Option<(String, String)> },
 }
 
 /// Pull new commits OUT of a commit-enabled skill's run clone into the caller repo.
@@ -4020,15 +4038,63 @@ fn integrate_commits(
   // Try to rebase the range onto the caller's current branch. --keep-redundant-commits
   // preserves the side effect even if a commit's changes are already present (so the
   // "run twice = two commits" guarantee holds rather than collapsing to a no-op).
+  let before = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
   if git_status_ok(root, &["cherry-pick", "--keep-redundant-commits", &range]) {
-    Ok(Some(Integration::Applied { count }))
+    let after = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+    Ok(Some(Integration::Applied { count, range: before.zip(after) }))
   } else {
     let _ = git_status_ok(root, &["cherry-pick", "--abort"]);
     let branch = incoming_branch_name(skill, stamp, &tip);
     if !git_status_ok(root, &["branch", "--force", &branch, &tip]) {
       return Err(format!("commits didn't rebase cleanly and the fallback branch '{branch}' could not be created"));
     }
-    Ok(Some(Integration::Saved { branch, count }))
+    Ok(Some(Integration::Saved { branch, count, range: Some((base.to_string(), tip)) }))
+  }
+}
+
+/// Pack the commits a step just brought in into one self-contained HTML review page
+/// (`packdiff`, if it is on the PATH) under the session's durable artifact root
+/// (`$SCSH_HOME/sessions/<session>/diffs/`), and register it with the daemon so the job
+/// page grows a "⇄ commits diff" chip on that step's row. Best-effort residue: no packdiff,
+/// no readable range, or a pack failure skips with a hint — never a run failure.
+fn pack_step_diff(
+  root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
+  daemon_client: Option<&daemon::Client>,
+) {
+  let Some((from, to)) = range else {
+    return;
+  };
+  let dir = runtime::session_diffs_dir(session_id);
+  if std::fs::create_dir_all(&dir).is_err() {
+    return;
+  }
+  let out = dir.join(format!("{}-p{}.html", runtime::sanitize_component(&skill.name), outcome.proc_index));
+  let title = format!("scsh job {session_id} · {} commits", skill.name);
+  // `..` = the literal range: `from` is the branch tip the commits landed on (or their
+  // merge base on the saved-branch path), so merge-base resolution has nothing to add.
+  // The notes author is pinned to scsh's own bot: a skill-committed PR-DESCRIPTION.md is
+  // bot-authored (every clone commit is), and packdiff lifts the notes author's
+  // description into the page's Description panel — regardless of the host env.
+  let result = Command::new("packdiff")
+    .arg(format!("{from}..{to}"))
+    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title])
+    .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .status();
+  match result {
+    Ok(status) if status.success() => {
+      ok(&format!("{}: commits diff packed — {}", skill.name, out.display()));
+      if let Some(c) = daemon_client {
+        c.proc_diff(outcome.proc_index, &out.to_string_lossy());
+      }
+    }
+    Ok(_) => hint(&format!("{}: packdiff could not pack the commits diff (skipped)", skill.name)),
+    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+      hint("packdiff not found — `cargo install packdiff` to browse each step's commits from the job page");
+    }
+    Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
   }
 }
 
@@ -4198,7 +4264,8 @@ fn apply_cached_commits(root: &Path, patch: &str, skill: &str, stamp: &str) -> R
       .and_then(|b| git_capture(root, &["rev-list", "--count", &format!("{b}..HEAD")]))
       .and_then(|s| s.trim().parse::<usize>().ok())
       .unwrap_or(1);
-    return Ok(Some(Integration::Applied { count }));
+    let after = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+    return Ok(Some(Integration::Applied { count, range: before.zip(after) }));
   }
   let _ = git_status_ok(root, &["am", "--abort"]);
   let saved = cache_dir(root).join(format!("incoming-{}-{stamp}.patch", runtime::sanitize_component(skill)));
@@ -5167,12 +5234,13 @@ fn link_skill_hosts(_root: &Path) -> Vec<String> {
 
 /// Show how to run the scaffolded example skills.
 fn print_skill_usage() {
-  println!("\nThe demo .scsh.yml runs `add` on two routes by default (opencode+GPT, claude+Sonnet);");
-  println!("`multiply` (X * Y) lives in the `multiply` profile because it REQUIRES X");
-  println!("and Y. scsh resolves the env you forward (or refuses the skill). Examples — successes");
-  println!("({}) and the intended refusal scsh guards against ({}):", ok_mark(), refused_mark());
+  println!("\nThe demo .scsh.yml runs `add` on two routes by default (opencode+GPT, claude+Sonnet),");
+  println!("plus `subtract` (C - D) — a second commit-enabled step, so one run brings in two");
+  println!("commits from two different steps. `multiply` (X * Y) lives in the `multiply` profile");
+  println!("because it REQUIRES X and Y. scsh resolves the env you forward (or refuses the");
+  println!("skill). Examples — successes ({}) and the intended refusal ({}):", ok_mark(), refused_mark());
   println!();
-  example("scsh run", "add with defaults A=2 B=3 -> 2 + 3 = 5", true);
+  example("scsh run", "add 2 + 3 = 5, subtract 10 - 4 = 6 (both commit)", true);
   example("A=10 B=20 scsh run", "add forwards your A,B -> 10 + 20 = 30", true);
   example("X=6 Y=7 scsh run --profile multiply", "also runs multiply -> 6 * 7 = 42", true);
   example("scsh run --profile multiply", "multiply REFUSED — X is required by ${X}", false);
@@ -6217,7 +6285,16 @@ mod tests {
     let clone = clone_and_commit(&caller, "clean-clone", "foo.txt", "hi\n", "add foo");
 
     let outcome = integrate_commits(&caller, &clone, &base, "add", "STAMP").unwrap();
-    assert!(matches!(outcome, Some(Integration::Applied { count: 1 })), "expected 1 applied commit");
+    let range = match outcome {
+      Some(Integration::Applied { count: 1, range }) => range,
+      other => panic!("expected 1 applied commit, got {:?}", other.is_some()),
+    };
+    // The reported range spans exactly the integrated commit ON THE CALLER's branch — the
+    // pair pack_step_diff hands to packdiff: from the pre-integration HEAD to the new HEAD.
+    let (from, to) = range.expect("Applied carries the caller-repo range");
+    assert_eq!(from, base);
+    assert_eq!(to, head(&caller));
+    assert_eq!(git_capture(&caller, &["rev-list", "--count", &format!("{from}..{to}")]).unwrap().trim(), "1");
     // The file is now committed on the caller's branch, the tree is clean, and HEAD
     // advanced by exactly one commit.
     assert_eq!(std::fs::read_to_string(caller.join("foo.txt")).unwrap(), "hi\n");
@@ -6256,10 +6333,15 @@ mod tests {
     // (which already has shared.txt="one") is an add/add conflict.
     integrate_commits(&caller, &c1, &base, "s1", "S").unwrap();
     let outcome = integrate_commits(&caller, &c2, &base, "s2", "S").unwrap();
-    let branch = match outcome {
-      Some(Integration::Saved { branch, count: 1 }) => branch,
+    let (branch, range) = match outcome {
+      Some(Integration::Saved { branch, count: 1, range }) => (branch, range),
       other => panic!("expected the conflicting commit to be saved to a branch, got {:?}", other.is_some()),
     };
+    // Saved commits still get a packable range: base..tip resolves in the caller repo
+    // because the objects were fetched, even though the branch wasn't advanced.
+    let (from, to) = range.expect("Saved carries the base..tip range");
+    assert_eq!(from, base);
+    assert_eq!(git_capture(&caller, &["rev-list", "--count", &format!("{from}..{to}")]).unwrap().trim(), "1");
     // The caller's branch is untouched (still "one"); the fallback branch exists and
     // carries the skill's commit.
     assert_eq!(std::fs::read_to_string(caller.join("shared.txt")).unwrap(), "one\n");
@@ -6435,7 +6517,10 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert!(!caller.join("note.txt").exists(), "reverted to base");
     // Replaying the journaled patch (what a cache HIT does) brings the commit back.
     let res = apply_cached_commits(&caller, &patch, "demo", "20260101-000000");
-    assert!(matches!(res, Ok(Some(Integration::Applied { count: 1 }))), "expected Applied{{count:1}}");
+    assert!(
+      matches!(res, Ok(Some(Integration::Applied { count: 1, range: Some(_) }))),
+      "expected Applied{{count:1}} with a packable range"
+    );
     assert!(caller.join("note.txt").exists(), "replayed file is present");
     assert_eq!(git_capture(&caller, &["log", "-1", "--format=%s"]).unwrap().trim(), "add note");
     assert_ne!(git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim(), base, "HEAD advanced past base");

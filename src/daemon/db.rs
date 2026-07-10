@@ -115,6 +115,7 @@ mod tests {
         lines: Vec::new(),
         container_name: None,
         cast_path: None,
+        diff_path: None,
       }],
       last_seen_at: 1,
       client_connected: false,

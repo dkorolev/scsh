@@ -358,10 +358,12 @@ pub fn bundled_skills() -> [(&'static str, &'static str); 1] {
 /// land in a repo.
 /// Each entry is `(repo-relative path, contents, executable)`. The `scripts/*.py` files
 /// are scaffolded with the executable bit set so the harness can run them directly.
-pub fn demo_skills() -> [(&'static str, &'static str, bool); 4] {
+pub fn demo_skills() -> [(&'static str, &'static str, bool); 6] {
   [
     (".skills/add/SKILL.md", include_str!("../.skills/add/SKILL.md"), false),
     (".skills/add/scripts/add.py", include_str!("../.skills/add/scripts/add.py"), true),
+    (".skills/subtract/SKILL.md", include_str!("../.skills/subtract/SKILL.md"), false),
+    (".skills/subtract/scripts/subtract.py", include_str!("../.skills/subtract/scripts/subtract.py"), true),
     (".skills/multiply/SKILL.md", include_str!("../.skills/multiply/SKILL.md"), false),
     (".skills/multiply/scripts/multiply.py", include_str!("../.skills/multiply/scripts/multiply.py"), true),
   ]
@@ -1460,11 +1462,11 @@ mod tests {
   #[test]
   fn demo_config_is_valid() {
     let cfg = validate(demo_yaml()).expect("demo config should validate");
-    assert_eq!(cfg.skills.len(), 2);
+    assert_eq!(cfg.skills.len(), 3);
     let add = cfg.skills.iter().find(|s| s.name == "add").expect("add present");
     assert_eq!(add.invocations.len(), 2);
     let expanded = expand_invocations(&cfg);
-    assert_eq!(expanded.len(), 4);
+    assert_eq!(expanded.len(), 5);
     let add_oc =
       expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
     assert_eq!(add_oc.skill_source, "add");
@@ -1474,6 +1476,14 @@ mod tests {
     assert!(add_oc.commits, "add-opencode-gpt-5.4-mini-fast is commit-enabled");
     let add_cl = expanded.iter().find(|s| s.name == "add-claude-sonnet-4-6").expect("add-claude-sonnet-4-6");
     assert!(!add_cl.commits);
+    // subtract is the SECOND commit-enabled step in the default profile: with add it makes a
+    // default run bring in two commits from two different steps (each packed into a diff).
+    let sub_oc = expanded
+      .iter()
+      .find(|s| s.name == "subtract-opencode-gpt-5.4-mini-fast")
+      .expect("subtract-opencode-gpt-5.4-mini-fast");
+    assert!(sub_oc.commits, "subtract-opencode-gpt-5.4-mini-fast is commit-enabled");
+    assert!(sub_oc.profile.is_none(), "subtract runs in the default profile");
     let mul_oc =
       expanded.iter().find(|s| s.name == "multiply-opencode-gpt-5.4-mini-fast").expect("multiply-opencode-gpt");
     assert_eq!(mul_oc.profile.as_deref(), Some("multiply"));

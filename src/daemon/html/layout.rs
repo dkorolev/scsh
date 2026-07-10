@@ -378,6 +378,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
   .proc-kill:disabled { cursor: default; opacity: 0.55; }
+  /* The "⇄ commits diff" chip shares the kill button's right-edge slot: the diff appears
+     only after a step finished, the kill button only while it runs — never both. */
+  .proc-diff {
+    margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
+    font-size: 0.75rem; line-height: 1.4; text-decoration: none;
+    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
+    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+  }
+  .proc-diff:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); text-decoration: none; }
   .autoscroll-ctl {
     display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
     cursor: pointer; user-select: none; color: var(--text-muted);

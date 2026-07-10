@@ -9,18 +9,11 @@ You are running the **add** skill. It ships its own worker script under `scripts
 
 ## Steps
 
-1. **Run the script:** `python3 scripts/add.py`. It reads `A` and `B` from the environment (defaulting A=2, B=3), computes the sum, writes `{"result": "<line>"}` to the result file, and appends the same line to `add_log.txt` at the repository root. For the defaults the line is `2 + 3 = 5`.
+1. **Run the script:** `python3 scripts/add.py`. It reads `A` and `B` from the environment (defaulting A=2, B=3), computes the sum, appends the line to `add_log.txt` at the repository root, **commits that file** (`add: <the result line>`), regenerates and **commits `PR-DESCRIPTION.md`** (a pull-request-style description of the log so far, in its own commit), and writes `{"result": "<line>"}` to the result file. For the defaults the line is `2 + 3 = 5`.
 
    When run through `scsh`, the result path is in `$SCSH_RESULT` (always under `tmp/`). When run on its own, the script defaults to `tmp/add_result.json`.
 
-2. **Record the result as a commit.** `add_log.txt` is the deliverable (tracked at the repository root, not under `tmp/`). Commit only that file:
-
-   ```sh
-   git add add_log.txt
-   git commit -m "add: <the result line>"
-   ```
-
-   Never stage or commit anything under `tmp/` (gitignored scratch). Each run appends a line and makes a new commit, so running add twice produces two commits.
+2. **The commits are the script's job — do not commit anything yourself.** `add_log.txt` is the deliverable (tracked at the repository root, not under `tmp/`), and the script has already committed it — and the `PR-DESCRIPTION.md` companion — by the time it prints the result. Never stage or commit anything under `tmp/` (gitignored scratch). Each run appends a line and makes new commits, so running add twice produces two pairs of commits. Only if the script printed a `could not commit` warning, commit `add_log.txt` and `PR-DESCRIPTION.md` (and nothing else) yourself.
 
 ## tmp/
 

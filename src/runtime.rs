@@ -1090,6 +1090,12 @@ pub fn session_casts_dir(session: &str) -> std::path::PathBuf {
   host_sessions_dir().join(session).join("casts")
 }
 
+/// A session's packed commit diffs — one self-contained packdiff review page per step that
+/// brought commits into the caller's branch (`$SCSH_HOME/sessions/<session>/diffs/`).
+pub fn session_diffs_dir(session: &str) -> std::path::PathBuf {
+  host_sessions_dir().join(session).join("diffs")
+}
+
 /// A session's preserved harness run logs (`$SCSH_HOME/sessions/<session>/logs/`).
 pub fn session_logs_dir(session: &str) -> std::path::PathBuf {
   host_sessions_dir().join(session).join("logs")

@@ -53,7 +53,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 <span class="label">{label}</span> {proc_stat}
 <span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
 <span class="note dim">{note}</span>
-{kill_btn}</summary>
+{diff_btn}{kill_btn}</summary>
 {proc_meta}
 <div class="detail">{detail}</div>
 {container_line}
@@ -65,6 +65,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       glyph = glyph,
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
+      diff_btn = proc_diff_btn_html(&session.id, proc),
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = elapsed,
@@ -139,6 +140,23 @@ fn looks_like_artifact_path(text: &str) -> bool {
   !text.is_empty()
     && (text.starts_with('/') || text.starts_with("tmp/") || text.starts_with(".harness/"))
     && !text.contains(char::is_whitespace)
+}
+
+/// A "⇄ commits diff" chip on a step's summary row, shown once the run integrated this
+/// step's commits into the caller's branch and packed them (packdiff) into a review page.
+/// Navigates to `/diff/<session>/<proc>` in THIS tab (cmd/ctrl+click for a new one — no
+/// `target` override); the page is one self-contained HTML file. Mirrored by
+/// `procDiffBtnHtml` in the client JS (the chip appears live: integration happens after
+/// the step finished, so it lands on a late tick of the run).
+fn proc_diff_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord) -> String {
+  if proc.diff_path.is_none() {
+    return String::new();
+  }
+  format!(
+    "<a class=\"proc-diff\" data-proc-diff href=\"/diff/{id}/{index}\" title=\"Browse the commits this step brought into your branch — one self-contained review page\">⇄ commits diff</a>",
+    index = proc.index,
+    id = esc(session_id),
+  )
 }
 
 /// A small per-proc "✕ Force stop" button, shown only while that proc still runs: it stops

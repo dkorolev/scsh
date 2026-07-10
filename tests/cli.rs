@@ -569,9 +569,11 @@ fn list_json_is_machine_readable() {
   let r = scsh(&d, &["list", "--json"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
-  // The reserved `default` (add) and the declared `multiply`, each with its skill.
+  // The reserved `default` (add + subtract) and the declared `multiply`, each with its skills.
   assert!(
-    r.out.contains(r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6"] }"#),
+    r.out.contains(
+      r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "subtract-opencode-gpt-5.4-mini-fast"] }"#
+    ),
     "got: {}",
     r.out
   );
@@ -767,14 +769,14 @@ fn init_demo_does_not_duplicate_existing_tmp_ignore() {
 
 #[test]
 fn init_demo_scaffolds_example_skills() {
-  // --init-demo-project drops the add/multiply example skills under .skills/ and
+  // --init-demo-project drops the add/subtract/multiply example skills under .skills/ and
   // tells the user how to run them.
   let d = unique_dir("initskills");
   git_init(&d);
   let init = scsh(&d, &["--init-demo-project"]);
   assert_eq!(init.code, 0, "got: {}", init.out);
 
-  for name in ["add", "multiply"] {
+  for name in ["add", "subtract", "multiply"] {
     let p = d.join(".skills").join(name).join("SKILL.md");
     let body = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
     assert!(body.contains(&format!("name: {name}")), "{} should be the {name} skill", p.display());
@@ -789,7 +791,7 @@ fn init_demo_scaffolds_example_skills() {
     }
   }
   // It explains how to run them, including env passing (success + error) and the profile.
-  assert!(init.out.contains("scaffolded 4 example-skill files"), "got: {}", init.out);
+  assert!(init.out.contains("scaffolded 6 example-skill files"), "got: {}", init.out);
   assert!(init.out.contains("A=10 B=20 scsh run"), "init should show env-forwarding examples; got: {}", init.out);
   assert!(init.out.contains("--profile multiply"), "init should show the profile usage; got: {}", init.out);
   assert!(init.out.contains("REFUSED"), "init should show an error example too; got: {}", init.out);

@@ -178,6 +178,22 @@ impl Client {
     let _ = self.post("/api/v1/proc/cast", &body);
   }
 
+  /// Tell the daemon where the packed commits-diff page for this step lives on the host
+  /// (the packdiff HTML under `$SCSH_HOME/sessions/<session>/diffs/`). Posted after the
+  /// run integrates the step's commits — i.e. after proc/finish — so it must be
+  /// synchronous: the run is about to deregister and close the poster.
+  pub fn proc_diff(&self, proc_index: usize, path: &str) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"path\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      quote(path)
+    );
+    if !self.post_sync_after_flush("/api/v1/proc/diff", &body) {
+      log_post_failure("/api/v1/proc/diff", Some(proc_index));
+    }
+  }
+
   pub fn proc_line(&self, proc_index: usize, at: f64, line: &str) {
     if let Some(tx) = lock_post_tx(&self.inner) {
       let _ = tx.send(PostJob::ProcLine { proc: proc_index, at, line: line.to_string() });

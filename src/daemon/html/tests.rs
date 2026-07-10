@@ -33,6 +33,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         fail_reason: None,
         container_name: None,
         cast_path: Some("/tmp/x.cast".into()),
+        diff_path: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -454,6 +455,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         fail_reason: None,
         container_name: None,
         cast_path: None,
+        diff_path: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -472,6 +474,74 @@ fn session_proc_html_has_no_stray_backslashes() {
   assert!(html.contains(r#"<div class="output"><div class="dim">No output yet.</div>"#));
   assert!(html.contains(r#"id="session-stop""#), "running session should offer Force stop");
   assert!(html.contains("Force stop"));
+}
+
+#[test]
+fn session_page_shows_the_commits_diff_chip_only_when_packed() {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "difjob".into(),
+    Session {
+      id: "difjob".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      kind: None,
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![
+        ProcRecord {
+          index: 0,
+          kind: ProcKind::Skill,
+          label: "opencode: add".into(),
+          status: ProcStatus::Ok,
+          note: None,
+          detail: None,
+          fail_reason: None,
+          container_name: None,
+          cast_path: None,
+          diff_path: Some("/tmp/scsh-home/sessions/difjob/diffs/add-p0.html".into()),
+          harness: Some("opencode".into()),
+          skill_name: Some("add".into()),
+          model: None,
+          started_at: Some(1),
+          elapsed: Some(2.0),
+          lines: vec![],
+        },
+        ProcRecord {
+          index: 1,
+          kind: ProcKind::Skill,
+          label: "claude: add".into(),
+          status: ProcStatus::Ok,
+          note: None,
+          detail: None,
+          fail_reason: None,
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          harness: Some("claude".into()),
+          skill_name: Some("add".into()),
+          model: None,
+          started_at: Some(1),
+          elapsed: Some(2.0),
+          lines: vec![],
+        },
+      ],
+    },
+  );
+  let html = session_page(&store, "difjob").expect("session page");
+  let procs = session_procs_html(&html);
+  // The step whose commits were packed links its review page; the other has no chip.
+  assert!(procs.contains(r#"href="/diff/difjob/0""#), "packed step links its diff: {procs}");
+  assert!(procs.contains("⇄ commits diff"), "the chip is labeled: {procs}");
+  assert!(!procs.contains(r#"href="/diff/difjob/1""#), "unpacked step has no diff link: {procs}");
+  assert_eq!(procs.matches("data-proc-diff").count(), 1, "exactly one chip: {procs}");
+  // Plain click navigates in THIS tab; cmd/ctrl+click keeps its native new-tab meaning.
+  assert!(!procs.contains("target="), "no target override on the diff chip: {procs}");
 }
 
 #[test]
@@ -508,6 +578,17 @@ fn client_js_wires_force_stop() {
 }
 
 #[test]
+fn client_js_mirrors_the_commits_diff_chip() {
+  // Integration (and the packdiff pack) happens after a step finished, so the chip usually
+  // arrives on a live tick: the client must render the same markup session.rs serves.
+  let js = live_client_js();
+  assert!(js.contains("function procDiffBtnHtml"), "client js builds the diff chip");
+  assert!(js.contains("p.diff_path"), "client js keys the chip on the proc's diff_path");
+  assert!(js.contains("⇄ commits diff"), "the live chip carries the same label");
+  assert!(js.contains("initProcDiffs"), "chips present at page render are wired too");
+}
+
+#[test]
 fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
@@ -534,6 +615,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         fail_reason: None,
         container_name: None,
         cast_path: Some("/tmp/x.cast".into()),
+        diff_path: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -604,6 +686,7 @@ fn session_proc_html_shows_autoscroll_while_running() {
         fail_reason: None,
         container_name: None,
         cast_path: None,
+        diff_path: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,

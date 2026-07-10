@@ -237,6 +237,11 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   `srcdoc` composition; procs without a recording become note rows). Served as a download
   attachment named `scsh-session-{id}.html`; 404 with an actionable body when the session
   has no exportable recording yet
+- `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
+  brought into the caller's branch (one self-contained HTML file: the diff, commits, and
+  in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists
+  only for commit-enabled steps whose commits were integrated while `packdiff` was on the
+  PATH of the `scsh run` host; 404 otherwise
 - `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
@@ -252,7 +257,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   image build is recorded as an asciinema cast on the host (same ASCII-cinema player as
   skill runs) whenever `asciinema` is on PATH.
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
-  — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path
+  — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path,
+  `/proc/diff` the packed commits-diff page a step's integration produced
 - `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job from the
   session page: stop every still-named container, SIGTERM (then SIGKILL) the `scsh run`
   process when its PID is known, and mark incomplete procs failed with `force_stopped`.
