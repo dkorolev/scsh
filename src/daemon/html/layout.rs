@@ -409,7 +409,6 @@ const PAGE_CSS: &str = r#"
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar button.on { border-color: var(--red); color: var(--red); }
-  .cast-copied { color: var(--green); visibility: hidden; }
   .cast-keys { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
   .cast-summary {
     padding: 0.45rem 0.65rem; font-size: 0.9rem; line-height: 1.4;

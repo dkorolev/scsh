@@ -557,7 +557,10 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   let js = live_client_js();
   assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
   assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
-  assert!(procs.contains("data-cast-link"), "timestamp deep-link button");
+  // Link-at-time left the inline toolbar (the /play page keeps deep links); the run
+  // snapshot download wears the same blue as the job-level one.
+  assert!(!procs.contains("data-cast-link"), "no link-at-time in the inline toolbar");
+  assert!(procs.contains(r#"<a class="chamfer btn btn--cyan btn--sm" href="/cast/castab/2/export.html""#), "blue run snapshot");
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output / autoscroll control.
   assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
@@ -690,9 +693,11 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
   // server-rendered snippet and in the client JS that regenerates it.
   let session = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   let procs = session_procs_html(&session);
-  assert!(procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>"#));
+  assert!(procs.contains(
+    r#"<a class="chamfer btn btn--cyan btn--sm" href="/cast/castab/0/export.html" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>"#
+  ));
   let js = live_client_js();
-  assert!(js.contains("/export.html\" data-cast-export download hidden>⬇ Download run snapshot</a>"));
+  assert!(js.contains("/export.html\" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>"));
   assert!(js.contains("exportLink.hidden = !stats.events;"));
 }
 
