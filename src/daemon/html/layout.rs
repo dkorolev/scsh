@@ -211,6 +211,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
   .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
   .session-kind strong { color: var(--text); }
+  /* The resting lifecycle badge follows the heading (the kind/name stays flush-left with
+     the meta labels below) — align it with the heading text it now sits beside. */
+  .session-kind .session-status { margin-left: 0.5rem; vertical-align: 0.12em; }
   .daemon-status .dot {
     width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
   }
@@ -418,6 +421,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar button.on { border-color: var(--red); color: var(--red); }
+  /* The snapshot download keeps its cyan identity but at the SAME size and shape as its
+     toolbar siblings — a chamfered .btn in this row read as a misfit. */
+  .cast-toolbar a[data-cast-export] { border-color: var(--cyan); color: var(--cyan); }
+  .cast-toolbar a[data-cast-export]:hover { background: rgba(88, 166, 255, 0.12); }
   .cast-keys { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
   .cast-summary {
     padding: 0.45rem 0.65rem; font-size: 0.9rem; line-height: 1.4;

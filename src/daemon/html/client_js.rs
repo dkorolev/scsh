@@ -552,7 +552,7 @@ function castEmbedHtml(p) {
     '<button type="button" data-cast-reload>↻ Reload</button>' +
     '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
-    '<a class="chamfer btn btn--cyan btn--sm" href="' + esc(base) + '/export.html" data-cast-export download hidden><span>⬇ Download run snapshot</span></a>' +
+    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
@@ -1013,9 +1013,14 @@ function syncSessionStopButton(session) {
   const btn = document.getElementById('session-stop');
   if (!btn) return;
   if (session && session.ended_at) {
-    // The run is over: the control becomes a resting status badge (gray “completed”,
-    // red “failed”, …) — not a disabled button pretending something was stopped.
-    btn.outerHTML = sessionStatusBadge(sessionLifecycle(session, Date.now() / 1000));
+    // The run is over: the button goes away and the resting status badge (green
+    // “completed”, red “failed”, …) follows the heading — the same place the server
+    // renders it for an ended session.
+    btn.remove();
+    const kind = document.querySelector('.session-kind');
+    if (kind && !kind.querySelector('.session-status')) {
+      kind.insertAdjacentHTML('beforeend', ' ' + sessionStatusBadge(sessionLifecycle(session, Date.now() / 1000)));
+    }
   }
 }
 async function forceStopSession(btn) {
