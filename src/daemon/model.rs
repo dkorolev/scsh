@@ -14,7 +14,7 @@ pub const EPHEMERAL_IDLE_SECS: u64 = 300;
 pub const EPHEMERAL_COUNTDOWN_AFTER_SECS: u64 = 5;
 
 /// Silence threshold before a session without `ended_at` is marked terminated.
-pub const SESSION_STALE_SECS: u64 = 10;
+pub const SESSION_STALE_SECS: u64 = 30;
 
 /// Maximum sessions retained in daemon state.
 pub const MAX_STORED_SESSIONS: usize = 200;

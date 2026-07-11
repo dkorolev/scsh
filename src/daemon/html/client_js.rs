@@ -14,7 +14,7 @@ function fmtUptime(secs) {
   const h = Math.floor(secs / 3600);
   return 'up ' + h + 'h ' + (Math.floor((secs % 3600) / 60)) + 'm';
 }
-const SESSION_STALE_SECS = 10;
+const SESSION_STALE_SECS = 30;
 function sessionHasIncompleteProcs(session) {
   const procs = session.procs || [];
   return procs.some(p => p.status === 'running' || p.status === 'waiting');

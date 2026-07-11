@@ -670,7 +670,7 @@ mod tests {
         route: None,
         result_path: None,
       }],
-      last_seen_at: 80, // stale vs now=100 with SESSION_STALE_SECS=10
+      last_seen_at: 60, // stale vs now=100 with SESSION_STALE_SECS=30
       client_connected: true,
       run_pid: Some(1),
       workflow: Some(arith_meta()),
