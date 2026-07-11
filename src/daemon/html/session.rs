@@ -139,7 +139,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let fleets = fleet_sections_html(session);
   let n = session.procs.len();
   let lede = format!(
-    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}. <span class=\"dim\">Recordings and results stay on this machine.</span>",
+    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}.",
     kind = esc(kind),
     profile = esc(profile),
     life = esc(lifecycle.label()),

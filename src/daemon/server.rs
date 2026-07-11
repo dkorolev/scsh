@@ -1300,11 +1300,11 @@ fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, Stri
   };
   let valid = name.len() <= 64
     && name.chars().next().is_some_and(|c| c.is_ascii_alphanumeric())
-    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.');
+    && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
   if !valid {
     return (
       400,
-      err_body("project names are 1–64 chars: letters, digits, '-', '_', '.' (starting alphanumeric)"),
+      err_body("project names are 1–64 chars: letters, digits, '-', '_' (no dots or slashes; start with alphanumeric)"),
       false,
     );
   }
@@ -1314,7 +1314,16 @@ fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, Stri
   }
   let path = projects.join(&name);
   if path.exists() {
-    return (409, err_body(&format!("project '{name}' already exists — open it instead")), false);
+    // Client copies `name` into the Open box and toasts — do not create a second project.
+    return (
+      409,
+      format!(
+        "{{\"ok\":false,\"exists\":true,\"name\":{},\"error\":{}}}",
+        quote(&name),
+        quote(&format!("project '{name}' already exists — open it instead")),
+      ),
+      false,
+    );
   }
   if let Err(e) = scaffold_project(&path) {
     let _ = std::fs::remove_dir_all(&path); // leave nothing half-made; a retry starts clean
@@ -2488,13 +2497,20 @@ mod tests {
     assert_eq!(status2, 200, "got: {body2}");
     assert!(body2.contains(r#""runnable":true"#) && body2.contains("demo-1"), "got: {body2}");
 
-    // Same name again → 409, not a silent clobber.
+    // Same name again → 409 with exists:true so the UI can copy the name into Open.
     let (status3, body3, _) = projects_create_response(r#"{"name":"demo-1"}"#, &store);
     assert_eq!(status3, 409, "got: {body3}");
-    assert!(body3.contains("already exists"), "got: {body3}");
+    assert!(body3.contains("already exists") && body3.contains(r#""exists":true"#), "got: {body3}");
+    assert!(body3.contains(r#""name":"demo-1""#), "got: {body3}");
 
-    // Hostile names are rejected before any filesystem work.
-    for bad in [r#"{"name":"../escape"}"#, r#"{"name":"a/b"}"#, r#"{"name":".hidden"}"#, r#"{"name":""}"#] {
+    // Hostile names are rejected before any filesystem work (no dots, no slashes).
+    for bad in [
+      r#"{"name":"../escape"}"#,
+      r#"{"name":"a/b"}"#,
+      r#"{"name":".hidden"}"#,
+      r#"{"name":"foo.bar"}"#,
+      r#"{"name":""}"#,
+    ] {
       let (st, b, _) = projects_create_response(bad, &store);
       assert_eq!(st, 400, "{bad} got: {b}");
     }

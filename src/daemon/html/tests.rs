@@ -248,6 +248,12 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
   assert!(js.contains("/api/v1/projects/create"), "client js posts project creation");
   assert!(js.contains("function createProject"), "client js wires the button");
   assert!(js.contains("function handleRepoOpened"), "open and create share the response path");
+  assert!(js.contains("function showToast"), "existing-project feedback is a toast");
+  assert!(js.contains("suggestOpenExistingProject"), "existing name is copied into Open");
+  assert!(js.contains("This project already exists, just open it."), "toast copy");
+  assert!(js.contains("projectNameOk"), "client rejects dots/slashes before POST");
+  assert!(html.contains("no dots/slashes"), "placeholder documents the name rules");
+  assert!(html.contains(".toast"), "toast styles ship with the page");
 }
 
 #[test]
@@ -710,6 +716,10 @@ fn offline_export_embeds_commits_diff_when_present() {
   assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
   assert!(html.contains(r#"<details class="proc-diff">"#), "body embeds the packed diff");
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
+  assert!(
+    html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
+    "packdiff ≥ 0.3 needs scripts + same-origin for WASM/localStorage: {html}"
+  );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
 }
@@ -1076,6 +1086,8 @@ fn wrap_page_connecting_status_uses_blue() {
   assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
   assert!(!html.contains("fonts.googleapis.com"), "offline-first: no CDN fonts (WEB-UI §5)");
   assert!(html.contains("position: sticky"), "status chrome is pinned");
+  assert!(html.contains("width: 100%"), "status chrome spans the viewport");
+  assert!(html.contains(r#"class="page-shell""#), "content sits in a centered column under the bar");
 }
 
 #[test]
@@ -1096,8 +1108,13 @@ fn wrap_page_serves_valid_css_braces() {
   assert!(html.contains(":root {"));
   assert!(!html.contains(":root {{"));
   assert!(html.contains(".daemon-status {"));
-  assert!(html.contains(r#"class="page-lede""#), "lede renders above pinned chrome");
+  assert!(html.contains(r#"class="page-lede""#), "lede renders in the content column");
   assert!(html.contains("Hello lede"));
+  // Status bar is the first body child so it pins full-width at the top; lede follows under it.
+  let status_at = html.find(r#"id="daemon-status""#).expect("status bar");
+  let shell_at = html.find(r#"class="page-shell""#).expect("page shell");
+  let lede_at = html.find(r#"class="page-lede""#).expect("lede");
+  assert!(status_at < shell_at && shell_at < lede_at, "chrome, then shell, then lede");
 }
 
 #[test]
@@ -1269,6 +1286,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 0,
             needs: vec![],
             conditional: false,
+            when_summary: None,
           },
           WorkflowNodeMeta {
             id: "multiply".into(),
@@ -1276,6 +1294,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 1,
             needs: vec![],
             conditional: false,
+            when_summary: None,
           },
           WorkflowNodeMeta {
             id: "summarize".into(),
@@ -1283,6 +1302,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 2,
             needs: vec!["add".into(), "multiply".into()],
             conditional: false,
+            when_summary: None,
           },
         ],
       }),
@@ -1300,6 +1320,23 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(html.contains("href=\"#task-summarize\""));
   // Exactly two fan-in edges into summarize (paths in SVG).
   assert_eq!(html.matches("marker-end=\"url(#wf-arrow)\"").count(), 2);
+  assert!(html.contains(r#"class="wf-arrowhead""#), "open chevron arrowheads, not filled triangles");
+  // Fan-in ports land at distinct y on summarize (not a single shared tip).
+  let mut end_ys = Vec::new();
+  for part in html.split(r#"class="wf-edge" d=""#) {
+    if !part.contains(r#"marker-end="url(#wf-arrow)""#) {
+      continue;
+    }
+    let Some(d) = part.split('"').next() else {
+      continue;
+    };
+    if let Some(y) = d.rsplit(',').next() {
+      end_ys.push(y.to_string());
+    }
+  }
+  assert_eq!(end_ys.len(), 2, "expected two edge end ys, got {end_ys:?}");
+  assert_ne!(end_ys[0], end_ys[1], "fan-in edges must enter at different heights: {end_ys:?}");
+
   // All-done graph: legend only lists Done, not unused statuses.
   assert!(html.contains(r#"<li class="wf-leg wf-leg-done""#));
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-running""#));
@@ -1336,6 +1373,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 0,
             needs: vec![],
             conditional: false,
+            when_summary: None,
           },
           WorkflowNodeMeta {
             id: "sort_fruits".into(),
@@ -1343,6 +1381,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 1,
             needs: vec!["categorize".into()],
             conditional: false,
+            when_summary: None,
           },
           WorkflowNodeMeta {
             id: "sort_vegetables".into(),
@@ -1350,6 +1389,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 2,
             needs: vec!["categorize".into()],
             conditional: false,
+            when_summary: None,
           },
         ],
       }),
@@ -1386,6 +1426,7 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 0,
             needs: vec![],
             conditional: false,
+            when_summary: None,
           },
           WorkflowNodeMeta {
             id: "review".into(),
@@ -1393,13 +1434,21 @@ fn workflow_graph_renders_builtin_shapes() {
             order: 1,
             needs: vec!["probe_credentials".into()],
             conditional: true,
+            when_summary: Some("Runs only if probe_credentials.ok = true".into()),
           },
         ],
       }),
     },
   );
   let review = session_page(&store, "rev001").expect("review");
-  assert!(review.contains("Conditional task"), "gate marker");
+  assert!(review.contains(r#"class="wf-gate""#), "gate marker");
+  assert!(review.contains(">when</span>"), "gate label is the word when, not a diamond");
+  assert!(
+    review.contains("Runs only if probe_credentials.ok = true"),
+    "gate tooltip states the real when: condition"
+  );
+  assert!(!review.contains("Conditional task"), "no cryptic Conditional task label");
+  assert!(!review.contains('◇'), "no diamond glyph");
   assert!(review.contains(r#"wf-skipped"#));
   assert_eq!(review.matches("marker-end=\"url(#wf-arrow)\"").count(), 1);
 

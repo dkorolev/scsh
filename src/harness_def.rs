@@ -20,9 +20,9 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review`/`arith`/`greet` (workflows) are
+/// `doctor`/`add`/`research`/`demo-pr` (flat) and `fruits`/`code-review`/`arith`/`greet` (workflows) are
 /// always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 7] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 8] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -31,6 +31,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 7] {
     ("code-review", include_str!("harness_defs/code-review.yml")),
     ("arith", include_str!("harness_defs/arith.yml")),
     ("greet", include_str!("harness_defs/greet.yml")),
+    ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
   ]
 }
 
@@ -326,9 +327,11 @@ impl HarnessDef {
 }
 
 impl Step {
-  /// The full `SKILL.md` body scsh materializes for this step: the author's `prompt` plus the
+  /// The full prompt scsh sends to the harness for this step: the author's `prompt` plus the
   /// scsh-generated I/O contract — which env vars carry the inputs, and the exact JSON shape to
   /// write to `$SCSH_RESULT`. The author writes intent; scsh guarantees the machine contract.
+  /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]), not
+  /// as a synthetic `SKILL.md`.
   pub fn render_skill_body(&self) -> String {
     let mut s = self.prompt.trim_end().to_string();
     s.push_str("\n\n## Inputs\n\n");
@@ -396,6 +399,32 @@ impl Cond {
 /// Whether a step's `when:` gate holds — every condition must (they are AND-ed).
 pub fn when_holds(when: &When, value_of: &impl Fn(&Ref) -> Option<String>) -> bool {
   when.iter().all(|c| c.eval(value_of))
+}
+
+fn format_ref(r: &Ref) -> String {
+  match r {
+    Ref::Param(name) => format!("params.{name}"),
+    Ref::StepField { step, field } => format!("{step}.{field}"),
+  }
+}
+
+fn format_cond(c: &Cond) -> String {
+  let lhs = format_ref(&c.reference);
+  match c.op {
+    CondOp::Eq => format!("{lhs} = {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::Ne => format!("{lhs} ≠ {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::Lt => format!("{lhs} < {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::Lte => format!("{lhs} ≤ {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::Gt => format!("{lhs} > {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::Gte => format!("{lhs} ≥ {}", c.values.first().map(String::as_str).unwrap_or("")),
+    CondOp::In => format!("{lhs} in [{}]", c.values.join(", ")),
+  }
+}
+
+/// One-line human summary of a `when:` gate for UI tooltips (AND of every condition).
+pub fn format_when_summary(when: &When) -> String {
+  let body = when.iter().map(format_cond).collect::<Vec<_>>().join(" and ");
+  format!("Runs only if {body}")
 }
 
 /// The result of discovering the definitions available to a repo: the merged definitions
@@ -1118,6 +1147,24 @@ mod tests {
   }
 
   #[test]
+  fn builtin_demo_pr_is_a_commit_enabled_multi_agent_flat_def() {
+    let def = builtin("demo-pr");
+    assert!(!def.is_workflow(), "demo-pr is a flat one-shot, not a DAG");
+    assert_eq!(def.invocations.len(), 4);
+    let agents: std::collections::BTreeSet<&str> = def.invocations.iter().map(|r| r.harness.as_str()).collect();
+    assert_eq!(agents, ["claude", "codex", "cursor", "grok"].into_iter().collect());
+    assert!(
+      def.invocations.iter().all(|r| r.commits == Some(true)),
+      "every demo-pr route is commit-enabled for packdiff"
+    );
+    let task = def.task.as_deref().expect("flat def has a task");
+    assert!(task.contains("PR-DESCRIPTION.md"), "task writes the notes file: {task}");
+    assert!(task.contains("demo_pr_note.txt"), "task writes a feature stub: {task}");
+    let title = def.params.iter().find(|p| p.name == "TITLE").expect("TITLE param");
+    assert_eq!(title.default.as_deref(), Some("Hello from demo-pr"));
+  }
+
+  #[test]
   fn step_commits_parses_as_a_boolean() {
     let ok = r#"description: "x"
 steps:
@@ -1182,6 +1229,7 @@ steps:
     assert_eq!(when[0].reference, Ref::StepField { step: "probe_credentials".into(), field: "ok".into() });
     assert_eq!(when[0].op, CondOp::Eq);
     assert_eq!(when[0].values, vec!["true".to_string()]);
+    assert_eq!(format_when_summary(when), "Runs only if probe_credentials.ok = true");
   }
 
   /// Index into `builtin_defs()` for readability.

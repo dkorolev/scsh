@@ -274,8 +274,14 @@ fn export_error(as_json: bool, code: i32, message: &str) -> i32 {
 }
 
 /// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
-/// and summaries appear in the session browser. No-op when cursor/Composer is unavailable.
-fn annotate_run_casts(cast_paths: Vec<std::path::PathBuf>) {
+/// and summaries appear in the session browser. Also copy new chapters onto matching
+/// `.sccache` cast copies so a later cache hit replays chapters with the recording.
+/// No-op when cursor/Composer is unavailable.
+fn annotate_run_casts(root: &Path, cast_paths: Vec<std::path::PathBuf>) {
+  // Attach chapters that already exist (e.g. a prior annotate) into the result cache first.
+  for cast in &cast_paths {
+    cache_attach_chapters(root, cast);
+  }
   let pending: Vec<std::path::PathBuf> = cast_paths
     .into_iter()
     .filter(|c| daemon::chapters_sidecar_path(&c.to_string_lossy()).map(|s| !s.exists()).unwrap_or(false))
@@ -289,10 +295,19 @@ fn annotate_run_casts(cast_paths: Vec<std::path::PathBuf>) {
     .into_iter()
     .map(|cast| {
       let model = model.clone();
-      std::thread::spawn(move || annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some())
+      std::thread::spawn(move || {
+        let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
+        (cast, ok)
+      })
     })
     .collect();
-  let done = handles.into_iter().filter_map(|h| h.join().ok()).filter(|&ok| ok).count();
+  let mut done = 0;
+  for h in handles {
+    if let Ok((cast, true)) = h.join() {
+      done += 1;
+      cache_attach_chapters(root, &cast);
+    }
+  }
   eprintln!("scsh: annotated {done} cast(s)");
 }
 
@@ -1093,7 +1108,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   let mut invocations = config::expand_invocations(&cfg);
   for inv in &mut invocations {
     inv.delivery = match &def.task {
-      Some(task) => config::SkillDelivery::IntoClone(task.clone()),
+      Some(task) => config::SkillDelivery::DirectPrompt(task.clone()),
       None => config::SkillDelivery::Repo,
     };
     // Route the result under the gitignored scratch root (which may be `.harness/tmp`), so the
@@ -1123,7 +1138,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
 
   let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
   let code = build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition");
-  annotate_run_casts(session_skill_casts(&session_id));
+  annotate_run_casts(&root, session_skill_casts(&session_id));
   code
 }
 
@@ -1259,7 +1274,7 @@ fn step_invocation(
     commits: step.commits,
     result: format!("{session_dir_rel}/{}.json", step.id),
     terminal: config::Terminal::default(),
-    delivery: config::SkillDelivery::IntoClone(step.render_skill_body()),
+    delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
 }
@@ -1558,6 +1573,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     plural(ran),
     if skipped > 0 { format!(", {skipped} skipped") } else { String::new() }
   ));
+  annotate_run_casts(root, session_skill_casts(&session_id));
   0
 }
 
@@ -1677,7 +1693,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
       let session_id = daemon::new_session_id();
       let code = build_and_run(&rt, &root, &runnable, profile, &session_id, "profile");
       // Annotate the recordings this run just produced (best-effort; no-op without cursor).
-      annotate_run_casts(session_skill_casts(&session_id));
+      annotate_run_casts(&root, session_skill_casts(&session_id));
       code
     }
   }
@@ -1942,7 +1958,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
         &skill.skill_source,
         &skill.result,
         skill.terminal,
-        skill.delivery.is_global(),
+        &skill.delivery,
       );
       let model = skill.model.as_deref().unwrap_or("(harness default)");
       let timeout = skill.timeout.map(|t| format!("{t}s")).unwrap_or_else(|| "none".into());
@@ -3089,9 +3105,11 @@ impl SkillRun {
   }
   /// A cache hit: the result was restored from the cache without running the skill (no
   /// clone, no container). `cached_commits` carries any journaled commits to replay, so a
-  /// hit for a commit-enabled skill still reproduces the commit.
-  fn cached(cached_commits: Option<String>) -> SkillRun {
-    SkillRun { ok: true, cached: true, cached_commits, ..SkillRun::base() }
+  /// hit for a commit-enabled skill still reproduces the commit. `result_content` is the
+  /// restored JSON — workflows need it to bind downstream `inputs:` / `when:` from this
+  /// step's outputs (a hit that only wrote the file to disk left the DAG with nothing to read).
+  fn cached(cached_commits: Option<String>, result_content: String) -> SkillRun {
+    SkillRun { ok: true, cached: true, cached_commits, result_content: Some(result_content), ..SkillRun::base() }
   }
 }
 
@@ -3146,13 +3164,21 @@ fn run_one_skill(
   if let Some(key) = &key {
     if let Some(entry) = cache_lookup(root, key) {
       if restore_cached_result(root, &skill.result, &entry.result).is_ok() {
+        let when = entry.cached_at.map(|t| format!(" · {}", format_cached_at(t))).unwrap_or_default();
         let line = match json::message(&entry.result) {
-          Some(m) => format!("{}  (cached)", first_line(&m)),
-          None => "(cached)".to_string(),
+          Some(m) => format!("{}  (cached{when})", first_line(&m)),
+          None => format!("(cached{when})"),
         };
         // Replay the original recording and show the original duration, so a hit reads the same
         // as the run that produced it — not a bare "(cached) · 0s · no output".
         if let (Some(c), Some(cast)) = (&daemon_client, &entry.cast) {
+          // Restore chapters next to the cached cast so the session browser finds them the
+          // same way it finds a live run's sidecar (`<stem>.chapters.json`).
+          if let Some(src) = &entry.chapters {
+            if let Some(dest) = daemon::chapters_sidecar_path(&cast.to_string_lossy()) {
+              let _ = std::fs::copy(src, dest);
+            }
+          }
           c.proc_cast(spinner.index(), &cast.to_string_lossy());
         }
         // Durable result copy for fleet rollups / job-page comparison (same path as a live run).
@@ -3168,7 +3194,9 @@ fn run_one_skill(
         }
         // Carry any journaled commits so they're replayed onto the caller's branch — a hit
         // for a commit-enabled skill reproduces the commit, not just the result file.
-        return SkillRun::cached(entry.commits);
+        // Also carry the result JSON so a workflow can feed this step's outputs into later
+        // steps (without it, run_workflow aborts with "produced no result" after a cache hit).
+        return SkillRun::cached(entry.commits, entry.result);
       }
     }
   }
@@ -3301,7 +3329,7 @@ fn run_one_skill(
     &skill.skill_source,
     &skill.result,
     skill.terminal,
-    skill.delivery.is_global(),
+    &skill.delivery,
   );
   let cmd = if git_transport {
     runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
@@ -3620,13 +3648,13 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
   Ok(())
 }
 
-/// Materialize a carried `SKILL.md` body for the agent. `IntoClone` (a `--def` run) lands at
-/// `.skills/<skill_source>/SKILL.md` in the clone — written into the bind mount, or committed
-/// into the bare transport repo on Apple Containers. `GlobalInstall` (an override-bundle run)
-/// lands in the harness's global skills dir, which lives under the run dir's `tmp/` — mounted
-/// on BOTH transports, so a plain host-side write reaches the container and the checkout
-/// never contains the skill. `Repo` is a no-op: the committed copy already rides in the clone.
-fn materialize_skill_body(run_dir: &Path, git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
+/// Materialize a carried skill body when the delivery needs a file on disk. `DirectPrompt`
+/// (harness-def `task:` / workflow `prompt:`) is a no-op — the text goes straight into the
+/// harness CLI as a custom prompt. `GlobalInstall` (an override-bundle run) lands in the
+/// harness's global skills dir under the run dir's `tmp/` — mounted on BOTH transports, so a
+/// plain host-side write reaches the container and the checkout never contains the skill.
+/// `Repo` is a no-op: the committed copy already rides in the clone.
+fn materialize_skill_body(run_dir: &Path, _git_transport: bool, skill: &ResolvedInvocation) -> Result<(), String> {
   let write = |rel: &str, body: &str| -> Result<(), String> {
     let path = run_dir.join(rel);
     if let Some(parent) = path.parent() {
@@ -3635,16 +3663,7 @@ fn materialize_skill_body(run_dir: &Path, git_transport: bool, skill: &ResolvedI
     std::fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))
   };
   match &skill.delivery {
-    config::SkillDelivery::Repo => Ok(()),
-    config::SkillDelivery::IntoClone(body) => {
-      let rel = format!(".skills/{}/SKILL.md", skill.skill_source);
-      if git_transport {
-        let bare = run_dir.join(runtime::TRANSPORT_BARE);
-        runtime::inject_file_into_bare(&bare, &rel, body, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
-      } else {
-        write(&rel, body)
-      }
-    }
+    config::SkillDelivery::Repo | config::SkillDelivery::DirectPrompt(_) => Ok(()),
     config::SkillDelivery::GlobalInstall(body) => {
       write(&format!("{}/{}/SKILL.md", skill.harness.global_skills_rel(), skill.skill_source), body)
     }
@@ -4240,6 +4259,9 @@ fn integrate_commits(
 /// (`$SCSH_HOME/sessions/<session>/diffs/`), and register it with the daemon so the job
 /// page grows a "⇄ commits diff" chip on that step's row. Best-effort residue: no packdiff,
 /// no readable range, or a pack failure skips with a hint — never a run failure.
+///
+/// Invokes packdiff in machine mode (`--json`): stdout is a single `{ "Packed": … }` or
+/// error document (packdiff ≥ 0.3). Progress stays on stderr and is discarded.
 fn pack_step_diff(
   root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
   daemon_client: Option<&daemon::Client>,
@@ -4260,25 +4282,80 @@ fn pack_step_diff(
   // description into the page's Description panel — regardless of the host env.
   let result = Command::new("packdiff")
     .arg(format!("{from}..{to}"))
-    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title])
+    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title, "--json"])
     .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
     .stdin(Stdio::null())
-    .stdout(Stdio::null())
+    .stdout(Stdio::piped())
     .stderr(Stdio::null())
-    .status();
+    .output();
   match result {
-    Ok(status) if status.success() => {
+    Ok(output) if output.status.success() && out.is_file() => {
       ok(&format!("{}: commits diff packed — {}", skill.name, out.display()));
       if let Some(c) = daemon_client {
         c.proc_diff(outcome.proc_index, &out.to_string_lossy());
       }
     }
-    Ok(_) => hint(&format!("{}: packdiff could not pack the commits diff (skipped)", skill.name)),
+    Ok(output) => {
+      let detail = packdiff_failure_detail(&output.stdout);
+      hint(&format!(
+        "{}: packdiff could not pack the commits diff (skipped{})",
+        skill.name,
+        detail.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
+      ));
+    }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      hint("packdiff not found — `cargo install packdiff` to browse each step's commits from the job page");
+      hint("packdiff not found — `cargo install packdiff` (≥ 0.3.4) to browse each step's commits from the job page");
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
   }
+}
+
+/// Pull a short reason out of packdiff's machine-mode error document (or `None`).
+fn packdiff_failure_detail(stdout: &[u8]) -> Option<String> {
+  let text = std::str::from_utf8(stdout).ok()?.trim();
+  if text.is_empty() {
+    return None;
+  }
+  // Prefer the typed `message` field when present; otherwise the top-level variant name.
+  if let Some(i) = text.find("\"message\"") {
+    let after = &text[i + "\"message\"".len()..];
+    if let Some(rest) = after.trim_start().strip_prefix(':') {
+      let rest = rest.trim_start();
+      if let Some(s) = rest.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = s.chars();
+        while let Some(c) = chars.next() {
+          match c {
+            '\\' => match chars.next() {
+              Some('n') => out.push('\n'),
+              Some('t') => out.push('\t'),
+              Some('"') => out.push('"'),
+              Some('\\') => out.push('\\'),
+              Some(o) => {
+                out.push('\\');
+                out.push(o);
+              }
+              None => break,
+            },
+            '"' => break,
+            other => out.push(other),
+          }
+        }
+        if !out.is_empty() {
+          return Some(out);
+        }
+      }
+    }
+  }
+  // `{ "UnknownRef": { ... } }` → `UnknownRef`
+  let trimmed = text.trim_start().trim_start_matches('{').trim_start();
+  if let Some(key) = trimmed.strip_prefix('"') {
+    let name: String = key.chars().take_while(|c| *c != '"').collect();
+    if !name.is_empty() && name != "Packed" {
+      return Some(name);
+    }
+  }
+  None
 }
 
 /// A distinct branch name for commits that couldn't be rebased cleanly:
@@ -4372,33 +4449,52 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
 
 /// A cached run — everything needed to reproduce the original observation, not just the answer:
 /// the result-file content, any commits it made (a `format-patch` mbox, for a commit-enabled
-/// skill), how long the original run took, and its terminal recording. So a hit shows the same
-/// duration and replayable video as the first run, not a bare "(cached) · 0s".
+/// skill), how long the original run took, when it was cached, its terminal recording, and
+/// (when annotation has finished) the chapters sidecar. So a hit shows the same duration,
+/// replayable video, and chapters as the first run — not a bare "(cached) · 0s".
 struct CacheEntry {
   result: String,
   commits: Option<String>,
   /// The original run's wall-clock seconds, so the board shows the real duration on a hit.
   elapsed: Option<f64>,
+  /// Unix seconds when this entry was written (the original run's finish time).
+  cached_at: Option<u64>,
   /// The original run's cast recording (copied into the cache), for replay on a hit.
   cast: Option<PathBuf>,
+  /// Chapters sidecar next to the cached cast (`<key>.chapters.json`), when annotation has
+  /// landed (either at store time or attached later via [`cache_attach_chapters`]).
+  chapters: Option<PathBuf>,
 }
 
 /// Look up the cache entry for `key` (result, journaled commits, original duration, and cast).
 fn cache_lookup(root: &Path, key: &str) -> Option<CacheEntry> {
   let dir = cache_dir(root);
-  let text = std::fs::read_to_string(dir.join(format!("{key}.json"))).ok()?;
+  let json_path = dir.join(format!("{key}.json"));
+  let text = std::fs::read_to_string(&json_path).ok()?;
   let cast = dir.join(format!("{key}.cast"));
+  let chapters = dir.join(format!("{key}.chapters.json"));
+  // Prefer the stamped `cached_at`; fall back to the entry file's mtime for older caches.
+  let cached_at = json::field(&text, "cached_at").and_then(|s| s.trim().parse::<u64>().ok()).or_else(|| {
+    std::fs::metadata(&json_path)
+      .ok()
+      .and_then(|m| m.modified().ok())
+      .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+      .map(|d| d.as_secs())
+  });
   Some(CacheEntry {
     result: json::field(&text, "result")?,
     commits: json::field(&text, "commits"),
     elapsed: json::field(&text, "elapsed").and_then(|s| s.trim().parse::<f64>().ok()),
+    cached_at,
     cast: cast.is_file().then_some(cast),
+    chapters: chapters.is_file().then_some(chapters),
   })
 }
 
 /// Store a skill's result-file `content`, any commit `patch`, the original `elapsed` seconds, and
 /// its `cast_src` recording in the cache under `key` (the cast is copied alongside as
-/// `<key>.cast`). Best-effort: a write failure just means the next identical run won't be a hit.
+/// `<key>.cast`; chapters as `<key>.chapters.json` when already present). Best-effort: a write
+/// failure just means the next identical run won't be a hit.
 fn cache_store(
   root: &Path, key: &str, content: &str, commits: Option<&str>, elapsed: Option<f64>, cast_src: Option<&Path>,
 ) {
@@ -4406,7 +4502,8 @@ fn cache_store(
   if std::fs::create_dir_all(&dir).is_err() {
     return;
   }
-  // elapsed is stored as a quoted string so the string-only `json::field` reader can read it back.
+  // elapsed / cached_at are stored as quoted strings so the string-only `json::field` reader
+  // can read them back.
   let mut fields = vec![format!("\"result\": {}", json::quote(content))];
   if let Some(patch) = commits {
     fields.push(format!("\"commits\": {}", json::quote(patch)));
@@ -4414,9 +4511,50 @@ fn cache_store(
   if let Some(e) = elapsed {
     fields.push(format!("\"elapsed\": {}", json::quote(&format!("{e}"))));
   }
+  fields.push(format!("\"cached_at\": {}", json::quote(&format!("{}", now_secs()))));
   let _ = std::fs::write(dir.join(format!("{key}.json")), format!("{{{}}}\n", fields.join(", ")));
   if let Some(src) = cast_src.filter(|p| p.is_file()) {
     let _ = std::fs::copy(src, dir.join(format!("{key}.cast")));
+    // Remember which cache key this durable cast feeds, so post-run annotation can attach
+    // chapters onto the cached copy (annotation finishes after cache_store).
+    let _ = std::fs::write(PathBuf::from(format!("{}.sccache-key", src.display())), key);
+    if let Some(chapters) = daemon::chapters_sidecar_path(&src.to_string_lossy()) {
+      if chapters.is_file() {
+        let _ = std::fs::copy(&chapters, dir.join(format!("{key}.chapters.json")));
+      }
+    }
+  }
+}
+
+/// After a cast's chapters sidecar appears (annotation), copy it into the result cache next to
+/// the matching `{key}.cast` — so a later cache hit restores chapters with the recording.
+/// Uses the `{cast}.sccache-key` marker written by [`cache_store`]. Best-effort no-op otherwise.
+fn cache_attach_chapters(root: &Path, cast: &Path) {
+  let Some(chapters) = daemon::chapters_sidecar_path(&cast.to_string_lossy()) else {
+    return;
+  };
+  if !chapters.is_file() {
+    return;
+  }
+  let key_path = PathBuf::from(format!("{}.sccache-key", cast.display()));
+  let Ok(key) = std::fs::read_to_string(&key_path) else {
+    return;
+  };
+  let key = key.trim();
+  if key.is_empty() {
+    return;
+  }
+  let dest = cache_dir(root).join(format!("{key}.chapters.json"));
+  let _ = std::fs::copy(&chapters, dest);
+}
+
+/// Human stamp for a cache hit: `2026-07-09 21:35 UTC` from a unix-seconds `cached_at`.
+fn format_cached_at(epoch_secs: u64) -> String {
+  let raw = runtime::format_utc_timestamp(epoch_secs); // YYYYMMDD-HHMMSS
+  if raw.len() >= 15 {
+    format!("{}-{}-{} {}:{} UTC", &raw[0..4], &raw[4..6], &raw[6..8], &raw[9..11], &raw[11..13])
+  } else {
+    raw
   }
 }
 
@@ -5420,13 +5558,19 @@ fn print_skill_usage() {
   println!("\nThe demo .scsh.yml runs `add` on two routes by default (opencode+GPT, claude+Sonnet),");
   println!("plus `subtract` (C - D) — a second commit-enabled step, so one run brings in two");
   println!("commits from two different steps. `multiply` (X * Y) lives in the `multiply` profile");
-  println!("because it REQUIRES X and Y. scsh resolves the env you forward (or refuses the");
-  println!("skill). Examples — successes ({}) and the intended refusal ({}):", ok_mark(), refused_mark());
+  println!("because it REQUIRES X and Y. `demo-pr` is the minimal fake-PR skill (feature note +");
+  println!("PR-DESCRIPTION.md) on claude / codex / grok / cursor. scsh resolves the env you");
+  println!(
+    "forward (or refuses the skill). Examples — successes ({}) and the intended refusal ({}):",
+    ok_mark(),
+    refused_mark()
+  );
   println!();
   example("scsh run", "add 2 + 3 = 5, subtract 10 - 4 = 6 (both commit)", true);
   example("A=10 B=20 scsh run", "add forwards your A,B -> 10 + 20 = 30", true);
   example("X=6 Y=7 scsh run --profile multiply", "also runs multiply -> 6 * 7 = 42", true);
   example("scsh run --profile multiply", "multiply REFUSED — X is required by ${X}", false);
+  example("scsh run demo-pr-claude-sonnet", "fake PR on claude (⇄ commits diff + Description)", true);
   println!();
   let (var, def, req) = (env_syntax("${VAR}"), env_syntax("${VAR:-default}"), env_syntax("${VAR:?msg}"));
   println!("The env syntax: {var} requires VAR, {def} injects a default, {req}");
@@ -5434,6 +5578,7 @@ fn print_skill_usage() {
   println!("When a skill finishes, scsh prints the message from its JSON result file (e.g.");
   println!("\"6 * 7 = 42\"), not just the file path. Preview the resolved env without containers:");
   println!("  {}      (shows every skill and the profile that runs it).", bold("scsh list"));
+  println!("Or from any clean repo (no scaffold): {}.", bold("scsh run --def demo-pr"));
 }
 
 /// An env-syntax token (e.g. `${VAR}`), in cyan to set it apart from the prose.
@@ -6168,10 +6313,12 @@ fn print_help_cache() {
   println!("{}", h_head("Where it lives"));
   print!(
     "{}",
-    r#"  Under the repo's gitignored tmp/: tmp/.sccache/<sha256>.json, and nowhere else. Each
-  entry holds the skill's result AND, for a commit-enabled skill, the commits it made
-  (journaled as a git patch). On a hit scsh restores the result file, prints it with
-  "(cached)", and replays any journaled commits; on a miss it runs and stores both.
+    r#"  Under the repo's gitignored tmp/: tmp/.sccache/<sha256>.json (plus .cast / .chapters.json),
+  and nowhere else. Each entry holds the skill's result, when it was cached, the original
+  duration and recording, chapters once annotation finishes, AND — for a commit-enabled skill —
+  the commits it made (journaled as a git patch). On a hit scsh restores the result file, prints
+  it with "(cached · <when>)", restores the cast + chapters, and replays any journaled commits;
+  on a miss it runs and stores them.
 "#
   );
   println!();
@@ -6441,6 +6588,36 @@ mod tests {
   // container needed — so the rebase / fallback-branch / run-twice behavior is
   // pinned down in CI. (The full container round-trip is shown in DEMO.md.)
 
+  #[test]
+  fn packdiff_failure_detail_reads_machine_mode_errors() {
+    let unknown = br#"{
+  "UnknownRef": {
+    "repo": "/tmp/r",
+    "ref": "nope",
+    "message": "unknown ref in \"/tmp/r\": nope",
+    "stage": "ref",
+    "exit_code": 4
+  }
+}"#;
+    assert_eq!(packdiff_failure_detail(unknown).as_deref(), Some("unknown ref in \"/tmp/r\": nope"));
+    assert_eq!(
+      packdiff_failure_detail(br#"{ "NotAGitRepository": { "stage": "repo", "exit_code": 3 } }"#).as_deref(),
+      Some("NotAGitRepository")
+    );
+    assert_eq!(packdiff_failure_detail(br#"{ "Packed": { "out": "x.html" } }"#), None);
+    assert_eq!(packdiff_failure_detail(b""), None);
+  }
+
+  #[test]
+  fn cached_skill_run_carries_result_json_for_workflow_outputs() {
+    // A workflow reads step outputs from SkillRun.result_content after each wave. A cache
+    // hit that only restored the file on disk used to leave result_content=None and abort
+    // the DAG with "produced no result" (session wpyouk / arith after add+multiply hits).
+    let run = SkillRun::cached(None, r#"{"sum":5}"#.into());
+    assert!(run.ok && run.cached);
+    assert_eq!(run.result_content.as_deref(), Some(r#"{"sum":5}"#));
+  }
+
   use std::sync::atomic::{AtomicUsize, Ordering};
   static MT: AtomicUsize = AtomicUsize::new(0);
 
@@ -6660,9 +6837,9 @@ mod tests {
 
     // A definition/workflow body drives the key (it isn't a caller .skills/ file).
     let mut with_body = s.clone();
-    with_body.delivery = config::SkillDelivery::IntoClone("do X".into());
+    with_body.delivery = config::SkillDelivery::DirectPrompt("do X".into());
     let mut with_body2 = s.clone();
-    with_body2.delivery = config::SkillDelivery::IntoClone("do Y".into());
+    with_body2.delivery = config::SkillDelivery::DirectPrompt("do Y".into());
     assert_ne!(
       cache_key(&caller, &with_body, &env).unwrap(),
       cache_key(&caller, &with_body2, &env).unwrap(),
@@ -6693,6 +6870,8 @@ mod tests {
     // Store with a duration and a cast recording, so a hit can reproduce them.
     let cast_src = caller.join("orig.cast");
     std::fs::write(&cast_src, "cast-bytes").unwrap();
+    let chapters_src = caller.join("orig.chapters.json");
+    std::fs::write(&chapters_src, r#"{"summary":"hi","chapters":[{"t":1.0,"title":"start"}]}"#).unwrap();
     cache_store(&caller, key, result, None, Some(12.5), Some(&cast_src));
     // Stored under the repo's gitignored tmp/.sccache/<key>.json, and reads back.
     assert!(caller.join("tmp/.sccache").join(format!("{key}.json")).is_file());
@@ -6700,8 +6879,13 @@ mod tests {
     assert_eq!(entry.result, result);
     assert!(entry.commits.is_none(), "no commits journaled for a non-committing skill");
     assert_eq!(entry.elapsed, Some(12.5), "the original duration round-trips");
+    assert!(entry.cached_at.is_some(), "cached_at is stamped on store");
     let cast = entry.cast.expect("the cast was cached");
     assert_eq!(std::fs::read_to_string(&cast).unwrap(), "cast-bytes", "the recording round-trips");
+    let chapters = entry.chapters.expect("chapters were cached with the cast");
+    assert!(std::fs::read_to_string(&chapters).unwrap().contains("\"summary\""), "chapters round-trip");
+    // Durable cast remembers its cache key so a later annotate can attach chapters.
+    assert_eq!(std::fs::read_to_string(format!("{}.sccache-key", cast_src.display())).unwrap().trim(), key);
 
     // Restoring writes the result file (creating tmp/), exactly as a real run would have.
     restore_cached_result(&caller, "tmp/add_result.json", result).unwrap();
@@ -6721,6 +6905,31 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_eq!(e2.result, result);
     assert_eq!(e2.commits.as_deref(), Some(patch));
     assert!(e2.elapsed.is_none() && e2.cast.is_none(), "optional fields absent when not stored");
+    assert!(e2.cached_at.is_some(), "cached_at still stamped without a cast");
+  }
+
+  #[test]
+  fn cache_attach_chapters_copies_sidecar_after_annotate() {
+    let caller = repo("chap-cache");
+    let key = "cafechap";
+    let cast_src = caller.join("run.cast");
+    std::fs::write(&cast_src, "cast").unwrap();
+    // Store without chapters (the usual order: cache_store finishes before annotate).
+    cache_store(&caller, key, r#"{"ok":true}"#, None, Some(1.0), Some(&cast_src));
+    assert!(cache_lookup(&caller, key).unwrap().chapters.is_none());
+    // Annotate lands the sidecar next to the durable cast.
+    std::fs::write(caller.join("run.chapters.json"), r#"{"summary":"done","chapters":[{"t":0.5,"title":"hi"}]}"#)
+      .unwrap();
+    cache_attach_chapters(&caller, &cast_src);
+    let entry = cache_lookup(&caller, key).expect("hit");
+    let chapters = entry.chapters.expect("chapters attached into the cache");
+    assert!(std::fs::read_to_string(chapters).unwrap().contains("done"));
+  }
+
+  #[test]
+  fn format_cached_at_is_human_utc() {
+    assert_eq!(format_cached_at(0), "1970-01-01 00:00 UTC");
+    assert_eq!(format_cached_at(1_700_000_000), "2023-11-14 22:13 UTC");
   }
 
   #[test]

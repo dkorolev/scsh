@@ -776,12 +776,13 @@ fn init_demo_scaffolds_example_skills() {
   let init = scsh(&d, &["--init-demo-project"]);
   assert_eq!(init.code, 0, "got: {}", init.out);
 
-  for name in ["add", "subtract", "multiply"] {
+  for name in ["add", "subtract", "multiply", "demo-pr"] {
     let p = d.join(".skills").join(name).join("SKILL.md");
     let body = std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()));
     assert!(body.contains(&format!("name: {name}")), "{} should be the {name} skill", p.display());
     // Each skill ships its own worker script, scaffolded executable.
-    let script = d.join(".skills").join(name).join("scripts").join(format!("{name}.py"));
+    let script_name = if name == "demo-pr" { "demo_pr.py".to_string() } else { format!("{name}.py") };
+    let script = d.join(".skills").join(name).join("scripts").join(script_name);
     assert!(script.is_file(), "{} should be scaffolded", script.display());
     #[cfg(unix)]
     {
@@ -791,7 +792,7 @@ fn init_demo_scaffolds_example_skills() {
     }
   }
   // It explains how to run them, including env passing (success + error) and the profile.
-  assert!(init.out.contains("scaffolded 6 example-skill files"), "got: {}", init.out);
+  assert!(init.out.contains("scaffolded 8 example-skill files"), "got: {}", init.out);
   assert!(init.out.contains("A=10 B=20 scsh run"), "init should show env-forwarding examples; got: {}", init.out);
   assert!(init.out.contains("--profile multiply"), "init should show the profile usage; got: {}", init.out);
   assert!(init.out.contains("REFUSED"), "init should show an error example too; got: {}", init.out);

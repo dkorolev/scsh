@@ -242,7 +242,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 - `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
   brought into the caller's branch (one self-contained HTML file: the diff, commits, and
   in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists
-  only for commit-enabled steps whose commits were integrated while `packdiff` was on the
+  only for commit-enabled steps whose commits were integrated while `packdiff` (≥ 0.3.4
+  recommended; `cargo install packdiff`) was on the
   PATH of the `scsh run` host; 404 otherwise
 - `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
 - `GET /api/v1/sessions` — JSON session id list
@@ -309,7 +310,7 @@ params:                                                       # each forwards as
   B:
     type: int
     default: "3"
-task: |                                                       # becomes .skills/<name>/SKILL.md
+task: |                                                       # passed to the harness as a custom prompt
   Read A and B from the environment, compute A+B, write {"sum": …} to $SCSH_RESULT, and assert.
 invocations:                                                  # the agent matrix (as in .scsh.yml)
   opencode-gpt:
@@ -322,8 +323,9 @@ invocations:                                                  # the agent matrix
 
 Param types are `string`, `int`, `bool`, and `enum` (with a comma-separated `choices:`). A param
 with a `default:` is optional; without one it is required unless `required: false` is set. The
-`task` body is materialized into the run clone (or the git-transport bare on Apple Container),
-so the caller's working tree stays clean — `scsh run --def` requires a clean repo just like a
+`task` / workflow-step `prompt` body is handed to the harness as a **custom prompt** (harnesses
+already accept free-form prompts) — no synthetic `.skills/…/SKILL.md` is written. Repo skills
+under `.skills/` still run the skill-file path. `scsh run --def` requires a clean repo just like a
 normal run.
 
 ## Workflow definitions (`steps:`)
@@ -386,10 +388,12 @@ output field, and any referenced step must be in `needs:` — checked when the d
 parsed, so a workflow that could branch on a value no step produces is rejected up front.
 
 **Job-page dependency graph.** Workflow sessions carry an optional `workflow` object on the
-session snapshot (`nodes: [{ id, proc_index, order, needs, conditional }]`). The job page
+session snapshot (`nodes: [{ id, proc_index, order, needs, conditional, when_summary }]`). The job page
 renders a live DAG (HTML nodes + SVG edges) above the proc list: click a node to open that
-step's panel (`#task-<id>`). Topology comes only from declared `needs` — never from proc
-notes. Flat jobs and older sessions without `workflow` keep the list-only page. `stalled` is
+step's panel (`#task-<id>`). Steps with a `when:` gate show a small **when** marker whose
+tooltip states the condition (e.g. `Runs only if probe_credentials.ok = true`). Topology comes
+only from declared `needs` — never from proc notes. Flat jobs and older sessions without
+`workflow` keep the list-only page. `stalled` is
 a derived display state when the session heartbeat is stale (`SESSION_STALE_SECS`), not a
 persisted proc status.
 
@@ -424,7 +428,9 @@ are built and each agent's credentials proxy through, then runs a trivial end-to
 `categorize` fan out into `sort_fruits` and `sort_vegetables` running in parallel). For a
 **fake PR** in the Web UI (DAG + packdiff ⇄ commits diff with a Description panel), run
 **`greet`**: `scaffold` → `implement` → `describe` seeds a broken `greet()`, fixes it, then
-commits `PR-DESCRIPTION.md`.
+commits `PR-DESCRIPTION.md`. For the **minimal** one-shot version (just a feature note +
+`PR-DESCRIPTION.md`, no DAG), run **`demo-pr`** — four agent routes (claude / codex / cursor /
+grok), each `commits: true`.
 
 ## Images panel
 

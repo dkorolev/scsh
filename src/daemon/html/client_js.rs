@@ -1559,16 +1559,66 @@ function openRepo() {
 }
 // Create a fresh project under ~/.scsh/projects/<name> — a new git repo born runnable — and
 // open it in place, so a demo job can start seconds later with no terminal involved.
+// Names: letters/digits/-/_ only (no dots or slashes). An existing name copies into Open + toasts.
+function projectNameOk(name) {
+  return /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(name) && !/[./]/.test(name);
+}
+function showToast(message) {
+  let el = document.getElementById('scsh-toast');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'scsh-toast';
+    el.className = 'toast';
+    el.setAttribute('role', 'status');
+    document.body.appendChild(el);
+  }
+  el.textContent = message;
+  el.classList.remove('show');
+  // Retrigger the CSS transition when the same message fires twice in a row.
+  void el.offsetWidth;
+  el.classList.add('show');
+  clearTimeout(showToast._timer);
+  showToast._timer = setTimeout(() => { el.classList.remove('show'); }, 2800);
+}
+function suggestOpenExistingProject(name) {
+  const pathInput = document.getElementById('repo-path');
+  const openBtn = document.getElementById('repo-open');
+  const nameInput = document.getElementById('project-name');
+  if (pathInput) {
+    pathInput.value = name;
+    pathInput.focus();
+    pathInput.select();
+    pathInput.classList.add('flash-open');
+    setTimeout(() => pathInput.classList.remove('flash-open'), 1200);
+  }
+  if (openBtn) {
+    openBtn.classList.add('flash-open');
+    setTimeout(() => openBtn.classList.remove('flash-open'), 1200);
+  }
+  if (nameInput) nameInput.value = '';
+  showToast('This project already exists, just open it.');
+}
 function createProject() {
   const input = document.getElementById('project-name');
   const note = document.getElementById('repo-note');
   const name = (input?.value || '').trim();
   if (!name) { if (note) note.textContent = 'enter a project name'; return; }
+  if (!projectNameOk(name)) {
+    showToast('Project names: letters, digits, - or _ only (no dots or slashes).');
+    if (note) note.textContent = '';
+    return;
+  }
   if (note) note.textContent = 'creating…';
   fetch('/api/v1/projects/create', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: name }),
-  }).then(r => r.json()).then(resp => {
+  }).then(async r => {
+    const resp = await r.json();
+    if (r.status === 409 || resp.exists) {
+      suggestOpenExistingProject(resp.name || name);
+      if (note) note.textContent = '';
+      return;
+    }
     handleRepoOpened(resp, note);
     if (resp.ok) {
       const pathInput = document.getElementById('repo-path');

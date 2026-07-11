@@ -167,7 +167,7 @@ Or <strong>create a new project</strong>: a fresh git repository under
 </div>
 <div class="images-controls">
 <div class="chamfer input-wrap" style="flex:1;min-width:16rem">
-<input class="input" type="text" id="project-name" placeholder="new project name (created under ~/.scsh/projects/)">
+<input class="input" type="text" id="project-name" placeholder="project name (letters, digits, - or _; no dots/slashes)" autocomplete="off" spellcheck="false">
 </div>
 <button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New project</span></button>
 </div>

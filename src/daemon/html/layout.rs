@@ -27,10 +27,14 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
-    padding: 28px 24px 48px;
+    padding: 0;
+    line-height: 1.5;
+  }
+  /* Content column — the status bar sits outside this so it can span the full viewport. */
+  .page-shell {
     max-width: 1100px;
     margin: 0 auto;
-    line-height: 1.5;
+    padding: 28px 24px 48px;
   }
   h1 { font-size: 1.75rem; font-weight: 600; margin: 0 0 4px; }
   h1 a { color: inherit; text-decoration: none; }
@@ -145,7 +149,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .input::placeholder, #repo-path::placeholder { color: var(--text-muted); }
   .param-row input[type=text], .param-row input[type=number], .param-row select {
     background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-    border-radius: 4px; padding: 6px 10px; width: auto; min-width: 8rem;
+    border-radius: 4px; padding: 6px 10px; flex: 1 1 16rem; min-width: 16rem; max-width: 100%;
   }
   .param-row input:focus, .param-row select:focus { border-color: var(--purple); outline: none; }
 
@@ -198,17 +202,19 @@ pub(crate) const PAGE_CSS: &str = r#"
   .agent-badge::before { background: var(--surface); }
   .form-title { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px; }
 
-  /* ── status bar (pinned chrome — WEB-UI §1 / §2) ── */
+  /* ── status bar (full-width pinned chrome — WEB-UI §1 / §2) ── */
   .page-lede {
     margin: 0 0 0.85rem; font-size: 1.02rem; line-height: 1.45; color: var(--text);
     max-width: 52rem;
   }
   .page-lede .dim { color: var(--text-muted); }
   .daemon-status {
-    position: sticky; top: 0; z-index: 20;
+    position: sticky; top: 0; z-index: 40;
+    width: 100%; box-sizing: border-box;
     display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap;
-    font-size: 0.85rem; margin-bottom: 1.25rem; padding: 0.55rem 0.85rem;
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    font-size: 0.85rem; margin: 0; padding: 0.55rem 24px;
+    background: var(--surface);
+    border: none; border-bottom: 1px solid var(--border); border-radius: 0;
   }
   .daemon-status .crumbs { font-weight: 700; font-size: 1rem; }
   .crumbs a { color: inherit; text-decoration: none; }
@@ -307,8 +313,12 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll { overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem; }
   .workflow-stage { position: relative; min-height: 4rem; }
-  .workflow-edges { position: absolute; inset: 0; color: #6e7681; pointer-events: none; }
-  .wf-edge { fill: none; stroke: currentColor; stroke-width: 1.75; opacity: 0.85; }
+  .workflow-edges { position: absolute; inset: 0; color: #8b949e; pointer-events: none; }
+  .wf-edge {
+    fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round;
+    opacity: 0.92;
+  }
+  .wf-arrowhead { stroke: currentColor; }
   .workflow-nodes { position: relative; width: 100%; height: 100%; }
   .wf-node {
     position: absolute; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
@@ -323,7 +333,11 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .wf-gate { margin-left: 0.35rem; color: var(--purple); font-weight: 700; }
+  .wf-gate {
+    margin-left: 0.4rem; padding: 0.05rem 0.35rem; border: 1px solid rgba(137, 87, 229, 0.55);
+    border-radius: 3px; color: var(--purple); font-weight: 600; font-size: 0.68rem;
+    letter-spacing: 0.02em; vertical-align: middle; white-space: nowrap;
+  }
   .wf-node.wf-running { border-left-color: var(--purple); }
   .wf-node.wf-running .wf-state { color: var(--purple); }
   .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.45); }
@@ -509,6 +523,24 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 100%; min-height: 28rem; border: 1px solid var(--border); border-radius: 4px;
     margin: 0.4rem 0 0.25rem; background: #fff;
   }
+  /* Bottom-center toast — brief, non-blocking feedback (e.g. project already exists). */
+  .toast {
+    position: fixed; left: 50%; bottom: 1.75rem; z-index: 2000;
+    transform: translateX(-50%) translateY(0.6rem);
+    max-width: min(28rem, calc(100vw - 2rem));
+    padding: 0.7rem 1.15rem; border-radius: 8px;
+    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    font-size: 0.92rem; line-height: 1.35; text-align: center;
+    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.22s ease, transform 0.22s ease;
+  }
+  .toast.show {
+    opacity: 1; transform: translateX(-50%) translateY(0);
+  }
+  #repo-path.flash-open, #repo-open.flash-open {
+    box-shadow: 0 0 0 2px var(--cyan);
+  }
   .autoscroll-ctl {
     display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
     cursor: pointer; user-select: none; color: var(--text-muted);
@@ -629,7 +661,8 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, lede: 
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
     None => "const SESSION_ID = null;".to_string(),
   };
-  // Plain-language summary ABOVE the pinned chrome so it scrolls away (WEB-UI §1).
+  // Lede lives in the content column under the full-width status bar so it scrolls away
+  // while the chrome stays pinned at the top of the viewport (WEB-UI §1).
   let lede_html = if lede.is_empty() { String::new() } else { format!("<p class=\"page-lede\">{lede}</p>\n") };
   // The session page embeds an asciinema player per proc; the index page does not need it.
   let (player_css, player_js) = if session_id.is_some() {
@@ -652,12 +685,13 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, lede: 
 <style>{css}</style>
 </head>
 <body>
-{lede}
 <div id="daemon-status" class="daemon-status connecting">
 <span class="crumbs">{crumbs}</span>
 <span class="daemon-right"><span id="status-label">connecting…</span>
 <span id="status-uptime" class="dim"></span>{scsh_version}<span class="dot" aria-hidden="true"></span></span></div>
-{body}
+<div class="page-shell">
+{lede}{body}
+</div>
 {player_js}
 <script>
 const WS_PORT = {port};

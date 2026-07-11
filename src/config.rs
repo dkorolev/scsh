@@ -128,14 +128,14 @@ pub struct ResolvedInvocation {
   pub artifacts: Vec<String>,
 }
 
-/// How a skill's `SKILL.md` reaches the agent inside the container.
+/// How a skill's instructions reach the agent inside the container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SkillDelivery {
   /// The repo's own committed `.skills/<name>/SKILL.md`, already present in the clone.
   Repo,
-  /// A carried body (a `scsh run --def` / workflow-step run), materialized into the clone at
-  /// `.skills/<name>/SKILL.md` — the caller's working tree stays clean.
-  IntoClone(String),
+  /// An inline harness-def `task:` / workflow-step `prompt:` — passed to the harness as a
+  /// **custom prompt** (no `SKILL.md` is written; harnesses already accept free-form prompts).
+  DirectPrompt(String),
   /// A carried body (an `--override-dot-scsh-yml` run), installed into the harness's GLOBAL
   /// skills location inside the container ([`Harness::global_skills_rel`]) — the repo
   /// checkout never contains the skill, yet the agent can use it, natively by name where the
@@ -144,17 +144,12 @@ pub enum SkillDelivery {
 }
 
 impl SkillDelivery {
-  /// The carried `SKILL.md` body, when this delivery carries one.
+  /// The carried prompt / `SKILL.md` body, when this delivery carries one.
   pub fn body(&self) -> Option<&str> {
     match self {
       SkillDelivery::Repo => None,
-      SkillDelivery::IntoClone(b) | SkillDelivery::GlobalInstall(b) => Some(b),
+      SkillDelivery::DirectPrompt(b) | SkillDelivery::GlobalInstall(b) => Some(b),
     }
-  }
-
-  /// Whether the skill is installed globally in the container rather than in the checkout.
-  pub fn is_global(&self) -> bool {
-    matches!(self, SkillDelivery::GlobalInstall(_))
   }
 }
 
@@ -382,7 +377,7 @@ pub fn bundled_skills() -> [(&'static str, &'static str); 1] {
 /// land in a repo.
 /// Each entry is `(repo-relative path, contents, executable)`. The `scripts/*.py` files
 /// are scaffolded with the executable bit set so the harness can run them directly.
-pub fn demo_skills() -> [(&'static str, &'static str, bool); 6] {
+pub fn demo_skills() -> [(&'static str, &'static str, bool); 8] {
   [
     (".skills/add/SKILL.md", include_str!("../.skills/add/SKILL.md"), false),
     (".skills/add/scripts/add.py", include_str!("../.skills/add/scripts/add.py"), true),
@@ -390,6 +385,8 @@ pub fn demo_skills() -> [(&'static str, &'static str, bool); 6] {
     (".skills/subtract/scripts/subtract.py", include_str!("../.skills/subtract/scripts/subtract.py"), true),
     (".skills/multiply/SKILL.md", include_str!("../.skills/multiply/SKILL.md"), false),
     (".skills/multiply/scripts/multiply.py", include_str!("../.skills/multiply/scripts/multiply.py"), true),
+    (".skills/demo-pr/SKILL.md", include_str!("../.skills/demo-pr/SKILL.md"), false),
+    (".skills/demo-pr/scripts/demo_pr.py", include_str!("../.skills/demo-pr/scripts/demo_pr.py"), true),
   ]
 }
 
@@ -1488,11 +1485,11 @@ mod tests {
   #[test]
   fn demo_config_is_valid() {
     let cfg = validate(demo_yaml()).expect("demo config should validate");
-    assert_eq!(cfg.skills.len(), 3);
+    assert_eq!(cfg.skills.len(), 4);
     let add = cfg.skills.iter().find(|s| s.name == "add").expect("add present");
     assert_eq!(add.invocations.len(), 2);
     let expanded = expand_invocations(&cfg);
-    assert_eq!(expanded.len(), 5);
+    assert_eq!(expanded.len(), 9);
     let add_oc =
       expanded.iter().find(|s| s.name == "add-opencode-gpt-5.4-mini-fast").expect("add-opencode-gpt-5.4-mini-fast");
     assert_eq!(add_oc.skill_source, "add");
@@ -1513,6 +1510,16 @@ mod tests {
     let mul_oc =
       expanded.iter().find(|s| s.name == "multiply-opencode-gpt-5.4-mini-fast").expect("multiply-opencode-gpt");
     assert_eq!(mul_oc.profile.as_deref(), Some("multiply"));
+    // demo-pr: one commit-enabled route per agent (claude / codex / grok / cursor).
+    let demo = cfg.skills.iter().find(|s| s.name == "demo-pr").expect("demo-pr present");
+    assert_eq!(demo.invocations.len(), 4);
+    for route in
+      ["demo-pr-claude-sonnet", "demo-pr-codex-gpt-5.5", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"]
+    {
+      let inv = expanded.iter().find(|s| s.name == route).unwrap_or_else(|| panic!("missing {route}"));
+      assert!(inv.commits, "{route} must be commit-enabled for packdiff");
+      assert_eq!(inv.skill_source, "demo-pr");
+    }
   }
 
   #[test]
@@ -1800,11 +1807,12 @@ mod tests {
     assert_eq!(Harness::Cursor.global_skills_rel(), "tmp/.cursor/skills");
     assert!(Harness::Claude.resolves_skills_by_name() && Harness::Cursor.resolves_skills_by_name());
     assert!(!Harness::Opencode.resolves_skills_by_name());
-    // SkillDelivery: only GlobalInstall is global; only Repo carries no body.
-    assert!(SkillDelivery::GlobalInstall("x".into()).is_global());
-    assert!(!SkillDelivery::IntoClone("x".into()).is_global());
+    // SkillDelivery: only Repo carries no body; DirectPrompt and GlobalInstall carry text.
     assert_eq!(SkillDelivery::Repo.body(), None);
     assert_eq!(SkillDelivery::GlobalInstall("x".into()).body(), Some("x"));
+    assert_eq!(SkillDelivery::DirectPrompt("hi".into()).body(), Some("hi"));
+    assert!(matches!(SkillDelivery::GlobalInstall("x".into()), SkillDelivery::GlobalInstall(_)));
+    assert!(matches!(SkillDelivery::DirectPrompt("x".into()), SkillDelivery::DirectPrompt(_)));
   }
 
   #[test]

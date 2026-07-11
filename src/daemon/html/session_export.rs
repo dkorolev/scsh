@@ -10,7 +10,9 @@
 //! (`fit: 'both'`, idle compression, chapter markers, `fullscreenEl` = the cast box,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads —
 //! simply is not there. Packed commits-diff pages (when present) ride as sandboxed
-//! `srcdoc` iframes so the snapshot stays a single file.
+//! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
+//! engine and localStorage work — packdiff ≥ 0.3 document-first review) so the snapshot
+//! stays a single file.
 
 use super::escape::esc;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
@@ -150,7 +152,7 @@ fn diff_embed_html(diff_html: Option<&str>) -> String {
     return String::new();
   };
   format!(
-    r#"<details class="proc-diff"><summary>⇄ commits diff</summary><iframe sandbox srcdoc="{srcdoc}"></iframe></details>
+    r#"<details class="proc-diff"><summary>⇄ commits diff</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
 "#,
     srcdoc = srcdoc_attr(html),
   )

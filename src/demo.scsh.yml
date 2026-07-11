@@ -46,3 +46,27 @@ skills:
       claude-sonnet-4-6:
         harness: claude
         model: sonnet
+  # Minimal fake-PR: two files (feature note + PR-DESCRIPTION.md), two commits, packdiff
+  # Description panel. One route per agent so you can pick a flavor.
+  demo-pr:
+    timeout: 600
+    env:
+      - TITLE: ${TITLE:-Hello from demo-pr}
+    result: tmp/demo_pr_{name}_result.json
+    invocations:
+      claude-sonnet:
+        harness: claude
+        model: sonnet
+        commits: true
+      codex-gpt-5.5:
+        harness: codex
+        model: gpt-5.5
+        commits: true
+      grok-build:
+        harness: grok
+        model: grok-build
+        commits: true
+      cursor-composer-fast:
+        harness: cursor
+        model: composer-2.5-fast
+        commits: true
