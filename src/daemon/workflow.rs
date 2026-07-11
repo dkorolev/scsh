@@ -674,6 +674,7 @@ mod tests {
       client_connected: true,
       run_pid: Some(1),
       workflow: Some(arith_meta()),
+      parent_session: None,
     };
     // Only first node mapped for this test
     session.workflow.as_mut().unwrap().nodes[1].proc_index = None;
@@ -809,6 +810,7 @@ mod tests {
       client_connected: true,
       run_pid: Some(1),
       workflow: None,
+      parent_session: None,
     };
     let meta = effective_workflow_meta(&session).expect("flat job gets a graph");
     let ids: Vec<&str> = meta.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -923,6 +925,7 @@ mod tests {
       client_connected: true,
       run_pid: Some(1),
       workflow: Some(arith_meta()),
+      parent_session: None,
     };
     // Rebind authored proc indices to match this fixture.
     session.workflow.as_mut().unwrap().nodes[0].proc_index = Some(1);
@@ -1044,6 +1047,7 @@ mod tests {
           },
         ],
       }),
+      parent_session: None,
     };
     let meta = effective_workflow_meta(&session).unwrap();
     let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
@@ -1134,6 +1138,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     let meta = effective_workflow_meta(&session).unwrap();
     let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
@@ -1156,6 +1161,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     let map = needs_from_harness_profile(&session).expect("arith builtin");
     assert_eq!(map.get("summarize"), Some(&vec!["add".to_string(), "multiply".to_string()]));

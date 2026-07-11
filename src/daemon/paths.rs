@@ -177,7 +177,7 @@ pub fn base_url(port: u16) -> String {
 }
 
 pub fn session_url(port: u16, session_id: &str) -> String {
-  format!("{}/session/{}", base_url(port), session_id)
+  format!("{}/job/{}", base_url(port), session_id)
 }
 
 /// Canonical absolute path for display and storage (resolves relative paths against cwd).
@@ -237,6 +237,6 @@ mod tests {
   #[test]
   fn session_url_format() {
     let u = session_url(7274, "abcdef");
-    assert_eq!(u, "http://127.0.0.1:7274/session/abcdef");
+    assert_eq!(u, "http://127.0.0.1:7274/job/abcdef");
   }
 }

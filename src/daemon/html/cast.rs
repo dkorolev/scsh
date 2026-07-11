@@ -85,7 +85,7 @@ header code {{
 </head>
 <body>
 <header>
-<a href="/session/{sid}">← session <code>{sid}</code></a>
+<a href="/job/{sid}">← job <code>{sid}</code></a>
 <strong>{label}</strong>
 {live_note}
 </header>

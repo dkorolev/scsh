@@ -25,7 +25,7 @@ reachable while a daemon is listening on that port; start `scsh daemon start` fo
 post-run browsing, or rely on persisted state after `scsh daemon restart`:
 
 ```text
-http://127.0.0.1:7274/session/abcdef
+http://127.0.0.1:7274/job/abcdef
 ```
 
 Open it in a browser to see image builds and skills as collapsible sections, with timestamped
@@ -124,12 +124,20 @@ play exactly as before, and the manual ↻ reload button keeps working.
 After a run, if the `cursor-agent` CLI and a cursor login are present on the host, `scsh`
 annotates each new recording: it renders the cast to a compact timestamped transcript, asks
 cursor-agent on the **Composer** model for a one-sentence summary plus 3–8 chapters, and
-writes a `<cast>.chapters.json` sidecar next to the recording. The player loads it from
-`GET /cast/{session}/{proc}/chapters` (returns `{}` when absent). Annotate on demand with:
+writes a `<cast>.chapters.json` sidecar next to the recording. When a daemon client is live,
+annotation can appear as post-skill **annotate** procs on the same job (before the session
+ends); standalone `scsh annotate-cast` may register a short `(internal)` session instead.
+The player loads chapters from `GET /cast/{session}/{proc}/chapters` (returns `{}` when
+absent). Annotate on demand with:
 
 ```console
 scsh annotate-cast ~/.scsh/sessions/<session>/casts/<recording>.cast   # override model via SCSH_ANNOTATE_MODEL
 ```
+
+The job page shows how many casts still lack a sidecar (`N casts finalizing chapters`) and
+labels the whole-job export `chapters pending ⬇` until they land (or `incomplete ⬇` while
+the job is still running). Projects → **Internal** lists synthetic-repo sessions —
+`(image builds)` and `(internal)` — separate from real projects and repositories.
 
 ## Artifact formats
 
@@ -224,8 +232,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 
 ## API (for scripts)
 
-- `GET /` — HTML session index
-- `GET /session/{id}` — HTML session detail
+- `GET /` — HTML index (Run tab); also `/jobs`, `/projects`, `/setup`
+- `GET /job/{id}` — HTML job detail (`/session/{id}` still accepted)
 - `GET /cast/{session}/{proc}` — asciicast v3 recording (valid partial file mid-run);
   `?dl=1` for a download attachment
 - `GET /cast/{session}/{proc}/play` — HTML player page (scrub, pause, `#t=…` deep links)
@@ -234,11 +242,11 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   folded in when present, and a malformed sidecar exports without chapters). Served as a
   download attachment named `<cast stem>.html`; 404 with an actionable body until the
   recording has at least one complete frame
-- `GET /session/{id}/export.html` — the ENTIRE session as one self-contained offline HTML
+- `GET /job/{id}/export.html` — the ENTIRE job as one self-contained offline HTML
   page: a summary header plus every recording embedded as its per-cast export page (iframe
   `srcdoc` composition; procs without a recording become note rows). Served as a download
-  attachment named `scsh-session-{id}.html`; 404 with an actionable body when the session
-  has no exportable recording yet
+  attachment named `scsh-job-{id}.html`; 404 with an actionable body when the job
+  has no exportable recording yet (`/session/{id}/export.html` still accepted)
 - `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
   brought into the caller's branch (one self-contained HTML file: the diff, commits, and
   in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists

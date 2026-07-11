@@ -167,7 +167,7 @@ function indexRowHtml(id, session, nowUnix) {
   const profile = session.profile || 'default';
   const n = (session.procs || []).length;
   const duration = sessionDurationLabel(session, nowUnix, lifecycle);
-  return '<tr data-session-id="' + esc(id) + '"><td><a class="job-id" href="/session/' + esc(id) + '">' + esc(id) + '</a></td>' +
+  return '<tr data-session-id="' + esc(id) + '"><td><a class="job-id" href="/job/' + esc(id) + '">' + esc(id) + '</a></td>' +
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
@@ -278,7 +278,8 @@ function sessionEndedLabel(session, nowUnix) {
   if (session.ended_at) return formatUnixTime(session.ended_at);
   const life = sessionLifecycle(session, nowUnix);
   if (life.class === 'running') return 'still running';
-  if (life.class === 'terminated') return life.label;
+  // Heartbeat-stale: last_seen is the effective end time (badge already says terminated).
+  if (life.class === 'terminated') return formatUnixTime(session.last_seen_at || session.started_at);
   return '—';
 }
 function renderSessionMeta(session, nowUnix) {
@@ -299,8 +300,8 @@ function renderSessionMeta(session, nowUnix) {
       '<dt>Ended</dt><dd data-session-ended>' + esc(ended) + '</dd>' +
       '<dt>Duration</dt><dd data-session-duration>' +
       esc(formatDuration(sessionDurationSecs(session, nowUnix))) + '</dd>' +
-      '<dt>Branch</dt><dd data-session-branch><code>' + esc(branch) + '</code></dd>' +
-      '<dt>Repo</dt><dd data-session-repo><code class="repo-path">' + esc(repo) + '</code></dd>';
+      '<dt>Repo</dt><dd data-session-repo><code class="repo-path">' + esc(repo) + '</code></dd>' +
+      '<dt>Branch</dt><dd data-session-branch><code>' + esc(branch) + '</code></dd>';
   } else {
     setTextUnlessSelecting(el.querySelector('[data-session-ended]'), ended);
     setTextUnlessSelecting(el.querySelector('[data-session-branch] code'), branch);
@@ -597,6 +598,15 @@ function updateProcFields(det, p, nowUnix) {
       ? 'Force-stop this container only — the rest of the job continues'
       : 'This step already finished';
   }
+  // Run snapshot label tracks live vs finished; the link itself is unhidden once frames exist.
+  const exportLink = det.querySelector('a[data-cast-export]');
+  if (exportLink) {
+    const live = p.status === 'running' || p.status === 'waiting';
+    const label = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+    const span = exportLink.querySelector('span');
+    if (span) span.textContent = label;
+    else exportLink.textContent = label;
+  }
   // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
   // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
   if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
@@ -619,27 +629,26 @@ function updateProcFields(det, p, nowUnix) {
       if (before) det.insertBefore(div, before);
     }
   } else if (containerEl) containerEl.remove();
-  // A proc that gained a cast (rendered earlier as text) swaps its output for the embed.
+  // A proc that gained a cast (rendered earlier as text) swaps its output for the embed
+  // and gets a run-snapshot link above Force stop.
   const castEl = det.querySelector('.cast');
   if (hasCast(p) && !castEl) {
     det.querySelector('.autoscroll-ctl')?.remove();
     det.querySelector('.output')?.remove();
+    ensureProcSnapshot(det, p);
     det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
   } else if (castEl && castEl.dataset.status !== p.status) {
     // On finish, reload once so the player has the complete recording, not the partial
     // one; keep the viewer's position and leave live mode (player remounts without live).
     const wasRunning = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
     castEl.dataset.status = p.status;
-    const exportLink = castEl.querySelector('[data-cast-export]');
-    if (exportLink) {
-      const live = p.status === 'running' || p.status === 'waiting';
-      exportLink.textContent = live ? '⬇ incomplete' : '⬇ Download run snapshot';
-    }
     if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
       castEl.dataset.ended = String(Math.round(Date.now() / 1000));
       if (castEl._live) setCastLive(castEl, false);
       createCastPlayer(castEl, castEl._player ? castEl._player.getCurrentTime() : null);
     }
+  } else if (hasCast(p)) {
+    ensureProcSnapshot(det, p);
   }
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
@@ -653,6 +662,39 @@ function updateProcFields(det, p, nowUnix) {
   syncAutoscrollCtl(det, p);
 }
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
+// Insert the run-snapshot link above Force stop when a cast appears mid-job.
+function ensureProcSnapshot(det, p) {
+  if (det.querySelector('a[data-cast-export]')) return;
+  let actions = det.querySelector('.proc-actions');
+  if (!actions) {
+    actions = document.createElement('div');
+    actions.className = 'proc-actions';
+    const kill = det.querySelector('button[data-proc-stop]');
+    if (kill && kill.parentElement === det) {
+      det.insertBefore(actions, kill);
+      actions.appendChild(kill);
+    } else {
+      const summary = det.querySelector('summary');
+      if (summary) det.insertBefore(actions, summary);
+      else det.prepend(actions);
+      if (kill) actions.appendChild(kill);
+    }
+  }
+  const live = p.status === 'running' || p.status === 'waiting';
+  const label = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+  const href = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index + '/export.html';
+  const a = document.createElement('a');
+  a.className = 'chamfer btn btn--cyan btn--sm proc-snapshot';
+  a.href = href;
+  a.setAttribute('data-cast-export', '');
+  a.setAttribute('download', '');
+  a.hidden = true;
+  a.title = 'Offline HTML snapshot of this run';
+  a.innerHTML = '<span>' + label + '</span>';
+  const killBtn = actions.querySelector('button[data-proc-stop]');
+  if (killBtn) actions.insertBefore(a, killBtn);
+  else actions.appendChild(a);
+}
 // Mirrors proc_diff_btn_html in session.rs.
 function procDiffBtnHtml(p) {
   return '<a class="proc-diff" data-proc-diff href="/diff/' + encodeURIComponent(SESSION_ID) + '/' + p.index +
@@ -669,12 +711,9 @@ function castEmbedHtml(p) {
   const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
   const ended = (p.started_at && p.elapsed != null && p.status !== 'running' && p.status !== 'waiting')
     ? ' data-ended="' + Math.round(p.started_at + p.elapsed) + '"' : '';
-  const live = p.status === 'running' || p.status === 'waiting';
-  const exportLabel = live ? '⬇ incomplete' : '⬇ Download run snapshot';
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
-    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>' + exportLabel + '</a>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
@@ -746,7 +785,8 @@ function createCastPlayer(box, startAt, autoplay) {
     box._loadedDuration = stats.events ? stats.duration : null;
     // The .html export needs at least one complete frame (the server 404s otherwise), so
     // the download link rides the same no-frames state as the placeholder.
-    const exportLink = box.querySelector('[data-cast-export]');
+    const det = box.closest('details.proc');
+    const exportLink = (det || box).querySelector('[data-cast-export]');
     if (exportLink) exportLink.hidden = !stats.events;
     if (!stats.events) {
       mount.innerHTML = castPlaceholderHtml(box.dataset.status);
@@ -813,8 +853,9 @@ function pollForChapters(box, chaptersUrl) {
   pending.className = 'dim chap-pending';
   pending.textContent = '⏳ chapters: summarizing…';
   if (bar) bar.appendChild(pending);
+  if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]);
   box._chapPoll = setInterval(() => {
-    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); return; }
+    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]); return; }
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
       const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
       if (!chapters.length) return;
@@ -823,6 +864,7 @@ function pollForChapters(box, chaptersUrl) {
       pending.remove();
       // Re-create at the same position so the timeline gains its markers too.
       createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
+      if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]);
     }).catch(() => {});
   }, 5000);
 }
@@ -898,8 +940,23 @@ function procHtml(p, isOpen, nowUnix) {
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
+  const live = p.status === 'running' || p.status === 'waiting';
+  const snapLabel = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+  const snap = hasCast(p)
+    ? '<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/' + encodeURIComponent(SESSION_ID) +
+      '/' + p.index + '/export.html" data-cast-export download hidden title="Offline HTML snapshot of this run"><span>' +
+      snapLabel + '</span></a>'
+    : '';
+  const kill = '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
+    esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) + '"' + (live ? '' : ' disabled') +
+    ' title="' + (live
+      ? 'Force-stop this container only — the rest of the job continues'
+      : 'This step already finished') +
+    '"><span>Force stop</span></button>';
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
-    (isOpen ? ' open' : '') + '><summary>' +
+    (isOpen ? ' open' : '') + '>' +
+    '<div class="proc-actions">' + snap + kill + '</div>' +
+    '<summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span> ' +
@@ -1578,6 +1635,7 @@ function onTick(msg) {
     if (snapshot) {
       renderIndex(snapshot, nowUnix);
       renderRepoJobs(snapshot, nowUnix);
+      renderInternalJobs(snapshot, nowUnix);
     }
   }
 }
@@ -1635,7 +1693,7 @@ function initFleetJumps() {
 function syncSessionStopButton(session) {
   const lifecycle = sessionLifecycle(session, Date.now() / 1000);
   const btn = document.getElementById('session-stop');
-  // Gray in place (WEB-UI §2) — never remove. Badge still follows the heading when resting.
+  // Gray in place (WEB-UI §2) — never remove. Kind/lifecycle live on the page lede.
   if (btn) {
     const running = lifecycle.class === 'running';
     btn.disabled = !running;
@@ -1644,16 +1702,51 @@ function syncSessionStopButton(session) {
       : ('Job is ' + lifecycle.label + ' — nothing left to stop');
     setBtnLabel(btn, 'Force stop');
   }
+  syncChaptersPending(session);
+  const pending = chaptersPendingCount(session);
   const exportBtn = document.querySelector('a.session-export span') || document.querySelector('a.session-export');
   if (exportBtn) {
-    const label = lifecycle.class === 'running' ? 'incomplete ⬇' : 'job snapshot ⬇';
+    let label = 'job snapshot ⬇';
+    if (lifecycle.class === 'running') label = 'incomplete ⬇';
+    else if (pending > 0) label = 'chapters pending ⬇';
     if (exportBtn.tagName === 'SPAN') exportBtn.textContent = label;
     else setBtnLabel(exportBtn, label);
   }
-  if (lifecycle.class === 'running') return;
-  const kind = document.querySelector('.session-kind');
-  if (kind && !kind.querySelector('.session-status')) {
-    kind.insertAdjacentHTML('beforeend', ' ' + sessionStatusBadge(lifecycle));
+}
+function chaptersPendingCount(session) {
+  let annotateLive = 0;
+  if (session && session.procs) {
+    for (const p of session.procs) {
+      if (p.kind === 'annotate' && (p.status === 'running' || p.status === 'waiting')) annotateLive++;
+    }
+  }
+  const domPending = document.querySelectorAll('.chap-pending').length;
+  if (annotateLive > 0 || domPending > 0) return Math.max(annotateLive, domPending);
+  const el = document.getElementById('chapters-pending');
+  const ssr = el ? (parseInt(el.getAttribute('data-pending') || '0', 10) || 0) : 0;
+  if (!ssr) return 0;
+  // Cast players loaded and none still summarizing → chapters settled (or never will).
+  if (document.querySelectorAll('.cast[data-ready]').length > 0) return 0;
+  return ssr;
+}
+function syncChaptersPending(session) {
+  const n = chaptersPendingCount(session);
+  let el = document.getElementById('chapters-pending');
+  const card = document.querySelector('.card.card--accent-left-purple');
+  if (n > 0) {
+    const text = n + ' cast' + (n === 1 ? '' : 's') + ' finalizing chapters';
+    if (!el && card) {
+      el = document.createElement('p');
+      el.className = 'chapters-pending dim';
+      el.id = 'chapters-pending';
+      card.appendChild(el);
+    }
+    if (el) {
+      el.setAttribute('data-pending', String(n));
+      el.textContent = text;
+    }
+  } else if (el) {
+    el.remove();
   }
 }
 async function forceStopSession(btn) {
@@ -1706,7 +1799,7 @@ async function killProc(btn) {
   });
   if (!ok) return;
   btn.disabled = true;
-  btn.textContent = 'stopping\u2026';
+  setBtnLabel(btn, 'Stopping…');
   try {
     const resp = await fetch('/api/v1/proc/stop', {
       method: 'POST',
@@ -1716,14 +1809,14 @@ async function killProc(btn) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
-      btn.textContent = 'Force stop';
+      setBtnLabel(btn, 'Force stop');
       showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
-    btn.textContent = data.already_ended ? 'already ended' : 'stopped';
+    setBtnLabel(btn, data.already_ended ? 'already ended' : 'stopped');
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = 'Force stop';
+    setBtnLabel(btn, 'Force stop');
     showToast(String(e));
   }
 }
@@ -2058,7 +2151,7 @@ function startSetupTests(tests, btn) {
       showToast((j && j.error) || 'setup test failed to start');
       return;
     }
-    location.href = '/session/' + encodeURIComponent(j.session);
+    location.href = '/job/' + encodeURIComponent(j.session);
   }).catch(e => {
     if (btn) btn.disabled = false;
     showToast(String(e));
@@ -2190,7 +2283,7 @@ function postImagesBuild(req) {
     body: JSON.stringify(req),
   }).then(r => r.json()).then(resp => {
     if (resp.ok && resp.session) {
-      window.location.href = '/session/' + resp.session;
+      window.location.href = '/job/' + resp.session;
     } else if (note) {
       note.textContent = resp.error || 'build request failed';
     }
@@ -2277,7 +2370,7 @@ let OPEN_REPO_RUNNABLE = false;
 const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
 // ---- tabs ----
-// Explicit tab clicks push history (#tab=…); Back/Forward restore the panel (WEB-UI §1).
+// Explicit tab clicks push history (/jobs, /projects, /setup, /); Back/Forward restore (WEB-UI §1).
 // /project/… and /repo/… are filtered Projects views — keep the path, open the Projects tab.
 (function initTabs() {
   const tabs = document.querySelectorAll('.tab');
@@ -2286,10 +2379,35 @@ const DEFS_BY_NAME = {};  // name -> definition
     const p = location.pathname || '/';
     return p === '/project' || p.indexOf('/project/') === 0 || p === '/repo' || p.indexOf('/repo/') === 0;
   }
+  function normalizeTab(id) {
+    if (id === 'images') return 'setup';
+    if (id === 'start') return 'run'; // legacy prefs / #tab=start
+    if (id === 'dirs') return 'projects'; // legacy prefs / #tab=dirs
+    return id;
+  }
+  function pathForTab(id) {
+    id = normalizeTab(id);
+    if (id === 'jobs') return '/jobs';
+    if (id === 'projects') return '/projects';
+    if (id === 'setup') return '/setup';
+    return '/'; // run
+  }
+  function tabFromLocation() {
+    if (pathFilter()) return 'projects';
+    const p = (location.pathname || '/').replace(/\/+$/, '') || '/';
+    if (p === '/jobs') return 'jobs';
+    if (p === '/projects') return 'projects';
+    if (p === '/setup' || p === '/images') return 'setup';
+    if (p === '/run' || p === '/') return 'run';
+    // Legacy bookmarks: /#tab=dirs → projects, etc.
+    const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
+    if (m) return normalizeTab(m[1]);
+    return null;
+  }
   function activate(id, mode) {
-    if (id === 'images') id = 'setup'; // compatibility alias for #tab=images / saved prefs
+    id = normalizeTab(id);
     const t = document.querySelector('.tab[data-tab="' + id + '"]');
-    if (!t) id = 'start';
+    if (!t) id = 'run';
     const active = document.querySelector('.tab[data-tab="' + id + '"]') || tabs[0];
     id = active.dataset.tab;
     document.querySelectorAll('.tab').forEach(x => {
@@ -2301,14 +2419,16 @@ const DEFS_BY_NAME = {};  // name -> definition
     if (id === 'setup' && typeof refreshSetup === 'function') refreshSetup();
     if (pathFilter()) {
       // Stay on /project/… or /repo/…; only rewrite when leaving the filtered view.
-      if (mode === 'push' && id !== 'dirs') {
-        history.pushState({ tab: id }, '', '/#tab=' + id);
+      if (mode === 'push' && id !== 'projects') {
+        history.pushState({ tab: id }, '', pathForTab(id));
       }
       return;
     }
-    const hash = '#tab=' + id;
-    if (mode === 'push') history.pushState({ tab: id }, '', hash);
-    else if (location.hash !== hash) history.replaceState({ tab: id }, '', hash);
+    const next = pathForTab(id);
+    if (mode === 'push') history.pushState({ tab: id }, '', next);
+    else if ((location.pathname || '/') !== next || (location.hash || '').indexOf('#tab=') === 0) {
+      history.replaceState({ tab: id }, '', next);
+    }
     if (typeof SESSION_ID !== 'string' || !SESSION_ID) saveUiPrefs({ tab: id });
   }
   tabs.forEach(t => {
@@ -2316,17 +2436,12 @@ const DEFS_BY_NAME = {};  // name -> definition
     t.addEventListener('click', () => activate(t.dataset.tab, 'push'));
   });
   window.addEventListener('popstate', () => {
-    if (pathFilter()) { activate('dirs', 'sync'); return; }
-    const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
-    activate(m ? m[1] : 'start', 'sync');
+    activate(tabFromLocation() || 'run', 'sync');
   });
-  if (pathFilter()) {
-    activate('dirs', 'sync');
-  } else {
-    const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
-    const saved = (!m && loadUiPrefs().tab) || null;
-    activate(m ? m[1] : (saved || 'start'), 'sync');
-  }
+  const fromLoc = tabFromLocation();
+  const savedRaw = loadUiPrefs().tab;
+  const saved = savedRaw ? normalizeTab(savedRaw) : null;
+  activate(fromLoc || saved || 'run', 'sync');
 })();
 function defSourceBadge(src) {
   // builtin wears purple (the setup color); repo/home keep the muted status hues.
@@ -2464,8 +2579,8 @@ function handleRepoOpened(resp, note) {
     const form = document.getElementById('def-form');
     if (form) form.innerHTML = '';
     renderRepoJobs(liveSessions, Date.now() / 1000);
+    renderInternalJobs(liveSessions, Date.now() / 1000);
 }
-function renderDefs(defs) {
   const list = document.getElementById('defs-list');
   if (!list) return;
   for (const k in DEFS_BY_NAME) delete DEFS_BY_NAME[k];
@@ -2542,7 +2657,7 @@ function startJob(name) {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(req),
   }).then(r => r.json()).then(resp => {
-    if (resp.ok && resp.session) { window.location.href = '/session/' + resp.session; }
+    if (resp.ok && resp.session) { window.location.href = '/job/' + resp.session; }
     else if (note) note.textContent = resp.error || 'could not start job';
   }).catch(() => { if (note) note.textContent = 'could not start job'; });
 }
@@ -2579,6 +2694,9 @@ function repoFilterHref(repo) {
     return '%' + (hex.length === 1 ? '0' + hex : hex);
   }).join('');
 }
+function isInternalRepo(repo) {
+  return repo === '(image builds)' || repo === '(internal)';
+}
 function renderRepoJobs(sessions, nowUnix) {
   const body = document.getElementById('repos-body');
   if (!body || !sessions) return;
@@ -2592,7 +2710,7 @@ function renderRepoJobs(sessions, nowUnix) {
   });
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
-    if (!s || !s.repo || s.repo === '(image builds)') return;
+    if (!s || !s.repo || isInternalRepo(s.repo)) return;
     if (wantRepo && s.repo !== wantRepo) return;
     (byRepo[s.repo] = byRepo[s.repo] || []).push(Object.assign({ id: id }, s));
   });
@@ -2632,7 +2750,7 @@ function renderRepoJobs(sessions, nowUnix) {
         const links = g.map(s => {
           const lc = sessionLifecycle(s, nowUnix);
           return '<div class="repo-job"><span class="chamfer session-status ' + lc.class +
-            '"><span>' + esc(lc.label) + '</span></span> <a class="job-id" href="/session/' + esc(s.id) + '">' + esc(s.id) +
+            '"><span>' + esc(lc.label) + '</span></span> <a class="job-id" href="/job/' + esc(s.id) + '">' + esc(s.id) +
             '</a> <span class="dim">' + esc(formatShortAge(nowUnix - activity(s))) + '</span></div>';
         }).join('');
         return '<div class="repo-jobgroup"><span class="repo-jobgroup-name">' + esc(task) + '</span>' + links + '</div>';
@@ -2642,6 +2760,69 @@ function renderRepoJobs(sessions, nowUnix) {
       '"><a class="repo-filter-link" href="' + esc(repoFilterHref(repo)) + '">' + esc(repoLabel(repo)) +
       '</a></td><td>' + cells + '</td></tr>';
   }).join('');
+}
+function renderInternalJobs(sessions, nowUnix) {
+  const panel = document.getElementById('tab-projects');
+  if (!panel || !sessions) return;
+  nowUnix = nowUnix ?? (Date.now() / 1000);
+  if (parseIndexFilter(location.pathname)) {
+    const existing = document.getElementById('internal-jobs-card');
+    if (existing) existing.remove();
+    return;
+  }
+  const jobs = [];
+  Object.keys(sessions).forEach(id => {
+    const s = sessions[id];
+    if (s && s.repo && isInternalRepo(s.repo)) jobs.push(Object.assign({ id: id }, s));
+  });
+  let card = document.getElementById('internal-jobs-card');
+  if (!jobs.length) {
+    if (card) card.remove();
+    return;
+  }
+  const activity = (s) => s.ended_at || s.started_at || 0;
+  const isRunning = (s) => sessionLifecycle(s, nowUnix).label === 'running';
+  const groups = {};
+  jobs.forEach(s => { const k = s.profile || 'default'; (groups[k] = groups[k] || []).push(s); });
+  const ordered = Object.keys(groups).sort().map(k => {
+    const g = groups[k];
+    g.sort((a, b) => (isRunning(b) - isRunning(a)) || (activity(b) - activity(a)));
+    return [k, g];
+  });
+  ordered.sort((a, b) => {
+    const ar = a[1].some(isRunning), br = b[1].some(isRunning);
+    if (ar !== br) return br - ar;
+    return Math.max(...b[1].map(activity)) - Math.max(...a[1].map(activity));
+  });
+  const body = ordered.map(([task, g]) => {
+    const links = g.map(s => {
+      const lc = sessionLifecycle(s, nowUnix);
+      return '<div class="repo-job"><span class="chamfer session-status ' + lc.class +
+        '"><span>' + esc(lc.label) + '</span></span> <a class="job-id" href="/job/' + esc(s.id) + '">' + esc(s.id) +
+        '</a> <span class="dim">' + esc(formatShortAge(nowUnix - activity(s))) + '</span></div>';
+    }).join('');
+    return '<div class="repo-jobgroup"><span class="repo-jobgroup-name">' + esc(task) + '</span>' + links + '</div>';
+  }).join('');
+  if (!card) {
+    card = document.createElement('div');
+    card.className = 'card card--accent-left-purple';
+    card.id = 'internal-jobs-card';
+    card.innerHTML = '<p class="section-label">Internal</p>' +
+      '<p class="dim">System jobs — image builds and annotate catch-up — not tied to a project or repository.</p>' +
+      '<div id="internal-body"></div>';
+    panel.appendChild(card);
+  }
+  const bodyEl = card.querySelector('#internal-body') || card;
+  if (bodyEl.id === 'internal-body') bodyEl.innerHTML = body;
+  else {
+    let inner = card.querySelector('#internal-body');
+    if (!inner) {
+      inner = document.createElement('div');
+      inner.id = 'internal-body';
+      card.appendChild(inner);
+    }
+    inner.innerHTML = body;
+  }
 }
 (function initReposPanel() {
   if (!document.getElementById('repo-path')) return;
@@ -2655,6 +2836,7 @@ function renderRepoJobs(sessions, nowUnix) {
   fetch('/api/v1/repos').then(r => r.json()).then(resp => {
     (resp.repos || []).forEach(r => { if (r.path && !(r.path in OPEN_REPOS)) OPEN_REPOS[r.path] = { clean: r.clean }; });
     renderRepoJobs(liveSessions, Date.now() / 1000);
+    renderInternalJobs(liveSessions, Date.now() / 1000);
   }).catch(() => {});
 })();
 "#

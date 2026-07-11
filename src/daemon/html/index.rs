@@ -55,11 +55,40 @@ pub fn parse_index_filter(path: &str) -> Option<IndexFilter> {
   None
 }
 
+/// Which index tab is active on first paint (path-based: `/`, `/jobs`, `/projects`, `/setup`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IndexTab {
+  Run,
+  Jobs,
+  Projects,
+  Setup,
+}
+
+impl IndexTab {
+  /// Parse a request path (`/`, `/run`, `/jobs`, `/projects`, `/setup`, `/images`).
+  pub fn from_path(path: &str) -> Option<Self> {
+    let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
+    let path = if path.is_empty() { "/" } else { path };
+    match path {
+      "/" | "/run" => Some(Self::Run),
+      "/jobs" => Some(Self::Jobs),
+      "/projects" => Some(Self::Projects),
+      "/setup" | "/images" => Some(Self::Setup),
+      _ => None,
+    }
+  }
+}
+
 pub fn index_page(store: &Store) -> String {
-  index_page_with_filter(store, None)
+  index_page_for(store, None, IndexTab::Run)
 }
 
 pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> String {
+  // Filtered /project|/repo URLs open the Projects tab.
+  index_page_for(store, filter, IndexTab::Projects)
+}
+
+pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab) -> String {
   let port = store.port;
   let now = now_unix_secs();
   let filter_repo = filter.as_ref().map(|f| f.repo_path());
@@ -80,20 +109,16 @@ pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> Str
       "<tr><td colspan=\"7\" class=\"dim\">No jobs yet — run <code>scsh run</code> to start one.</td></tr>\n".into()
     };
   }
-  // Default landing tab is Run (`start`). Filtered /project|/repo URLs open Projects.
-  let dirs_active = if filter.is_some() { " active" } else { "" };
-  let start_active = if filter.is_some() { "" } else { " active" };
-  let dirs_panel_active = if filter.is_some() { " active" } else { "" };
-  let start_panel_active = if filter.is_some() { "" } else { " active" };
+  let active = |want: IndexTab| if tab == want { " active" } else { "" };
   let body = format!(
     "<nav class=\"tabs\">\
-<button class=\"tab{start_active}\" data-tab=\"start\">Run</button>\
-<button class=\"tab\" data-tab=\"jobs\">Jobs</button>\
-<button class=\"tab{dirs_active}\" data-tab=\"dirs\">Projects</button>\
-<button class=\"tab\" data-tab=\"setup\">Setup</button>\
+<button class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
+<button class=\"tab{jobs_a}\" data-tab=\"jobs\">Jobs</button>\
+<button class=\"tab{proj_a}\" data-tab=\"projects\">Projects</button>\
+<button class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
-<section class=\"tab-panel{start_panel_active}\" id=\"tab-start\">\n{start}</section>\n\
-<section class=\"tab-panel\" id=\"tab-jobs\">\n\
+<section class=\"tab-panel{run_p}\" id=\"tab-run\">\n{start}</section>\n\
+<section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\">\n\
 <div class=\"card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
@@ -102,12 +127,16 @@ pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> Str
 <tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
 </div>\n\
 </section>\n\
-<section class=\"tab-panel{dirs_panel_active}\" id=\"tab-dirs\">\n{dirs}</section>\n\
-<section class=\"tab-panel\" id=\"tab-setup\">\n{images}</section>\n",
-    start_active = start_active,
-    dirs_active = dirs_active,
-    start_panel_active = start_panel_active,
-    dirs_panel_active = dirs_panel_active,
+<section class=\"tab-panel{proj_p}\" id=\"tab-projects\">\n{dirs}</section>\n\
+<section class=\"tab-panel{setup_p}\" id=\"tab-setup\">\n{images}</section>\n",
+    run_a = active(IndexTab::Run),
+    jobs_a = active(IndexTab::Jobs),
+    proj_a = active(IndexTab::Projects),
+    setup_a = active(IndexTab::Setup),
+    run_p = active(IndexTab::Run),
+    jobs_p = active(IndexTab::Jobs),
+    proj_p = active(IndexTab::Projects),
+    setup_p = active(IndexTab::Setup),
     rows = rows,
     harness_stops = harness_stop_strip(store, now),
     dirs = dirs_panel(store, now, filter.as_ref()),
@@ -156,8 +185,7 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
 /// inventory under a collapsed Advanced disclosure. Populated by `GET /api/v1/setup`.
 ///
 /// First paint already lists every harness in a `checking…` state (§13: no empty limbo
-/// while the runtime inspect runs). Tab id is `setup`; `#tab=images` remains a
-/// compatibility alias in the client.
+/// while the runtime inspect runs). Path `/setup` (and `/images` as a compatibility alias).
 fn images_panel() -> String {
   let mut cards = String::new();
   for h in crate::config::Harness::ALL {
@@ -293,7 +321,7 @@ fn dirs_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
   let banner = match filter {
     Some(f) => format!(
       "<p class=\"filter-banner\" data-repo-filter=\"{path}\">Showing <strong>{label}</strong> · \
-<a class=\"filter-clear\" href=\"/#tab=dirs\">Show all</a></p>\n",
+<a class=\"filter-clear\" href=\"/projects\">Show all</a></p>\n",
       path = esc(&f.repo_path()),
       label = esc(&f.label()),
     ),
@@ -309,10 +337,80 @@ name; anything else shows its repository path. Click a name to filter.</p>
 <tbody id="repos-body">{rows}</tbody>
 </table></div>
 </div>
+{internal}
 "##,
     banner = banner,
     rows = repo_jobs_rows(store, now, filter),
+    internal = internal_panel(store, now, filter),
   )
+}
+
+/// Projects → Internal: synthetic-repo sessions (`(image builds)`, `(internal)`), grouped by
+/// profile. Hidden when filtering to a real project/repo or when none exist. Mirrored by
+/// `renderInternalJobs` in the client JS.
+fn internal_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
+  if filter.is_some() {
+    return String::new();
+  }
+  let mut jobs: Vec<&Session> = store.sessions.values().filter(|s| is_internal_repo(&s.repo)).collect();
+  if jobs.is_empty() {
+    return String::new();
+  }
+  let activity = |s: &Session| s.ended_at.unwrap_or(s.started_at);
+  let mut groups: std::collections::BTreeMap<&str, Vec<&Session>> = std::collections::BTreeMap::new();
+  for s in jobs.drain(..) {
+    groups.entry(s.profile.as_deref().unwrap_or("default")).or_default().push(s);
+  }
+  let mut ordered: Vec<(&str, Vec<&Session>)> = groups.into_iter().collect();
+  for (_, g) in &mut ordered {
+    g.sort_by_key(|s| {
+      (std::cmp::Reverse(s.lifecycle_status(now) == SessionLifecycle::Running), std::cmp::Reverse(activity(s)))
+    });
+  }
+  ordered.sort_by_key(|(_, g)| {
+    (
+      std::cmp::Reverse(g.iter().any(|s| s.lifecycle_status(now) == SessionLifecycle::Running)),
+      std::cmp::Reverse(g.iter().map(|s| activity(s)).max().unwrap_or(0)),
+    )
+  });
+  let body = ordered
+    .iter()
+    .map(|(task, g)| {
+      let links = g
+        .iter()
+        .map(|s| {
+          let lc = s.lifecycle_status(now);
+          format!(
+            "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/job/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
+            id = esc(&s.id),
+            cls = lc.css_class(),
+            label = lc.label(),
+            age = format_short_age(now.saturating_sub(activity(s))),
+          )
+        })
+        .collect::<Vec<_>>()
+        .join("");
+      format!(
+        "<div class=\"repo-jobgroup\"><span class=\"repo-jobgroup-name\">{task}</span>{links}</div>",
+        task = esc(task),
+        links = links,
+      )
+    })
+    .collect::<Vec<_>>()
+    .join("");
+  format!(
+    r##"<div class="card card--accent-left-purple" id="internal-jobs-card">
+<p class="section-label">Internal</p>
+<p class="dim">System jobs — image builds and annotate catch-up — not tied to a project or repository.</p>
+<div id="internal-body">{body}</div>
+</div>
+"##,
+    body = body,
+  )
+}
+
+fn is_internal_repo(repo: &str) -> bool {
+  repo == crate::daemon::server::IMAGE_BUILDS_REPO || repo == crate::daemon::server::INTERNAL_REPO
 }
 
 /// Rows of the Projects table. Within a repository the jobs are grouped by the task they
@@ -329,7 +427,7 @@ fn repo_jobs_rows(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
     by_repo.entry(path).or_default();
   }
   for s in store.sessions.values() {
-    if s.repo.is_empty() || s.repo == crate::daemon::server::IMAGE_BUILDS_REPO {
+    if s.repo.is_empty() || is_internal_repo(&s.repo) {
       continue;
     }
     if filter_repo.as_ref().is_some_and(|want| &s.repo != want) {
@@ -377,7 +475,7 @@ fn repo_jobs_rows(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
             .map(|s| {
               let lc = s.lifecycle_status(now);
               format!(
-                "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/session/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
+                "<div class=\"repo-job\"><span class=\"chamfer session-status {cls}\"><span>{label}</span></span> <a class=\"job-id\" href=\"/job/{id}\">{id}</a> <span class=\"dim\">{age}</span></div>",
                 id = esc(&s.id),
                 cls = lc.css_class(),
                 label = lc.label(),
@@ -444,7 +542,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
   );
   let duration = index_duration_label(session, now, lifecycle);
   format!(
-    "<tr data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/session/{id}\">{id}</a></td>\
+    "<tr data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/job/{id}\">{id}</a></td>\
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\

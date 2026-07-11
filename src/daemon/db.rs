@@ -155,6 +155,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     }
   }
 

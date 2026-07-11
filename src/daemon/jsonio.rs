@@ -111,10 +111,14 @@ fn session_json(s: &Session, effective_workflow: bool) -> String {
       None => String::new(),
     }
   };
+  let parent_session = match &s.parent_session {
+    Some(p) => format!(", \"parent_session\": {}", quote(p)),
+    None => String::new(),
+  };
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid}{workflow} }}",
+\"run_pid\": {run_pid}{workflow}{parent_session} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -203,6 +207,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   let client_connected = field_bool(obj, "client_connected").unwrap_or(false);
   let run_pid = field_num(obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
   let workflow = super::workflow::parse_workflow_value(field_value(obj, "workflow").ok());
+  let parent_session = field_str(obj, "parent_session");
   Ok(Session {
     id,
     started_at,
@@ -217,6 +222,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
     client_connected,
     run_pid,
     workflow,
+    parent_session,
   })
 }
 
@@ -360,7 +366,7 @@ mod tests {
 
   #[test]
   fn roundtrip_session_with_proc() {
-    let session = Session {
+    let mut session = Session {
       id: "abcdef".into(),
       started_at: 99,
       ended_at: Some(105),
@@ -394,6 +400,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
     let s = parse_session_json(&session_json_store(&session)).unwrap();
@@ -403,6 +410,12 @@ mod tests {
     assert_eq!(s.procs[0].diff_path.as_deref(), Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html"));
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
+    assert_eq!(s.parent_session, None);
+
+    session.parent_session = Some("parent1".into());
+    let with_parent = parse_session_json(&session_json_store(&session)).unwrap();
+    assert_eq!(with_parent.parent_session.as_deref(), Some("parent1"));
+    assert!(session_json_store(&session).contains("\"parent_session\": \"parent1\""));
   }
 
   #[test]
@@ -441,6 +454,7 @@ mod tests {
           },
         ],
       }),
+      parent_session: None,
     };
     let parsed = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(parsed.workflow.as_ref().unwrap().nodes.len(), 2);
@@ -500,6 +514,7 @@ mod tests {
         client_connected: false,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     let light = tick_json_light(&store, 105);

@@ -232,9 +232,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap; }
   .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
   .session-kind strong { color: var(--text); }
-  /* The resting lifecycle badge follows the heading (the kind/name stays flush-left with
-     the meta labels below) — align it with the heading text it now sits beside. */
-  .session-kind .session-status { margin-left: 0.5rem; vertical-align: 0.12em; }
+  /* Clear the absolute top-right action stack (snapshot + Force stop). */
+  .card:has(.session-actions) .session-meta { padding-right: 9.5rem; }
+  .chapters-pending { margin: 0.65rem 0 0; font-size: 0.9rem; }
   .daemon-status .dot {
     width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
   }
@@ -432,8 +432,19 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fleet-jump:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); }
   .fleet-jump-cell { width: 2.5rem; text-align: right; }
   details.proc {
+    position: relative;
     background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border);
     border-radius: 6px; margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
+  }
+  /* Snapshot above Force stop, pinned to the proc island's top-right. */
+  .proc-actions {
+    position: absolute; top: 0.35rem; right: 0.55rem; z-index: 2;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+  }
+  .proc-actions .proc-kill,
+  .proc-actions .proc-snapshot {
+    margin-left: 0; align-self: stretch;
+    min-width: 8.5rem; box-sizing: border-box; height: 1.85rem;
   }
   details.proc[open] {
     border-top-color: #3a4558; border-right-color: #3a4558; border-bottom-color: #3a4558;
@@ -448,6 +459,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     cursor: pointer; list-style: none; display: flex; gap: 0.5rem;
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;
   }
+  /* Keep the summary text clear of the absolute top-right action stack. */
+  details.proc > summary { padding-right: 9.5rem; }
   summary::-webkit-details-marker { display: none; }
   summary .triangle {
     flex-shrink: 0; width: 0.85rem; text-align: center; font-size: 0.65rem;
@@ -609,16 +622,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .image-build-btn:hover:not(:disabled) { background: rgba(88, 166, 255, 0.12); }
   .image-build-btn:disabled { cursor: default; opacity: 0.55; }
   .proc-kill {
-    margin-left: auto; align-self: center; flex-shrink: 0;
+    flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
     color: var(--red); background: transparent; border: 1px solid var(--red);
     border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
-    min-width: 5.75rem; /* reserve the slot so enable/disable never shifts the row (WEB-UI §2) */
   }
   .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
   .proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); border-color: var(--border); }
-  /* The "⇄ commits diff" chip shares the kill button's right-edge slot: the diff appears
-     only after a step finished, the kill button only while it runs — never both. */
+  /* Diff chip stays on the summary row (right edge); Force stop / snapshot live in `.proc-actions`. */
   a.proc-diff, span.proc-diff {
     margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
@@ -713,10 +724,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar button.on { border-color: var(--red); color: var(--red); }
-  /* The snapshot download keeps its cyan identity but at the SAME size and shape as its
-     toolbar siblings — a chamfered .btn in this row read as a misfit. */
-  .cast-toolbar a[data-cast-export] { border-color: var(--cyan); color: var(--cyan); }
-  .cast-toolbar a[data-cast-export]:hover { background: rgba(88, 166, 255, 0.12); }
   /* The job-level snapshot download wears the SAME style — one download family. */
   .dl-snap {
     display: inline-block; font: inherit; font-size: 0.8rem; line-height: 1.5;
@@ -754,11 +761,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }
-  /* Pinned to the meta island's top-right corner (the card is the positioning context). */
-  .session-actions { position: absolute; top: 0.7rem; right: 0.85rem; display: flex; gap: 0.6rem; align-items: center; margin: 0; z-index: 2; }
+  /* Snapshot above Force stop, pinned to the meta island's top-right. */
+  .session-actions {
+    position: absolute; top: 0.7rem; right: 0.85rem; z-index: 2; margin: 0;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+  }
   .session-actions #session-stop,
   .session-actions .session-export {
-    min-width: 6.5rem; /* gray-in-place Force stop; export matches its box (WEB-UI §2) */
+    min-width: 8.5rem; /* gray-in-place Force stop; export matches its box (WEB-UI §2) */
     box-sizing: border-box;
     height: 1.85rem;
   }
@@ -779,7 +789,7 @@ fn crumbs_html(session_id: Option<&str>) -> String {
   match session_id {
     Some(id) => format!(
       "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">jobs</a>\
-<span class=\"crumb-sep\">›</span><a class=\"job-id\" href=\"/session/{id}\">{id}</a>",
+<span class=\"crumb-sep\">›</span><a class=\"job-id\" href=\"/job/{id}\">{id}</a>",
       id = crate::daemon::html::escape::esc(id)
     ),
     None => "<a href=\"/\">scsh</a>".to_string(),

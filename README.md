@@ -276,7 +276,7 @@ more. Off a TTY (a pipe, a file, CI) there's no board — each step prints a pla
 line, so logs stay readable.
 
 When the session browser daemon is running, the same events also appear in a browser at a
-deep link `http://127.0.0.1:7274/session/abcdef` URL printed at the end of `scsh run`.
+deep link `http://127.0.0.1:7274/job/abcdef` URL printed at the end of `scsh run`.
 Workflow jobs also get a live **dependency graph** on that page (nodes + edges from declared
 `needs`), above the usual step panels.
 

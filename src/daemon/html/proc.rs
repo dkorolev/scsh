@@ -34,14 +34,13 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }
 
-/// Inline beecast-player embed for a proc's recording: a toolbar (`.cast` + self-contained
-/// `.html` downloads) above an empty `.cast-player` box the client JS mounts the player into.
-/// Playback chrome — play, chapters, speed, fullscreen, and **● Live** for still-running
-/// casts — is the player's own. Works mid-run too: the cast endpoint serves the partial
-/// file, and declared-live mode follows the growing tail until the viewer seeks back.
-/// The `.html` export link starts hidden; the client JS unhides it once the recording has
-/// frames (the export endpoint 404s on a frameless cast). Replaces the text-line output
-/// for recorded procs.
+/// Inline beecast-player embed for a proc's recording: a toolbar (`.cast` download) above
+/// an empty `.cast-player` box the client JS mounts the player into. Playback chrome —
+/// play, chapters, speed, fullscreen, and **● Live** for still-running casts — is the
+/// player's own. Works mid-run too: the cast endpoint serves the partial file, and
+/// declared-live mode follows the growing tail until the viewer seeks back.
+/// The run-snapshot link lives in `.proc-actions` (not this toolbar); the client JS
+/// unhides it once the recording has frames. Replaces the text-line output for recorded procs.
 pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
   let idx = proc.index;
@@ -51,11 +50,9 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
     (Some(s), Some(e)) if !proc_is_live(proc.status) => format!(" data-ended=\"{}\"", s + e.round() as u64),
     _ => String::new(),
   };
-  let export_label = if proc_is_live(proc.status) { "⬇ incomplete" } else { "⬇ Download run snapshot" };
   format!(
     r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}"{ended}>
 <div class="cast-toolbar">
-<a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>{export_label}</a>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>
 </div>
@@ -63,7 +60,6 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 </div>
 "#,
     status = proc.status.as_str(),
-    export_label = export_label,
   )
 }
 
@@ -157,6 +153,16 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
 <span class="dim">image build</span></div>"#,
         harness = esc(harness)
       )
+    }
+    ProcKind::Annotate => {
+      let mut parts = vec![r#"<span class="dim">annotate</span>"#.to_string()];
+      if let Some(h) = proc.harness.as_deref().filter(|h| !h.is_empty()) {
+        parts.push(format!(r#"<span><strong>harness</strong> {harness}</span>"#, harness = esc(h)));
+      }
+      if let Some(m) = proc.model.as_deref().filter(|m| !m.is_empty()) {
+        parts.push(format!(r#"<span><strong>model</strong> {model}</span>"#, model = esc(m)));
+      }
+      format!(r#"<div class="proc-meta">{parts}</div>"#, parts = parts.join(" · "))
     }
     ProcKind::Skill => {
       let mut skill_name = proc.skill_name.clone();

@@ -46,6 +46,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         lines: vec![],
       }],
       workflow: None,
+      parent_session: None,
     },
   );
   store
@@ -226,7 +227,10 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   assert!(procs.contains(">skipped</span>"), "skipped elapsed phrase: {procs}");
   // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
   // not the transient step note — same rule that puts a finished skill's answer in the row.
-  assert!(procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#), "skip reason in the collapsed row: {procs}");
+  assert!(
+    procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#),
+    "skip reason in the collapsed row: {procs}"
+  );
   assert!(procs.contains("data-proc-stop"), "kill control stays in place (WEB-UI §2): {procs}");
   assert!(procs.contains("disabled title="), "skipped step's kill is grayed: {procs}");
   // Live updates speak the same phrases; workflow graph keeps its own icon map.
@@ -299,9 +303,15 @@ fn ui_review_fixes_hold() {
   assert!(html.contains("details.proc.ok { border-left-color: var(--green); }"));
   assert!(html.contains("details.proc.running { border-left-color: var(--orange); }"));
   assert!(html.contains("details.proc.running summary .label { color: var(--orange); }"));
-  assert!(html.contains(".wf-node.wf-running { border-left-color: var(--orange); }"), "graph running matches proc orange");
+  assert!(
+    html.contains(".wf-node.wf-running { border-left-color: var(--orange); }"),
+    "graph running matches proc orange"
+  );
   assert!(html.contains(".wf-node.wf-stalled { border-left-color: var(--purple); }"), "abandoned/stalled is purple");
-  assert!(html.contains(".wf-node.wf-force-stopped { border-left-color: var(--red); }"), "force-stopped shares fail red");
+  assert!(
+    html.contains(".wf-node.wf-force-stopped { border-left-color: var(--red); }"),
+    "force-stopped shares fail red"
+  );
   assert!(js.contains("stalled:'Abandoned'"), "legend label is Abandoned");
   {
     let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
@@ -329,21 +339,27 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   assert!(
-    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a class="job-id" href="/session/castab">castab</a>"#),
+    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a class="job-id" href="/job/castab">castab</a>"#),
     "breadcrumb permalinks in the top island (the id in a fixed font)"
   );
   // The status dot sits at the very RIGHT edge of the island.
-  assert!(html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")), "dot last in the island");
+  assert!(
+    html.contains(r#"{}<span class="dot" aria-hidden="true"></span></span></div>"#.trim_start_matches("{}")),
+    "dot last in the island"
+  );
   assert!(html.contains(r#"<span class="daemon-right">"#), "daemon status keeps the island's right side");
   assert!(!html.contains("<h1>"), "the body no longer duplicates the path as an h1");
-  // A workflow session says so — not "profile" — inside the purple island. (The heading
-  // stays flush-left; the resting lifecycle badge may follow it, so don't pin the </p>.)
-  assert!(html.contains(r#"<p class="session-kind">workflow <strong>arith</strong>"#), "got: {html}");
+  // Kind/profile/lifecycle live on the page lede — not repeated in the purple island.
+  assert!(html.contains(r#"class="page-lede""#), "got lede: {html}");
+  assert!(html.contains("workflow <strong>arith</strong>"), "lede names the workflow: {html}");
+  assert!(!html.contains(r#"class="session-kind""#), "purple island no longer repeats kind: {html}");
+  assert!(!html.contains(r#"<ul class="skills">"#), "purple island drops skills list: {html}");
   // A session with no kind (persisted by an older build) still reads as a profile.
   let mut old = store_with_cast_proc(ProcStatus::Running);
   old.sessions.get_mut("castab").unwrap().profile = Some("default".into());
   let html = session_page(&old, "castab").expect("session renders");
-  assert!(html.contains(r#"<p class="session-kind">profile <strong>default</strong>"#), "got: {html}");
+  assert!(html.contains("profile <strong>default</strong>"), "lede defaults kind to profile: {html}");
+  assert!(!html.contains(r#"class="session-kind""#), "no session-kind on default profile: {html}");
   // The index island shows just "scsh".
   let html = super::index_page(&store);
   assert!(html.contains(r#"<span class="crumbs"><a href="/">scsh</a></span>"#), "got crumbs on index");
@@ -376,9 +392,23 @@ fn session_meta_agrees_with_lifecycle_badge() {
   // say "TERMINATED ABRUPTLY" in the badge and "still running" in Ended.
   let zombie = store_with_cast_proc(ProcStatus::Running);
   let page = session_page(&zombie, "castab").expect("session renders");
-  assert!(page.contains(r#"session-status terminated"#), "zombie badge: {page}");
-  assert!(page.contains(r#"data-session-ended>terminated abruptly</dd>"#), "Ended matches badge: {page}");
+  assert!(
+    page.contains("terminated abruptly") || page.contains("· terminated"),
+    "zombie lifecycle on lede: {page}"
+  );
+  assert!(!page.contains(r#"class="session-kind""#), "no island status chip: {page}");
+  // Ended shows the last-seen timestamp (effective end), not the status phrase.
+  assert!(page.contains(r#"data-session-ended>"#), "Ended present: {page}");
   assert!(!page.contains(r#"data-session-ended>still running</dd>"#), "Ended must not contradict: {page}");
+  assert!(
+    !page.contains(r#"data-session-ended>terminated abruptly</dd>"#),
+    "Ended is a time, badge carries the phrase: {page}"
+  );
+  assert!(page.contains(r#"data-session-ended>19700101-000001 UTC</dd>"#), "Ended uses last_seen: {page}");
+  // Repo above Branch.
+  let repo = page.find("<dt>Repo</dt>").expect("Repo");
+  let branch = page.find("<dt>Branch</dt>").expect("Branch");
+  assert!(repo < branch, "Repo should sit above Branch: {page}");
   assert!(page.contains(r#"data-session-started>"#), "meta is server-rendered on first paint");
   assert!(page.contains(r#"data-last-seen="1""#), "last_seen seeds the client lifecycle");
 
@@ -451,7 +481,9 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
     assert!(html.contains(name), "harness card {name} on first paint");
   }
   assert!(html.contains("scsh-base:latest"), "base image row on first paint");
-  for tag in ["scsh-opencode:latest", "scsh-claude:latest", "scsh-codex:latest", "scsh-grok:latest", "scsh-cursor:latest"] {
+  for tag in
+    ["scsh-opencode:latest", "scsh-claude:latest", "scsh-codex:latest", "scsh-grok:latest", "scsh-cursor:latest"]
+  {
     assert!(html.contains(tag), "harness image {tag} on first paint");
   }
   let js = live_client_js();
@@ -481,26 +513,39 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
 fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
-  for id in ["repo-path", "repo-pick", "repo-open", "repo-blockers", "defs-panel", "defs-list", "def-form", "repos-body"] {
+  for id in
+    ["repo-path", "repo-pick", "repo-open", "repo-blockers", "defs-panel", "defs-list", "def-form", "repos-body"]
+  {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
   // The four tabs, and their panels — Run is leftmost and the default landing tab.
-  for (tab, panel) in [("start", "tab-start"), ("jobs", "tab-jobs"), ("dirs", "tab-dirs"), ("setup", "tab-setup")] {
+  for (tab, panel) in [("run", "tab-run"), ("jobs", "tab-jobs"), ("projects", "tab-projects"), ("setup", "tab-setup")] {
     assert!(html.contains(&format!("data-tab=\"{tab}\"")), "index page should have the {tab} tab");
     assert!(html.contains(&format!("id=\"{panel}\"")), "index page should have panel #{panel}");
   }
   let nav = html.find("<nav class=\"tabs\">").expect("tabs nav");
-  let run_btn = html[nav..].find("data-tab=\"start\">Run</button>").expect("Run tab");
+  let run_btn = html[nav..].find("data-tab=\"run\">Run</button>").expect("Run tab");
   let jobs_btn = html[nav..].find("data-tab=\"jobs\">Jobs</button>").expect("Jobs tab");
   assert!(run_btn < jobs_btn, "Run should be leftmost");
-  assert!(html.contains("<section class=\"tab-panel active\" id=\"tab-start\">"), "Run panel active by default");
-  assert!(html.contains("class=\"tab active\" data-tab=\"start\">Run</button>"), "Run tab active by default");
+  assert!(html.contains("<section class=\"tab-panel active\" id=\"tab-run\">"), "Run panel active by default");
+  assert!(html.contains("class=\"tab active\" data-tab=\"run\">Run</button>"), "Run tab active by default");
   let js = live_client_js();
-  assert!(js.contains("saved || 'start'"), "client default tab is Run");
+  assert!(js.contains("saved || 'run'"), "client default tab is Run");
+  assert!(js.contains("pathForTab"), "tabs use path URLs, not #tab= hashes");
+  assert!(!js.contains("'/#tab='"), "no hash-based tab navigation");
+  assert!(js.contains("'/projects'"), "Projects tab path is /projects");
+  assert!(super::index::IndexTab::from_path("/projects") == Some(super::index::IndexTab::Projects));
+  assert!(super::index::IndexTab::from_path("/setup") == Some(super::index::IndexTab::Setup));
+  assert!(super::index::IndexTab::from_path("/images") == Some(super::index::IndexTab::Setup));
+  assert!(super::index::IndexTab::from_path("/jobs") == Some(super::index::IndexTab::Jobs));
+  assert!(super::index::IndexTab::from_path("/") == Some(super::index::IndexTab::Run));
   assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
   assert!(js.contains("/api/v1/repos/pick"), "client js pops the folder picker");
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
+  assert!(js.contains("function renderInternalJobs"), "client js renders Internal section");
+  assert!(js.contains("chapters pending ⬇"), "export label for pending chapters");
+  assert!(js.contains("function syncChaptersPending"), "live chapters-pending sync");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
   assert!(js.contains("function initTabs"), "client js wires the tabs");
   assert!(js.contains("history.pushState"), "tab clicks push history (WEB-UI §1)");
@@ -558,6 +603,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         lines: vec![],
       }],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -633,6 +679,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
         },
       ],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "difjob").expect("session page");
@@ -665,26 +712,31 @@ fn ended_session_grays_force_stop_button_in_place() {
       skills: vec![],
       procs: vec![],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "done01").expect("session page");
   // WEB-UI §2: the control stays, grayed, with an explanation — it does not vanish.
   assert!(html.contains(r#"id="session-stop""#), "ended session still shows Force stop");
   assert!(html.contains(r#"id="session-stop" data-session="done01" disabled"#), "Force stop is disabled: {html}");
-  assert!(html.contains(r#"session-status completed"#), "ended session shows the completed badge");
+  assert!(html.contains(r#"class="page-lede""#), "session page has a plain-language lede");
   assert!(
-    html.contains(r#"</strong> <span class="chamfer session-status completed">"#),
-    "the badge follows the session-kind heading: {html}"
+    html.contains("· completed ·") || html.contains("completed"),
+    "lede carries the completed lifecycle: {html}"
+  );
+  assert!(
+    !html.contains(r#"class="session-kind""#),
+    "ended session has no session-kind heading in the island: {html}"
   );
   assert!(
     !html.contains(r#"session-actions"><span class="chamfer session-status"#),
     "no badge in the top-right actions slot"
   );
-  assert!(html.contains(r#"class="page-lede""#), "session page has a plain-language lede");
+  assert!(!html.contains(r#"<ul class="skills">"#), "no skills list in purple island");
 }
 
 #[test]
-fn offline_export_shows_lifecycle_chip_after_heading() {
+fn offline_export_keeps_meta_without_kind_heading() {
   let session = Session {
     id: "exp01".into(),
     started_at: 1,
@@ -699,13 +751,12 @@ fn offline_export_shows_lifecycle_chip_after_heading() {
     skills: vec![],
     procs: vec![],
     workflow: None,
+    parent_session: None,
   };
   let html = session_export_page(&session, &[]);
-  assert!(
-    html.contains(r#"</strong> <span class="chamfer session-status completed"><span>completed</span></span>"#),
-    "export heading carries the same resting lifecycle chip as the live page: {html}"
-  );
-  assert!(html.contains(r#"profile <strong>code-review</strong>"#), "kind/profile still lead: {html}");
+  assert!(!html.contains(r#"class="session-kind""#), "export drops session-kind: {html}");
+  assert!(html.contains(r#"<dl class="session-meta">"#), "export keeps session-meta: {html}");
+  assert!(html.contains("<code>exp01</code>"), "job id in meta: {html}");
   assert!(html.contains("accessibility: 'snapshot'"), "export player opts enable a11y snapshot");
 }
 
@@ -746,6 +797,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       lines: vec![],
     }],
     workflow: None,
+    parent_session: None,
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
@@ -823,6 +875,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
         },
       ],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "fleet1").expect("session page");
@@ -919,6 +972,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         },
       ],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "fleet2").expect("fleet page");
@@ -997,6 +1051,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         lines: vec![],
       }],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "castab").expect("session page");
@@ -1022,12 +1077,15 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   assert!(js.contains("markers"), "chapters reach the player as markers");
   assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
   assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
-  // Link-at-time left the inline toolbar (the /play page keeps deep links); the run
-  // snapshot download is cyan but the SAME size and shape as its toolbar siblings —
-  // no chamfered .btn misfit in this row.
+  // Run snapshot sits in the proc island's top-right (above Force stop), cyan chamfer —
+  // not inside the cast toolbar (toolbar keeps only `.cast` download + keys hint).
   assert!(!procs.contains("data-cast-link"), "no link-at-time in the inline toolbar");
-  assert!(procs.contains(r#"<a href="/cast/castab/2/export.html" data-cast-export"#), "run snapshot link");
-  assert!(!procs.contains(r#"btn--cyan" href="/cast/"#), "no .btn styling inside the cast toolbar");
+  assert!(procs.contains(r#"class="chamfer btn btn--cyan btn--sm proc-snapshot""#), "run snapshot link");
+  assert!(procs.contains(r#"href="/cast/castab/2/export.html" data-cast-export"#), "run snapshot href");
+  assert!(
+    !procs.contains(r#"cast-toolbar"><a href="/cast/castab/2/export.html"#),
+    "snapshot is outside the cast toolbar"
+  );
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output / autoscroll control.
   assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
@@ -1083,6 +1141,7 @@ fn session_proc_html_shows_autoscroll_while_running() {
         lines: vec![],
       }],
       workflow: None,
+      parent_session: None,
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -1136,7 +1195,8 @@ fn cast_growth_notifications_append_in_place() {
 #[test]
 fn live_follows_from_player_toolbar_not_scsh_chrome() {
   // Session-page embed: no external Live button — the player owns ● Live when running.
-  let running = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Running).sessions["castab"].procs[0]);
+  let running =
+    super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Running).sessions["castab"].procs[0]);
   assert!(!running.contains("data-cast-live"), "session embed has no scsh Live button");
   let done = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Ok).sessions["castab"].procs[0]);
   assert!(!done.contains("data-cast-live"));
@@ -1160,17 +1220,21 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
   let page = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
   assert!(page.contains(r#"<a id="dl-html" href="/cast/castab/0/export.html" download hidden>⬇ download .html</a>"#));
   assert!(page.contains("document.getElementById('dl-html').hidden = !stats.events;"));
-  // Session-page embed: same link, same hide-until-frames wiring — both in the
-  // server-rendered snippet and in the client JS that regenerates it.
+  // Session-page embed: run snapshot lives in `.proc-actions` (hidden until frames);
+  // client JS unhides it when the cast has events.
   let session = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   let procs = session_procs_html(&session);
   assert!(
-    procs.contains(r#"<a href="/cast/castab/0/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>"#)
+    procs.contains(r#"class="chamfer btn btn--cyan btn--sm proc-snapshot""#)
+      && procs.contains(r#"href="/cast/castab/0/export.html" data-cast-export download hidden"#)
+      && procs.contains("<span>run snapshot ⬇</span>"),
+    "run snapshot button: {procs}"
   );
   let js = live_client_js();
-  assert!(js.contains("/export.html\" data-cast-export download hidden>' + exportLabel + '</a>"));
+  assert!(js.contains("ensureProcSnapshot"));
   assert!(js.contains("exportLink.hidden = !stats.events;"));
-  assert!(js.contains("⬇ incomplete"), "live cast export says incomplete while running");
+  assert!(js.contains("incomplete ⬇"), "live cast export says incomplete while running");
+  assert!(js.contains("run snapshot ⬇"), "finished cast export says run snapshot");
 }
 
 #[test]
@@ -1179,7 +1243,7 @@ fn session_page_header_offers_the_session_export_download() {
   // (decided server-side: any proc with a registered cast; the endpoint 404s edge cases).
   let html = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   assert!(
-    html.contains(r#"href="/session/castab/export.html" download"#) && html.contains("session-export"),
+    html.contains(r#"href="/job/castab/export.html" download"#) && html.contains("session-export"),
     "session export button"
   );
   // No recorded proc anywhere → no button (nothing to export; the 404 would only confuse).
@@ -1274,7 +1338,7 @@ fn review_round_four_fixes_hold() {
   // badge or the age stamp.
   assert!(
     html.contains(
-      r#"<div class="repo-jobgroup"><span class="repo-jobgroup-name">default</span><div class="repo-job"><span class="chamfer session-status completed"><span>completed</span></span> <a class="job-id" href="/session/castab">castab</a> <span class="dim">"#
+      r#"<div class="repo-jobgroup"><span class="repo-jobgroup-name">default</span><div class="repo-job"><span class="chamfer session-status completed"><span>completed</span></span> <a class="job-id" href="/job/castab">castab</a> <span class="dim">"#
     ),
     "got: {html}"
   );
@@ -1309,27 +1373,47 @@ fn review_round_four_fixes_hold() {
   let mut live = store_with_cast_proc(ProcStatus::Running);
   live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
   let shtml = session_page(&live, "castab").expect("session renders");
-  assert!(shtml.contains(">Force stop</button>"), "got: {shtml}");
+  assert!(shtml.contains(">Force stop</button>") || shtml.contains("<span>Force stop</span>"), "got: {shtml}");
   assert!(!shtml.contains("✕ Force stop"), "no leading ✕ on Force stop");
   assert!(!shtml.contains("✕ kill"));
-  assert!(shtml.contains("incomplete ⬇"), "running job export says incomplete: {shtml}");
+  assert!(shtml.contains("<span>incomplete ⬇</span>"), "running job export says incomplete: {shtml}");
   assert!(shtml.contains(r#"class="chamfer btn btn--cyan btn--sm session-export""#), "export matches Force stop size");
   assert!(
     shtml.find("session-export").unwrap() < shtml.find("id=\"session-stop\"").unwrap(),
-    "export sits left of Force stop"
+    "job snapshot sits above Force stop in the actions stack"
   );
-  assert!(!shtml.contains("Download job snapshot"), "label has no Download word");
-  assert!(!shtml.contains(">⬇ job snapshot"), "arrow sits after the label");
-  // Finished job keeps the snapshot label (match the button span, not embedded client JS).
+  assert!(shtml.contains("job snapshot ⬇") || shtml.contains("incomplete ⬇"), "snapshot wording is explicit");
+  // Finished job with a cast but no chapters sidecar → chapters pending (not incomplete).
   let done = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("done session");
   assert!(
-    done.contains("<span>job snapshot ⬇</span>"),
-    "finished job export label: {done}"
+    done.contains("<span>chapters pending ⬇</span>"),
+    "finished job missing sidecar uses chapters pending: {done}"
+  );
+  assert!(done.contains("1 cast finalizing chapters"), "pending counter on job page: {done}");
+  assert!(!done.contains("<span>incomplete ⬇</span>"), "finished job meta export is not incomplete");
+  assert!(!done.contains(r#"<ul class="skills">"#), "no skills list on job page island");
+  // Settled: cast + sidecar on disk → job snapshot.
+  let dir = std::env::temp_dir().join(format!("scsh-chap-ready-{}", crate::runtime::random_nonce_6()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let cast = dir.join("ready.cast");
+  std::fs::write(&cast, "{\"version\":3}\n").unwrap();
+  std::fs::write(dir.join("ready.chapters.json"), r#"{"summary":"ok","chapters":[]}"#).unwrap();
+  let mut settled = store_with_cast_proc(ProcStatus::Ok);
+  {
+    let s = settled.sessions.get_mut("castab").unwrap();
+    s.ended_at = Some(10);
+    s.procs[0].cast_path = Some(cast.to_string_lossy().into_owned());
+  }
+  let settled_html = session_page(&settled, "castab").expect("settled session");
+  assert!(
+    settled_html.contains("<span>job snapshot ⬇</span>"),
+    "settled job export label: {settled_html}"
   );
   assert!(
-    !done.contains("<span>incomplete ⬇</span>"),
-    "finished job is not incomplete"
+    !settled_html.contains(r#"id="chapters-pending""#),
+    "no pending line when sidecar exists: {settled_html}"
   );
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -1353,10 +1437,26 @@ fn review_round_five_fixes_hold() {
   let arith = html.find(r#"<span class="repo-jobgroup-name">arith</span>"#).expect("arith group");
   let default = html.find(r#"<span class="repo-jobgroup-name">default</span>"#).expect("default group");
   assert!(arith < default, "the group with a running job sorts above the finished one: {html}");
-  assert!(html.contains(r#"<span class="chamfer session-status running"><span>running</span></span> <a class="job-id" href="/session/livejb">livejb</a> <span class="dim">"#), "got: {html}");
-  assert!(html.contains(r#"data-tab="start">Run</button>"#), "got: {html}");
+  assert!(html.contains(r#"<span class="chamfer session-status running"><span>running</span></span> <a class="job-id" href="/job/livejb">livejb</a> <span class="dim">"#), "got: {html}");
+  assert!(html.contains(r#"data-tab="run">Run</button>"#), "got: {html}");
   assert!(!html.contains("New job"));
   assert!(!html.contains("Start a job"));
+  // Image-build sessions land under Projects → Internal, not the main Projects table.
+  {
+    let mut img = store_with_cast_proc(ProcStatus::Ok);
+    img.sessions.get_mut("castab").unwrap().repo = crate::daemon::server::IMAGE_BUILDS_REPO.into();
+    img.sessions.get_mut("castab").unwrap().profile = Some("build-images".into());
+    img.sessions.get_mut("castab").unwrap().ended_at = Some(5);
+    let html = super::index_page(&img);
+    assert!(html.contains(r#"id="internal-jobs-card""#), "Internal section present: {html}");
+    assert!(html.contains(r#"<p class="section-label">Internal</p>"#), "Internal label: {html}");
+    assert!(html.contains(r#"<span class="repo-jobgroup-name">build-images</span>"#), "grouped by profile: {html}");
+    assert!(html.contains(r#"href="/job/castab""#), "job link in Internal: {html}");
+    assert!(
+      !html.contains(r#"data-repo="(image builds)""#),
+      "image builds excluded from Projects table: {html}"
+    );
+  }
   // Short ages are single-unit; both renderers ship the same helper and group markup.
   assert_eq!(super::format::format_short_age(45), "45s");
   assert_eq!(super::format::format_short_age(200), "3m");
@@ -1377,28 +1477,13 @@ fn review_round_five_fixes_hold() {
 #[test]
 fn project_and_repo_filter_urls_normalize_extra_slashes() {
   use super::index::{parse_index_filter, IndexFilter};
-  assert_eq!(
-    parse_index_filter("/project//demo-1/"),
-    Some(IndexFilter::Project("demo-1".into()))
-  );
-  assert_eq!(
-    parse_index_filter("/project/demo-1"),
-    Some(IndexFilter::Project("demo-1".into()))
-  );
+  assert_eq!(parse_index_filter("/project//demo-1/"), Some(IndexFilter::Project("demo-1".into())));
+  assert_eq!(parse_index_filter("/project/demo-1"), Some(IndexFilter::Project("demo-1".into())));
   assert_eq!(parse_index_filter("/project/"), None);
   assert_eq!(parse_index_filter("/project"), None);
-  assert_eq!(
-    parse_index_filter("/repo///Users/dima/foo/"),
-    Some(IndexFilter::Repo("/Users/dima/foo".into()))
-  );
-  assert_eq!(
-    parse_index_filter("/repo/Users/dima/foo"),
-    Some(IndexFilter::Repo("/Users/dima/foo".into()))
-  );
-  assert_eq!(
-    parse_index_filter("/repo/tmp/my%20repo"),
-    Some(IndexFilter::Repo("/tmp/my repo".into()))
-  );
+  assert_eq!(parse_index_filter("/repo///Users/dima/foo/"), Some(IndexFilter::Repo("/Users/dima/foo".into())));
+  assert_eq!(parse_index_filter("/repo/Users/dima/foo"), Some(IndexFilter::Repo("/Users/dima/foo".into())));
+  assert_eq!(parse_index_filter("/repo/tmp/my%20repo"), Some(IndexFilter::Repo("/tmp/my repo".into())));
   assert_eq!(parse_index_filter("/repo/"), None);
 }
 
@@ -1415,14 +1500,12 @@ fn filtered_index_page_shows_only_matching_repo_and_opens_projects_tab() {
     store.sessions.insert("other1".into(), other);
   }
   let html = index_page_with_filter(&store, Some(IndexFilter::Repo("/tmp/repo".into())));
-  assert!(
-    html.contains(r#"class="tab active" data-tab="dirs""#),
-    "Projects tab active when filtered: {html}"
-  );
+  assert!(html.contains(r#"class="tab active" data-tab="projects""#), "Projects tab active when filtered: {html}");
   assert!(html.contains("filter-banner"), "filter banner present");
   assert!(html.contains("Show all"), "clear-filter link");
+  assert!(html.contains("href=\"/projects\""), "Show all clears to /projects");
   assert!(html.contains("castab"), "matching job shown");
-  assert!(!html.contains(">other1<") && !html.contains("/session/other1"), "other repo's job hidden");
+  assert!(!html.contains(">other1<") && !html.contains("/job/other1"), "other repo's job hidden");
   assert!(html.contains(r#"class="repo-filter-link""#));
 }
 
@@ -1519,6 +1602,7 @@ fn workflow_graph_renders_builtin_shapes() {
           },
         ],
       }),
+      parent_session: None,
     },
   );
   let html = session_page(&store, "arith1").expect("page");
@@ -1616,6 +1700,7 @@ fn workflow_graph_renders_builtin_shapes() {
           },
         ],
       }),
+      parent_session: None,
     },
   );
   let fruits = session_page(&store, "fruit1").expect("fruits");
@@ -1624,10 +1709,7 @@ fn workflow_graph_renders_builtin_shapes() {
     "ready stays separate from waiting in the headline"
   );
   assert!(fruits.contains("data-tip="), "nodes carry instant tooltips");
-  assert!(
-    fruits.contains("Ready — dependencies finished; not started yet"),
-    "ready tip explains why the node is idle"
-  );
+  assert!(fruits.contains("Ready — dependencies finished; not started yet"), "ready tip explains why the node is idle");
   assert_eq!(
     fruits
       .split(r#"id="workflow-graph""#)
@@ -1681,6 +1763,7 @@ fn workflow_graph_renders_builtin_shapes() {
           },
         ],
       }),
+      parent_session: None,
     },
   );
   let review = session_page(&store, "rev001").expect("review");
@@ -1749,6 +1832,7 @@ fn workflow_graph_renders_builtin_shapes() {
           },
         ],
       }),
+      parent_session: None,
     },
   );
   let waiting = session_page(&store, "wait1").expect("waiting");
@@ -1804,23 +1888,15 @@ fn workflow_graph_renders_builtin_shapes() {
           },
         ],
       }),
+      parent_session: None,
     },
   );
   let stopped = session_page(&store, "stop1").expect("force-stopped page");
-  let summary = stopped
-    .split(r#"class="workflow-summary dim">"#)
-    .nth(1)
-    .and_then(|s| s.split("</p>").next())
-    .unwrap_or("?");
-  assert!(
-    stopped.contains(r#"wf-force-stopped"#),
-    "force-stopped node class; summary={summary}"
-  );
+  let summary =
+    stopped.split(r#"class="workflow-summary dim">"#).nth(1).and_then(|s| s.split("</p>").next()).unwrap_or("?");
+  assert!(stopped.contains(r#"wf-force-stopped"#), "force-stopped node class; summary={summary}");
   assert!(stopped.contains("Force-stopped"), "force-stopped label; summary={summary}");
-  assert!(
-    summary.contains("force-stopped"),
-    "summary counts force-stopped separately: {summary}"
-  );
+  assert!(summary.contains("force-stopped"), "summary counts force-stopped separately: {summary}");
   assert!(summary.contains("failed"), "natural failure stays failed: {summary}");
   assert!(stopped.contains("wf-leg-force-stopped"), "legend lists force-stopped");
 

@@ -46,14 +46,16 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       }
       format!("{}<div class=\"output\">{lines_html}</div>", autoscroll_ctl_html(proc.status))
     };
+    let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     procs_html.push_str(&format!(
       r#"<details class="proc {status_class}" data-index="{index}"{task_attrs}>
+<div class="proc-actions">{snapshot_btn}{kill_btn}</div>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span> {proc_stat}
 <span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
 <span class="note dim">{note}</span>
-{diff_btn}{kill_btn}</summary>
+{diff_btn}</summary>
 {proc_meta}
 <div class="detail">{detail}</div>
 {container_line}
@@ -66,6 +68,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       diff_btn = proc_diff_btn_html(&session.id, proc),
+      snapshot_btn = snapshot_btn,
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = esc(&elapsed),
@@ -80,25 +83,16 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     ));
   }
   let profile = session.profile.as_deref().unwrap_or("default");
-  let skills_html = if session.skills.is_empty() {
-    String::new()
-  } else {
-    let items: Vec<String> = session
-      .skills
-      .iter()
-      .map(|sk| format!("<li><code>{}</code> <span class=\"dim\">({})</span></li>", esc(&sk.name), esc(&sk.harness)))
-      .collect();
-    format!("<ul class=\"skills\">{}</ul>\n", items.join(""))
-  };
   let id = esc(&session.id);
   let session_meta = session_meta_html(session, now);
   let lifecycle = session.lifecycle_status(now);
-  // Export sits left of Force stop. While the job is still running the label is
-  // "incomplete" so a mid-run download is obviously a partial snapshot.
+  let pending = chapters_pending_count(session);
+  // Snapshot sits above Force stop in the island’s top-right. Mid-run → incomplete;
+  // finished but chapters still landing → chapters pending; else job snapshot.
   let export_btn = if session.procs.iter().any(proc_has_cast) {
-    let label = if lifecycle == SessionLifecycle::Running { "incomplete ⬇" } else { "job snapshot ⬇" };
+    let label = session_export_label(lifecycle, pending);
     format!(
-      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download title=\"Offline HTML snapshot of this job\"><span>{label}</span></a>\n",
+      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/job/{id}/export.html\" download title=\"Offline HTML snapshot of this entire job\"><span>{label}</span></a>\n",
       id = id,
       label = label,
     )
@@ -106,16 +100,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     String::new()
   };
   // Force stop always occupies its slot (WEB-UI §2): enabled while running, otherwise
-  // grayed with an explanation. The resting lifecycle badge still follows the heading.
-  let status_chip = if lifecycle == SessionLifecycle::Running {
-    String::new()
-  } else {
-    format!(
-      " <span class=\"chamfer session-status {}\"><span>{}</span></span>",
-      lifecycle.css_class(),
-      esc(lifecycle.label())
-    )
-  };
+  // grayed with an explanation. Kind/lifecycle live on the page lede, not in this island.
   let stop_enabled = lifecycle == SessionLifecycle::Running;
   let stop_btn = format!(
     "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"{disabled} title=\"{title}\"><span>Force stop</span></button>\n",
@@ -134,8 +119,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       }
     },
   );
-  // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
-  // opens with what the session IS — its kind and name — with the controls top-right.
   let kind = session.kind.as_deref().unwrap_or("profile");
   let workflow = workflow_graph_html(session, now);
   let fleets = fleet_sections_html(session);
@@ -148,22 +131,62 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     n = n,
     plural = if n == 1 { "" } else { "s" },
   );
+  let chapters_pending = chapters_pending_html(pending);
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{export_btn}{stop_btn}</div>\
-<p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
+{session_meta}\n{chapters_pending}</div>\n\
 {workflow}{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
-    kind = esc(kind),
-    profile = esc(profile),
     export_btn = export_btn,
-    status_chip = status_chip,
     stop_btn = stop_btn,
     session_meta = session_meta,
-    skills = skills_html,
+    chapters_pending = chapters_pending,
     workflow = workflow,
     fleets = fleets,
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))
+}
+
+/// Non-annotate procs that have a cast but no chapters sidecar yet.
+pub(crate) fn chapters_pending_count(session: &Session) -> usize {
+  use crate::daemon::model::ProcKind;
+  session
+    .procs
+    .iter()
+    .filter(|p| {
+      if p.kind == ProcKind::Annotate {
+        return false;
+      }
+      let Some(cast) = p.cast_path.as_deref() else {
+        return false;
+      };
+      match crate::daemon::chapters_sidecar_path(cast) {
+        Some(path) => !path.exists(),
+        None => false,
+      }
+    })
+    .count()
+}
+
+fn session_export_label(lifecycle: SessionLifecycle, pending: usize) -> &'static str {
+  if lifecycle == SessionLifecycle::Running {
+    "incomplete ⬇"
+  } else if pending > 0 {
+    "chapters pending ⬇"
+  } else {
+    "job snapshot ⬇"
+  }
+}
+
+fn chapters_pending_html(pending: usize) -> String {
+  if pending == 0 {
+    return String::new();
+  }
+  format!(
+    r#"<p class="chapters-pending dim" id="chapters-pending" data-pending="{n}">{n} cast{plural} finalizing chapters</p>"#,
+    n = pending,
+    plural = if pending == 1 { "" } else { "s" },
+  )
 }
 
 /// A bare repo-relative artifact path (`tmp/scsh/<id>/add.json`-shaped) — system info, not
@@ -191,9 +214,25 @@ fn proc_diff_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord)
   )
 }
 
+/// Per-proc offline snapshot link (top-right of the proc island, above Force stop).
+/// Hidden until the recording has frames — the export endpoint 404s on a frameless cast.
+fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord) -> String {
+  if !proc_has_cast(proc) {
+    return String::new();
+  }
+  let live = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
+  let label = if live { "incomplete ⬇" } else { "run snapshot ⬇" };
+  format!(
+    r#"<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden title="Offline HTML snapshot of this run"><span>{label}</span></a>"#,
+    sid = esc(session_id),
+    idx = proc.index,
+    label = label,
+  )
+}
+
 /// A small per-proc "Force stop" button. Always rendered (WEB-UI §2): enabled only while
 /// that proc still runs on a live session; otherwise grayed with an explanation so the
-/// control does not vanish mid-job.
+/// control does not vanish mid-job. Lives under the run-snapshot link in `.proc-actions`.
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::{ProcStatus, SessionLifecycle};
   let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
@@ -207,7 +246,7 @@ fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::
     "This step already finished"
   };
   format!(
-    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\">Force stop</button>",
+    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\"><span>Force stop</span></button>",
     index = proc.index,
     id = esc(&session.id),
     disabled = if enabled { "" } else { " disabled" },
@@ -222,7 +261,10 @@ fn session_meta_html(session: &Session, now: u64) -> String {
   let ended = match (session.ended_at, lifecycle) {
     (Some(t), _) => format!("{} UTC", crate::runtime::format_utc_timestamp(t)),
     (None, SessionLifecycle::Running) => "still running".into(),
-    (None, SessionLifecycle::Terminated) => SessionLifecycle::Terminated.label().into(),
+    // Heartbeat-stale: last_seen is the effective end (when we last heard from the run).
+    (None, SessionLifecycle::Terminated) => {
+      format!("{} UTC", crate::runtime::format_utc_timestamp(session.last_seen_at))
+    }
     (None, _) => "—".into(),
   };
   let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());
@@ -234,8 +276,8 @@ fn session_meta_html(session: &Session, now: u64) -> String {
 <dt>Started</dt><dd data-session-started>{started}</dd>
 <dt>Ended</dt><dd data-session-ended>{ended}</dd>
 <dt>Duration</dt><dd data-session-duration>{duration}</dd>
-<dt>Branch</dt><dd data-session-branch><code>{branch}</code></dd>
 <dt>Repo</dt><dd data-session-repo><code class="repo-path">{repo}</code></dd>
+<dt>Branch</dt><dd data-session-branch><code>{branch}</code></dd>
 </dl>"#,
     started_at = session.started_at,
     ended_at = session.ended_at.map(|t| t.to_string()).unwrap_or_default(),

@@ -303,7 +303,10 @@ fn handle_connection(
     write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
     return Ok((false, None));
   }
-  if req.method == "GET" && req.path.starts_with("/session/") && bare_path.ends_with("/export.html") {
+  if req.method == "GET"
+    && (req.path.starts_with("/job/") || req.path.starts_with("/session/"))
+    && bare_path.ends_with("/export.html")
+  {
     let (status, body, disposition) = session_export_response(bare_path, store);
     write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
     return Ok((false, None));
@@ -453,23 +456,29 @@ fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
   }
 }
 
-/// `GET /session/<id>/export.html` — EVERY recording of the session assembled into ONE
+/// `GET /job/<id>/export.html` — EVERY recording of the job assembled into ONE
 /// self-contained offline HTML page, served as a download attachment named
-/// `scsh-session-<id>.html`. Each recording embeds as the exact per-cast export page
+/// `scsh-job-<id>.html`. Each recording embeds as the exact per-cast export page
 /// ([`crate::export::render_page_from_texts`]) in an attribute-escaped `<iframe srcdoc>`
 /// — see [`html::session_export_page`] for the composition rationale. Procs with no cast
-/// or no frames become note rows, never errors; a session with ZERO exportable casts is a
-/// 404 with an actionable body (only a hand-typed URL sees it — the session-page button
-/// renders only when a proc has a registered cast).
+/// or no frames become note rows, never errors; a job with ZERO exportable casts is a
+/// 404 with an actionable body (only a hand-typed URL sees it — the job-page button
+/// renders only when a proc has a registered cast). `/session/…/export.html` remains
+/// accepted as a compatibility alias.
 fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
-  let id = bare_path.strip_prefix("/session/").unwrap_or("").strip_suffix("/export.html").unwrap_or("");
+  let id = bare_path
+    .strip_prefix("/job/")
+    .or_else(|| bare_path.strip_prefix("/session/"))
+    .unwrap_or("")
+    .strip_suffix("/export.html")
+    .unwrap_or("");
   // Clone the session under the lock, then do all file I/O (casts + sidecars) unlocked.
   let Some(session) = lock_store(store).sessions.get(id).cloned() else {
-    return (404, "session not found".into(), None);
+    return (404, "job not found".into(), None);
   };
   let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
   if !exports.iter().any(|e| matches!(e, html::CastExport::Cast { .. })) {
-    return (404, "no exportable recordings in this session — retry once a skill's recording has output".into(), None);
+    return (404, "no exportable recordings in this job — retry once a skill's recording has output".into(), None);
   }
   let page = html::session_export_page(&session, &exports);
   (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
@@ -490,7 +499,7 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
   let Some(cast_path) = proc.cast_path.as_deref() else {
     let note = match proc.kind {
       ProcKind::Build => "no recording — image build ran without asciinema on PATH (text log only)",
-      ProcKind::Skill => NO_RECORDING,
+      ProcKind::Skill | ProcKind::Annotate => NO_RECORDING,
     };
     return html::CastExport::Note { text: note.into(), diff_html };
   };
@@ -680,20 +689,30 @@ fn route(
       let html = html::index_page(&*lock_store(store));
       (200, html, "text/html; charset=utf-8", false)
     }
-    path if path.starts_with("/project") || path.starts_with("/repo") => {
-      // Filtered Projects view. Extra slashes are normalized by parse_index_filter.
-      // Bare `/project` or `/repo` (no name/path) falls through to the unfiltered index.
-      let filter = html::parse_index_filter(path);
-      let html = html::index_page_with_filter(&*lock_store(store), filter);
+    path @ ("/run" | "/jobs" | "/projects" | "/setup" | "/images") => {
+      let tab = html::IndexTab::from_path(path).unwrap_or(html::IndexTab::Run);
+      let html = html::index_page_for(&*lock_store(store), None, tab);
       (200, html, "text/html; charset=utf-8", false)
     }
-    path if path.starts_with("/session/") => {
-      let id = path.strip_prefix("/session/").unwrap_or("");
+    path if path.starts_with("/project") || path.starts_with("/repo") => {
+      // Filtered Projects view. Extra slashes are normalized by parse_index_filter.
+      // Bare `/project` or `/repo` (no name/path) falls through to the unfiltered Projects tab.
+      let filter = html::parse_index_filter(path);
+      let html = if filter.is_some() {
+        html::index_page_with_filter(&*lock_store(store), filter)
+      } else {
+        html::index_page_for(&*lock_store(store), None, html::IndexTab::Projects)
+      };
+      (200, html, "text/html; charset=utf-8", false)
+    }
+    path if path.starts_with("/job/") || path.starts_with("/session/") => {
+      // Canonical page URL is `/job/<id>`; `/session/<id>` is kept as a compatibility alias.
+      let id = path.strip_prefix("/job/").or_else(|| path.strip_prefix("/session/")).unwrap_or("");
       let store = lock_store(store);
       if let Some(page) = html::session_page(&*store, id) {
         (200, page, "text/html; charset=utf-8", false)
       } else {
-        (404, "session not found".into(), "text/plain", false)
+        (404, "job not found".into(), "text/plain", false)
       }
     }
     "/assets/scsh-cast-player.js" => (200, html::PLAYER_JS.to_string(), "application/javascript; charset=utf-8", false),
@@ -779,6 +798,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let run_pid = field_num(&obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
       let workflow =
         crate::daemon::workflow::parse_workflow_value(obj.iter().find(|(k, _)| k == "workflow").map(|(_, v)| v));
+      let parent_session = field_str(&obj, "parent_session");
       if id.is_empty() {
         return false;
       }
@@ -802,6 +822,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if workflow.is_some() {
           s.workflow = workflow;
         }
+        if parent_session.is_some() {
+          s.parent_session = parent_session;
+        }
         return true;
       }
       let session = Session {
@@ -818,6 +841,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         client_connected: false,
         run_pid,
         workflow,
+        parent_session,
       };
       store.insert_session(id, session);
       true
@@ -1060,8 +1084,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
 }
 
 /// Canonicalize path-like repo values; pass display labels (empty, or non-path strings such as
-/// `build-images`' "(image builds)") through untouched. Clients already absolutize real paths;
-/// the server-side pass is only the defensive second canonicalization for those.
+/// `build-images`' "(image builds)" and annotate's "(internal)") through untouched. Clients
+/// already absolutize real paths; the server-side pass is only the defensive second
+/// canonicalization for those.
 fn display_or_absolute_repo(repo: &str) -> String {
   if repo.starts_with('/') {
     super::paths::absolutize_repo_path(std::path::Path::new(repo))
@@ -1216,6 +1241,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           client_connected: false,
           run_pid,
           workflow: None,
+          parent_session: None,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1234,6 +1260,10 @@ const BUILD_IMAGES_PROFILE: &str = "build-images";
 /// The synthetic `repo` label image-build sessions carry, so they never appear as a real
 /// repository in the jobs-per-directory view or block a repo's one-job guard.
 pub(crate) const IMAGE_BUILDS_REPO: &str = "(image builds)";
+
+/// Synthetic `repo` for standalone annotate catch-up sessions (Projects → Internal). Same
+/// one-job-per-repo exemption as [`IMAGE_BUILDS_REPO`]: the label never matches a real path.
+pub(crate) const INTERNAL_REPO: &str = "(internal)";
 
 // ---------------------------------------------------------------------------
 // Harness definitions: open a repo, list its definitions, start a job in it.
@@ -1539,6 +1569,7 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
           client_connected: false,
           run_pid,
           workflow,
+          parent_session: None,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1654,6 +1685,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           client_connected: false,
           run_pid,
           workflow,
+          parent_session: None,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1721,7 +1753,7 @@ fn startup_error_detail(stderr_tail: &str, code: Option<i32>) -> String {
 fn repos_json(store: &Store, now: u64) -> String {
   let mut paths: std::collections::BTreeSet<String> = store.open_repos.keys().cloned().collect();
   for s in store.sessions.values() {
-    if s.repo != IMAGE_BUILDS_REPO {
+    if s.repo != IMAGE_BUILDS_REPO && s.repo != INTERNAL_REPO {
       paths.insert(s.repo.clone());
     }
   }
@@ -2261,6 +2293,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2312,6 +2345,7 @@ mod tests {
           client_connected: false,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2365,6 +2399,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2438,6 +2473,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2498,6 +2534,7 @@ mod tests {
           // No live PID — we assert store state, not kill success.
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2561,6 +2598,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2678,6 +2716,7 @@ mod tests {
       client_connected: true,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -2732,6 +2771,7 @@ mod tests {
   fn display_or_absolute_repo_keeps_labels_and_absolutizes_paths() {
     assert_eq!(display_or_absolute_repo(""), "");
     assert_eq!(display_or_absolute_repo("(image builds)"), "(image builds)");
+    assert_eq!(display_or_absolute_repo("(internal)"), "(internal)");
     // An absolute path survives (canonicalization is best-effort; /tmp may resolve to a symlink
     // target, so assert it is still absolute rather than byte-equal).
     assert!(display_or_absolute_repo("/tmp").starts_with('/'));
@@ -2779,6 +2819,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2887,6 +2928,7 @@ mod tests {
           client_connected: true,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -2990,6 +3032,7 @@ mod tests {
           client_connected: false,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -3072,6 +3115,7 @@ mod tests {
         client_connected: false,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     store
@@ -3103,7 +3147,7 @@ mod tests {
         export_test_proc(2, "cursor: skipped", None),
       ],
     );
-    let (status, page, disposition) = session_export_response("/session/sexabc/export.html", &store);
+    let (status, page, disposition) = session_export_response("/job/sexabc/export.html", &store);
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-sexabc.html\""));
     // The header: the page says JOB, wears the live page's purple island, and carries the
@@ -3111,12 +3155,8 @@ mod tests {
     assert!(page.contains("<title>scsh job sexabc</title>"), "job title");
     assert!(!page.contains("scsh session"), "the word is job, not session");
     assert!(page.contains("card--accent-left-purple"), "live-page island");
-    assert!(
-      page.contains(
-        r#"<p class="session-kind">profile <strong>default</strong> <span class="chamfer session-status completed"><span>completed</span></span></p>"#
-      ),
-      "kind line with resting lifecycle chip"
-    );
+    assert!(!page.contains(r#"class="session-kind""#), "export island has no session-kind");
+    assert!(page.contains(r#"<dl class="session-meta">"#), "export keeps session-meta");
     assert!(page.contains(r#"<code class="repo-path">/r</code>"#), "repo label");
     for label in ["claude: add", "codex: multiply", "cursor: skipped"] {
       assert!(page.contains(label), "a section for {label}");
@@ -3156,7 +3196,7 @@ mod tests {
       "hostil",
       vec![export_test_proc(0, "claude: evil", Some(cast.to_string_lossy().into_owned()))],
     );
-    let (status, page, _) = session_export_response("/session/hostil/export.html", &store);
+    let (status, page, _) = session_export_response("/job/hostil/export.html", &store);
     assert_eq!(status, 200);
     // The recording rides inside a JSON string in the boot script, with every `</`
     // escaped as `<\/` — a literal `</script>` in the cast can neither terminate the
@@ -3182,11 +3222,12 @@ mod tests {
         export_test_proc(1, "codex: multiply", None),
       ],
     );
-    let (status, body, disposition) = session_export_response("/session/nocast/export.html", &store);
+    let (status, body, disposition) = session_export_response("/job/nocast/export.html", &store);
     assert_eq!(status, 404);
     assert!(body.contains("no exportable recordings"), "body: {body}");
     assert!(disposition.is_none());
-    // Unknown session: the existing 404 style.
+    // Unknown job: the existing 404 style. Legacy /session/… alias still works.
+    assert_eq!(session_export_response("/job/nosuch/export.html", &store).0, 404);
     assert_eq!(session_export_response("/session/nosuch/export.html", &store).0, 404);
     let _ = std::fs::remove_dir_all(&dir);
   }
@@ -3220,6 +3261,7 @@ mod tests {
             client_connected: true,
             run_pid: None,
             workflow: None,
+            parent_session: None,
           },
         );
       }
@@ -3414,6 +3456,7 @@ mod tests {
         client_connected: false,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
@@ -3445,6 +3488,7 @@ mod tests {
         client_connected: false,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     reconcile_finished_job(&store, "done", Some(0), "");
@@ -3472,6 +3516,7 @@ mod tests {
         client_connected: false,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     let out = repos_json(&store, 51);

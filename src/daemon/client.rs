@@ -59,13 +59,14 @@ impl Client {
   pub fn register_session(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
   ) -> bool {
-    self.register_session_with_workflow(repo, branch, profile, kind, skills, None)
+    self.register_session_with_workflow(repo, branch, profile, kind, skills, None, None)
   }
 
-  /// Like [`Self::register_session`], optionally attaching immutable workflow DAG metadata.
+  /// Like [`Self::register_session`], optionally attaching immutable workflow DAG metadata
+  /// and/or a parent session id (e.g. annotate-cast catch-up under `(internal)`).
   pub fn register_session_with_workflow(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
-    workflow: Option<&super::workflow::WorkflowMeta>,
+    workflow: Option<&super::workflow::WorkflowMeta>, parent_session: Option<&str>,
   ) -> bool {
     let skill_parts: Vec<String> = skills
       .iter()
@@ -79,8 +80,12 @@ impl Client {
       Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(w)),
       None => String::new(),
     };
+    let parent_part = match parent_session {
+      Some(p) => format!(", \"parent_session\": {}", quote(p)),
+      None => String::new(),
+    };
     let body = format!(
-      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {}{workflow_part} }}",
+      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {}{workflow_part}{parent_part} }}",
       quote(&self.inner.session_id),
       quote(repo),
       quote(branch),

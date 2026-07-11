@@ -107,6 +107,10 @@ fn annotate_model() -> String {
 /// cursor-agent on the Composer model. Human output (progress, notes) goes to stderr; with
 /// `--json` (or when stdout is not a TTY) the sidecar paths are emitted as JSON on stdout,
 /// and errors as a single-key `{"Error": …}` object (§2).
+///
+/// When the session browser daemon is already up, registers a short `(internal)` session so
+/// annotate progress is visible as [`daemon::ProcKind::Annotate`] rows (optional
+/// `parent_session` when a cast path sits under `/sessions/<id>/`).
 fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
   use std::io::IsTerminal;
   let as_json = json_flag || !std::io::stdout().is_terminal();
@@ -121,21 +125,82 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
     return annotate_error(as_json, 1, "cursor-agent not available (need the `cursor-agent` CLI and a cursor login)");
   }
   let model = annotate_model();
+  let parent = paths.iter().find_map(|p| parent_session_from_cast_path(p));
+  let daemon_session = if daemon::Client::daemon_alive() {
+    let session_id = daemon::new_session_id();
+    let client = daemon::Client::new(session_id);
+    if client.register_session_with_workflow(
+      daemon::INTERNAL_REPO,
+      "",
+      Some("annotate"),
+      "annotate",
+      &[],
+      None,
+      parent.as_deref(),
+    ) {
+      if !as_json {
+        eprintln!("annotate: track progress at {}", client.session_url());
+      }
+      Some(client)
+    } else {
+      None
+    }
+  } else {
+    None
+  };
   let mut sidecars: Vec<(String, String)> = Vec::new(); // (cast, sidecar)
+  let mut next_idx = 0usize;
   for path in paths {
     if !as_json {
       eprint!("annotate {path} … ");
     }
+    let proc_idx = if daemon_session.is_some() {
+      let idx = next_idx;
+      next_idx += 1;
+      let stem = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("cast");
+      let mut label = format!("annotate · {stem}");
+      if label.len() > 60 {
+        label.truncate(57);
+        label.push('…');
+      }
+      if let Some(c) = &daemon_session {
+        c.proc_add(idx, &label, daemon::ProcKind::Annotate, None, Some("cursor"), Some(model.as_str()), None, None);
+        c.proc_start(idx);
+        c.proc_note(idx, "summarizing…");
+      }
+      Some(idx)
+    } else {
+      None
+    };
+    let started = std::time::Instant::now();
     match annotate::annotate_cast_with(std::path::Path::new(path), &model, annotate::run_cursor_agent) {
       Some(sidecar) => {
+        if let (Some(c), Some(idx)) = (&daemon_session, proc_idx) {
+          c.proc_finish(idx, daemon::ProcStatus::Ok, None, None, started.elapsed().as_secs_f64());
+        }
         if !as_json {
           eprintln!("✓ {}", sidecar.display());
         }
         sidecars.push((path.clone(), sidecar.to_string_lossy().into_owned()));
       }
-      None if !as_json => eprintln!("✗ (no annotation produced)"),
-      None => {}
+      None => {
+        if let (Some(c), Some(idx)) = (&daemon_session, proc_idx) {
+          c.proc_finish(
+            idx,
+            daemon::ProcStatus::Fail,
+            Some("annotate_failed"),
+            Some("no annotation produced"),
+            started.elapsed().as_secs_f64(),
+          );
+        }
+        if !as_json {
+          eprintln!("✗ (no annotation produced)");
+        }
+      }
     }
+  }
+  if let Some(c) = daemon_session {
+    c.finish_session();
   }
   if as_json {
     let items: Vec<String> = sidecars
@@ -277,7 +342,13 @@ fn export_error(as_json: bool, code: i32, message: &str) -> i32 {
 /// and summaries appear in the session browser. Also copy new chapters onto matching
 /// `.sccache` cast copies so a later cache hit replays chapters with the recording.
 /// No-op when cursor/Composer is unavailable.
-fn annotate_run_casts(root: &Path, cast_paths: Vec<std::path::PathBuf>) {
+///
+/// When `client` is `Some`, each pending cast becomes a live [`daemon::ProcKind::Annotate`]
+/// row (indices from `next_proc_index`) so the job page shows annotate progress before the
+/// session deregisters. When `client` is `None`, annotation still runs silently.
+fn annotate_run_casts(
+  root: &Path, cast_paths: Vec<std::path::PathBuf>, client: Option<&daemon::Client>, next_proc_index: &mut usize,
+) {
   // Attach chapters that already exist (e.g. a prior annotate) into the result cache first.
   for cast in &cast_paths {
     cache_attach_chapters(root, cast);
@@ -291,24 +362,87 @@ fn annotate_run_casts(root: &Path, cast_paths: Vec<std::path::PathBuf>) {
   }
   eprintln!("scsh: annotating {} cast(s) with cursor · {} …", pending.len(), annotate_model());
   let model = annotate_model();
-  let handles: Vec<_> = pending
-    .into_iter()
-    .map(|cast| {
-      let model = model.clone();
-      std::thread::spawn(move || {
-        let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
-        (cast, ok)
-      })
-    })
-    .collect();
   let mut done = 0;
-  for h in handles {
-    if let Ok((cast, true)) = h.join() {
-      done += 1;
-      cache_attach_chapters(root, &cast);
+  if let Some(client) = client {
+    std::thread::scope(|scope| {
+      let mut handles = Vec::with_capacity(pending.len());
+      for cast in pending {
+        let idx = *next_proc_index;
+        *next_proc_index += 1;
+        let stem = cast.file_stem().and_then(|s| s.to_str()).unwrap_or("cast");
+        let mut label = format!("annotate · {stem}");
+        if label.len() > 60 {
+          label.truncate(57);
+          label.push('…');
+        }
+        client.proc_add(
+          idx,
+          &label,
+          daemon::ProcKind::Annotate,
+          None,
+          Some("cursor"),
+          Some(model.as_str()),
+          None,
+          None,
+        );
+        client.proc_start(idx);
+        client.proc_note(idx, "summarizing…");
+        let model = model.clone();
+        handles.push(scope.spawn(move || {
+          let started = std::time::Instant::now();
+          let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
+          let elapsed = started.elapsed().as_secs_f64();
+          if ok {
+            client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed);
+          } else {
+            client.proc_finish(
+              idx,
+              daemon::ProcStatus::Fail,
+              Some("annotate_failed"),
+              Some("no annotation produced"),
+              elapsed,
+            );
+          }
+          (cast, ok)
+        }));
+      }
+      for h in handles {
+        if let Ok((cast, true)) = h.join() {
+          done += 1;
+          cache_attach_chapters(root, &cast);
+        }
+      }
+    });
+  } else {
+    let handles: Vec<_> = pending
+      .into_iter()
+      .map(|cast| {
+        let model = model.clone();
+        std::thread::spawn(move || {
+          let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
+          (cast, ok)
+        })
+      })
+      .collect();
+    for h in handles {
+      if let Ok((cast, true)) = h.join() {
+        done += 1;
+        cache_attach_chapters(root, &cast);
+      }
     }
   }
   eprintln!("scsh: annotated {done} cast(s)");
+}
+
+/// If `path` contains `/sessions/<id>/`, return that session id (parent of a standalone annotate).
+fn parent_session_from_cast_path(path: &str) -> Option<String> {
+  let mut comps = std::path::Path::new(path).components();
+  while let Some(c) = comps.next() {
+    if c.as_os_str() == "sessions" {
+      return comps.next().map(|c| c.as_os_str().to_string_lossy().into_owned()).filter(|s| !s.is_empty());
+    }
+  }
+  None
 }
 
 #[derive(Clone)]
@@ -1137,9 +1271,7 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   }
 
   let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
-  let code = build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition");
-  annotate_run_casts(&root, session_skill_casts(&session_id));
-  code
+  build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition")
 }
 
 /// One step's state once it has been decided: either skipped (its `when` was false, or a step it
@@ -1358,6 +1490,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       "workflow",
       &skill_meta,
       workflow.as_ref(),
+      None,
     ) {
       ok(&format!("track progress at {}", client.session_url()));
       let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1425,6 +1558,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     }
     step_procs.insert(s.id.clone(), p);
   }
+  // Annotate procs (added after the run) continue past the last declared step/build index.
+  let mut next_annotate_idx = step_procs.values().map(|p| p.index()).max().map(|m| m + 1).unwrap_or(0);
   ui.pin_board_to_top();
 
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
@@ -1573,7 +1708,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     plural(ran),
     if skipped > 0 { format!(", {skipped} skipped") } else { String::new() }
   ));
-  annotate_run_casts(root, session_skill_casts(&session_id));
+  annotate_run_casts(root, session_skill_casts(&session_id), daemon_client.as_deref(), &mut next_annotate_idx);
   0
 }
 
@@ -1691,10 +1826,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
         return 1;
       }
       let session_id = daemon::new_session_id();
-      let code = build_and_run(&rt, &root, &runnable, profile, &session_id, "profile");
-      // Annotate the recordings this run just produced (best-effort; no-op without cursor).
-      annotate_run_casts(&root, session_skill_casts(&session_id));
-      code
+      build_and_run(&rt, &root, &runnable, profile, &session_id, "profile")
     }
   }
 }
@@ -3037,6 +3169,11 @@ fn build_and_run(
   if let Some(c) = &daemon_session.client {
     ok(&format!("session recordings & live board: {}", c.session_url()));
   }
+
+  // Annotate while the client is still registered (before DaemonSession drop / finish_session).
+  let mut next_annotate_idx = outcomes.iter().map(|o| o.proc_index).max().map(|m| m + 1).unwrap_or(0);
+  annotate_run_casts(root, session_skill_casts(&session_id), daemon_session.client.as_deref(), &mut next_annotate_idx);
+
   if failed == 0 {
     ok(&format!("all {n} skill{} completed successfully", plural(n)));
     0
@@ -6020,7 +6157,7 @@ fn print_help_run() {
   println!();
   println!("{}", h_head("Watch it live"));
   println!("{}", h_dim("  Every run registers with the session browser and prints a clickable deep link"));
-  println!("{}", h_dim("  (http://127.0.0.1:7274/session/<id>, port from SCSH_DAEMON_PORT) at the start"));
+  println!("{}", h_dim("  (http://127.0.0.1:7274/job/<id>, port from SCSH_DAEMON_PORT) at the start"));
   println!("{}", h_dim("  AND as one of the last lines — recordings, logs, and live TUIs live there."));
   println!();
   println!("{}", h_head("What `run` does (summary)"));
@@ -6361,6 +6498,16 @@ fn print_help_cache() {
 mod tests {
   use super::*;
   use std::ffi::OsString;
+
+  #[test]
+  fn parent_session_from_cast_path_extracts_id() {
+    assert_eq!(
+      parent_session_from_cast_path("/Users/x/.scsh/sessions/abcdef/casts/foo.cast").as_deref(),
+      Some("abcdef")
+    );
+    assert_eq!(parent_session_from_cast_path("/tmp/orphan.cast"), None);
+    assert_eq!(parent_session_from_cast_path("/sessions/"), None);
+  }
 
   #[test]
   fn persist_run_artifacts_copies_cast_and_logs_with_shared_stem() {

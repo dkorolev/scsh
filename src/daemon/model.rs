@@ -111,11 +111,12 @@ impl ProcStatus {
   }
 }
 
-/// Build vs skill row.
+/// Build vs skill vs annotate row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcKind {
   Build,
   Skill,
+  Annotate,
 }
 
 impl ProcKind {
@@ -123,6 +124,7 @@ impl ProcKind {
     match self {
       ProcKind::Build => "build",
       ProcKind::Skill => "skill",
+      ProcKind::Annotate => "annotate",
     }
   }
 
@@ -130,6 +132,7 @@ impl ProcKind {
     match s {
       "build" => Some(ProcKind::Build),
       "skill" => Some(ProcKind::Skill),
+      "annotate" => Some(ProcKind::Annotate),
       _ => None,
     }
   }
@@ -212,6 +215,9 @@ pub struct Session {
   /// Optional workflow dependency graph (`needs` DAG). `None` for flat jobs, builds, and
   /// sessions persisted before this field existed.
   pub workflow: Option<WorkflowMeta>,
+  /// When this session was spawned as a follow-on job (e.g. standalone `annotate-cast` for
+  /// recordings under `$SCSH_HOME/sessions/<id>/`), the parent session id. `None` otherwise.
+  pub parent_session: Option<String>,
 }
 
 /// A repository opened from the daemon UI, ready to start jobs in. Kept in memory only (a
@@ -267,7 +273,8 @@ impl Store {
   }
 
   /// The one-job-per-directory guard: true while a job (session) is still running in `repo`.
-  /// Image-build sessions use a synthetic repo label, so they never block a real repo.
+  /// Synthetic repo labels (`(image builds)`, `(internal)`) never collide with a real path,
+  /// so those sessions never block a real repo.
   pub fn job_running_in(&self, repo: &str, now: u64) -> bool {
     self.sessions.values().any(|s| s.repo == repo && s.lifecycle_status(now) == SessionLifecycle::Running)
   }
@@ -431,6 +438,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     assert_eq!(session.duration_secs(200), Some(100));
@@ -452,9 +460,10 @@ mod tests {
       client_connected: true,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
-    assert_eq!(session.lifecycle_status(110), SessionLifecycle::Running);
-    assert_eq!(session.lifecycle_status(111), SessionLifecycle::Terminated);
+    assert_eq!(session.lifecycle_status(100 + SESSION_STALE_SECS), SessionLifecycle::Running);
+    assert_eq!(session.lifecycle_status(100 + SESSION_STALE_SECS + 1), SessionLifecycle::Terminated);
   }
 
   #[test]
@@ -493,6 +502,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     assert_eq!(session.lifecycle_status(50), SessionLifecycle::Cancelled);
   }
@@ -556,6 +566,7 @@ mod tests {
       client_connected: true,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     assert!(session.has_incomplete_procs());
     assert_eq!(session.lifecycle_status(2), SessionLifecycle::Running);
@@ -577,6 +588,7 @@ mod tests {
       client_connected: true,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     let done = Session {
       id: "done".into(),
@@ -592,6 +604,7 @@ mod tests {
       client_connected: false,
       run_pid: None,
       workflow: None,
+      parent_session: None,
     };
     let mut sessions = BTreeMap::new();
     sessions.insert(done.id.clone(), done);
@@ -622,6 +635,7 @@ mod tests {
           client_connected: false,
           run_pid: None,
           workflow: None,
+          parent_session: None,
         },
       );
     }
@@ -667,6 +681,7 @@ mod tests {
         client_connected: true,
         run_pid: None,
         workflow: None,
+        parent_session: None,
       },
     );
     assert_eq!(store.alive_clients(now + SESSION_STALE_SECS), 1);
@@ -686,6 +701,15 @@ mod tests {
       Some(EPHEMERAL_IDLE_SECS - EPHEMERAL_COUNTDOWN_AFTER_SECS)
     );
     assert_eq!(store.ephemeral_shutdown_in_secs(now + EPHEMERAL_IDLE_SECS), Some(0));
+  }
+
+  #[test]
+  fn proc_kind_annotate_round_trips() {
+    assert_eq!(ProcKind::Annotate.as_str(), "annotate");
+    assert_eq!(ProcKind::parse("annotate"), Some(ProcKind::Annotate));
+    assert_eq!(ProcKind::parse("build"), Some(ProcKind::Build));
+    assert_eq!(ProcKind::parse("skill"), Some(ProcKind::Skill));
+    assert_eq!(ProcKind::parse("other"), None);
   }
 
   #[test]

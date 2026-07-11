@@ -183,6 +183,7 @@ mod tests {
         lines: vec![],
       }],
       workflow: None,
+      parent_session: None,
     }
   }
 
