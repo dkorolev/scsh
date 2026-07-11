@@ -661,11 +661,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   a.proc-diff, span.proc-diff {
     margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
-    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
-    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
-    min-width: 5.75rem; text-align: center; box-sizing: border-box;
+    min-width: 10.5rem; height: 1.85rem; padding: 0 0.75rem;
+    text-align: center; box-sizing: border-box;
   }
-  a.proc-diff:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); text-decoration: none; }
+  a.proc-diff:hover { text-decoration: none; }
   /* Offline export: packed commits-diff embedded as a sandboxed iframe (not the live chip). */
   details.proc-diff {
     margin: 0.5rem 0; border: 1px solid var(--border); border-radius: 6px;
@@ -722,6 +721,26 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar button.on { border-color: var(--red); color: var(--red); }
+  .annotation-link { margin-left: 0.25rem; white-space: nowrap; }
+  .annotation-link--running { color: var(--orange) !important; border-color: var(--orange) !important; }
+  .annotation-link--ok { color: var(--green) !important; border-color: var(--green) !important; }
+  .annotation-link--fail { color: var(--red) !important; border-color: var(--red) !important; }
+  .annotation-dots { display: inline-block; width: 3ch; text-align: left; }
+  .annotation-dots::after { content: '.'; animation: annotation-dots 1.2s steps(1, end) infinite; }
+  @keyframes annotation-dots {
+    0%, 100% { content: '.'; }
+    33% { content: '..'; }
+    66% { content: '...'; }
+  }
+  @media (prefers-reduced-motion: reduce) { .annotation-dots::after { animation: none; content: '...'; } }
+  .annotation-target {
+    color: var(--orange); font-size: 0.75rem; white-space: nowrap; text-decoration: none;
+    border-bottom: 1px solid currentColor;
+  }
+  .wf-annotation { display: block; font-size: 0.68rem; line-height: 1.2; white-space: nowrap; }
+  .wf-annotation--running { color: var(--orange); }
+  .wf-annotation--ok { color: var(--green); }
+  .wf-annotation--fail { color: var(--red); }
   /* The job-level snapshot download wears the SAME style — one download family. */
   .dl-snap {
     display: inline-block; font: inherit; font-size: 0.8rem; line-height: 1.5;
@@ -772,19 +791,24 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
   /* Snapshot above Force stop, pinned to the proc island's top-right. */
   .proc-actions {
     position: absolute; top: 0.35rem; right: 0.55rem; z-index: 2;
-    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+    display: grid; grid-template-columns: repeat(2, 10.5rem); gap: 0.35rem;
   }
   .proc-actions .proc-kill,
-  .proc-actions .proc-snapshot {
-    margin-left: 0; align-self: stretch;
+  .proc-actions .proc-snapshot,
+  .proc-actions .proc-diff {
+    margin-left: 0; align-self: stretch; width: 100%;
     min-width: 10.5rem; box-sizing: border-box; height: 1.85rem;
   }
+  .proc-actions .proc-diff { grid-column: 1; grid-row: 1; }
+  .proc-actions .proc-snapshot { grid-column: 2; grid-row: 1; }
+  .proc-actions .proc-kill { grid-column: 2; grid-row: 2; }
   /* Keep the summary text clear of the absolute top-right action stack. */
   details.proc:has(.proc-actions) > summary { padding-right: 11.5rem; }
+  details.proc:has(.proc-actions .proc-diff) > summary { padding-right: 22.35rem; }
   button.proc-kill {
     flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
-    color: var(--red); background: var(--red); border: none;
+    color: var(--text); background: var(--red); border: none;
     border-radius: 4px; padding: 0 0.45rem; opacity: 1;
   }
   button.proc-kill:hover:not(:disabled) { background: var(--red); }

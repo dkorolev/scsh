@@ -477,10 +477,8 @@ fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
 /// `scsh-job-<id>.html`. Each recording embeds as the exact per-cast export page
 /// ([`crate::export::render_page_from_texts`]) in an attribute-escaped `<iframe srcdoc>`
 /// — see [`html::session_export_page`] for the composition rationale. Procs with no cast
-/// or no frames become note rows, never errors; a job with ZERO exportable casts is a
-/// 404 with an actionable body (only a hand-typed URL sees it — the job-page button
-/// renders only when a proc has a registered cast). `/session/…/export.html` remains
-/// accepted as a compatibility alias.
+/// or no frames become note rows, never errors. `/session/…/export.html` remains accepted
+/// as a compatibility alias.
 fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
   let id = bare_path
     .strip_prefix("/job/")
@@ -493,9 +491,6 @@ fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, 
     return (404, "job not found".into(), None);
   };
   let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
-  if !exports.iter().any(|e| matches!(e, html::CastExport::Cast { .. })) {
-    return (404, "no exportable recordings in this job — retry once a skill's recording has output".into(), None);
-  }
   // The snapshot freezes lifecycle, duration, and workflow-node states at this instant.
   let page = html::session_export_page(&session, &exports, now_unix_secs());
   (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
@@ -549,10 +544,23 @@ fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String
   let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
     return (200, "{}".into());
   };
+  let annotation = annotation_for_cast(store, &cast_path);
+  let relation = annotation.as_ref().map(|(job, proc, status)| {
+    format!("\"annotation_job\": {}, \"annotation_proc\": {proc}, \"annotation_status\": {}", quote(job), quote(status))
+  });
   match chapters_sidecar_path(&cast_path).and_then(|p| std::fs::read_to_string(p).ok()) {
-    Some(json) => (200, json),
-    None => match summarizing_job_for_cast(store, &cast_path) {
-      Some(job) => (200, format!("{{ \"summarizing_job\": {} }}", quote(&job))),
+    Some(json) => match relation {
+      Some(fields) => {
+        let trimmed = json.trim_end();
+        match trimmed.strip_suffix('}') {
+          Some(prefix) => (200, format!("{prefix}, {fields} }}")),
+          None => (200, json),
+        }
+      }
+      None => (200, json),
+    },
+    None => match relation {
+      Some(fields) => (200, format!("{{ {fields} }}")),
       None => (200, "{}".into()),
     },
   }
@@ -564,19 +572,24 @@ fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String
 /// pending note can link to. Paths are compared whole and by file name: the two sides may
 /// spell the same file differently (relative CLI argument vs the absolute registered
 /// path), and the nonce-stamped stem (`add-…-utc-ufakca.cast`) is unique per recording.
-fn summarizing_job_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<String> {
+fn annotation_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<(String, usize, &'static str)> {
   let file_name = std::path::Path::new(cast_path).file_name();
   let store = lock_store(store);
   for (id, session) in store.sessions.iter() {
     for proc in &session.procs {
-      if proc.kind != ProcKind::Annotate || !matches!(proc.status, ProcStatus::Waiting | ProcStatus::Running) {
+      if proc.kind != ProcKind::Annotate {
         continue;
       }
       let Some(target) = proc.annotate_target.as_deref() else {
         continue;
       };
       if target == cast_path || (file_name.is_some() && std::path::Path::new(target).file_name() == file_name) {
-        return Some(id.clone());
+        let status = match proc.status {
+          ProcStatus::Waiting | ProcStatus::Running => "running",
+          ProcStatus::Ok => "ok",
+          ProcStatus::Fail | ProcStatus::Skipped => "fail",
+        };
+        return Some((id.clone(), proc.index, status));
       }
     }
   }
@@ -3186,7 +3199,7 @@ mod tests {
     std::fs::write(&cast, "{\"version\":3}\n[0.5,\"o\",\"hi\"]\n").unwrap();
     let cast_path = cast.to_string_lossy().into_owned();
     let store = store_with_export_session("srcjob", vec![export_test_proc(0, "claude: add", Some(cast_path.clone()))]);
-    // No sidecar and no annotate job registered yet: the body stays the empty object.
+    // No annotator proc means no invented annotation state.
     let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
     assert_eq!(status, 200);
     assert_eq!(body, "{}");
@@ -3217,19 +3230,19 @@ mod tests {
     );
     let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
     assert_eq!(status, 200);
-    assert_eq!(body, r#"{ "summarizing_job": "annjob" }"#);
+    assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // The match also holds across path spellings: a standalone `scsh annotate-cast` may
     // register a relative argument while the run registered the absolute path — the
     // nonce-stamped file name is the shared key.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].annotate_target =
       Some("casts/add-20260711-114749-utc-ufakca.cast".into());
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
-    assert_eq!(body, r#"{ "summarizing_job": "annjob" }"#);
-    // A finished annotate proc is no longer "summarizing" — an id would be a stale link.
+    assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
+    // Finished state remains linked instead of disappearing.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].status = ProcStatus::Ok;
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
-    assert_eq!(body, "{}");
-    // Once the sidecar lands its content wins outright.
+    assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "ok" }"#);
+    // Once the sidecar lands, chapters and the durable relationship coexist.
     std::fs::write(
       dir.join("add-20260711-114749-utc-ufakca.chapters.json"),
       r#"{"summary":"ok","chapters":[{"t":0,"title":"Start"}]}"#,
@@ -3237,7 +3250,7 @@ mod tests {
     .unwrap();
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
     assert!(body.contains("\"chapters\""), "sidecar content served: {body}");
-    assert!(!body.contains("summarizing_job"), "no job id once chapters exist");
+    assert!(body.contains("\"annotation_status\": \"ok\""), "completed annotation stays linked: {body}");
     let _ = std::fs::remove_dir_all(&dir);
   }
 
@@ -3277,6 +3290,7 @@ mod tests {
     assert!(page.contains("card--accent-left-purple"), "live-page island");
     assert!(!page.contains(r#"class="session-kind""#), "export island has no session-kind");
     assert!(page.contains(r#"<dl class="session-meta">"#), "export keeps session-meta");
+    assert!(page.contains(r#"<main class="page-shell">"#), "offline export keeps the live page's centered width");
     assert!(page.contains(r#"<code class="repo-path">/r</code>"#), "repo label");
     for label in ["claude: add", "codex: multiply", "cursor: skipped"] {
       assert!(page.contains(label), "a section for {label}");
@@ -3329,8 +3343,8 @@ mod tests {
   }
 
   #[test]
-  fn session_export_without_exportable_casts_is_an_actionable_404() {
-    // A frameless cast (header only) and a cast-less proc: nothing to export yet.
+  fn session_export_without_recordings_keeps_the_job_snapshot_useful() {
+    // A frameless cast (header only) and a cast-less proc still export as explanatory rows.
     let dir = std::env::temp_dir().join(format!("scsh-session-export-404-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let cast = dir.join("frameless.cast");
@@ -3343,9 +3357,9 @@ mod tests {
       ],
     );
     let (status, body, disposition) = session_export_response("/job/nocast/export.html", &store);
-    assert_eq!(status, 404);
-    assert!(body.contains("no exportable recordings"), "body: {body}");
-    assert!(disposition.is_none());
+    assert_eq!(status, 200);
+    assert!(body.contains("no recording"), "body: {body}");
+    assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-nocast.html\""));
     // Unknown job: the existing 404 style. Legacy /session/… alias still works.
     assert_eq!(session_export_response("/job/nosuch/export.html", &store).0, 404);
     assert_eq!(session_export_response("/session/nosuch/export.html", &store).0, 404);

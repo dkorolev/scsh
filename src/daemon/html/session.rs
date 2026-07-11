@@ -48,15 +48,18 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       format!("<div class=\"output\">{lines_html}</div>")
     };
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
+    let diff_btn = proc_diff_btn_html(&session.id, proc);
+    let annotation_target = annotation_target_link_html(session, proc);
     procs_html.push_str(&format!(
-      r#"<details class="proc {status_class}" data-index="{index}"{task_attrs}>
-<div class="proc-actions">{snapshot_btn}{kill_btn}</div>
+      r#"<details class="proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
+<div class="proc-actions">{diff_btn}{snapshot_btn}{kill_btn}</div>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span> {proc_stat}
 <span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
 <span class="note dim">{note}</span>
-{diff_btn}</summary>
+{annotation_target}
+</summary>
 {proc_meta}
 <div class="detail">{detail}</div>
 {container_line}
@@ -68,7 +71,8 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       task_attrs = proc_task_attrs(session, proc),
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
-      diff_btn = proc_diff_btn_html(&session.id, proc),
+      diff_btn = diff_btn,
+      annotation_target = annotation_target,
       snapshot_btn = snapshot_btn,
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
@@ -89,16 +93,12 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let pending = chapters_pending_count(session);
   // Snapshot sits above Force stop in the island’s top-right. Mid-run → incomplete;
   // finished but chapters still landing → chapters pending; else job snapshot.
-  let export_btn = if session.procs.iter().any(proc_has_cast) {
-    let label = session_export_label(lifecycle, pending);
-    format!(
-      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/job/{id}/export.html\" download title=\"Offline HTML snapshot of this entire job\"><span>{label}</span></a>\n",
-      id = id,
-      label = label,
-    )
-  } else {
-    String::new()
-  };
+  let label = session_export_label(lifecycle, pending);
+  let export_btn = format!(
+    "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/job/{id}/export.html\" download title=\"Offline HTML snapshot of this entire job\"><span>{label}</span></a>\n",
+    id = id,
+    label = label,
+  );
   // Force stop only while the job is running — hide it otherwise. A control that can
   // never act again is noise, not a missing feature: the lifecycle badge already says
   // completed / failed / cancelled. (Deliberate departure from the WEB-UI §2 gray-in-place
@@ -128,6 +128,29 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))
+}
+
+fn annotation_target_link_html(
+  session: &crate::daemon::model::Session, proc: &crate::daemon::model::ProcRecord,
+) -> String {
+  if proc.kind != crate::daemon::model::ProcKind::Annotate {
+    return String::new();
+  }
+  let Some(target) = proc.annotate_target.as_deref() else {
+    return String::new();
+  };
+  let target_name = std::path::Path::new(target).file_name().and_then(|s| s.to_str()).unwrap_or("source recording");
+  let href = session
+    .procs
+    .iter()
+    .find(|candidate| candidate.cast_path.as_deref() == Some(target))
+    .map(|candidate| format!("/job/{}#proc-{}", esc(&session.id), candidate.index))
+    .or_else(|| session.parent_session.as_ref().map(|parent| format!("/job/{}", esc(parent))))
+    .unwrap_or_else(|| format!("/job/{}", esc(&session.id)));
+  format!(
+    "<a class=\"annotation-target\" href=\"{href}\" title=\"Recording being annotated: {target}\">↩ source run</a>",
+    target = esc(target_name)
+  )
 }
 
 /// The one-line page lede shared by the live job page and the offline export: kind,
@@ -222,7 +245,7 @@ fn proc_diff_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord)
     return String::new();
   }
   format!(
-    "<a class=\"proc-diff\" data-proc-diff href=\"/diff/{id}/{index}\" title=\"Browse the commits this step brought into your branch — one self-contained review page\">⇄ commits diff</a>",
+    "<a class=\"chamfer btn btn--purple btn--sm proc-diff\" data-proc-diff href=\"/diff/{id}/{index}\" title=\"Browse the commits this step brought into your branch — one self-contained review page\"><span>⇄ commits diff</span></a>",
     index = proc.index,
     id = esc(session_id),
   )

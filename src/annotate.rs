@@ -1,9 +1,9 @@
 //! Cast annotation: turn an asciicast recording into a one-sentence summary and a handful
-//! of timestamped chapters, using cursor-agent on the Composer model.
+//! of timestamped chapters, using Codex on the fast GPT-5.4 Mini route.
 //!
 //! Flow: render the asciicast NDJSON to a compact timestamped transcript, hand it to
-//! cursor-agent (prefer host tmux + asciinema so the annotate proc has a visual cast;
-//! fall back to `cursor-agent -p` headless), validate the reply, and write it as the
+//! Codex (prefer host tmux + asciinema so the annotate proc has a visual cast;
+//! fall back to `codex exec` headless), validate the reply, and write it as the
 //! cast's `.chapters.json` sidecar. Best-effort throughout — annotation never fails a run.
 
 use std::io::Read;
@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use crate::json::{self, Value};
 
-/// Hard cap on one annotation `cursor-agent` call. Annotation is a known-fast job (seconds),
+/// Hard cap on one Codex annotation call. Annotation is a known-fast job (seconds),
 /// so this bounds a hang well under the §9 five-minute default — a hung external tool must
 /// never hang the run.
 pub const ANNOTATE_TIMEOUT: Duration = Duration::from_secs(180);
@@ -45,7 +45,7 @@ pub enum AnnotateError {
   UnreadableCast(String),
   /// The recording rendered to an empty transcript — nothing visible to annotate.
   EmptyTranscript,
-  /// cursor-agent produced no reply (spawn/exit failure, or a timeout even after a retry).
+  /// Codex produced no reply (spawn/exit failure, or a timeout even after a retry).
   ModelFailed(String),
   /// The model reply did not contain a valid annotation object.
   UnparseableReply,
@@ -74,9 +74,7 @@ impl AnnotateError {
     match self {
       AnnotateError::UnreadableCast(_) => "check the path and permissions, then re-run `scsh annotate-cast <cast>`",
       AnnotateError::EmptyTranscript => "record a session that produces visible output; an empty cast has no chapters",
-      AnnotateError::ModelFailed(_) => {
-        "check `cursor-agent` login and network, then re-run `scsh annotate-cast <cast>`"
-      }
+      AnnotateError::ModelFailed(_) => "check `codex` login and network, then re-run `scsh annotate-cast <cast>`",
       AnnotateError::UnparseableReply | AnnotateError::NoValidChapters => {
         "re-run `scsh annotate-cast <cast>`; if it persists, try another model via SCSH_ANNOTATE_MODEL"
       }
@@ -85,8 +83,8 @@ impl AnnotateError {
   }
 }
 
-/// Why one cursor-agent invocation produced no reply. Timeouts are separated from other
-/// failures because only a watchdog kill earns a retry (cursor-agent occasionally stalls
+/// Why one Codex invocation produced no reply. Timeouts are separated from other
+/// failures because only a watchdog kill earns a retry (the CLI occasionally stalls
 /// on startup and then answers a fresh call within seconds — same policy as seecast).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum RunFailure {
@@ -250,7 +248,7 @@ fn has_duplicate_keys(fields: &[(String, Value)]) -> bool {
   fields.iter().enumerate().any(|(i, (k, _))| fields[..i].iter().any(|(prev, _)| prev == k))
 }
 
-/// Extract and validate a [`CastAnnotation`] from a cursor-agent reply (which may wrap the
+/// Extract and validate a [`CastAnnotation`] from a model reply (which may wrap the
 /// JSON in prose or a code fence). Takes the first `{`..last `}` slice and parses it.
 /// Replies with duplicate keys, more than [`MAX_CHAPTERS`] chapters, or summary/title
 /// strings over [`MAX_TEXT_BYTES`] are rejected as parse failures.
@@ -321,7 +319,7 @@ pub fn parse_annotation(reply: &str) -> Option<CastAnnotation> {
   Some(CastAnnotation { summary, chapters })
 }
 
-/// The prompt handed to cursor-agent, embedding the transcript (stdout / -p mode). The
+/// The prompt handed to Codex, embedding the transcript. The
 /// prompt asks for 3-8 chapters and terse titles; [`parse_annotation`] enforces generous
 /// ceilings on top ([`MAX_CHAPTERS`] chapters, [`MAX_TEXT_BYTES`] bytes per summary/title)
 /// so a runaway reply is rejected instead of written to disk.
@@ -338,26 +336,9 @@ TRANSCRIPT:\n{transcript}"
   )
 }
 
-/// Prompt for the recorded interactive path: agent must write `annotation.json` in cwd.
-fn annotation_prompt_file(transcript: &str) -> String {
-  format!(
-    "Below is a timestamped transcript of a terminal-session screen recording (an AI coding \
-agent working). Produce a JSON object describing it and WRITE it to the file annotation.json \
-in the current working directory (overwrite if present). Do not wrap it in markdown. After \
-the file is written you are done.\n\n\
-Schema:\n\
-{{\"summary\": \"<one sentence, what the session did>\", \
-\"chapters\": [{{\"t\": <seconds into the recording, may be fractional e.g. 12.5>, \"title\": \"<3-6 word phase name>\"}}]}}\n\n\
-Use between 3 and 8 chapters, in ascending time order. The FIRST chapter MUST start at t=0 \
-(the beginning). Each chapter marks a distinct phase; keep titles terse.\n\n\
-TRANSCRIPT:\n{transcript}"
-  )
-}
-
-/// Whether the host can run the cursor/Composer annotation: the `cursor-agent` binary is on
-/// PATH and cursor container auth is configured (same credentials the harness uses).
+/// Whether the host can run Codex annotation: the CLI is on PATH and host auth is ready.
 pub fn host_can_annotate() -> bool {
-  crate::runtime::which("cursor-agent").is_some() && crate::runtime::cursor_container_auth_ready()
+  crate::runtime::which("codex").is_some() && crate::runtime::codex_container_auth_ready()
 }
 
 /// Host can record annotate under tmux + asciinema (visual cast for the annotate proc).
@@ -379,12 +360,12 @@ pub fn sidecar_is_stale(cast: &Path, sidecar: &Path) -> bool {
   }
 }
 
-/// Annotate one cast file: render → cursor-agent(Composer) → validated sidecar written next
+/// Annotate one cast file: render → Codex → validated sidecar written next
 /// to the cast. Returns the sidecar path on success, or the reason nothing was written —
 /// annotation stays best-effort (callers never fail a run over it), but the reason feeds
 /// the daemon Fail row and CLI output. A watchdog-killed call is retried ONCE (see
-/// [`RunFailure`]). `run` invokes cursor-agent so tests can stub it; production passes
-/// [`run_cursor_agent`].
+/// [`RunFailure`]). `run` invokes Codex so tests can stub it; production passes
+/// [`run_codex`].
 pub fn annotate_cast_with<R>(cast_path: &Path, model: &str, mut run: R) -> Result<std::path::PathBuf, AnnotateError>
 where
   R: FnMut(&str, &str) -> Result<String, RunFailure>,
@@ -397,20 +378,20 @@ where
   let prompt = annotation_prompt(&transcript);
   let reply = match run(model, &prompt) {
     Ok(reply) => reply,
-    Err(RunFailure::Failed) => return Err(AnnotateError::ModelFailed("cursor-agent exited without a reply".into())),
-    // Retry once after a timeout kill: cursor-agent occasionally stalls on startup and
+    Err(RunFailure::Failed) => return Err(AnnotateError::ModelFailed("Codex exited without a reply".into())),
+    // Retry once after a timeout kill: the model CLI occasionally stalls on startup and
     // then answers a fresh call within seconds, so one retry turns a flaky external into
     // a reliable step. Both deaths stay visible in the failure reason.
     Err(RunFailure::TimedOut) => match run(model, &prompt) {
       Ok(reply) => reply,
       Err(RunFailure::TimedOut) => {
         return Err(AnnotateError::ModelFailed(format!(
-          "cursor-agent hit the {}s timeout twice (retried once after the first kill)",
+          "Codex hit the {}s timeout twice (retried once after the first kill)",
           ANNOTATE_TIMEOUT.as_secs()
         )));
       }
       Err(RunFailure::Failed) => {
-        return Err(AnnotateError::ModelFailed("cursor-agent timed out, and the retry exited without a reply".into()));
+        return Err(AnnotateError::ModelFailed("Codex timed out, and the retry exited without a reply".into()));
       }
     },
   };
@@ -425,12 +406,13 @@ where
   Ok(sidecar)
 }
 
-/// Production annotate: prefer a recorded interactive cursor-agent (tmux + asciinema) when
+/// Production annotate: prefer recorded interactive Codex (tmux + asciinema) when
 /// `record_cast` is set and the host can record; otherwise (or when the recorded attempt
 /// yields no valid annotation) fall back to headless `-p` with the usual retry-once
 /// semantics of [`annotate_cast_with`]. On success the result carries the sidecar and the
 /// annotate recording path when one was produced — even a recording of a failed interactive
-/// attempt rides along, since the fallback's answer annotates the same cast.
+/// attempt is discarded: a successful fallback must not make a failed recording look
+/// like a successful annotator run.
 pub fn annotate_cast(
   cast_path: &Path, model: &str, record_cast: Option<&Path>,
 ) -> Result<AnnotateResult, AnnotateError> {
@@ -441,48 +423,65 @@ pub fn annotate_cast(
       if transcript.trim().is_empty() {
         return Err(AnnotateError::EmptyTranscript);
       }
-      run_cursor_agent_recorded(model, &annotation_prompt_file(&transcript), out)
+      run_codex_recorded(model, &annotation_prompt(&transcript), out)
     }
     _ => None,
   };
-  let recorded = || record_cast.filter(|p| p.is_file()).map(|p| p.to_path_buf());
   if let Some(reply) = recorded_reply {
     if let Some(annotation) = parse_annotation(&reply).filter(|a| !a.chapters.is_empty()) {
       let sidecar = crate::daemon::chapters_sidecar_path(&cast_path.to_string_lossy())
         .ok_or_else(|| AnnotateError::WriteFailed("not a .cast path, cannot derive the sidecar name".into()))?;
       crate::atomic_write(&sidecar, annotation.to_sidecar_json().as_bytes())
         .map_err(|e| AnnotateError::WriteFailed(e.to_string()))?;
-      return Ok(AnnotateResult { sidecar, cast_path: recorded() });
+      return Ok(AnnotateResult { sidecar, cast_path: record_cast.filter(|p| p.is_file()).map(|p| p.to_path_buf()) });
     }
   }
-  let sidecar = annotate_cast_with(cast_path, model, run_cursor_agent)?;
-  Ok(AnnotateResult { sidecar, cast_path: recorded() })
+  if let Some(failed_recording) = record_cast {
+    let _ = std::fs::remove_file(failed_recording);
+  }
+  let sidecar = annotate_cast_with(cast_path, model, run_codex)?;
+  Ok(AnnotateResult { sidecar, cast_path: None })
 }
 
-/// Run cursor-agent headless on the host with `prompt`, returning its stdout on success.
+/// Run Codex headless on the host with `prompt`, returning its final response on success.
 /// Runs in an empty temp dir (the prompt is self-contained) and is killed if it runs past
 /// [`ANNOTATE_TIMEOUT`] — a hung annotation never stalls the run (§9).
-pub fn run_cursor_agent(model: &str, prompt: &str) -> Result<String, RunFailure> {
+pub fn run_codex(model: &str, prompt: &str) -> Result<String, RunFailure> {
   let dir = std::env::temp_dir().join(format!("scsh-annotate-{}", crate::runtime::random_nonce_6()));
   std::fs::create_dir_all(&dir).map_err(|_| RunFailure::Failed)?;
-  let child = Command::new("cursor-agent")
+  let reply_path = dir.join("reply.json");
+  let child = Command::new("codex")
     .current_dir(&dir)
-    .args(["-p", "--force", "--output-format", "text", "--model", model, prompt])
+    .args([
+      "exec",
+      "--skip-git-repo-check",
+      "--ephemeral",
+      "--dangerously-bypass-approvals-and-sandbox",
+      "--model",
+      model,
+      "--output-last-message",
+      &reply_path.to_string_lossy(),
+      prompt,
+    ])
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
     .spawn();
-  let result = match child {
-    Ok(c) => wait_capped(c, ANNOTATE_TIMEOUT),
+  let status = match child {
+    Ok(c) => wait_capped(c, ANNOTATE_TIMEOUT).map(|_| ()),
     Err(_) => Err(RunFailure::Failed),
+  };
+  let result = match status {
+    Ok(()) => std::fs::read_to_string(&reply_path).map_err(|_| RunFailure::Failed),
+    Err(e) => Err(e),
   };
   let _ = std::fs::remove_dir_all(&dir);
   result
 }
 
-/// Interactive cursor-agent under host tmux + asciinema. Writes the recording to `cast_out`
-/// and returns the contents of `annotation.json` when the agent produces it.
-pub fn run_cursor_agent_recorded(model: &str, prompt: &str, cast_out: &Path) -> Option<String> {
+/// Non-interactive Codex under host tmux + asciinema. The CLI writes its final response
+/// directly to `annotation.json`; no TUI trust or approval prompt can block the harness.
+pub fn run_codex_recorded(model: &str, prompt: &str, cast_out: &Path) -> Option<String> {
   if let Some(parent) = cast_out.parent() {
     std::fs::create_dir_all(parent).ok()?;
   }
@@ -491,26 +490,22 @@ pub fn run_cursor_agent_recorded(model: &str, prompt: &str, cast_out: &Path) -> 
   let term = crate::config::Terminal::default();
   // Keep the name outside the shell script so Rust can always tear the tmux session down,
   // including when `wait_capped_status` has to kill a wedged recorder shell. Killing only
-  // that shell is insufficient: tmux is a server and its cursor-agent child outlives it.
+  // that shell is insufficient: tmux is a server and its Codex child outlives it.
   let session = format!("scsh-ann-{}", crate::runtime::random_nonce_6());
-  // Same quoting as the cursor harness: shell_quote the full prompt so embedded " / ' survive.
+  // Shell-quote the full prompt so embedded " / ' survive.
   let agent = format!(
-    "cursor-agent --force --sandbox disabled --disable-auto-update --model {} {}",
+    "codex exec --skip-git-repo-check --ephemeral --dangerously-bypass-approvals-and-sandbox \
+--model {} --output-last-message annotation.json {}",
     crate::runtime::shell_quote(model),
     crate::runtime::shell_quote(prompt),
   );
-  // Trust this temp cwd so the TUI does not block on a workspace-trust dialog (host path
-  // slug: strip leading /, replace / with - — same rule as the in-container harness).
-  let trust_slug = dir.to_string_lossy().trim_start_matches('/').replace('/', "-");
   let script = format!(
     r#"set -eu
 cd {dir}
 result=annotation.json
 rm -f "$result"
-mkdir -p "$HOME/.cursor/projects/{trust_slug}"
-: > "$HOME/.cursor/projects/{trust_slug}/.workspace-trusted"
 session={session}
-# Interactive TUI — agent writes annotation.json (completion signal).
+# Recorded non-interactive execution — the final-response file is the completion signal.
 tmux -f /dev/null new-session -d -x {cols} -y {rows} -s "$session" {agent_q}
 (
   i=0
@@ -536,7 +531,6 @@ wait || true
 tmux kill-session -t "$session" 2>/dev/null || true
 "#,
     dir = crate::runtime::shell_quote(&dir.to_string_lossy()),
-    trust_slug = trust_slug,
     session = crate::runtime::shell_quote(&session),
     cols = term.cols,
     rows = term.rows,
@@ -753,13 +747,6 @@ mod tests {
     assert!(written.contains("\"summary\": \"Did work.\""), "got: {written}");
     assert!(written.contains("\"title\": \"Start\""), "got: {written}");
     let _ = std::fs::remove_dir_all(&dir);
-  }
-
-  #[test]
-  fn annotation_prompt_file_asks_for_annotation_json() {
-    let p = annotation_prompt_file("hello transcript");
-    assert!(p.contains("annotation.json"), "got: {p}");
-    assert!(p.contains("hello transcript"), "got: {p}");
   }
 
   #[test]

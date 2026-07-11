@@ -1545,21 +1545,14 @@ fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
 }
 
 #[test]
-fn chapters_pending_note_links_to_the_summarizing_job() {
-  // While a finished cast waits for its chapters, the daemon reports the annotating job's
-  // id (`summarizing_job` in the chapters JSON) and the pending note deep-links to it —
-  // plain text until the id is known.
+fn annotation_control_links_to_the_job_and_persists_its_state() {
   let js = live_client_js();
-  assert!(js.contains("meta.summarizing_job"), "the poll reads the summarizing job id");
-  assert!(
-    js.contains(r#"pending.innerHTML = '⏳ chapters: <a href="/job/' + esc(jobId) + '">summarizing…</a>';"#),
-    "known id → the pending element is a normal /job/ link"
-  );
-  assert!(js.contains("pending.textContent = '⏳ chapters: summarizing…';"), "unknown id → plain text, no dead link");
-  // The bounded-poll behavior stays untouched: the note appears only inside the
-  // annotation window and the id can arrive on a later poll tick.
+  assert!(js.contains("meta.annotation_job"), "the player reads the annotation job id");
+  assert!(js.contains("#proc-' + Number(meta.annotation_proc"), "the link targets the annotating run");
+  assert!(js.contains("annotation-link--' + status"), "running/ok/fail each retain a status class");
+  assert!(js.contains("annotation-dots"), "running annotation gets animated dots");
   assert!(js.contains("CHAPTERS_WAIT_SECS"), "the poll window is still bounded");
-  assert!(js.contains("setChapPending(pending, meta.summarizing_job)"), "a late-registering job links up mid-poll");
+  assert!(js.contains("renderAnnotationLink(box, meta)"), "a late-registering job links up mid-poll");
 }
 
 #[test]
@@ -1652,19 +1645,18 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
 
 #[test]
 fn session_page_header_offers_the_session_export_download() {
-  // A session with a recorded proc gets the whole-session download button in the header
-  // (decided server-side: any proc with a registered cast; the endpoint 404s edge cases).
+  // Every session gets a whole-job download: cast-less procs remain useful note rows.
   let html = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("session page");
   assert!(
     html.contains(r#"href="/job/castab/export.html" download"#) && html.contains("session-export"),
     "session export button"
   );
-  // No recorded proc anywhere → no button (nothing to export; the 404 would only confuse).
+  // No recorded proc anywhere still retains the button and exports the job metadata.
   let mut store = store_with_cast_proc(ProcStatus::Ok);
   store.sessions.get_mut("castab").unwrap().procs[0].cast_path = None;
   let bare = session_page(&store, "castab").expect("session page");
   // (The `.session-export` CSS rule is in the shared shell, so match the anchor itself.)
-  assert!(!bare.contains("<a class=\"session-export\""), "no export button without any registered cast");
+  assert!(bare.contains("session-export"), "job snapshot remains available without a recording");
 }
 
 #[test]
@@ -1775,12 +1767,12 @@ fn review_round_four_fixes_hold() {
   let mut ended = store_with_cast_proc(ProcStatus::Ok);
   ended.sessions.get_mut("castab").unwrap().procs[0].elapsed = Some(30.0);
   let shtml = session_page(&ended, "castab").expect("session renders");
-  assert!(shtml.contains(r#" data-status="ok" data-ended="31">"#), "got: {shtml}");
+  assert!(shtml.contains(r#" data-status="ok" data-kind="skill" data-ended="31">"#), "got: {shtml}");
   assert!(shtml.contains("CHAPTERS_WAIT_SECS"), "bounded summarizing window ships");
   // A still-running recording has no end yet (the session-meta dl has its own unrelated
   // data-ended, so pin the cast box's tag specifically).
   let running = session_page(&store_with_cast_proc(ProcStatus::Running), "castab").expect("session renders");
-  assert!(running.contains(r#" data-status="running">"#), "got: {running}");
+  assert!(running.contains(r#" data-status="running" data-kind="skill">"#), "got: {running}");
   assert!(!running.contains(r#" data-status="running" data-ended"#), "got: {running}");
   // (5) The per-container button reads "Force stop", not "kill" and without a leading ✕.
   let mut live = store_with_cast_proc(ProcStatus::Running);
@@ -1892,7 +1884,7 @@ fn review_round_five_fixes_hold() {
   assert!(!shtml.contains("fullscreenEl: box"), "fullscreen must contain only the player, not the scsh cast card");
   assert!(!shtml.contains(".cast:fullscreen"), "the outer cast card is never the fullscreen element");
   assert!(
-    shtml.contains("button.proc-kill") && shtml.contains("color: var(--red); background: var(--red); border: none;"),
+    shtml.contains("button.proc-kill") && shtml.contains("color: var(--text); background: var(--red); border: none;"),
     "Force stop must keep its red chamfered border despite button.btn specificity: {shtml}"
   );
 }

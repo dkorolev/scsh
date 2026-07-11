@@ -591,10 +591,10 @@ function updateProcFields(det, p, nowUnix) {
   // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
   // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
   if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
-    const summary = det.querySelector('summary');
-    if (summary) {
-      summary.insertAdjacentHTML('beforeend', procDiffBtnHtml(p));
-      wireProcDiff(summary.querySelector('a[data-proc-diff]'));
+    const actions = det.querySelector('.proc-actions');
+    if (actions) {
+      actions.insertAdjacentHTML('afterbegin', procDiffBtnHtml(p));
+      wireProcDiff(actions.querySelector('a[data-proc-diff]'));
     }
   }
   const detailEl = det.querySelector('.detail');
@@ -673,14 +673,13 @@ function ensureProcSnapshot(det, p) {
   a.hidden = true;
   a.title = 'Offline HTML snapshot of this run';
   a.innerHTML = '<span>' + label + '</span>';
-  const killBtn = actions.querySelector('button[data-proc-stop]');
-  if (killBtn) actions.insertBefore(a, killBtn);
-  else actions.appendChild(a);
+  actions.appendChild(a);
 }
 // Mirrors proc_diff_btn_html in session.rs.
 function procDiffBtnHtml(p) {
-  return '<a class="proc-diff" data-proc-diff href="/diff/' + encodeURIComponent(SESSION_ID) + '/' + p.index +
-    '" title="Browse the commits this step brought into your branch — one self-contained review page">⇄ commits diff</a>';
+  return '<a class="chamfer btn btn--purple btn--sm proc-diff" data-proc-diff href="/diff/' +
+    encodeURIComponent(SESSION_ID) + '/' + p.index +
+    '" title="Browse the commits this step brought into your branch — one self-contained review page"><span>⇄ commits diff</span></a>';
 }
 // The chip lives inside the <summary>; keep a click on it from toggling the details row.
 function wireProcDiff(a) {
@@ -808,11 +807,15 @@ function createCastPlayer(box, startAt, autoplay) {
     if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
     if (box._live || running) setCastLive(box, true);
     renderCastSummary(box, meta.summary);
+    renderAnnotationLink(box, meta);
     // Chapters are written by the annotation pass AFTER the run ends; a finished cast with
     // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
     // sidecar lands — no browser refresh. (Polling stops quietly if annotation never comes,
-    // e.g. no cursor-agent on the host.)
-    if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl, meta.summarizing_job);
+    // e.g. no annotator on the host.) An annotator recording is already the act of
+    // producing chapters for another cast; recursively summarizing it is nonsensical.
+    if (!chapters.length && box.dataset.status !== 'running' && box.dataset.kind !== 'annotate') {
+      pollForChapters(box, chaptersUrl);
+    }
   });
 }
 function focusCastPlayer(box) {
@@ -828,27 +831,27 @@ function setChapterKeys(box, hasChapters) {
 // never (no annotator on the host, or a recording from before annotation existed). Show the
 // indicator and poll only inside that window — an old cast gets neither.
 const CHAPTERS_WAIT_SECS = 300;
-// The pending note's content: a plain "summarizing…" until the annotating job is known,
-// then a deep link to that job's page (the annotation runs as a real daemon job — the
-// chapters endpoint reports its id as summarizing_job while the sidecar is pending).
-function setChapPending(pending, jobId) {
-  if (jobId && pending.dataset.job !== jobId) {
-    pending.dataset.job = jobId;
-    pending.innerHTML = '⏳ chapters: <a href="/job/' + esc(jobId) + '">summarizing…</a>';
-  } else if (!jobId && !pending.dataset.job) {
-    pending.textContent = '⏳ chapters: summarizing…';
-  }
+// Persistent annotation state: an animated pen while active, then a durable colored link.
+function renderAnnotationLink(box, meta) {
+  if (!box || box.dataset.kind === 'annotate') return;
+  const bar = box.querySelector('.cast-toolbar');
+  if (!bar) return;
+  let link = bar.querySelector('.annotation-link');
+  const job = meta && meta.annotation_job;
+  const status = meta && meta.annotation_status;
+  if (!job || !status) { if (link) link.remove(); return; }
+  if (!link) { link = document.createElement('a'); bar.appendChild(link); }
+  link.href = '/job/' + encodeURIComponent(job) + '#proc-' + Number(meta.annotation_proc || 0);
+  link.className = 'annotation-link annotation-link--' + status + (status === 'running' ? ' chap-pending' : '');
+  link.innerHTML = status === 'running'
+    ? '<span aria-hidden="true">🖊</span> annotating<span class="annotation-dots" aria-hidden="true"></span>'
+    : (status === 'ok' ? '✓ annotation complete' : '✗ annotation failed');
 }
-function pollForChapters(box, chaptersUrl, summarizingJob) {
+function pollForChapters(box, chaptersUrl) {
   if (box._chapPoll) return;
   const endedAt = Number(box.dataset.ended || 0);
   const sinceEnd = () => Date.now() / 1000 - endedAt;
   if (!endedAt || sinceEnd() > CHAPTERS_WAIT_SECS) return;
-  const bar = box.querySelector('.cast-toolbar');
-  const pending = document.createElement('span');
-  pending.className = 'dim chap-pending';
-  setChapPending(pending, summarizingJob);
-  if (bar) bar.appendChild(pending);
   // liveSessions is null until the first WS tick — never index it bare (SESSION_ID is a
   // property name; `null[SESSION_ID]` throws TypeError in the console).
   const sessionForChapters = () => (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null);
@@ -857,18 +860,15 @@ function pollForChapters(box, chaptersUrl, summarizingJob) {
     if (s) syncChaptersPending(s);
   }
   box._chapPoll = setInterval(() => {
-    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); const s = sessionForChapters(); if (s) syncChaptersPending(s); return; }
+    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; const s = sessionForChapters(); if (s) syncChaptersPending(s); return; }
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
+      renderAnnotationLink(box, meta);
       const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
       if (!chapters.length) {
-        // The annotate job may register only after this poll started (post-run catch-up,
-        // or a standalone `scsh annotate-cast`) — link up as soon as its id appears.
-        setChapPending(pending, meta.summarizing_job);
         return;
       }
       clearInterval(box._chapPoll);
       box._chapPoll = null;
-      pending.remove();
       // Re-create at the same position so the timeline gains its markers too.
       createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
       const s = sessionForChapters();
@@ -1234,6 +1234,29 @@ function wfBookendHtml(pos, isStart) {
     'px;top:' + pos.y.toFixed(1) + 'px;width:' + pos.w.toFixed(0) + 'px;min-height:' + WF_BOOKEND_H +
     'px" title="' + title + '" aria-hidden="true">' + glyph + '</div>';
 }
+function annotationForProc(session, proc) {
+  if (!session || !proc || !proc.cast_path || !liveSessions) return null;
+  const sourceName = String(proc.cast_path).split('/').pop();
+  for (const [jobId, candidate] of Object.entries(liveSessions)) {
+    if (!candidate || (jobId !== session.id && candidate.parent_session !== session.id)) continue;
+    for (const ann of (candidate.procs || [])) {
+      if (ann.kind !== 'annotate' || !ann.annotate_target) continue;
+      const targetName = String(ann.annotate_target).split('/').pop();
+      if (ann.annotate_target !== proc.cast_path && targetName !== sourceName) continue;
+      const status = ann.status === 'running' || ann.status === 'waiting' ? 'running'
+        : (ann.status === 'ok' ? 'ok' : 'fail');
+      return { jobId, proc: ann.index, status };
+    }
+  }
+  return null;
+}
+function wfAnnotationHtml(session, proc) {
+  const ann = annotationForProc(session, proc);
+  if (!ann) return '';
+  const text = ann.status === 'running' ? '🖊 annotating' : (ann.status === 'ok' ? '✓ annotation complete' : '✗ annotation failed');
+  const dots = ann.status === 'running' ? '<span class="annotation-dots" aria-hidden="true"></span>' : '';
+  return '<span class="wf-annotation wf-annotation--' + ann.status + '">' + text + dots + '</span>';
+}
 function wfBuildGraphHtml(session, nowUnix) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
   if (!nodes.length) return '';
@@ -1285,7 +1308,8 @@ function wfBuildGraphHtml(session, nowUnix) {
       ' aria-label="' + esc(tip.replace(/\n/g, ', ')) +
       '"><span class="wf-state"><span class="wf-ico" aria-hidden="true">' + wfStateIcon(state) +
       '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span></span><span class="wf-id">' +
-      esc(title) + gate + '</span><span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
+      esc(title) + gate + '</span>' + wfAnnotationHtml(session, p) +
+      '<span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
   }).join('') + wfBookendHtml(finish, false);
   return '<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
@@ -1373,6 +1397,13 @@ function updateWorkflowGraph(session, nowUnix) {
     }
     if (node.proc_index != null) el.setAttribute('data-proc-index', String(node.proc_index));
     const p = (session.procs || []).find(x => x.index === node.proc_index);
+    const oldAnnotation = el.querySelector('.wf-annotation');
+    if (oldAnnotation) oldAnnotation.remove();
+    const annotationHtml = wfAnnotationHtml(session, p);
+    if (annotationHtml) {
+      const meta = el.querySelector('.wf-meta');
+      if (meta) meta.insertAdjacentHTML('beforebegin', annotationHtml);
+    }
     const unmetIds = wfUnmetNeedIds(session, node);
     const tip = wfNodeTip(session, node, state, unmetIds, nowUnix);
     el.setAttribute('data-tip', tip);
