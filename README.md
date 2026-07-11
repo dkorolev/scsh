@@ -191,13 +191,14 @@ See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 
 **Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
 runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
-`~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits` and
-`code-review` workflows — the latter probes the agent's credentials end to end before
-spending the long review container). A flat
+`~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits`, `code-review`,
+`arith`, and `greet` workflows — `greet` is the fake-PR demo: scaffold a broken `greet()`,
+fix it, commit `PR-DESCRIPTION.md`). A flat
 definition declares a `description`, typed `params` (which become environment variables), a
 `task` body, and an `invocations:` agent matrix. A **workflow** definition instead declares
 `steps:` — a DAG where each step runs an agent, writes typed `output` (plus any declared
-`artifacts:` — plain files copied back beside its result, e.g. a `summary.txt`), and feeds later steps
+`artifacts:` — plain files copied back beside its result, e.g. a `summary.txt`), optional
+`commits: true` (same as a skill — rebase the step's commits onto your branch / packdiff), and feeds later steps
 whose `inputs` bind to `params.NAME` or `stepid.field` (`needs:` gives the edges, `when:` gates a
 step). Run one from the console with `scsh run --def <name>` (params from the environment), or,
 when the daemon is up, open a repository in the browser (type/paste a path or use the native
@@ -275,6 +276,8 @@ line, so logs stay readable.
 
 When the session browser daemon is running, the same events also appear in a browser at a
 deep link `http://127.0.0.1:7274/session/abcdef` URL printed at the end of `scsh run`.
+Workflow jobs also get a live **dependency graph** on that page (nodes + edges from declared
+`needs`), above the usual step panels.
 
 > **See it without a container or a model:** `scsh __ui-demo` runs the real board over a few
 > scripted subprocesses (click the rows, scroll), and `scsh __ui-demo --frames` prints a few static

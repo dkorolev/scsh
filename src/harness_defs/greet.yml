@@ -1,0 +1,103 @@
+# Built-in workflow: a tiny "fake PR" demo. Seeds a broken greet helper, fixes it, then
+# writes PR-DESCRIPTION.md — so the job page shows a live DAG and packdiff's ⇄ commits
+# diff looks like a real mini pull request (source + tests + Description panel).
+description: "Scaffold a broken greet() helper, fix it, then write PR-DESCRIPTION.md — a fake PR for the Web UI."
+params:
+  NAME:
+    type: string
+    default: "Ada"
+    description: "Name used in the greeting and the failing/passing test"
+steps:
+  scaffold:
+    agent:
+      harness: claude
+      model: sonnet
+    commits: true
+    inputs:
+      NAME: params.NAME
+    prompt: |
+      Create a tiny broken greeting project at the repository root (overwrite if present):
+
+      1. `greet.py` — exactly:
+
+         def greet(name: str) -> str:
+             return "hi"
+
+      2. `test_greet.py` — a stdlib unittest that expects the *correct* greeting (so it
+         fails against the stub above). Use the NAME env var. Example shape:
+
+         import os
+         import unittest
+         from greet import greet
+
+         class TestGreet(unittest.TestCase):
+             def test_hello(self):
+                 name = os.environ.get("NAME", "Ada")
+                 self.assertEqual(greet(name), f"Hello, {name}!")
+
+         if __name__ == "__main__":
+             unittest.main()
+
+      3. Commit ONLY those two files with message:
+         `scaffold: broken greet stub (test expects Hello, {NAME}!)`
+
+      Do not fix the implementation. Do not write PR-DESCRIPTION.md. Do not touch other
+      files. Then write the result JSON.
+    output:
+      ok:
+        type: bool
+
+  implement:
+    needs: scaffold
+    agent:
+      harness: claude
+      model: sonnet
+    commits: true
+    inputs:
+      NAME: params.NAME
+    prompt: |
+      The repo has a broken `greet.py` and a failing `test_greet.py` (from the scaffold
+      step). Fix the feature:
+
+      1. Change `greet(name)` so it returns `f"Hello, {name}!"` (exact spelling/punctuation).
+      2. Run `python3 test_greet.py` with NAME in the environment and confirm it passes.
+      3. Commit ONLY `greet.py` (and `test_greet.py` only if you had to adjust the test)
+         with message: `implement: greet returns Hello, {name}!`
+
+      Do not write PR-DESCRIPTION.md. Do not rewrite the scaffold from scratch unless a
+      file is missing. Then write the result JSON — `greeting` must be the return value of
+      `greet(NAME)`.
+    output:
+      greeting:
+        type: string
+
+  describe:
+    needs: implement
+    agent:
+      harness: claude
+      model: sonnet
+    commits: true
+    inputs:
+      NAME: params.NAME
+      GREETING: implement.greeting
+    prompt: |
+      Write a pull-request description for the greet fix and commit it as its own commit.
+
+      1. Create `PR-DESCRIPTION.md` at the repository root with this structure (fill in
+         NAME and GREETING from the environment):
+
+         # Add a proper Hello, {name} greeting
+
+         ## Summary
+         - Replace the stub `greet()` that returned `"hi"` with `Hello, {name}!`.
+         - Keep the stdlib unittest green for NAME={NAME} (expected `{GREETING}`).
+
+         ## Test plan
+         - [x] `NAME={NAME} python3 test_greet.py`
+
+      2. Commit ONLY `PR-DESCRIPTION.md` with message: `docs: add PR-DESCRIPTION.md for greet`
+
+      Do not change `greet.py` or `test_greet.py`. Then write the result JSON.
+    output:
+      ok:
+        type: bool

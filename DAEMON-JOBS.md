@@ -132,7 +132,9 @@ cd "$REPO" && WORDS="apple, carrot, pear, onion" "$SCSH_BIN" run --def fruits
 
 **Expect:** every step appears in the session browser immediately — one row per step, noted
 `step k/n` (plus `needs …`), waiting rows included; a step whose gate is false finishes as a
-dim ⊘ `skipped` row instead of vanishing. `categorize` runs first, then `sort_fruits` and
+dim ⊘ `skipped` row instead of vanishing. Above the rows, a **Workflow** card shows the DAG
+(`categorize` → `sort_fruits` / `sort_vegetables`); node colors track live state, and clicking a
+node opens that step's panel (`#task-…`). `categorize` runs first, then `sort_fruits` and
 `sort_vegetables` run in parallel;
 the session board shows all three step rows. The per-step results land under the gitignored
 session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fruits.json` has a
@@ -150,10 +152,25 @@ cd "$REPO" && "$SCSH_BIN" run --def arith
 
 **Expect:** the three harness images build FIRST, each as its own tracked row, before any step
 starts; then three step rows (`step 1/3` … `step 3/3 · needs add, multiply`) with `add` and
-`multiply` running in parallel and `summarize` waiting on both. Afterwards the session dir holds
+`multiply` running in parallel and `summarize` waiting on both. The **Workflow** card shows the
+fan-in DAG (`add` + `multiply` → `summarize`) from first paint. Afterwards the session dir holds
 `add.json` (`sum: 5`), `multiply.json` (`product: 20`), `summarize.json` (a `summary` string) —
 **and `summary.txt`**, the declared step artifact: a standalone plain-English sentence about
 both computations, copied back beside the results. `git -C "$REPO" status` stays clean.
+
+## 11. (Optional) Fake PR workflow (`greet`)
+
+Needs `packdiff` on PATH for the ⇄ commits diff chips. One agent CLI is enough (all three
+steps use claude/sonnet by default).
+
+```console
+cd "$REPO" && NAME=Ada "$SCSH_BIN" run --def greet
+```
+
+**Expect:** the **Workflow** card shows `scaffold → implement → describe`. After the run,
+the branch has `greet.py` / `test_greet.py` / `PR-DESCRIPTION.md`; `NAME=Ada python3 test_greet.py`
+passes; each step's row has a **⇄ commits diff** chip — open **implement** for the source
+fix and **describe** for the Description panel lifted from `PR-DESCRIPTION.md`.
 
 ## Cleanup
 

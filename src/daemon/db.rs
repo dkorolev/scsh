@@ -123,6 +123,7 @@ mod tests {
       last_seen_at: 1,
       client_connected: false,
       run_pid: None,
+      workflow: None,
     }
   }
 

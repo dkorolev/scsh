@@ -7,6 +7,7 @@ use super::proc::{
   autoscroll_ctl_html, cast_embed_html, elapsed_phrase, empty_output_html, proc_elapsed_secs, proc_has_cast,
   proc_meta_html, summary_stats_html,
 };
+use super::workflow::{proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
@@ -46,7 +47,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       format!("{}<div class=\"output\">{lines_html}</div>", autoscroll_ctl_html(proc.status))
     };
     procs_html.push_str(&format!(
-      r#"<details class="proc {status_class}" data-index="{index}">
+      r#"<details class="proc {status_class}" data-index="{index}"{task_attrs}>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span> {proc_stat}
@@ -61,6 +62,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 "#,
       status_class = proc.status.as_str(),
       index = proc.index,
+      task_attrs = proc_task_attrs(session, proc),
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       diff_btn = proc_diff_btn_html(&session.id, proc),
@@ -89,7 +91,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     format!("<ul class=\"skills\">{}</ul>\n", items.join(""))
   };
   let id = esc(&session.id);
-  let session_meta = session_meta_placeholder(session);
+  let session_meta = session_meta_html(session, now);
   // Same style as the per-run "⬇ Download run snapshot" in the cast toolbar (.dl-snap):
   // the two downloads read as one family, not a chamfered button next to a plain link.
   let export_btn = if session.procs.iter().any(proc_has_cast) {
@@ -126,11 +128,12 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
   // opens with what the session IS — its kind and name — with the controls top-right.
   let kind = session.kind.as_deref().unwrap_or("profile");
+  let workflow = workflow_graph_html(session, now);
   let fleets = fleet_sections_html(session);
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
 <p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
-{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
+{workflow}{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     kind = esc(kind),
     profile = esc(profile),
     export_btn = export_btn,
@@ -138,6 +141,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     stop_btn = stop_btn,
     session_meta = session_meta,
     skills = skills_html,
+    workflow = workflow,
     fleets = fleets,
     procs = procs_html,
   );
@@ -189,15 +193,35 @@ fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::
   )
 }
 
-fn session_meta_placeholder(session: &Session) -> String {
-  let ended = session.ended_at.map(|t| t.to_string()).unwrap_or_default();
+fn session_meta_html(session: &Session, now: u64) -> String {
+  use super::format::format_duration_secs;
+  let lifecycle = session.lifecycle_status(now);
+  let started = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
+  let ended = match (session.ended_at, lifecycle) {
+    (Some(t), _) => format!("{} UTC", crate::runtime::format_utc_timestamp(t)),
+    (None, SessionLifecycle::Running) => "still running".into(),
+    (None, SessionLifecycle::Terminated) => SessionLifecycle::Terminated.label().into(),
+    (None, _) => "—".into(),
+  };
+  let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());
+  let last_seen = session.last_seen_at;
   format!(
     r#"<dl class="session-meta" id="session-meta"
- data-started="{started}" data-ended="{ended}"
- data-repo="{repo}" data-branch="{branch}"></dl>"#,
-    started = session.started_at,
-    ended = esc(&ended),
+ data-started="{started_at}" data-ended="{ended_at}" data-last-seen="{last_seen}"
+ data-repo="{repo}" data-branch="{branch}">
+<dt>Started</dt><dd data-session-started>{started}</dd>
+<dt>Ended</dt><dd data-session-ended>{ended}</dd>
+<dt>Duration</dt><dd data-session-duration>{duration}</dd>
+<dt>Branch</dt><dd data-session-branch><code>{branch}</code></dd>
+<dt>Repo</dt><dd data-session-repo><code class="repo-path">{repo}</code></dd>
+</dl>"#,
+    started_at = session.started_at,
+    ended_at = session.ended_at.map(|t| t.to_string()).unwrap_or_default(),
+    last_seen = last_seen,
     repo = esc(&session.repo),
     branch = esc(&session.branch),
+    started = esc(&started),
+    ended = esc(&ended),
+    duration = esc(&duration),
   )
 }

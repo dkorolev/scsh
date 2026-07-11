@@ -20,9 +20,9 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review`/`arith` (workflows) are
+/// `doctor`/`add`/`research` (flat) and `fruits`/`code-review`/`arith`/`greet` (workflows) are
 /// always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 6] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 7] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -30,6 +30,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 6] {
     ("fruits", include_str!("harness_defs/fruits.yml")),
     ("code-review", include_str!("harness_defs/code-review.yml")),
     ("arith", include_str!("harness_defs/arith.yml")),
+    ("greet", include_str!("harness_defs/greet.yml")),
   ]
 }
 
@@ -269,6 +270,10 @@ pub struct Step {
   /// and required once declared. For deliverables that are files, not JSON fields (e.g. a
   /// plain-English `summary.txt`).
   pub artifacts: Vec<String>,
+  /// When true, commits the step makes inside the clone are rebased onto the caller's
+  /// branch (and packed with packdiff when available) — same contract as a skill's
+  /// `commits: true`.
+  pub commits: bool,
 }
 
 /// A parsed, validated harness definition — either a flat one-shot task or a workflow of steps.
@@ -350,6 +355,13 @@ impl Step {
         s.push_str(&format!("- `{a}`\n"));
       }
       s.push_str("\nThese files are required; the step fails without them.\n");
+    }
+    if self.commits {
+      s.push_str(
+        "\n## Commits\n\nThis step is commit-enabled: any `git commit` you make in the repo \
+         is brought back onto the caller's branch after the step finishes. Commit only the \
+         files this step is meant to change — never anything under `tmp/`.\n",
+      );
     }
     s
   }
@@ -585,7 +597,9 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     let fields = match node {
       Node::Map(f) => f,
       Node::Scalar(_) => {
-        errors.push(format!("step '{id}' must be a mapping (agent, prompt, inputs, output, when, needs, artifacts)"));
+        errors.push(format!(
+          "step '{id}' must be a mapping (agent, prompt, inputs, output, when, needs, artifacts, commits)"
+        ));
         continue;
       }
     };
@@ -595,11 +609,11 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("duplicate key 'steps.{id}.{k}'"));
       }
     }
-    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts"];
+    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits"];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits)"
         ));
       }
     }
@@ -618,9 +632,24 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("'steps.{id}.artifacts': '{a}' must be a plain filename (no '/' or '..')"));
       }
     }
+    let commits = match fm.get("commits") {
+      None => false,
+      Some(Node::Scalar(s)) => match s.trim() {
+        "true" | "yes" | "on" | "1" => true,
+        "false" | "no" | "off" | "0" => false,
+        other => {
+          errors.push(format!("'steps.{id}.commits': expected a boolean, got '{other}'"));
+          false
+        }
+      },
+      Some(_) => {
+        errors.push(format!("'steps.{id}.commits': expected a boolean"));
+        false
+      }
+    };
 
     if let (Some(agent), Some(prompt)) = (agent, prompt) {
-      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts });
+      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts, commits });
     }
   }
 
@@ -1071,6 +1100,51 @@ mod tests {
     let body = summarize.render_skill_body();
     assert!(body.contains("Required files"), "got: {body}");
     assert!(body.contains("`summary.txt`"), "got: {body}");
+  }
+
+  #[test]
+  fn builtin_greet_is_a_commit_enabled_fake_pr_workflow() {
+    let def = builtin("greet");
+    assert!(def.is_workflow());
+    assert_eq!(def.steps.len(), 3);
+    assert_eq!(def.steps[0].id, "scaffold");
+    assert_eq!(def.steps[1].id, "implement");
+    assert_eq!(def.steps[2].id, "describe");
+    assert!(def.steps.iter().all(|s| s.commits), "every greet step brings commits back");
+    assert_eq!(def.steps[1].needs, vec!["scaffold".to_string()]);
+    assert_eq!(def.steps[2].needs, vec!["implement".to_string()]);
+    let body = def.steps[0].render_skill_body();
+    assert!(body.contains("## Commits"), "commit-enabled steps get the commits contract: {body}");
+  }
+
+  #[test]
+  fn step_commits_parses_as_a_boolean() {
+    let ok = r#"description: "x"
+steps:
+  s1:
+    agent:
+      harness: claude
+    prompt: "p"
+    output:
+      ok:
+        type: bool
+    commits: true
+"#;
+    let def = validate("t", ok, DefSource::Builtin).unwrap();
+    assert!(def.steps[0].commits);
+    let bad = r#"description: "x"
+steps:
+  s1:
+    agent:
+      harness: claude
+    prompt: "p"
+    output:
+      ok:
+        type: bool
+    commits: maybe
+"#;
+    let err = validate("t", bad, DefSource::Builtin).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("commits")), "{err:?}");
   }
 
   #[test]

@@ -59,6 +59,14 @@ impl Client {
   pub fn register_session(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
   ) -> bool {
+    self.register_session_with_workflow(repo, branch, profile, kind, skills, None)
+  }
+
+  /// Like [`Self::register_session`], optionally attaching immutable workflow DAG metadata.
+  pub fn register_session_with_workflow(
+    &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
+    workflow: Option<&super::workflow::WorkflowMeta>,
+  ) -> bool {
     let skill_parts: Vec<String> = skills
       .iter()
       .map(|(name, harness)| format!("{{ \"name\": {}, \"harness\": {} }}", quote(name), quote(harness)))
@@ -67,8 +75,12 @@ impl Client {
       Some(p) => quote(p),
       None => "null".to_string(),
     };
+    let workflow_part = match workflow {
+      Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(w)),
+      None => String::new(),
+    };
     let body = format!(
-      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {} }}",
+      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {}{workflow_part} }}",
       quote(&self.inner.session_id),
       quote(repo),
       quote(branch),

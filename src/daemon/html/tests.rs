@@ -45,6 +45,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         elapsed: None,
         lines: vec![],
       }],
+      workflow: None,
     },
   );
   store
@@ -227,11 +228,11 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   // not the transient step note — same rule that puts a finished skill's answer in the row.
   assert!(procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#), "skip reason in the collapsed row: {procs}");
   assert!(!procs.contains("data-proc-stop"), "a skipped step offers no kill button: {procs}");
-  // Live updates speak the same phrases (no glyph map).
+  // Live updates speak the same phrases; workflow graph keeps its own icon map.
   let js = live_client_js();
   assert!(js.contains("function elapsedPhrase"));
   assert!(js.contains("'skipped'"));
-  assert!(!js.contains("skipped:'⊘'"));
+  assert!(js.contains("function wfDisplayState"), "workflow graph live state");
 }
 
 #[test]
@@ -256,7 +257,7 @@ fn running_cast_preview_starts_near_the_end() {
   // autoplay whose playhead jitters as the duration grows.
   assert!(js.contains("box._live = true; createCastPlayer(box, 'end')"), "running casts open live at the edge");
   assert!(!js.contains("near-end"), "the jittery near-end preview is gone");
-  assert!(js.contains("beecast-livechange"), "the toggle mirrors the player's own live state");
+  assert!(js.contains("beecast-livechange"), "scsh tracks the player's live state");
 }
 
 #[test]
@@ -356,6 +357,25 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
 }
 
 #[test]
+fn session_meta_agrees_with_lifecycle_badge() {
+  // WEB-UI §6 / ENG §13: channels must not disagree. A heartbeat-stale zombie must not
+  // say "TERMINATED ABRUPTLY" in the badge and "still running" in Ended.
+  let zombie = store_with_cast_proc(ProcStatus::Running);
+  let page = session_page(&zombie, "castab").expect("session renders");
+  assert!(page.contains(r#"session-status terminated"#), "zombie badge: {page}");
+  assert!(page.contains(r#"data-session-ended>terminated abruptly</dd>"#), "Ended matches badge: {page}");
+  assert!(!page.contains(r#"data-session-ended>still running</dd>"#), "Ended must not contradict: {page}");
+  assert!(page.contains(r#"data-session-started>"#), "meta is server-rendered on first paint");
+  assert!(page.contains(r#"data-last-seen="1""#), "last_seen seeds the client lifecycle");
+
+  let mut live = store_with_cast_proc(ProcStatus::Running);
+  live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
+  let page = session_page(&live, "castab").expect("session renders");
+  assert!(page.contains(r#"data-session-ended>still running</dd>"#), "live Ended: {page}");
+  assert!(page.contains(r#"id="session-stop""#), "live Force stop stays available");
+}
+
+#[test]
 fn index_page_shows_colored_harness_chips_per_proc() {
   let mut store = store_with_cast_proc(ProcStatus::Running);
   // A second, finished proc on another harness: its chip renders dimmed.
@@ -440,6 +460,9 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
   assert!(js.contains("function initTabs"), "client js wires the tabs");
+  assert!(js.contains("history.pushState"), "tab clicks push history (WEB-UI §1)");
+  assert!(js.contains("popstate"), "Back/Forward restore the active tab");
+  assert!(js.contains("function sessionEndedLabel"), "Ended label shares lifecycle with the badge");
 }
 
 #[test]
@@ -488,6 +511,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         elapsed: None,
         lines: vec![],
       }],
+      workflow: None,
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -562,6 +586,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           lines: vec![],
         },
       ],
+      workflow: None,
     },
   );
   let html = session_page(&store, "difjob").expect("session page");
@@ -593,6 +618,7 @@ fn ended_session_hides_force_stop_button() {
       run_pid: None,
       skills: vec![],
       procs: vec![],
+      workflow: None,
     },
   );
   let html = session_page(&store, "done01").expect("session page");
@@ -626,6 +652,7 @@ fn offline_export_shows_lifecycle_chip_after_heading() {
     run_pid: None,
     skills: vec![],
     procs: vec![],
+    workflow: None,
   };
   let html = session_export_page(&session, &[]);
   assert!(
@@ -672,6 +699,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       elapsed: Some(1.0),
       lines: vec![],
     }],
+    workflow: None,
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
@@ -744,6 +772,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           lines: vec![],
         },
       ],
+      workflow: None,
     },
   );
   let html = session_page(&store, "fleet1").expect("session page");
@@ -820,6 +849,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         elapsed: Some(3.0),
         lines: vec![],
       }],
+      workflow: None,
     },
   );
   let html = session_page(&store, "castab").expect("session page");
@@ -905,6 +935,7 @@ fn session_proc_html_shows_autoscroll_while_running() {
         elapsed: None,
         lines: vec![],
       }],
+      workflow: None,
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -956,24 +987,23 @@ fn cast_growth_notifications_append_in_place() {
 }
 
 #[test]
-fn live_toggle_renders_only_while_the_proc_runs() {
-  // Session-page embed: the Live toggle is in the toolbar, hidden unless the proc runs.
+fn live_follows_from_player_toolbar_not_scsh_chrome() {
+  // Session-page embed: no external Live button — the player owns ● Live when running.
   let running = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Running).sessions["castab"].procs[0]);
-  assert!(running.contains(r#"<button type="button" data-cast-live>● Live</button>"#));
+  assert!(!running.contains("data-cast-live"), "session embed has no scsh Live button");
   let done = super::proc::cast_embed_html("castab", &store_with_cast_proc(ProcStatus::Ok).sessions["castab"].procs[0]);
-  assert!(done.contains(r#"<button type="button" data-cast-live hidden>● Live</button>"#));
-  // The toggle drives the player's declared-live mode (parked at the edge, green pinned
-  // bar); the player renders each appended chunk in place and drops live on a rewind.
+  assert!(!done.contains("data-cast-live"));
   let js = live_client_js();
   assert!(js.contains("function setCastLive(box, on)"));
   assert!(js.contains("box._player.setLive(true)"));
-  // Standalone page: toggle present while running, hidden for finished procs, and the
-  // finish notice disables it after the final reload.
+  assert!(js.contains("controls: running ? { live: true } : true"), "running casts enable player Live control");
+  assert!(js.contains("live: !!(box._live || running)"), "running casts start declared-live");
+  // Standalone page: likewise no page-chrome Live toggle.
   let page = cast_player_page(&store_with_cast_proc(ProcStatus::Running), "castab", 0).expect("player page");
-  assert!(page.contains(r#"<button id="live-toggle">● Live</button>"#));
-  assert!(page.contains("toggle.disabled = true;"));
+  assert!(!page.contains("live-toggle"), "standalone page has no external Live button");
+  assert!(page.contains("controls: wantLive ? { live: true } : true"));
   let finished = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
-  assert!(finished.contains(r#"<button id="live-toggle" hidden>● Live</button>"#));
+  assert!(!finished.contains("live-toggle"));
 }
 
 #[test]
@@ -1154,7 +1184,8 @@ fn review_round_five_fixes_hold() {
   let shtml = session_page(&store, "castab").expect("session renders");
   assert!(!shtml.contains("sizeCastPane"), "the pane-sizing workaround must stay gone");
   assert!(!shtml.contains(".cast-player { width: 100%; height:"), "no forced pane height");
-  assert!(shtml.contains("height: auto !important"), "fullscreen overrides any inline pane height");
+  assert!(shtml.contains("height: 100% !important"), "fullscreen fills the grid cell for a stable mount measure");
+  assert!(shtml.contains(".cast:fullscreen .beecast-player"), "fullscreen styles the player root");
 }
 
 #[test]
@@ -1173,4 +1204,206 @@ fn review_round_six_fixes_hold() {
   assert!(html.contains("white-space: pre-line"), "multi-line tip CSS ships");
   // Both JS chip-count writers share one renderer, so live re-syncs keep the tooltip.
   assert!(html.contains("function chipCountHtml"), "shared chip-count renderer ships");
+}
+
+#[test]
+fn workflow_graph_renders_builtin_shapes() {
+  use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+  fn skill_proc(index: usize, id: &str, harness: &str, status: ProcStatus) -> ProcRecord {
+    ProcRecord {
+      index,
+      kind: ProcKind::Skill,
+      label: format!("{harness}: {id}"),
+      status,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      container_name: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some(id.into()),
+      route: None,
+      result_path: None,
+      harness: Some(harness.into()),
+      skill_name: Some(id.into()),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(1.0),
+      lines: vec![],
+    }
+  }
+  // arith: add + multiply → summarize
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "arith1".into(),
+    Session {
+      id: "arith1".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("arith".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![
+        skill_proc(0, "add", "claude", ProcStatus::Ok),
+        skill_proc(1, "multiply", "codex", ProcStatus::Ok),
+        skill_proc(2, "summarize", "grok", ProcStatus::Ok),
+      ],
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "add".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+          },
+          WorkflowNodeMeta {
+            id: "multiply".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec![],
+            conditional: false,
+          },
+          WorkflowNodeMeta {
+            id: "summarize".into(),
+            proc_index: Some(2),
+            order: 2,
+            needs: vec!["add".into(), "multiply".into()],
+            conditional: false,
+          },
+        ],
+      }),
+    },
+  );
+  let html = session_page(&store, "arith1").expect("page");
+  assert!(html.contains(r#"id="workflow-graph""#), "workflow card present");
+  assert!(html.contains("3 tasks · 3 done"), "summary counts by status, not edge count");
+  assert!(!html.contains("tasks ·") || !html.contains("dependencies</p>"), "summary must not say N dependencies");
+  assert!(!html.contains(r#"class="workflow-summary dim">3 tasks · 2 dependencies"#));
+  assert!(html.contains(r#"data-workflow-step="add""#));
+  assert!(html.contains(r#"data-workflow-step="multiply""#));
+  assert!(html.contains(r#"data-workflow-step="summarize""#));
+  assert!(html.contains(r#"id="task-add""#));
+  assert!(html.contains("href=\"#task-summarize\""));
+  // Exactly two fan-in edges into summarize (paths in SVG).
+  assert_eq!(html.matches("marker-end=\"url(#wf-arrow)\"").count(), 2);
+  // All-done graph: legend only lists Done, not unused statuses.
+  assert!(html.contains(r#"<li class="wf-leg wf-leg-done""#));
+  assert!(!html.contains(r#"<li class="wf-leg wf-leg-running""#));
+  assert!(!html.contains(r#"<li class="wf-leg wf-leg-waiting""#));
+  assert!(!html.contains(r#"<li class="wf-leg wf-leg-failed""#));
+  assert!(!html.contains(r#"<li class="wf-leg wf-leg-stalled""#));
+  assert!(!html.contains(r#"<li class="wf-leg wf-leg-skipped""#));
+
+  // fruits fan-out
+  store.sessions.insert(
+    "fruit1".into(),
+    Session {
+      id: "fruit1".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("fruits".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![
+        skill_proc(0, "categorize", "claude", ProcStatus::Ok),
+        skill_proc(1, "sort_fruits", "claude", ProcStatus::Waiting),
+        skill_proc(2, "sort_vegetables", "claude", ProcStatus::Waiting),
+      ],
+      last_seen_at: 1,
+      client_connected: true,
+      run_pid: Some(1),
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "categorize".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+          },
+          WorkflowNodeMeta {
+            id: "sort_fruits".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec!["categorize".into()],
+            conditional: false,
+          },
+          WorkflowNodeMeta {
+            id: "sort_vegetables".into(),
+            proc_index: Some(2),
+            order: 2,
+            needs: vec!["categorize".into()],
+            conditional: false,
+          },
+        ],
+      }),
+    },
+  );
+  let fruits = session_page(&store, "fruit1").expect("fruits");
+  assert_eq!(fruits.matches("marker-end=\"url(#wf-arrow)\"").count(), 2);
+  assert!(fruits.contains(r#"data-workflow-step="categorize""#));
+
+  // code-review conditional gate
+  store.sessions.insert(
+    "rev001".into(),
+    Session {
+      id: "rev001".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("code-review".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![
+        skill_proc(0, "probe_credentials", "claude", ProcStatus::Ok),
+        skill_proc(1, "review", "claude", ProcStatus::Skipped),
+      ],
+      last_seen_at: 1,
+      client_connected: true,
+      run_pid: Some(1),
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "probe_credentials".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+          },
+          WorkflowNodeMeta {
+            id: "review".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec!["probe_credentials".into()],
+            conditional: true,
+          },
+        ],
+      }),
+    },
+  );
+  let review = session_page(&store, "rev001").expect("review");
+  assert!(review.contains("Conditional task"), "gate marker");
+  assert!(review.contains(r#"wf-skipped"#));
+  assert_eq!(review.matches("marker-end=\"url(#wf-arrow)\"").count(), 1);
+
+  // Flat session: no graph
+  let flat = store_with_cast_proc(ProcStatus::Ok);
+  let flat_html = session_page(&flat, "castab").expect("flat");
+  assert!(!flat_html.contains(r#"id="workflow-graph""#));
+
+  // Client wiring
+  let js = live_client_js();
+  assert!(js.contains("function updateWorkflowGraph"));
+  assert!(js.contains("function activateWorkflowTask"));
+  assert!(js.contains("function initWorkflowGraph"));
+  assert!(js.contains("function wfLegendHtml"));
 }

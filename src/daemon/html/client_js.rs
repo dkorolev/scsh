@@ -200,23 +200,36 @@ function sessionRunning(session) {
   if (!session.ended_at && procs.length === 0) return true;
   return false;
 }
+// Wall-clock seconds for the job meta — mirrors Session::duration_secs. A terminated
+// (heartbeat-stale) session freezes at last_seen, never keeps ticking as "still running".
 function sessionDurationSecs(session, nowUnix) {
   const start = session.started_at || 0;
-  if (session.ended_at) return session.ended_at - start;
-  if (nowUnix > start) return nowUnix - start;
+  if (session.ended_at) return Math.max(0, session.ended_at - start);
+  const life = sessionLifecycle(session, nowUnix);
+  if (life.class === 'running') return Math.max(0, nowUnix - start);
+  if (life.class === 'terminated') {
+    const lastSeen = session.last_seen_at || start;
+    return Math.max(0, lastSeen - start);
+  }
   return 0;
+}
+function sessionEndedLabel(session, nowUnix) {
+  if (session.ended_at) return formatUnixTime(session.ended_at);
+  const life = sessionLifecycle(session, nowUnix);
+  if (life.class === 'running') return 'still running';
+  if (life.class === 'terminated') return life.label;
+  return '—';
 }
 function renderSessionMeta(session, nowUnix) {
   const el = document.getElementById('session-meta');
   if (!el || !session) return;
   const started = formatUnixTime(session.started_at);
-  const ended = session.ended_at
-    ? formatUnixTime(session.ended_at)
-    : (sessionRunning(session) ? 'still running' : '—');
+  const ended = sessionEndedLabel(session, nowUnix);
   const repo = session.repo || el.dataset.repo || '';
   const branch = session.branch || el.dataset.branch || '—';
   el.dataset.started = String(session.started_at || '');
   el.dataset.ended = session.ended_at ? String(session.ended_at) : '';
+  el.dataset.lastSeen = String(session.last_seen_at || session.started_at || '');
   el.dataset.repo = repo;
   el.dataset.branch = branch;
   if (!el.querySelector('[data-session-duration]')) {
@@ -249,6 +262,7 @@ function initSessionMetaFromDom() {
   const session = {
     started_at: Number(el.dataset.started) || 0,
     ended_at: el.dataset.ended ? Number(el.dataset.ended) : null,
+    last_seen_at: Number(el.dataset.lastSeen || el.dataset.started) || 0,
     repo: el.dataset.repo || '',
     branch: el.dataset.branch || '',
     procs: [],
@@ -516,11 +530,9 @@ function updateProcFields(det, p, nowUnix) {
     det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
   } else if (castEl && castEl.dataset.status !== p.status) {
     // On finish, reload once so the player has the complete recording, not the partial
-    // one; keep the viewer's position, end live mode cleanly, and hide the Live toggle.
+    // one; keep the viewer's position and leave live mode (player remounts without live).
     const wasRunning = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
     castEl.dataset.status = p.status;
-    const liveBtn = castEl.querySelector('[data-cast-live]');
-    if (liveBtn) liveBtn.hidden = p.status !== 'running';
     if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
       castEl.dataset.ended = String(Math.round(Date.now() / 1000));
       if (castEl._live) setCastLive(castEl, false);
@@ -558,7 +570,6 @@ function castEmbedHtml(p) {
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
-    '<button type="button" data-cast-live' + (p.status === 'running' ? '' : ' hidden') + '>● Live</button>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
     '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>' +
@@ -573,17 +584,13 @@ function initCasts(root) {
     // Opening a section hands its player the keyboard: space plays, f fullscreens.
     const det = box.closest('details');
     if (det) det.addEventListener('toggle', () => { if (det.open) focusCastPlayer(box); });
-    // The player owns live-mode state (a rewind drops it): mirror it onto the toggle.
+    // Still-running recordings start live (player toolbar ● Live; seek back to leave).
+    // The player owns live state and suppresses the play overlay while following.
     box.addEventListener('beecast-livechange', (e) => {
       box._live = !!(e.detail && e.detail.live);
-      const b = box.querySelector('[data-cast-live]');
-      if (b) b.classList.toggle('on', box._live);
     });
-    // A still-running recording is LIVE by default: parked at the growing edge, the bar
-    // pinned full-width in live green — not a playhead chasing a moving duration.
     if (box.dataset.status === 'running') { box._live = true; createCastPlayer(box, 'end'); }
     else createCastPlayer(box);
-    box.querySelector('[data-cast-live]').addEventListener('click', () => setCastLive(box, !box._live));
   });
 }
 // The available duration and event count of loaded asciicast text (complete lines only —
@@ -648,7 +655,17 @@ function createCastPlayer(box, startAt, autoplay) {
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
     // fullscreenEl: the player's ⛶ button and `f` key fullscreen the whole cast box, so
     // scsh's chrome (the summary line, the toolbar) rides along.
-    const opts = { fit: 'both', controls: true, idleTimeLimit: 2, markers, fullscreenEl: box, accessibility: 'snapshot' };
+    const running = box.dataset.status === 'running';
+    const opts = {
+      fit: 'both',
+      controls: running ? { live: true } : true,
+      idleTimeLimit: 2,
+      markers,
+      fullscreenEl: box,
+      accessibility: 'snapshot',
+      // Still-running: start declared-live (no play overlay) until the viewer seeks back.
+      live: !!(box._live || running),
+    };
     if (startAt === 'end') startAt = stats.duration;
     if (startAt != null) opts.startAt = Math.max(0, Math.min(startAt, stats.duration));
     // The text is passed inline ({ data }) — it was already fetched to decide placeholder
@@ -664,7 +681,7 @@ function createCastPlayer(box, startAt, autoplay) {
     const det = box.closest('details');
     const active = document.activeElement;
     if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
-    if (box._live) setCastLive(box, true);
+    if (box._live || running) setCastLive(box, true);
     renderCastSummary(box, meta.summary);
     // Chapters are written by the annotation pass AFTER the run ends; a finished cast with
     // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
@@ -715,11 +732,9 @@ function pollForChapters(box, chaptersUrl) {
 // toggle turns off and hides.
 function setCastLive(box, on) {
   box._live = !!on;
-  const btn = box.querySelector('[data-cast-live]');
-  if (btn) btn.classList.toggle('on', box._live);
   // Declared-live (player.setLive): parked at the growing edge, appends pinned
   // unconditionally, the bar full-width in live green. The player drops it itself on a
-  // rewind, and the livechange listener above re-syncs the toggle.
+  // rewind (beecast-livechange re-syncs box._live); ● Live lives in the player toolbar.
   if (!box._player) return;
   if (box._live) {
     followCastGrowth(box);
@@ -777,7 +792,9 @@ function procHtml(p, isOpen, nowUnix) {
     ? castEmbedHtml(p)
     : autoscrollCtlHtml(p) + '<div class="output">' + ((p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status)) + '</div>';
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
-  const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' +
+  const step = workflowStepIdForProc(p);
+  const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
+  const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '><summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
@@ -785,6 +802,164 @@ function procHtml(p, isOpen, nowUnix) {
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
     container + body + '</details>';
+}
+function workflowStepIdForProc(p) {
+  const session = SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null;
+  const nodes = session && session.workflow && session.workflow.nodes;
+  if (nodes) {
+    const hit = nodes.find(n => n.proc_index === p.index);
+    if (hit) return hit.id;
+  }
+  return p.skill_name || p.skill_source || null;
+}
+function wfStateIcon(state) {
+  return ({waiting:'○',ready:'○',running:'◉',done:'✓',failed:'✗',skipped:'⊘',stalled:'!'})[state] || '○';
+}
+function wfStateLabel(state) {
+  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Done',failed:'Failed',skipped:'Skipped',stalled:'Stalled'})[state] || state;
+}
+function wfUnmetNeeds(session, node) {
+  const nodes = (session.workflow && session.workflow.nodes) || [];
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const procs = session.procs || [];
+  const terminal = s => s === 'ok' || s === 'fail' || s === 'skipped';
+  return (node.needs || []).filter(need => {
+    const n = byId[need];
+    if (!n || n.proc_index == null) return true;
+    const p = procs.find(x => x.index === n.proc_index);
+    return !p || !terminal(p.status);
+  }).length;
+}
+function wfDisplayState(session, node, nowUnix) {
+  const life = sessionLifecycle(session, nowUnix).class;
+  const stalled = life === 'terminated';
+  const procs = session.procs || [];
+  const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
+  if (!p) return stalled ? 'stalled' : 'waiting';
+  if (p.status === 'ok') return 'done';
+  if (p.status === 'fail') return 'failed';
+  if (p.status === 'skipped') return 'skipped';
+  if (p.status === 'running') return stalled ? 'stalled' : 'running';
+  if (p.status === 'waiting') {
+    if (stalled) return 'stalled';
+    return wfUnmetNeeds(session, node) === 0 ? 'ready' : 'waiting';
+  }
+  return 'waiting';
+}
+function wfLegendHtml(present) {
+  const order = ['running','done','failed','stalled','waiting','ready','skipped'];
+  const items = order.filter(s => present[s]).map(s =>
+    '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
+    wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
+  ).join('');
+  return items ? '<ul class="workflow-legend" aria-label="Status legend">' + items + '</ul>' : '';
+}
+function wfSummaryText(counts, total) {
+  const parts = [total + (total === 1 ? ' task' : ' tasks')];
+  for (const [n, label] of [[counts.done,'done'],[counts.running,'running'],[counts.waiting,'waiting'],
+    [counts.failed,'failed'],[counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
+    if (n > 0) parts.push(n + ' ' + label);
+  }
+  return parts.join(' · ');
+}
+function updateWorkflowGraph(session, nowUnix) {
+  const root = document.querySelector('[data-workflow-graph]');
+  if (!root || !session || !session.workflow) return;
+  const present = Object.create(null);
+  const counts = { done: 0, running: 0, waiting: 0, failed: 0, stalled: 0, skipped: 0 };
+  const nodes = session.workflow.nodes || [];
+  nodes.forEach(node => {
+    const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
+    if (!el) return;
+    const state = wfDisplayState(session, node, nowUnix);
+    present[state] = true;
+    if (state === 'done') counts.done++;
+    else if (state === 'running') counts.running++;
+    else if (state === 'waiting' || state === 'ready') counts.waiting++;
+    else if (state === 'failed') counts.failed++;
+    else if (state === 'stalled') counts.stalled++;
+    else if (state === 'skipped') counts.skipped++;
+    const prev = el.dataset.wfState;
+    if (prev !== state) {
+      el.className = 'wf-node wf-' + state;
+      el.dataset.wfState = state;
+      const ico = el.querySelector('.wf-ico');
+      const lab = el.querySelector('.wf-state-label');
+      if (ico) ico.textContent = wfStateIcon(state);
+      if (lab) lab.textContent = wfStateLabel(state);
+    }
+    if (node.proc_index != null) el.setAttribute('data-proc-index', String(node.proc_index));
+    const p = (session.procs || []).find(x => x.index === node.proc_index);
+    const unmet = wfUnmetNeeds(session, node);
+    const deps = !(node.needs || []).length ? 'no dependencies' : 'depends on ' + node.needs.join(' and ');
+    el.setAttribute('aria-label', node.id + ', ' + wfStateLabel(state) + ', ' + deps);
+    const meta = el.querySelector('.wf-meta');
+    if (meta) {
+      const bits = [];
+      if (p && p.harness) bits.push(p.harness);
+      if (p && p.model) bits.push(p.model);
+      const elapsed = p ? procElapsed(p, nowUnix) : null;
+      if (elapsed != null && (state === 'running' || state === 'done' || state === 'failed' || state === 'stalled')) {
+        bits.push(formatElapsedClock(elapsed));
+      }
+      if (state === 'waiting' && unmet > 0) bits.push(unmet + ' waiting on');
+      if (state === 'ready') bits.push('ready');
+      meta.textContent = bits.join(' · ');
+    }
+  });
+  const head = root.querySelector('.workflow-head');
+  if (head) {
+    const summary = head.querySelector('.workflow-summary');
+    if (summary) summary.textContent = wfSummaryText(counts, nodes.length);
+    const next = wfLegendHtml(present);
+    const cur = head.querySelector('.workflow-legend');
+    if (next) {
+      if (cur) cur.outerHTML = next;
+      else {
+        if (summary) summary.insertAdjacentHTML('afterend', next);
+        else head.insertAdjacentHTML('beforeend', next);
+      }
+    } else if (cur) {
+      cur.remove();
+    }
+  }
+}
+function activateWorkflowTask(stepId) {
+  if (!stepId) return;
+  const det = document.getElementById('task-' + stepId) ||
+    document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
+  if (!det) return;
+  det.open = true;
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+  const summary = det.querySelector('summary');
+  if (summary) {
+    try { summary.focus({ preventScroll: true }); } catch (_) { try { summary.focus(); } catch (_) {} }
+  }
+  det.classList.add('wf-dest-flash');
+  setTimeout(() => det.classList.remove('wf-dest-flash'), 1200);
+  if (location.hash !== '#task-' + stepId) {
+    history.replaceState(null, '', '#task-' + stepId);
+  }
+}
+function initWorkflowGraph() {
+  const root = document.querySelector('[data-workflow-graph]');
+  if (!root || root.dataset.bound) return;
+  root.dataset.bound = '1';
+  root.addEventListener('click', (ev) => {
+    const a = ev.target.closest('a.wf-node');
+    if (!a || !root.contains(a)) return;
+    const step = a.getAttribute('data-workflow-step');
+    if (!step) return;
+    ev.preventDefault();
+    activateWorkflowTask(step);
+  });
+  window.addEventListener('hashchange', () => {
+    const m = /^#task-(.+)$/.exec(location.hash || '');
+    if (m) activateWorkflowTask(decodeURIComponent(m[1]));
+  });
+  const m0 = /^#task-(.+)$/.exec(location.hash || '');
+  if (m0) setTimeout(() => activateWorkflowTask(decodeURIComponent(m0[1])), 0);
 }
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
@@ -842,9 +1017,15 @@ function renderSession(session, nowUnix) {
       det.open = userOpen;
       updateProcFields(det, p, nowUnix);
       syncProcOutput(det, p);
+      const step = workflowStepIdForProc(p);
+      if (step && !det.id) {
+        det.id = 'task-' + step;
+        det.setAttribute('data-workflow-step', step);
+      }
     }
   });
   initCasts(root);
+  updateWorkflowGraph(session, nowUnix);
 }
 function onWsMessage(msg) {
   if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }
@@ -922,6 +1103,7 @@ startProcClock();
   initProcDiffs(root);
   initHarnessStops();
   initFleetJumps();
+  initWorkflowGraph();
 })();
 function initFleetJumps() {
   document.querySelectorAll('.fleet-jump').forEach((btn) => {
@@ -937,17 +1119,15 @@ function initFleetJumps() {
   });
 }
 function syncSessionStopButton(session) {
+  const lifecycle = sessionLifecycle(session, Date.now() / 1000);
   const btn = document.getElementById('session-stop');
-  if (!btn) return;
-  if (session && session.ended_at) {
-    // The run is over: the button goes away and the resting status badge (green
-    // “completed”, red “failed”, …) follows the heading — the same place the server
-    // renders it for an ended session.
-    btn.remove();
-    const kind = document.querySelector('.session-kind');
-    if (kind && !kind.querySelector('.session-status')) {
-      kind.insertAdjacentHTML('beforeend', ' ' + sessionStatusBadge(sessionLifecycle(session, Date.now() / 1000)));
-    }
+  // Match SSR: Force stop only while genuinely running. Heartbeat-stale (terminated)
+  // jobs lose the button and gain the resting badge — never "still running" + Force stop.
+  if (lifecycle.class === 'running') return;
+  if (btn) btn.remove();
+  const kind = document.querySelector('.session-kind');
+  if (kind && !kind.querySelector('.session-status')) {
+    kind.insertAdjacentHTML('beforeend', ' ' + sessionStatusBadge(lifecycle));
   }
 }
 async function forceStopSession(btn) {
@@ -1250,15 +1430,36 @@ let OPEN_REPO_RUNNABLE = false;
 const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
 // ---- tabs ----
+// Explicit tab clicks push history (#tab=…); Back/Forward restore the panel (WEB-UI §1).
 (function initTabs() {
   const tabs = document.querySelectorAll('.tab');
   if (!tabs.length) return;
-  tabs.forEach(t => t.addEventListener('click', () => {
-    const id = t.dataset.tab;
-    document.querySelectorAll('.tab').forEach(x => x.classList.toggle('active', x === t));
+  function activate(id, mode) {
+    const t = document.querySelector('.tab[data-tab="' + id + '"]');
+    if (!t) id = 'jobs';
+    const active = document.querySelector('.tab[data-tab="' + id + '"]') || tabs[0];
+    id = active.dataset.tab;
+    document.querySelectorAll('.tab').forEach(x => {
+      const on = x === active;
+      x.classList.toggle('active', on);
+      x.setAttribute('aria-selected', on ? 'true' : 'false');
+    });
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
     if (id === 'images' && typeof refreshImages === 'function') refreshImages();
-  }));
+    const hash = '#tab=' + id;
+    if (mode === 'push') history.pushState({ tab: id }, '', hash);
+    else if (location.hash !== hash) history.replaceState({ tab: id }, '', hash);
+  }
+  tabs.forEach(t => {
+    t.setAttribute('role', 'tab');
+    t.addEventListener('click', () => activate(t.dataset.tab, 'push'));
+  });
+  window.addEventListener('popstate', () => {
+    const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
+    activate(m ? m[1] : 'jobs', 'sync');
+  });
+  const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
+  activate(m ? m[1] : 'jobs', 'sync');
 })();
 function defSourceBadge(src) {
   // builtin wears purple (the setup color); repo/home keep the muted status hues.

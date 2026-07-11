@@ -377,10 +377,21 @@ steps:
   language. A false gate — or a skipped dependency — skips the step.
 - **`output:`** — validated after the step: a missing or mistyped field fails the step (and any
   branch that needs it). Only these fields are visible to downstream `inputs`/`when`.
+- **`commits: true`** — optional; same contract as a skill's `commits: true`: commits the step
+  makes inside the clone are rebased onto the caller's branch (and packed with packdiff when
+  available). The step prompt should tell the agent what to commit.
 
 Every `inputs:`/`when:` reference must resolve to a declared param or an upstream step's declared
 output field, and any referenced step must be in `needs:` — checked when the definition is
 parsed, so a workflow that could branch on a value no step produces is rejected up front.
+
+**Job-page dependency graph.** Workflow sessions carry an optional `workflow` object on the
+session snapshot (`nodes: [{ id, proc_index, order, needs, conditional }]`). The job page
+renders a live DAG (HTML nodes + SVG edges) above the proc list: click a node to open that
+step's panel (`#task-<id>`). Topology comes only from declared `needs` — never from proc
+notes. Flat jobs and older sessions without `workflow` keep the list-only page. `stalled` is
+a derived display state when the session heartbeat is stale (`SESSION_STALE_SECS`), not a
+persisted proc status.
 
 **Session scratch.** A workflow's per-step result files live under a session directory
 `<scratch>/scsh/<session>/`, where `<scratch>` is `.harness/tmp` when that is gitignored (some
@@ -410,7 +421,10 @@ run that finished normally is left alone, but one that died before it ever regis
 Two built-in definitions make good demos: **`doctor`** (no params — confirms the agent images
 are built and each agent's credentials proxy through, then runs a trivial end-to-end task) and
 **`fruits`** (the workflow demo — give it `WORDS` like `apple, carrot, pear, onion` and watch
-`categorize` fan out into `sort_fruits` and `sort_vegetables` running in parallel).
+`categorize` fan out into `sort_fruits` and `sort_vegetables` running in parallel). For a
+**fake PR** in the Web UI (DAG + packdiff ⇄ commits diff with a Description panel), run
+**`greet`**: `scaffold` → `implement` → `describe` seeds a broken `greet()`, fixes it, then
+commits `PR-DESCRIPTION.md`.
 
 ## Images panel
 

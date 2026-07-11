@@ -282,6 +282,60 @@ pub(crate) const PAGE_CSS: &str = r#"
 
   /* ── session procs ── */
   .procs { margin-top: 1rem; width: 100%; }
+  /* ── workflow dependency graph ── */
+  .workflow-card { margin: 1rem 0; }
+  .workflow-head { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; align-items: baseline; margin-bottom: 0.75rem; }
+  .workflow-title { margin: 0; font-size: 1.05rem; }
+  .workflow-summary { margin: 0; }
+  .workflow-legend {
+    list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 0.85rem;
+    font-size: 0.78rem; color: var(--text-muted);
+  }
+  .workflow-legend .wf-ico { margin-right: 0.2rem; }
+  .wf-leg-running { color: var(--purple); }
+  .wf-leg-done { color: var(--green); }
+  .wf-leg-failed { color: var(--red); }
+  .wf-leg-stalled { color: var(--orange); }
+  .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
+  .workflow-scroll { overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem; }
+  .workflow-stage { position: relative; min-height: 4rem; }
+  .workflow-edges { position: absolute; inset: 0; color: #6e7681; pointer-events: none; }
+  .wf-edge { fill: none; stroke: currentColor; stroke-width: 1.75; opacity: 0.85; }
+  .workflow-nodes { position: relative; width: 100%; height: 100%; }
+  .wf-node {
+    position: absolute; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
+    gap: 0.15rem; padding: 0.45rem 0.65rem; min-width: 44px; min-height: 44px;
+    text-decoration: none; color: var(--text); background: var(--bg); border: 1px solid var(--border);
+    border-left: 3px solid var(--border); border-radius: 6px; font-size: 0.85rem; line-height: 1.25;
+  }
+  .wf-node:hover { border-color: #3a4558; background: var(--surface); }
+  .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .wf-node.wf-flash { box-shadow: 0 0 0 2px var(--cyan); }
+  details.proc.wf-dest-flash { box-shadow: 0 0 0 2px var(--cyan); transition: box-shadow 0.2s ease; }
+  .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wf-gate { margin-left: 0.35rem; color: var(--purple); font-weight: 700; }
+  .wf-node.wf-running { border-left-color: var(--purple); }
+  .wf-node.wf-running .wf-state { color: var(--purple); }
+  .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.45); }
+  @media (prefers-reduced-motion: no-preference) {
+    .wf-node.wf-running { animation: wf-pulse 1.6s ease-in-out infinite; }
+    @keyframes wf-pulse {
+      0%, 100% { box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.35); }
+      50% { box-shadow: 0 0 0 3px rgba(137, 87, 229, 0.55); }
+    }
+  }
+  .wf-node.wf-done { border-left-color: var(--green); }
+  .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
+  .wf-node.wf-failed { border-left-color: var(--red); }
+  .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
+  .wf-node.wf-stalled { border-left-color: var(--orange); }
+  .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--orange); }
+  .wf-node.wf-waiting, .wf-node.wf-ready { border-left-color: var(--text-muted); }
+  .wf-node.wf-waiting .wf-state, .wf-node.wf-ready .wf-state { color: var(--text-muted); }
+  .wf-node.wf-skipped { border-left-color: var(--text-muted); opacity: 0.75; }
+  .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
   .fleet {
@@ -504,8 +558,16 @@ pub(crate) const PAGE_CSS: &str = r#"
   .cast:fullscreen .cast-toolbar { grid-column: 1; }
   .cast:fullscreen .cast-summary { display: none; }
   /* !important: whatever height the pane carries inline, fullscreen must override it and
-     let the grid row size the player. */
-  .cast:fullscreen .cast-player { grid-column: 1; grid-row: 2; height: auto !important; max-height: none !important; min-height: 0; }
+     let the grid row size the player. Fill the cell so beecast's wrap-fullscreen mount
+     measure matches the visible area (avoids a late scale jump that clips 1×). */
+  .cast:fullscreen .cast-player {
+    grid-column: 1; grid-row: 2; min-height: 0;
+    height: 100% !important; max-height: none !important;
+    display: flex; flex-direction: column;
+  }
+  .cast:fullscreen .beecast-player {
+    flex: 1 1 auto; min-height: 0; width: 100%; height: 100% !important;
+  }
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }

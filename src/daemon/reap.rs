@@ -182,6 +182,7 @@ mod tests {
         elapsed: None,
         lines: vec![],
       }],
+      workflow: None,
     }
   }
 

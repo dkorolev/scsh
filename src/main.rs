@@ -1256,7 +1256,7 @@ fn step_invocation(
       .map(|(key, value)| config::EnvVar { key, rule: config::EnvRule::Constant(value) })
       .collect(),
     profile: None,
-    commits: false,
+    commits: step.commits,
     result: format!("{session_dir_rel}/{}.json", step.id),
     terminal: config::Terminal::default(),
     delivery: config::SkillDelivery::IntoClone(step.render_skill_body()),
@@ -1335,12 +1335,14 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
     let skill_meta: Vec<(&str, &str)> = def.steps.iter().map(|s| (s.id.as_str(), s.agent.harness.as_str())).collect();
-    if client.register_session(
+    let workflow = daemon::workflow_meta_from_def(def);
+    if client.register_session_with_workflow(
       &repo_path_for_session(root),
       &current_branch(root),
       Some(&def.name),
       "workflow",
       &skill_meta,
+      workflow.as_ref(),
     ) {
       ok(&format!("track progress at {}", client.session_url()));
       let ping_active = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
@@ -1374,7 +1376,11 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   }
 
   let secs = now_secs();
-  let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let stamp = runtime::format_utc_timestamp(secs);
+  // Tip of the caller's branch before each wave. Commit-enabled steps rebase onto this, then
+  // we refresh it so the next wave's clone sees those commits and its own packdiff range is
+  // only what *that* step added (same contract as the flat `build_and_run` path).
+  let mut base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
 
   // Declare EVERY step as a proc row up front, in definition order — the board and the
@@ -1463,7 +1469,12 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           let base_ref = base.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
-          scope.spawn(move || (id, run_one_skill(inv, rt, root, secs, p, base_ref, dc, sid)))
+          scope.spawn(move || {
+            let proc_index = p.index();
+            let mut run = run_one_skill(inv, rt, root, secs, p, base_ref, dc, sid);
+            run.proc_index = proc_index;
+            (id, run)
+          })
         })
         .collect();
       handles
@@ -1475,25 +1486,60 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         .collect()
     });
 
-    // Record each step's outcome; the first failure (run failure or an output that does not match
-    // the declared schema) aborts the workflow.
-    for (id, run) in results {
-      let Some(step) = def.steps.iter().find(|s| s.id == id) else { continue };
+    // Record each step's outcome in definition order; the first failure (run failure or an
+    // output that does not match the declared schema) aborts the workflow. Commit-enabled
+    // steps then rebase onto the caller and pack a ⇄ commits diff — before the next wave
+    // clones, so later steps see earlier commits (the greet fake-PR chain depends on this).
+    let mut by_id: HashMap<String, SkillRun> = results.into_iter().collect();
+    for s in &to_run {
+      let Some(run) = by_id.remove(&s.id) else { continue };
       if !run.ok {
-        failure = Some(format!("step '{id}' failed ({})", run.fail_reason.as_deref().unwrap_or("unknown")));
+        failure = Some(format!("step '{}' failed ({})", s.id, run.fail_reason.as_deref().unwrap_or("unknown")));
         break;
       }
-      match run.result_content.as_deref().map(|c| extract_step_outputs(c, &step.outputs)) {
+      match run.result_content.as_deref().map(|c| extract_step_outputs(c, &s.outputs)) {
         Some(Ok(outputs)) => {
-          state.insert(id, StepState { skipped: false, outputs });
+          state.insert(s.id.clone(), StepState { skipped: false, outputs });
         }
         Some(Err(e)) => {
-          failure = Some(format!("step '{id}' produced an invalid result: {e}"));
+          failure = Some(format!("step '{}' produced an invalid result: {e}", s.id));
           break;
         }
         None => {
-          failure = Some(format!("step '{id}' produced no result"));
+          failure = Some(format!("step '{}' produced no result", s.id));
           break;
+        }
+      }
+      if s.commits {
+        if let (Some(b), Some(clone)) = (base.as_deref(), run.clone_dir.as_ref()) {
+          let inv = invs.iter().find(|i| i.name == s.id).expect("invocation for step in this wave");
+          match integrate_commits(root, clone, b, &s.id, &stamp) {
+            Ok(None) => {}
+            Ok(Some(Integration::Applied { count, range })) => {
+              ok(&format!(
+                "{}: brought in {count} commit{} (rebased onto {})",
+                s.id,
+                plural(count),
+                current_branch(root)
+              ));
+              pack_step_diff(root, &session_id, inv, &run, range, daemon_client.as_deref());
+              base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+            }
+            Ok(Some(Integration::Saved { branch, count, range })) => {
+              warn(&format!(
+                "{}: {count} commit{} didn't rebase cleanly — saved to branch {branch} (inspect, then merge/cherry-pick)",
+                s.id,
+                plural(count)
+              ));
+              pack_step_diff(root, &session_id, inv, &run, range, daemon_client.as_deref());
+            }
+            Err(e) => warn(&format!("{}: could not bring in commits — {e}", s.id)),
+          }
+        }
+      }
+      if run.ok && !keep_run_dirs() {
+        if let Some(clone) = &run.clone_dir {
+          let _ = std::fs::remove_dir_all(clone);
         }
       }
     }
@@ -6710,6 +6756,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       when: None,
       needs: vec!["add".into()],
       artifacts: vec!["summary.txt".into()],
+      commits: false,
     };
     let inv = step_invocation(&step, "tmp/scsh/abcdef", Vec::new());
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
