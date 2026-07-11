@@ -4304,7 +4304,7 @@ fn pack_step_diff(
       ));
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-      hint("packdiff not found — `cargo install packdiff` (≥ 0.3.4) to browse each step's commits from the job page");
+      hint("packdiff not found — `cargo install packdiff` (0.3.6) to browse each step's commits from the job page");
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
   }
