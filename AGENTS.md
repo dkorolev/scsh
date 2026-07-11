@@ -7,3 +7,7 @@ The house rules are codified in [`dkorolev/principles`](https://github.com/dkoro
 ## Do not hide command output
 
 Never pipe long-running or important commands through `| tail`, `| head`, or similar truncators (e.g. `cargo test 2>&1 | tail -5`). Waiting with no live progress is worse than a long log. Run the command as-is so stdout/stderr stream; if you need a durable log, use `tee` (and still keep the live stream). Details in [`CONTRIBUTING.md`](CONTRIBUTING.md).
+
+## Pull request bodies
+
+Do **not** include a Test plan section (or checklist) in pull request descriptions. Summary bullets are enough; testing stays in the branch and CI.
