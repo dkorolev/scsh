@@ -9,7 +9,7 @@ env:
   RUSTFLAGS: -D warnings
 
 jobs:
-  test:
+  quality:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -47,20 +47,37 @@ jobs:
       - name: Clippy (release)
         run: cargo clippy --release --all-targets -- -D warnings
 
-      - name: Build (debug)
-        run: cargo build
+  tests:
+    name: Tests (${{ matrix.suite }}, ${{ matrix.profile }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [unit, integration]
+        profile: [debug, release]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Build (release)
-        run: cargo build --release
+      - uses: dtolnay/rust-toolchain@stable
 
-      - name: Unit tests (debug)
-        run: cargo test --bin scsh
+      - uses: Swatinem/rust-cache@v2
 
-      - name: Unit tests (release)
-        run: cargo test --release --bin scsh
-
-      - name: Integration tests (debug)
-        run: cargo test --test cli
-
-      - name: Integration tests (release)
-        run: cargo test --release --test cli
+      - name: Run ${{ matrix.suite }} tests (${{ matrix.profile }})
+        env:
+          SUITE: ${{ matrix.suite }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          args=""
+          if [ "$PROFILE" = release ]; then
+            args="$args --release"
+          fi
+          if [ "$SUITE" = unit ]; then
+            cargo build $args
+            args="$args --bin scsh"
+          else
+            args="$args --test cli"
+          fi
+          cargo test $args
