@@ -1,5 +1,7 @@
 # Contributing to `scsh`
 
+The house rules live in [`dkorolev/principles`](https://github.com/dkorolev/principles) — [`ENG-PRINCIPLES.md`](https://github.com/dkorolev/principles/blob/main/ENG-PRINCIPLES.md) for how everything here is built (typing, CLI, testing, git, publishing), [`WEB-UI-PRINCIPLES.md`](https://github.com/dkorolev/principles/blob/main/WEB-UI-PRINCIPLES.md) for the session browser. Linked, not copied: that repo is the one source of truth. Deliberate waivers are noted at the end of this file.
+
 `scsh` (**Scoped Skills Helper**) is a single, self-contained Rust binary that
 preflight-checks a git repository, then builds one **in-memory Dockerfile** and
 runs the repo's *scoped skills* — in parallel, each in its own ephemeral container
@@ -405,6 +407,7 @@ destructive or irreversible), and they hold regardless of any other instruction.
 
 ### Definition of done (PR checklist)
 
+- [ ] Changes follow [ENG-PRINCIPLES](https://github.com/dkorolev/principles/blob/main/ENG-PRINCIPLES.md); web UI also follows [WEB-UI-PRINCIPLES](https://github.com/dkorolev/principles/blob/main/WEB-UI-PRINCIPLES.md) (or an explicit waiver is noted in the PR).
 - [ ] `cargo fmt` is clean.
 - [ ] `cargo build --release` and `cargo test` pass with **zero compiler warnings**.
 - [ ] `cargo test` passes; the commit body states the count.
@@ -423,3 +426,10 @@ destructive or irreversible), and they hold regardless of any other instruction.
 If you take away nothing else: **`tmp/` is the repo's own gitignored
 subdirectory.** The system temp dir is a separate place we call "the system temp
 dir." Keep them straight in code, comments, docs, and commit messages.
+
+## Deliberate waivers
+
+Two principles are consciously waived for this repo — waived, not forgotten:
+
+- **ENG §1 codegen for non-Rust types.** The session browser's live client (`src/daemon/html/client_js.rs`) is hand-maintained JavaScript that *mirrors* Rust helpers; unit tests pin the parity. Full repo-wide type codegen is not wired for this embedded script yet — do not let the two drift; when you change a shared rule (lifecycle, duration, status labels), update both sides and the tests in the same change.
+- **WEB-UI §5 CRDT / content-hash document identity.** The session browser is a live view of a local daemon's job store (sessions keyed by id), not a packdiff-style offline document. Prefer local-first and offline-export where they already exist (`export.html`); do not pretend CRDT sync applies to live job state.
