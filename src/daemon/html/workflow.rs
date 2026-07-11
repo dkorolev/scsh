@@ -14,6 +14,10 @@ const NODE_H: f64 = 72.0;
 const GAP_X: f64 = 56.0;
 const GAP_Y: f64 = 28.0;
 const PAD: f64 = 16.0;
+// Synthetic start / finish terminal discs flanking the DAG.
+const TERM_W: f64 = 28.0;
+const TERM_H: f64 = 28.0;
+const TERM_GAP_X: f64 = 40.0;
 
 #[derive(Clone)]
 struct LaidOut {
@@ -32,12 +36,20 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     return String::new();
   }
 
-  let layout = layout_nodes(session, &meta, now);
-  let width = layout.iter().map(|n| n.x + NODE_W).fold(0.0_f64, f64::max) + PAD;
+  let mut layout = layout_nodes(session, &meta, now);
+  if layout.is_empty() {
+    return String::new();
+  }
+  // Shift the DAG right so the start terminal gets its own little column.
+  for n in &mut layout {
+    n.x += TERM_W + TERM_GAP_X;
+  }
   let height = layout.iter().map(|n| n.y + NODE_H).fold(0.0_f64, f64::max) + PAD;
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
-  let edges_svg = render_edges(&meta, &by_id);
+  let mut edges_svg = render_edges(&meta, &by_id);
+  let (term_edges, term_html, width) = render_terminals(&meta, &by_id);
+  edges_svg.push_str(&term_edges);
 
   let mut nodes_html = String::new();
   let mut present = std::collections::BTreeSet::new();
@@ -67,6 +79,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     counts.tally(state);
     nodes_html.push_str(&node_html(session, &meta, node, pos, now));
   }
+  nodes_html.push_str(&term_html);
 
   format!(
     r#"<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>
@@ -181,6 +194,75 @@ fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &L
   svg
 }
 
+/// Synthetic start / finish terminals: a starting-line dot with an arrow into every root task
+/// and a checkered finish disc fed by every leaf, so even a single-run job reads
+/// start → run → finish (exactly two arrows). Decorative only — not focusable, not clickable.
+/// Returns (terminal edge paths, terminal markup, total stage width).
+fn render_terminals(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &LaidOut>) -> (String, String, f64) {
+  let min_y = by_id.values().map(|n| n.y).fold(f64::INFINITY, f64::min);
+  let max_y = by_id.values().map(|n| n.y + NODE_H).fold(0.0_f64, f64::max);
+  let term_y = (min_y + max_y) / 2.0 - TERM_H / 2.0;
+  let start_x = PAD;
+  let finish_x = by_id.values().map(|n| n.x + NODE_W).fold(0.0_f64, f64::max) + TERM_GAP_X;
+  let width = finish_x + TERM_W + PAD;
+
+  let mut has_incoming: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+  let mut has_outgoing: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+  for node in &meta.nodes {
+    if !by_id.contains_key(node.id.as_str()) {
+      continue;
+    }
+    for need in &node.needs {
+      if by_id.contains_key(need.as_str()) {
+        has_incoming.insert(node.id.as_str());
+        has_outgoing.insert(need.as_str());
+      }
+    }
+  }
+  // Top→bottom port order so the fan never crosses itself.
+  let mut roots: Vec<&&LaidOut> = by_id.iter().filter(|(id, _)| !has_incoming.contains(*id)).map(|(_, n)| n).collect();
+  let mut leaves: Vec<&&LaidOut> = by_id.iter().filter(|(id, _)| !has_outgoing.contains(*id)).map(|(_, n)| n).collect();
+  roots.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+  leaves.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
+
+  let mut edges = String::new();
+  for (i, root) in roots.iter().enumerate() {
+    let geom =
+      EdgeGeom { x1: start_x + TERM_W, y1: term_port_y(term_y, i, roots.len()), x2: root.x, y2: root.y + NODE_H / 2.0 };
+    edges.push_str(&edge_path_class(&geom, "wf-edge wf-edge-term"));
+  }
+  for (i, leaf) in leaves.iter().enumerate() {
+    let geom = EdgeGeom {
+      x1: leaf.x + NODE_W,
+      y1: leaf.y + NODE_H / 2.0,
+      x2: finish_x,
+      y2: term_port_y(term_y, i, leaves.len()),
+    };
+    edges.push_str(&edge_path_class(&geom, "wf-edge wf-edge-term"));
+  }
+
+  let html = format!(
+    concat!(
+      r#"<span class="wf-terminal wf-term-start" role="img" aria-label="start" style="left:{sx:.1}px;top:{ty:.1}px"></span>"#,
+      r#"<span class="wf-terminal wf-term-finish" role="img" aria-label="finish" style="left:{fx:.1}px;top:{ty:.1}px"></span>"#
+    ),
+    sx = start_x,
+    fx = finish_x,
+    ty = term_y,
+  );
+  (edges, html, width)
+}
+
+/// Vertical attachment along a terminal disc face — `port_y` scaled down to the disc height.
+fn term_port_y(term_y: f64, index: usize, count: usize) -> f64 {
+  if count <= 1 {
+    return term_y + TERM_H / 2.0;
+  }
+  let margin = TERM_H * 0.28;
+  let usable = TERM_H - 2.0 * margin;
+  term_y + margin + usable * (index as f64) / ((count - 1) as f64)
+}
+
 /// Vertical attachment along a node face: single edge → center; several → evenly spaced
 /// with a margin so tips do not sit on the corners.
 fn port_y(node_y: f64, index: usize, count: usize) -> f64 {
@@ -194,13 +276,18 @@ fn port_y(node_y: f64, index: usize, count: usize) -> f64 {
 
 /// Cubic with horizontal tangents at both ends — reads as a clean ribbon, not a merged Y.
 fn edge_path(e: &EdgeGeom) -> String {
+  edge_path_class(e, "wf-edge")
+}
+
+fn edge_path_class(e: &EdgeGeom, class: &str) -> String {
   let dx = (e.x2 - e.x1).max(24.0);
   let c1x = e.x1 + dx * 0.42;
   let c2x = e.x2 - dx * 0.42;
   // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
   let x2 = e.x2 - 1.5;
   format!(
-    r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
+    r#"<path class="{class}" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
+    class = class,
     x1 = e.x1,
     y1 = e.y1,
     y2 = e.y2,

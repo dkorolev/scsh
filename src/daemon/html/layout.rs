@@ -415,6 +415,20 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   .wf-node.wf-build { border-left-color: var(--cyan); }
   .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+  /* Start / finish terminals — decorative bookends, never focusable or clickable. */
+  .wf-terminal {
+    position: absolute; box-sizing: border-box; width: 28px; height: 28px;
+    border: 2px solid var(--text-muted); border-radius: 50%; background: var(--bg);
+    pointer-events: none; user-select: none;
+  }
+  .wf-term-start::after {
+    /* Starting line: a filled dot inside the ring, like a race start marker. */
+    content: ""; position: absolute; inset: 6px; border-radius: 50%; background: var(--text-muted);
+  }
+  .wf-term-finish {
+    /* Finish flag: a little checkered disc. */
+    background: repeating-conic-gradient(var(--text-muted) 0% 25%, var(--bg) 0% 50%) 50% 50% / 12px 12px;
+  }
   /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
   .fleet {

@@ -1106,6 +1106,7 @@ function wfFirstIdByState(session, nodes, nowUnix) {
 }
 // Layout constants — keep in lockstep with src/daemon/html/workflow.rs.
 const WF_NODE_W = 200, WF_NODE_H = 72, WF_GAP_X = 56, WF_GAP_Y = 28, WF_PAD = 16;
+const WF_TERM_W = 28, WF_TERM_H = 28, WF_TERM_GAP_X = 40;
 let pendingWorkflowStep = null;
 let wfHistorySilent = false;
 function wfNodeRanks(nodes) {
@@ -1160,6 +1161,59 @@ function wfPortY(nodeY, index, count) {
   const usable = WF_NODE_H - 2 * margin;
   return nodeY + margin + usable * index / (count - 1);
 }
+function wfTermPortY(termY, index, count) {
+  if (count <= 1) return termY + WF_TERM_H / 2;
+  const margin = WF_TERM_H * 0.28;
+  const usable = WF_TERM_H - 2 * margin;
+  return termY + margin + usable * index / (count - 1);
+}
+function wfEdgePath(x1, y1, dstX, y2, cls) {
+  // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
+  const x2 = dstX - 1.5;
+  const dx = Math.max(24, x2 - x1);
+  const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
+  return '<path class="' + cls + '" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+    ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
+    ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
+}
+// Synthetic start / finish terminals — keep in lockstep with render_terminals in workflow.rs.
+// Start dot → every root; every leaf → checkered finish disc. Decorative, never interactive.
+function wfTerminals(nodes, layout) {
+  if (!layout.length) return { edges: '', html: '', width: 0 };
+  const present = Object.create(null);
+  layout.forEach(n => { present[n.id] = true; });
+  const hasIncoming = Object.create(null), hasOutgoing = Object.create(null);
+  nodes.forEach(node => {
+    if (!present[node.id]) return;
+    (node.needs || []).forEach(need => {
+      if (present[need]) { hasIncoming[node.id] = true; hasOutgoing[need] = true; }
+    });
+  });
+  const minY = Math.min(...layout.map(n => n.y));
+  const maxY = Math.max(...layout.map(n => n.y + WF_NODE_H));
+  const termY = (minY + maxY) / 2 - WF_TERM_H / 2;
+  const startX = WF_PAD;
+  const finishX = Math.max(...layout.map(n => n.x + WF_NODE_W)) + WF_TERM_GAP_X;
+  const byY = (a, b) => a.y - b.y;
+  const roots = layout.filter(n => !hasIncoming[n.id]).slice().sort(byY);
+  const leaves = layout.filter(n => !hasOutgoing[n.id]).slice().sort(byY);
+  let edges = '';
+  roots.forEach((n, i) => {
+    edges += wfEdgePath(startX + WF_TERM_W, wfTermPortY(termY, i, roots.length),
+      n.x, n.y + WF_NODE_H / 2, 'wf-edge wf-edge-term');
+  });
+  leaves.forEach((n, i) => {
+    edges += wfEdgePath(n.x + WF_NODE_W, n.y + WF_NODE_H / 2,
+      finishX, wfTermPortY(termY, i, leaves.length), 'wf-edge wf-edge-term');
+  });
+  const term = (cls, label, x) => '<span class="wf-terminal ' + cls + '" role="img" aria-label="' + label +
+    '" style="left:' + x.toFixed(1) + 'px;top:' + termY.toFixed(1) + 'px"></span>';
+  return {
+    edges,
+    html: term('wf-term-start', 'start', startX) + term('wf-term-finish', 'finish', finishX),
+    width: finishX + WF_TERM_W + WF_PAD,
+  };
+}
 function wfEdgesSvg(nodes, layout) {
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const pairs = [];
@@ -1184,20 +1238,18 @@ function wfEdgesSvg(nodes, layout) {
     const src = byId[p[0]], dst = byId[p[1]];
     const x1 = src.x + WF_NODE_W;
     const y1 = wfPortY(src.y, outPort[i], outN[p[0]]);
-    const x2 = dst.x - 1.5;
     const y2 = wfPortY(dst.y, inPort[i], inN[p[1]]);
-    const dx = Math.max(24, x2 - x1);
-    const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
-    return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
-      ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
-      ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
+    return wfEdgePath(x1, y1, dst.x, y2, 'wf-edge');
   }).join('');
 }
 function wfBuildGraphHtml(session, nowUnix) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
   if (!nodes.length) return '';
   const layout = wfLayoutNodes(session, nodes, nowUnix);
-  const w = Math.max(...layout.map(n => n.x + WF_NODE_W)) + WF_PAD;
+  // Shift the DAG right so the start terminal gets its own little column.
+  layout.forEach(n => { n.x += WF_TERM_W + WF_TERM_GAP_X; });
+  const term = wfTerminals(nodes, layout);
+  const w = term.width;
   const h = Math.max(...layout.map(n => n.y + WF_NODE_H)) + WF_PAD;
   const present = Object.create(null);
   const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
@@ -1255,8 +1307,8 @@ function wfBuildGraphHtml(session, nowUnix) {
     '" viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" aria-hidden="true"><defs>' +
     '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
     '<path class="wf-arrowhead" d="M3.5 2.5 L11 7 L3.5 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</marker></defs>' + wfEdgesSvg(nodes, layout) + '</svg>' +
-    '<div class="workflow-nodes">' + nodesHtml + '</div></div></div></div>';
+    '</marker></defs>' + wfEdgesSvg(nodes, layout) + term.edges + '</svg>' +
+    '<div class="workflow-nodes">' + nodesHtml + term.html + '</div></div></div></div>';
 }
 function ensureWorkflowGraphMounted(session, nowUnix) {
   const nodes = (session && session.workflow && session.workflow.nodes) || [];
