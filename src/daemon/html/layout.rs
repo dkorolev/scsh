@@ -650,7 +650,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 100%; min-height: 28rem; border: 1px solid var(--border); border-radius: 4px;
     margin: 0.4rem 0 0.25rem; background: #fff;
   }
-  /* Bottom-center toast — brief, non-blocking feedback (e.g. project already exists). */
+  /* Bottom-center toast — brief, non-blocking feedback (e.g. invalid project name). */
   .toast {
     position: fixed; left: 50%; bottom: 1.75rem; z-index: 2000;
     transform: translateX(-50%) translateY(0.6rem);
