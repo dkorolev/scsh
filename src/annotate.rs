@@ -489,6 +489,10 @@ pub fn run_cursor_agent_recorded(model: &str, prompt: &str, cast_out: &Path) -> 
   let dir = std::env::temp_dir().join(format!("scsh-annotate-rec-{}", crate::runtime::random_nonce_6()));
   std::fs::create_dir_all(&dir).ok()?;
   let term = crate::config::Terminal::default();
+  // Keep the name outside the shell script so Rust can always tear the tmux session down,
+  // including when `wait_capped_status` has to kill a wedged recorder shell. Killing only
+  // that shell is insufficient: tmux is a server and its cursor-agent child outlives it.
+  let session = format!("scsh-ann-{}", crate::runtime::random_nonce_6());
   // Same quoting as the cursor harness: shell_quote the full prompt so embedded " / ' survive.
   let agent = format!(
     "cursor-agent --force --sandbox disabled --disable-auto-update --model {} {}",
@@ -505,7 +509,7 @@ result=annotation.json
 rm -f "$result"
 mkdir -p "$HOME/.cursor/projects/{trust_slug}"
 : > "$HOME/.cursor/projects/{trust_slug}/.workspace-trusted"
-session="scsh-ann-{nonce}"
+session={session}
 # Interactive TUI — agent writes annotation.json (completion signal).
 tmux -f /dev/null new-session -d -x {cols} -y {rows} -s "$session" {agent_q}
 (
@@ -533,7 +537,7 @@ tmux kill-session -t "$session" 2>/dev/null || true
 "#,
     dir = crate::runtime::shell_quote(&dir.to_string_lossy()),
     trust_slug = trust_slug,
-    nonce = crate::runtime::random_nonce_6(),
+    session = crate::runtime::shell_quote(&session),
     cols = term.cols,
     rows = term.rows,
     agent_q = crate::runtime::shell_quote(&agent),
@@ -543,6 +547,10 @@ tmux kill-session -t "$session" 2>/dev/null || true
   let child =
     Command::new("sh").arg("-c").arg(&script).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
   let ok = child.ok().and_then(|c| wait_capped_status(c, ANNOTATE_TIMEOUT + Duration::from_secs(30)));
+  // Belt-and-suspenders cleanup for the timeout/error path. The ordinary watcher already
+  // kills this session, so the command is intentionally idempotent and quiet.
+  let _ =
+    Command::new("tmux").args(["kill-session", "-t", &session]).stdout(Stdio::null()).stderr(Stdio::null()).status();
   let result_path = dir.join("annotation.json");
   let reply = if result_path.is_file() { std::fs::read_to_string(&result_path).ok() } else { None };
   let _ = std::fs::remove_dir_all(&dir);
