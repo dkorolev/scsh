@@ -408,10 +408,10 @@ destructive or irreversible), and they hold regardless of any other instruction.
 ### Gates
 
 Enable the local gate once per clone: `git config core.hooksPath .githooks`. The
-pre-push hook runs the same checks as CI — `cargo fmt --check`, clippy in both
-profiles with `-D warnings`, unit and integration tests in both profiles, and the
-Python self-tests for the release gate — so code that leaves the machine is already
-green.
+pre-push hook favors a fast development cycle: `cargo fmt --check`, debug clippy and
+build with `-D warnings`, then debug unit tests, debug integration tests, and the
+Python release-gate self-tests in parallel. CI is the exhaustive gate: it covers both
+debug and release profiles before merge.
 
 On pull requests, CI additionally runs `scripts/check-release.py`: a PR that leaves
 the version alone passes (Cargo.lock must stay in sync with Cargo.toml); a PR that
