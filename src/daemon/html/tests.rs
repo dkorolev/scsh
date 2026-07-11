@@ -276,8 +276,30 @@ fn create_cast_player_does_not_redeclare_det() {
   assert_eq!(
     fn_body.matches("const det").count(),
     1,
-    "createCastPlayer must declare det once (got: {fn_body})"
+    "createCastPlayer must declare det once"
   );
+}
+
+/// Syntax-check the whole live client script under Node. Catches redeclared `const`/`let`,
+/// stray braces, and other parse errors that would abort the inline `<script>` and leave
+/// the session browser dead — the class of bug behind `Identifier 'det' has already been declared`.
+#[test]
+fn live_client_js_parses_under_node() {
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let dir = std::env::temp_dir().join(format!("scsh-live-js-check-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let path = dir.join("live-client.js");
+  std::fs::write(&path, live_client_js()).unwrap();
+  let out = std::process::Command::new("node").arg("--check").arg(&path).output().expect("spawn node --check");
+  assert!(
+    out.status.success(),
+    "live_client_js must parse: {}\n{}",
+    String::from_utf8_lossy(&out.stderr),
+    String::from_utf8_lossy(&out.stdout)
+  );
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
