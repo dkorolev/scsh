@@ -174,7 +174,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
     };
     let started = std::time::Instant::now();
     match annotate::annotate_cast_with(std::path::Path::new(path), &model, annotate::run_cursor_agent) {
-      Some(sidecar) => {
+      Ok(sidecar) => {
         if let (Some(c), Some(idx)) = (&daemon_session, proc_idx) {
           c.proc_finish(idx, daemon::ProcStatus::Ok, None, None, started.elapsed().as_secs_f64());
         }
@@ -183,18 +183,21 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
         }
         sidecars.push((path.clone(), sidecar.to_string_lossy().into_owned()));
       }
-      None => {
+      Err(err) => {
+        // The distinct reason (unreadable cast / empty transcript / model timeout / …)
+        // lands both in the daemon Fail row and on stderr, with the paired `→` fix.
         if let (Some(c), Some(idx)) = (&daemon_session, proc_idx) {
           c.proc_finish(
             idx,
             daemon::ProcStatus::Fail,
             Some("annotate_failed"),
-            Some("no annotation produced"),
+            Some(&err.to_string()),
             started.elapsed().as_secs_f64(),
           );
         }
         if !as_json {
-          eprintln!("✗ (no annotation produced)");
+          eprintln!("✗ {err}");
+          eprintln!("  → {}", err.hint());
         }
       }
     }
@@ -354,9 +357,13 @@ fn annotate_run_casts(
   for cast in &cast_paths {
     cache_attach_chapters(root, cast);
   }
+  // A cast needs annotation when it has no sidecar yet OR when it was re-recorded after
+  // its sidecar was written — "sidecar exists" alone would keep a stale annotation forever.
   let pending: Vec<std::path::PathBuf> = cast_paths
     .into_iter()
-    .filter(|c| daemon::chapters_sidecar_path(&c.to_string_lossy()).map(|s| !s.exists()).unwrap_or(false))
+    .filter(|c| {
+      daemon::chapters_sidecar_path(&c.to_string_lossy()).map(|s| annotate::sidecar_is_stale(c, &s)).unwrap_or(false)
+    })
     .collect();
   if pending.is_empty() || !annotate::host_can_annotate() {
     return;
@@ -391,20 +398,21 @@ fn annotate_run_casts(
         let model = model.clone();
         handles.push(scope.spawn(move || {
           let started = std::time::Instant::now();
-          let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
+          let result = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent);
           let elapsed = started.elapsed().as_secs_f64();
-          if ok {
-            client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed);
-          } else {
-            client.proc_finish(
+          match &result {
+            Ok(_) => client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed),
+            // The distinct failure reason (unreadable cast / model timeout / …) is the
+            // Fail row's message, so the job page says more than "no annotation produced".
+            Err(err) => client.proc_finish(
               idx,
               daemon::ProcStatus::Fail,
               Some("annotate_failed"),
-              Some("no annotation produced"),
+              Some(&err.to_string()),
               elapsed,
-            );
+            ),
           }
-          (cast, ok)
+          (cast, result.is_ok())
         }));
       }
       for h in handles {
@@ -420,8 +428,13 @@ fn annotate_run_casts(
       .map(|cast| {
         let model = model.clone();
         std::thread::spawn(move || {
-          let ok = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent).is_some();
-          (cast, ok)
+          let result = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent);
+          // No daemon row to carry the reason here, so a failure is at least named on
+          // stderr instead of silently folding into the final "annotated N" count.
+          if let Err(err) = &result {
+            eprintln!("scsh: annotate failed for {}: {err}", cast.display());
+          }
+          (cast, result.is_ok())
         })
       })
       .collect();
