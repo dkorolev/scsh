@@ -2580,6 +2580,7 @@ function handleRepoOpened(resp, note) {
     renderRepoJobs(liveSessions, Date.now() / 1000);
     renderInternalJobs(liveSessions, Date.now() / 1000);
 }
+function renderDefs(defs) {
   const list = document.getElementById('defs-list');
   if (!list) return;
   for (const k in DEFS_BY_NAME) delete DEFS_BY_NAME[k];
