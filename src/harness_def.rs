@@ -1175,7 +1175,7 @@ mod tests {
     let expected = [
       ("smoke-pr-claude", "claude", "sonnet"),
       ("smoke-pr-codex", "codex", "gpt-5.5"),
-      ("smoke-pr-grok", "grok", "grok-build"),
+      ("smoke-pr-grok", "grok", "grok-composer-2.5-fast"),
       ("smoke-pr-cursor", "cursor", "composer-2.5-fast"),
     ];
     for (name, harness, model) in expected {

@@ -39,5 +39,5 @@ task: |
 invocations:
   run:
     harness: grok
-    model: grok-build
+    model: grok-composer-2.5-fast
     commits: true
