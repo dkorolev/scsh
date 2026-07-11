@@ -311,7 +311,7 @@ fn ui_review_fixes_hold() {
   );
   // 2. Clicking something that renders inputs further down scrolls there.
   let js = live_client_js();
-  assert_eq!(js.matches("scrollIntoView").count() >= 2, true, "def form + defs panel scroll into view");
+  assert!(js.matches("scrollIntoView").count() >= 2, "def form + defs panel scroll into view");
   // 3. A finished proc's collapsed row shows its ANSWER, not the stale run note.
   let mut store = store_with_cast_proc(ProcStatus::Ok);
   {

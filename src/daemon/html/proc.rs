@@ -184,11 +184,8 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
       if let Some(h) = harness {
         parts.push(format!(r#"<span><strong>harness</strong> {harness}</span>"#, harness = esc(&h)));
       }
-      let model = proc
-        .model
-        .as_deref()
-        .map(|m| esc(m))
-        .unwrap_or_else(|| r#"<span class="dim">(harness default)</span>"#.to_string());
+      let model =
+        proc.model.as_deref().map(esc).unwrap_or_else(|| r#"<span class="dim">(harness default)</span>"#.to_string());
       parts.push(format!(r#"<span><strong>model</strong> {model}</span>"#));
       if let Some(r) = proc.fail_reason.as_deref().filter(|s| !s.is_empty()) {
         parts.push(format!(r#"<span><strong>fail reason</strong> <code>{r}</code></span>"#));

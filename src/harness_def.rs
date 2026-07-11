@@ -382,7 +382,7 @@ impl Cond {
     match self.op {
       CondOp::Eq => self.values.first().is_some_and(|v| *v == actual),
       CondOp::Ne => self.values.first().is_some_and(|v| *v != actual),
-      CondOp::In => self.values.iter().any(|v| *v == actual),
+      CondOp::In => self.values.contains(&actual),
       _ => {
         let (Ok(a), Some(Ok(b))) = (actual.trim().parse::<i64>(), self.values.first().map(|v| v.trim().parse::<i64>()))
         else {

@@ -347,7 +347,7 @@ pub fn trim_sessions_to_cap(sessions: &mut std::collections::BTreeMap<String, Se
 }
 
 /// Sessions sorted for the index page: running first, then by start time descending.
-pub fn sessions_for_index<'a>(sessions: &'a BTreeMap<String, Session>, now: u64) -> Vec<&'a Session> {
+pub fn sessions_for_index(sessions: &BTreeMap<String, Session>, now: u64) -> Vec<&Session> {
   let mut list: Vec<&Session> = sessions.values().collect();
   list.sort_by(|a, b| {
     let a_live = a.lifecycle_status(now) == SessionLifecycle::Running;

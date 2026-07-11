@@ -64,6 +64,7 @@ impl Client {
 
   /// Like [`Self::register_session`], optionally attaching immutable workflow DAG metadata
   /// and/or a parent session id (e.g. annotate-cast catch-up under `(internal)`).
+  #[allow(clippy::too_many_arguments)]
   pub fn register_session_with_workflow(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
     workflow: Option<&super::workflow::WorkflowMeta>, parent_session: Option<&str>,
@@ -143,6 +144,7 @@ impl Client {
     self.close_poster();
   }
 
+  #[allow(clippy::too_many_arguments)]
   pub fn proc_add(
     &self, proc_index: usize, label: &str, kind: ProcKind, skill_name: Option<&str>, harness: Option<&str>,
     model: Option<&str>, skill_source: Option<&str>, route: Option<&str>,
@@ -171,12 +173,12 @@ impl Client {
       quote(label),
       quote(kind.as_str()),
     );
-    let _ = self.post("/api/v1/proc/add", &body);
+    self.post("/api/v1/proc/add", &body);
   }
 
   pub fn proc_start(&self, proc_index: usize) {
     let body = format!("{{ \"session\": {}, \"proc\": {} }}", quote(&self.inner.session_id), proc_index);
-    let _ = self.post("/api/v1/proc/start", &body);
+    self.post("/api/v1/proc/start", &body);
   }
 
   pub fn proc_note(&self, proc_index: usize, note: &str) {
@@ -186,7 +188,7 @@ impl Client {
       proc_index,
       quote(note)
     );
-    let _ = self.post("/api/v1/proc/note", &body);
+    self.post("/api/v1/proc/note", &body);
   }
 
   /// Tell the daemon where this proc's asciinema `.cast` lives on the host: the live
@@ -198,7 +200,7 @@ impl Client {
       proc_index,
       quote(path)
     );
-    let _ = self.post("/api/v1/proc/cast", &body);
+    self.post("/api/v1/proc/cast", &body);
   }
 
   /// Tell the daemon where the packed commits-diff page for this step lives on the host
@@ -283,7 +285,7 @@ impl Client {
         log_post_failure("/api/v1/container", Some(proc_index));
       }
     } else {
-      let _ = self.post("/api/v1/container", &body);
+      self.post("/api/v1/container", &body);
     }
   }
 
@@ -297,11 +299,11 @@ impl Client {
       quote(runtime),
       quote(outcome),
     );
-    let _ = self.post("/api/v1/prune/schedule", &body);
+    self.post("/api/v1/prune/schedule", &body);
   }
 
   pub fn ping(&self) {
-    let _ = self.post("/api/v1/ping", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
+    self.post("/api/v1/ping", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
   }
 
   /// True when the session browser daemon serves its HTTP API on localhost.
@@ -536,7 +538,7 @@ pub fn spawn_daemon(mode: super::model::DaemonMode) -> std::io::Result<()> {
     // Double-fork so the daemon survives the parent `scsh` process exiting; `setsid` detaches
     // from the terminal (async-signal-safe syscalls only in pre_exec).
     unsafe {
-      cmd.pre_exec(|| super::paths::daemon_detach_child());
+      cmd.pre_exec(super::paths::daemon_detach_child);
     }
   }
   cmd.spawn()?;

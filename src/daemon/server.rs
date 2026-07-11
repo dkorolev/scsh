@@ -182,7 +182,7 @@ impl Server {
         let (json, casts) = {
           let mut store = lock_store(&self.store);
           store.reconcile(now);
-          let json = if include_sessions { tick_json(&*store, now) } else { tick_json_light(&*store, now) };
+          let json = if include_sessions { tick_json(&store, now) } else { tick_json_light(&store, now) };
           (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() })
         };
         self.ws_hub.broadcast(json);
@@ -686,12 +686,12 @@ fn route(
   }
   match req.path.split('?').next().unwrap_or(req.path.as_str()) {
     "/" => {
-      let html = html::index_page(&*lock_store(store));
+      let html = html::index_page(&lock_store(store));
       (200, html, "text/html; charset=utf-8", false)
     }
     path @ ("/run" | "/jobs" | "/projects" | "/setup" | "/images") => {
       let tab = html::IndexTab::from_path(path).unwrap_or(html::IndexTab::Run);
-      let html = html::index_page_for(&*lock_store(store), None, tab);
+      let html = html::index_page_for(&lock_store(store), None, tab);
       (200, html, "text/html; charset=utf-8", false)
     }
     path if path.starts_with("/project") || path.starts_with("/repo") => {
@@ -699,9 +699,9 @@ fn route(
       // Bare `/project` or `/repo` (no name/path) falls through to the unfiltered Projects tab.
       let filter = html::parse_index_filter(path);
       let html = if filter.is_some() {
-        html::index_page_with_filter(&*lock_store(store), filter)
+        html::index_page_with_filter(&lock_store(store), filter)
       } else {
-        html::index_page_for(&*lock_store(store), None, html::IndexTab::Projects)
+        html::index_page_for(&lock_store(store), None, html::IndexTab::Projects)
       };
       (200, html, "text/html; charset=utf-8", false)
     }
@@ -709,7 +709,7 @@ fn route(
       // Canonical page URL is `/job/<id>`; `/session/<id>` is kept as a compatibility alias.
       let id = path.strip_prefix("/job/").or_else(|| path.strip_prefix("/session/")).unwrap_or("");
       let store = lock_store(store);
-      if let Some(page) = html::session_page(&*store, id) {
+      if let Some(page) = html::session_page(&store, id) {
         (200, page, "text/html; charset=utf-8", false)
       } else {
         (404, "job not found".into(), "text/plain", false)
@@ -721,7 +721,7 @@ fn route(
       let rest = path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/play").unwrap_or("");
       let page = rest.split_once('/').and_then(|(sid, proc)| {
         let proc_index = proc.parse::<usize>().ok()?;
-        html::cast_player_page(&*lock_store(store), sid, proc_index)
+        html::cast_player_page(&lock_store(store), sid, proc_index)
       });
       match page {
         Some(page) => (200, page, "text/html; charset=utf-8", false),
@@ -1126,8 +1126,8 @@ fn images_json(runtime_override: Option<&str>) -> String {
         quote(&s.tag),
         s.exists,
         s.up_to_date,
-        s.created.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
-        s.size.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
+        s.created.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+        s.size.as_deref().map(quote).unwrap_or_else(|| "null".into()),
       )
     })
     .collect();

@@ -479,7 +479,7 @@ pub fn workflow_json(meta: &WorkflowMeta) -> String {
   format!("{{ \"nodes\": [{}] }}", nodes.join(", "))
 }
 
-fn proc_by_index<'a>(session: &'a Session, index: usize) -> Option<&'a ProcRecord> {
+fn proc_by_index(session: &Session, index: usize) -> Option<&ProcRecord> {
   session.procs.iter().find(|p| p.index == index)
 }
 
