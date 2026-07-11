@@ -164,7 +164,19 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
         label.push('…');
       }
       if let Some(c) = &daemon_session {
-        c.proc_add(idx, &label, daemon::ProcKind::Annotate, None, Some("cursor"), Some(model.as_str()), None, None);
+        // The annotated cast path rides along so the daemon can point the original job's
+        // "chapters: summarizing…" note at THIS session while the annotation runs.
+        c.proc_add(
+          idx,
+          &label,
+          daemon::ProcKind::Annotate,
+          None,
+          Some("cursor"),
+          Some(model.as_str()),
+          None,
+          None,
+          Some(path.as_str()),
+        );
         c.proc_start(idx);
         c.proc_note(idx, "summarizing…");
       }
@@ -383,6 +395,8 @@ fn annotate_run_casts(
           label.truncate(57);
           label.push('…');
         }
+        // The annotated cast path rides along so the daemon can point this recording's
+        // "chapters: summarizing…" note at the job carrying these annotate rows.
         client.proc_add(
           idx,
           &label,
@@ -392,6 +406,7 @@ fn annotate_run_casts(
           Some(model.as_str()),
           None,
           None,
+          Some(cast.to_string_lossy().as_ref()),
         );
         client.proc_start(idx);
         client.proc_note(idx, "summarizing…");
@@ -1434,26 +1449,30 @@ fn ensure_workflow_images(
     return Err((runtime::apple_dockerfile_too_large_message(df.len()), 1));
   }
   let tz = runtime::host_timezone();
-  let build_one =
-    |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
-      // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
-      let p = ui.proc(label.clone(), false);
-      if let Some(c) = daemon_client {
-        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None, None, None);
+  let build_one = |label: String,
+                   tag: &str,
+                   target: &str,
+                   fp: &str,
+                   harness: Option<config::Harness>|
+   -> Result<(), (String, i32)> {
+    // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
+    let p = ui.proc(label.clone(), false);
+    if let Some(c) = daemon_client {
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None, None, None, None);
+    }
+    p.start();
+    let stem = harness.map(|h| h.as_str()).unwrap_or("base");
+    match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
+      Ok(()) => {
+        p.finish_ok(None);
+        Ok(())
       }
-      p.start();
-      let stem = harness.map(|h| h.as_str()).unwrap_or("base");
-      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
-        Ok(()) => {
-          p.finish_ok(None);
-          Ok(())
-        }
-        Err(e) => {
-          p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
-          Err(e)
-        }
+      Err(e) => {
+        p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+        Err(e)
       }
-    };
+    }
+  };
   let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
   if !runtime::image_is_up_to_date(&rt.name, runtime::BASE_IMAGE_TAG, &base_fp) {
     build_one(
@@ -1564,6 +1583,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         Some(s.agent.harness.as_str()),
         s.agent.model.as_deref(),
         Some(&s.id),
+        None,
         None,
       );
     }
@@ -2797,7 +2817,7 @@ fn build_and_run(
     let base_label = format!("using {} · build base", backend_name(&rt.name));
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -2806,7 +2826,7 @@ fn build_and_run(
     let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None, None);
     }
     harness_build_procs.push(p);
   }
@@ -2824,6 +2844,7 @@ fn build_and_run(
         skill.model.as_deref(),
         Some(skill.skill_source.as_str()),
         fleet_route_name(skill),
+        None,
       );
     }
     if any_image_build {
@@ -2963,6 +2984,7 @@ fn build_and_run(
               skill.model.as_deref(),
               Some(skill.skill_source.as_str()),
               fleet_route_name(skill),
+              None,
             );
           }
           let retry_started = std::time::Instant::now();
@@ -3025,6 +3047,7 @@ fn build_and_run(
         skill_source: Some(skill.skill_source.clone()),
         route: fleet_route_name(skill).map(str::to_string),
         result_path,
+        annotate_target: None,
       });
     }
     let _ = fleet::write_rollups(&session_id, &fake_procs);
@@ -5025,7 +5048,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build base", backend_name(&rt_name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -5034,7 +5057,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None, None);
     }
     harness_build_procs.push(p);
   }

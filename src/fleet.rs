@@ -274,6 +274,7 @@ mod tests {
         skill_source: Some("add".into()),
         route: Some("opencode".into()),
         result_path: Some(p1),
+        annotate_target: None,
       },
       ProcRecord {
         index: 1,
@@ -295,6 +296,7 @@ mod tests {
         skill_source: Some("add".into()),
         route: Some("claude".into()),
         result_path: Some(p2),
+        annotate_target: None,
       },
     ];
     let written = write_rollups(session, &procs);

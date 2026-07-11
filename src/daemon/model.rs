@@ -179,6 +179,10 @@ pub struct ProcRecord {
   pub route: Option<String>,
   /// Durable copy of the skill's result JSON under `$SCSH_HOME/sessions/<id>/results/`.
   pub result_path: Option<String>,
+  /// Host path of the cast an `Annotate` proc is summarizing. Lets the chapters endpoint
+  /// point a still-chapterless recording at the job doing its annotation (the "chapters:
+  /// summarizing…" link on the job page). `None` on every other proc kind.
+  pub annotate_target: Option<String>,
 }
 
 /// One skill listed in a session's start payload.
@@ -433,6 +437,7 @@ mod tests {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -497,6 +502,7 @@ mod tests {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -539,6 +545,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 1,
@@ -560,6 +567,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
       ],
       last_seen_at: 1,

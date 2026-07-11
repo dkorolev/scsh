@@ -4,8 +4,8 @@ use super::escape::esc;
 use super::fleet::fleet_sections_html;
 use super::layout::wrap_page;
 use super::proc::{
-  autoscroll_ctl_html, cast_embed_html, elapsed_phrase, empty_output_html, proc_elapsed_secs, proc_has_cast,
-  proc_meta_html, summary_stats_html,
+  autoscroll_ctl_html, cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html,
+  summary_stats_html,
 };
 use super::workflow::{proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
@@ -30,8 +30,13 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let container = proc.container_name.as_deref().unwrap_or("");
     // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
     // build fallbacks (no asciinema on PATH) keep the timestamped output with auto-scroll.
+    // A proc with neither a recording nor a single log line — annotate rows are the
+    // canonical case — stays a slim summary-only row: the terminal chrome (auto-scroll
+    // control, an empty output box) belongs to procs that actually stream output.
     let body_html = if proc_has_cast(proc) {
       cast_embed_html(&session.id, proc)
+    } else if proc.lines.is_empty() {
+      String::new()
     } else {
       let mut lines_html = String::new();
       for line in &proc.lines {
@@ -40,9 +45,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
           at = line.at,
           text = esc(&line.text)
         ));
-      }
-      if lines_html.is_empty() {
-        lines_html = empty_output_html(proc.status);
       }
       format!("{}<div class=\"output\">{lines_html}</div>", autoscroll_ctl_html(proc.status))
     };

@@ -1,7 +1,6 @@
 use super::cast::cast_player_page;
 use super::client_js::live_client_js;
 use super::escape::esc;
-use super::proc::{empty_output_html, empty_output_label};
 use super::session::session_page;
 use super::session_export::session_export_page;
 use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, Store};
@@ -38,6 +37,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -585,14 +585,6 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
 }
 
 #[test]
-fn empty_output_label_depends_on_proc_status() {
-  assert_eq!(empty_output_label(ProcStatus::Running), "No output yet.");
-  assert_eq!(empty_output_label(ProcStatus::Waiting), "No output yet.");
-  assert_eq!(empty_output_label(ProcStatus::Ok), "No output.");
-  assert_eq!(empty_output_label(ProcStatus::Fail), "No output.");
-}
-
-#[test]
 fn session_proc_html_has_no_stray_backslashes() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
@@ -623,12 +615,13 @@ fn session_proc_html_has_no_stray_backslashes() {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
         started_at: Some(1),
         elapsed: None,
-        lines: vec![],
+        lines: vec![crate::daemon::model::OutputLine { at: 0.5, text: "building…".into() }],
       }],
       workflow: None,
       parent_session: None,
@@ -640,7 +633,6 @@ fn session_proc_html_has_no_stray_backslashes() {
   assert!(!procs.contains("\\\n"), "autoscroll markup must not leak backslashes");
   assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
   assert!(procs.contains("Auto-scroll to bottom"));
-  assert!(html.contains(r#"<div class="output"><div class="dim">No output yet.</div>"#));
   assert!(html.contains(r#"id="session-stop""#), "running session should offer Force stop");
   assert!(html.contains("Force stop"));
 }
@@ -677,6 +669,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
           harness: Some("opencode".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -698,6 +691,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
           harness: Some("claude".into()),
           skill_name: Some("add".into()),
           model: None,
@@ -826,6 +820,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
       harness: Some("opencode".into()),
       skill_name: Some("add".into()),
       model: None,
@@ -883,6 +878,7 @@ fn offline_export_keeps_text_log_lines() {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
       harness: Some("claude".into()),
       skill_name: None,
       model: None,
@@ -949,6 +945,7 @@ fn offline_export_includes_workflow_graph() {
         skill_source: Some("add".into()),
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -970,6 +967,7 @@ fn offline_export_includes_workflow_graph() {
         skill_source: Some("summarize".into()),
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("codex".into()),
         skill_name: Some("summarize".into()),
         model: None,
@@ -1081,6 +1079,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           skill_source: Some("add".into()),
           route: Some("opencode".into()),
           result_path: None,
+          annotate_target: None,
           harness: Some("opencode".into()),
           skill_name: Some("add-opencode".into()),
           model: None,
@@ -1102,6 +1101,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           skill_source: Some("add".into()),
           route: Some("claude".into()),
           result_path: None,
+          annotate_target: None,
           harness: Some("claude".into()),
           skill_name: Some("add-claude".into()),
           model: None,
@@ -1157,6 +1157,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           skill_source: Some("add".into()),
           route: Some("waiting-route".into()),
           result_path: None,
+          annotate_target: None,
           harness: Some("claude".into()),
           skill_name: Some("add-waiting-route".into()),
           model: None,
@@ -1178,6 +1179,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           skill_source: Some("add".into()),
           route: Some("done-route".into()),
           result_path: None,
+          annotate_target: None,
           harness: Some("claude".into()),
           skill_name: Some("add-done-route".into()),
           model: None,
@@ -1199,6 +1201,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           skill_source: Some("add".into()),
           route: Some("running-route".into()),
           result_path: None,
+          annotate_target: None,
           harness: Some("claude".into()),
           skill_name: Some("add-running-route".into()),
           model: None,
@@ -1320,6 +1323,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
@@ -1370,16 +1374,6 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
 }
 
 #[test]
-fn empty_output_html_has_no_backslash_artifacts() {
-  let html = empty_output_html(ProcStatus::Ok);
-  assert_eq!(html, "<div class=\"dim\">No output.</div>\n");
-  assert!(!html.contains("\\"));
-  let running = empty_output_html(ProcStatus::Running);
-  assert_eq!(running, "<div class=\"dim\">No output yet.</div>\n");
-  assert!(!running.contains("\\"));
-}
-
-#[test]
 fn session_proc_html_shows_autoscroll_while_running() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
@@ -1410,12 +1404,15 @@ fn session_proc_html_shows_autoscroll_while_running() {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("opencode".into()),
         skill_name: Some("add".into()),
         model: None,
         started_at: Some(1),
         elapsed: None,
-        lines: vec![],
+        // The auto-scroll control belongs to a text-output box, so the proc must have
+        // streamed at least one line for the control to render.
+        lines: vec![crate::daemon::model::OutputLine { at: 0.2, text: "cloning…".into() }],
       }],
       workflow: None,
       parent_session: None,
@@ -1424,6 +1421,98 @@ fn session_proc_html_shows_autoscroll_while_running() {
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
+  assert!(procs.contains(r#"<div class="output">"#), "streamed lines keep their output box");
+}
+
+/// A one-proc store whose proc is an `Annotate` row: no recording, no log lines — the
+/// shape the post-run annotation pass registers while it summarizes a cast.
+fn store_with_annotate_proc(status: ProcStatus) -> Store {
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "annjob".into(),
+    Session {
+      id: "annjob".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("annotate".into()),
+      kind: Some("annotate".into()),
+      repo: "(internal)".into(),
+      branch: "".into(),
+      last_seen_at: 1,
+      client_connected: true,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![ProcRecord {
+        index: 0,
+        kind: ProcKind::Annotate,
+        label: "annotate · add-20260711-114749-utc-ufakca".into(),
+        status,
+        note: Some("summarizing…".into()),
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: None,
+        diff_path: None,
+        skill_source: None,
+        route: None,
+        result_path: None,
+        annotate_target: Some("/tmp/casts/add-20260711-114749-utc-ufakca.cast".into()),
+        harness: Some("cursor".into()),
+        skill_name: None,
+        model: Some("composer".into()),
+        started_at: Some(1),
+        elapsed: None,
+        lines: vec![],
+      }],
+      workflow: None,
+      parent_session: None,
+    },
+  );
+  store
+}
+
+#[test]
+fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
+  // An annotate proc is not tmux-based: no recording, no streamed lines. Its row keeps
+  // the summary line, status, and Force stop, but must NOT wear the recorded-terminal
+  // chrome — no auto-scroll checkbox and no empty "No output." box.
+  for status in [ProcStatus::Running, ProcStatus::Ok, ProcStatus::Fail] {
+    let html = session_page(&store_with_annotate_proc(status), "annjob").expect("session page");
+    let procs = session_procs_html(&html);
+    assert!(procs.contains("annotate · add-20260711-114749-utc-ufakca"), "row renders: {procs}");
+    assert!(procs.contains("Force stop"), "per-proc Force stop stays");
+    assert!(!procs.contains("autoscroll-ctl"), "no auto-scroll control on a slim row ({status:?}): {procs}");
+    assert!(!procs.contains(r#"<div class="output">"#), "no output box on a slim row ({status:?}): {procs}");
+    assert!(!procs.contains("No output"), "no empty-output placeholder ({status:?}): {procs}");
+  }
+  // The live-update path renders the same slim shape, so a WS tick never grows the
+  // chrome back: the client builds the output box (and its auto-scroll control) only
+  // once log lines exist, and tears a stale control down otherwise.
+  let js = live_client_js();
+  assert!(
+    js.contains("lines.length ? autoscrollCtlHtml(p) + '<div class=\"output\">'"),
+    "procHtml keeps line-less procs slim"
+  );
+  assert!(js.contains("if (!lines.length || hasCast(p)) return;"), "syncProcOutput never creates an empty box");
+  assert!(!js.contains("No output yet."), "the retired empty-output placeholder is gone from the client");
+}
+
+#[test]
+fn chapters_pending_note_links_to_the_summarizing_job() {
+  // While a finished cast waits for its chapters, the daemon reports the annotating job's
+  // id (`summarizing_job` in the chapters JSON) and the pending note deep-links to it —
+  // plain text until the id is known.
+  let js = live_client_js();
+  assert!(js.contains("meta.summarizing_job"), "the poll reads the summarizing job id");
+  assert!(
+    js.contains(r#"pending.innerHTML = '⏳ chapters: <a href="/job/' + esc(jobId) + '">summarizing…</a>';"#),
+    "known id → the pending element is a normal /job/ link"
+  );
+  assert!(js.contains("pending.textContent = '⏳ chapters: summarizing…';"), "unknown id → plain text, no dead link");
+  // The bounded-poll behavior stays untouched: the note appears only inside the
+  // annotation window and the id can arrive on a later poll tick.
+  assert!(js.contains("CHAPTERS_WAIT_SECS"), "the poll window is still bounded");
+  assert!(js.contains("setChapPending(pending, meta.summarizing_job)"), "a late-registering job links up mid-poll");
 }
 
 #[test]
@@ -1822,6 +1911,7 @@ fn workflow_graph_renders_builtin_shapes() {
       skill_source: Some(id.into()),
       route: None,
       result_path: None,
+      annotate_target: None,
       harness: Some(harness.into()),
       skill_name: Some(id.into()),
       model: None,
@@ -2233,6 +2323,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         skill_source: Some("add".into()),
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,

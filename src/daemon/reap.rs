@@ -175,6 +175,7 @@ mod tests {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,
