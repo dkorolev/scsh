@@ -124,9 +124,13 @@ play exactly as before, and the manual ↻ reload button keeps working.
 After a run, if the `cursor-agent` CLI and a cursor login are present on the host, `scsh`
 annotates each new recording: it renders the cast to a compact timestamped transcript, asks
 cursor-agent on the **Composer** model for a one-sentence summary plus 3–8 chapters, and
-writes a `<cast>.chapters.json` sidecar next to the recording. When a daemon client is live,
-annotation can appear as post-skill **annotate** procs on the same job (before the session
-ends); standalone `scsh annotate-cast` may register a short `(internal)` session instead.
+writes a `<cast>.chapters.json` sidecar next to the recording. When the host also has
+**tmux** and **asciinema**, the annotate step runs as a recorded interactive TUI (same
+visual path as a skill run) under the session's `casts/` dir; otherwise it falls back to
+headless `cursor-agent -p`. Failures show as **annotation failed** on the annotate proc
+(best-effort — they never fail the parent skill). When a daemon client is live, annotation
+appears as post-skill **annotate** procs on the same job (before the session ends);
+standalone `scsh annotate-cast` may register a short `(internal)` session instead.
 The player loads chapters from `GET /cast/{session}/{proc}/chapters` (returns `{}` when
 absent). Annotate on demand with:
 
@@ -135,8 +139,8 @@ scsh annotate-cast ~/.scsh/sessions/<session>/casts/<recording>.cast   # overrid
 ```
 
 The job page shows how many casts still lack a sidecar (`N casts finalizing chapters`) and
-labels the whole-job export `chapters pending ⬇` until they land (or `incomplete ⬇` while
-the job is still running). Projects → **Internal** lists synthetic-repo sessions —
+labels the whole-job export `Chapters pending ⬇` until they land (or `Incomplete job ⬇` while
+the job is still running; per-run downloads say `Incomplete run ⬇`). Projects → **Internal** lists synthetic-repo sessions —
 `(image builds)` and `(internal)` — separate from real projects and repositories.
 
 ## Artifact formats

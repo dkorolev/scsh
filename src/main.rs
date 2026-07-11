@@ -185,15 +185,35 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
       None
     };
     let started = std::time::Instant::now();
-    match annotate::annotate_cast_with(std::path::Path::new(path), &model, annotate::run_cursor_agent) {
-      Ok(sidecar) => {
+    // Only pre-register a recording when the host can actually produce one (tmux +
+    // asciinema); otherwise the proc would carry a cast path that never materializes
+    // and the job page would show an empty player instead of the text row.
+    let record_cast = daemon_session.as_ref().filter(|_| annotate::can_record_annotate()).map(|c| {
+      let casts = runtime::session_casts_dir(c.session_id());
+      let _ = std::fs::create_dir_all(&casts);
+      let stem = std::path::Path::new(path).file_stem().and_then(|s| s.to_str()).unwrap_or("cast");
+      casts.join(format!(
+        "annotate-{}-{}-utc-{}.cast",
+        stem.replace('/', "_"),
+        runtime::format_utc_timestamp(now_secs()),
+        runtime::random_nonce_6()
+      ))
+    });
+    if let (Some(c), Some(idx), Some(cast)) = (&daemon_session, proc_idx, &record_cast) {
+      c.proc_cast(idx, &cast.to_string_lossy());
+    }
+    match annotate::annotate_cast(std::path::Path::new(path), &model, record_cast.as_deref()) {
+      Ok(result) => {
         if let (Some(c), Some(idx)) = (&daemon_session, proc_idx) {
+          if let Some(ref cast) = result.cast_path {
+            c.proc_cast(idx, &cast.to_string_lossy());
+          }
           c.proc_finish(idx, daemon::ProcStatus::Ok, None, None, started.elapsed().as_secs_f64());
         }
         if !as_json {
-          eprintln!("✓ {}", sidecar.display());
+          eprintln!("✓ {}", result.sidecar.display());
         }
-        sidecars.push((path.clone(), sidecar.to_string_lossy().into_owned()));
+        sidecars.push((path.clone(), result.sidecar.to_string_lossy().into_owned()));
       }
       Err(err) => {
         // The distinct reason (unreadable cast / empty transcript / model timeout / …)
@@ -411,12 +431,34 @@ fn annotate_run_casts(
         client.proc_start(idx);
         client.proc_note(idx, "summarizing…");
         let model = model.clone();
+        let session_id = client.session_id().to_string();
         handles.push(scope.spawn(move || {
           let started = std::time::Instant::now();
-          let result = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent);
+          let stem = cast.file_stem().and_then(|s| s.to_str()).unwrap_or("cast");
+          // Only pre-register a recording the host can actually produce (tmux + asciinema);
+          // a cast path that never materializes leaves the job page an empty player.
+          let record_cast = annotate::can_record_annotate().then(|| {
+            let casts_dir = runtime::session_casts_dir(&session_id);
+            let _ = std::fs::create_dir_all(&casts_dir);
+            casts_dir.join(format!(
+              "annotate-{}-{}-utc-{}.cast",
+              stem.replace('/', "_"),
+              runtime::format_utc_timestamp(now_secs()),
+              runtime::random_nonce_6()
+            ))
+          });
+          if let Some(ref rc) = record_cast {
+            client.proc_cast(idx, &rc.to_string_lossy());
+          }
+          let result = annotate::annotate_cast(&cast, &model, record_cast.as_deref());
           let elapsed = started.elapsed().as_secs_f64();
           match &result {
-            Ok(_) => client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed),
+            Ok(res) => {
+              if let Some(ref cpath) = res.cast_path {
+                client.proc_cast(idx, &cpath.to_string_lossy());
+              }
+              client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed);
+            }
             // The distinct failure reason (unreadable cast / model timeout / …) is the
             // Fail row's message, so the job page says more than "no annotation produced".
             Err(err) => client.proc_finish(
@@ -4903,7 +4945,6 @@ fn run_build_tui(
     // Register before the recorder starts so the session page can open the player mid-build.
     c.proc_cast(build.index(), &cast_path_str);
   }
-  build.note(&format!("recording TUI → {}", cast_path.display()));
 
   let started = |e: std::io::Error| {
     let _ = std::fs::remove_dir_all(&dir);

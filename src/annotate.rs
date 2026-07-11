@@ -2,12 +2,12 @@
 //! of timestamped chapters, using cursor-agent on the Composer model.
 //!
 //! Flow: render the asciicast NDJSON to a compact timestamped transcript, hand it to
-//! `cursor-agent -p` (headless) with a prompt that asks for strict JSON, validate the reply,
-//! and write it as the cast's `.chapters.json` sidecar (see the daemon's chapters endpoint).
-//! Best-effort throughout — annotation never fails a run, it just doesn't produce a sidecar.
+//! cursor-agent (prefer host tmux + asciinema so the annotate proc has a visual cast;
+//! fall back to `cursor-agent -p` headless), validate the reply, and write it as the
+//! cast's `.chapters.json` sidecar. Best-effort throughout — annotation never fails a run.
 
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -17,6 +17,14 @@ use crate::json::{self, Value};
 /// so this bounds a hang well under the §9 five-minute default — a hung external tool must
 /// never hang the run.
 pub const ANNOTATE_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// Result of a successful annotate: sidecar next to the skill cast, plus an optional
+/// recording of the annotate session itself (when tmux + asciinema ran).
+#[derive(Debug, Clone)]
+pub struct AnnotateResult {
+  pub sidecar: PathBuf,
+  pub cast_path: Option<PathBuf>,
+}
 
 /// Sanity ceilings on an accepted model reply. The prompt asks for 3-8 chapters and terse
 /// titles, so a reply blowing past these is malformed (or a runaway model), not a real
@@ -313,10 +321,10 @@ pub fn parse_annotation(reply: &str) -> Option<CastAnnotation> {
   Some(CastAnnotation { summary, chapters })
 }
 
-/// The prompt handed to cursor-agent, embedding the transcript. The prompt asks for 3-8
-/// chapters and terse titles; [`parse_annotation`] enforces generous ceilings on top
-/// ([`MAX_CHAPTERS`] chapters, [`MAX_TEXT_BYTES`] bytes per summary/title) so a runaway
-/// reply is rejected instead of written to disk.
+/// The prompt handed to cursor-agent, embedding the transcript (stdout / -p mode). The
+/// prompt asks for 3-8 chapters and terse titles; [`parse_annotation`] enforces generous
+/// ceilings on top ([`MAX_CHAPTERS`] chapters, [`MAX_TEXT_BYTES`] bytes per summary/title)
+/// so a runaway reply is rejected instead of written to disk.
 fn annotation_prompt(transcript: &str) -> String {
   format!(
     "Below is a timestamped transcript of a terminal-session screen recording (an AI coding \
@@ -330,10 +338,31 @@ TRANSCRIPT:\n{transcript}"
   )
 }
 
+/// Prompt for the recorded interactive path: agent must write `annotation.json` in cwd.
+fn annotation_prompt_file(transcript: &str) -> String {
+  format!(
+    "Below is a timestamped transcript of a terminal-session screen recording (an AI coding \
+agent working). Produce a JSON object describing it and WRITE it to the file annotation.json \
+in the current working directory (overwrite if present). Do not wrap it in markdown. After \
+the file is written you are done.\n\n\
+Schema:\n\
+{{\"summary\": \"<one sentence, what the session did>\", \
+\"chapters\": [{{\"t\": <seconds into the recording, may be fractional e.g. 12.5>, \"title\": \"<3-6 word phase name>\"}}]}}\n\n\
+Use between 3 and 8 chapters, in ascending time order. The FIRST chapter MUST start at t=0 \
+(the beginning). Each chapter marks a distinct phase; keep titles terse.\n\n\
+TRANSCRIPT:\n{transcript}"
+  )
+}
+
 /// Whether the host can run the cursor/Composer annotation: the `cursor-agent` binary is on
 /// PATH and cursor container auth is configured (same credentials the harness uses).
 pub fn host_can_annotate() -> bool {
   crate::runtime::which("cursor-agent").is_some() && crate::runtime::cursor_container_auth_ready()
+}
+
+/// Host can record annotate under tmux + asciinema (visual cast for the annotate proc).
+pub fn can_record_annotate() -> bool {
+  crate::runtime::which("tmux").is_some() && crate::runtime::asciinema_available()
 }
 
 /// Whether `cast` still needs annotation given its `sidecar` path: true when no sidecar
@@ -396,6 +425,40 @@ where
   Ok(sidecar)
 }
 
+/// Production annotate: prefer a recorded interactive cursor-agent (tmux + asciinema) when
+/// `record_cast` is set and the host can record; otherwise (or when the recorded attempt
+/// yields no valid annotation) fall back to headless `-p` with the usual retry-once
+/// semantics of [`annotate_cast_with`]. On success the result carries the sidecar and the
+/// annotate recording path when one was produced — even a recording of a failed interactive
+/// attempt rides along, since the fallback's answer annotates the same cast.
+pub fn annotate_cast(
+  cast_path: &Path, model: &str, record_cast: Option<&Path>,
+) -> Result<AnnotateResult, AnnotateError> {
+  let recorded_reply = match record_cast {
+    Some(out) if can_record_annotate() => {
+      let ndjson = std::fs::read_to_string(cast_path).map_err(|e| AnnotateError::UnreadableCast(e.to_string()))?;
+      let transcript = cast_transcript(&ndjson, 120);
+      if transcript.trim().is_empty() {
+        return Err(AnnotateError::EmptyTranscript);
+      }
+      run_cursor_agent_recorded(model, &annotation_prompt_file(&transcript), out)
+    }
+    _ => None,
+  };
+  let recorded = || record_cast.filter(|p| p.is_file()).map(|p| p.to_path_buf());
+  if let Some(reply) = recorded_reply {
+    if let Some(annotation) = parse_annotation(&reply).filter(|a| !a.chapters.is_empty()) {
+      let sidecar = crate::daemon::chapters_sidecar_path(&cast_path.to_string_lossy())
+        .ok_or_else(|| AnnotateError::WriteFailed("not a .cast path, cannot derive the sidecar name".into()))?;
+      crate::atomic_write(&sidecar, annotation.to_sidecar_json().as_bytes())
+        .map_err(|e| AnnotateError::WriteFailed(e.to_string()))?;
+      return Ok(AnnotateResult { sidecar, cast_path: recorded() });
+    }
+  }
+  let sidecar = annotate_cast_with(cast_path, model, run_cursor_agent)?;
+  Ok(AnnotateResult { sidecar, cast_path: recorded() })
+}
+
 /// Run cursor-agent headless on the host with `prompt`, returning its stdout on success.
 /// Runs in an empty temp dir (the prompt is self-contained) and is killed if it runs past
 /// [`ANNOTATE_TIMEOUT`] — a hung annotation never stalls the run (§9).
@@ -415,6 +478,78 @@ pub fn run_cursor_agent(model: &str, prompt: &str) -> Result<String, RunFailure>
   };
   let _ = std::fs::remove_dir_all(&dir);
   result
+}
+
+/// Interactive cursor-agent under host tmux + asciinema. Writes the recording to `cast_out`
+/// and returns the contents of `annotation.json` when the agent produces it.
+pub fn run_cursor_agent_recorded(model: &str, prompt: &str, cast_out: &Path) -> Option<String> {
+  if let Some(parent) = cast_out.parent() {
+    std::fs::create_dir_all(parent).ok()?;
+  }
+  let dir = std::env::temp_dir().join(format!("scsh-annotate-rec-{}", crate::runtime::random_nonce_6()));
+  std::fs::create_dir_all(&dir).ok()?;
+  let term = crate::config::Terminal::default();
+  // Same quoting as the cursor harness: shell_quote the full prompt so embedded " / ' survive.
+  let agent = format!(
+    "cursor-agent --force --sandbox disabled --disable-auto-update --model {} {}",
+    crate::runtime::shell_quote(model),
+    crate::runtime::shell_quote(prompt),
+  );
+  // Trust this temp cwd so the TUI does not block on a workspace-trust dialog (host path
+  // slug: strip leading /, replace / with - — same rule as the in-container harness).
+  let trust_slug = dir.to_string_lossy().trim_start_matches('/').replace('/', "-");
+  let script = format!(
+    r#"set -eu
+cd {dir}
+result=annotation.json
+rm -f "$result"
+mkdir -p "$HOME/.cursor/projects/{trust_slug}"
+: > "$HOME/.cursor/projects/{trust_slug}/.workspace-trusted"
+session="scsh-ann-{nonce}"
+# Interactive TUI — agent writes annotation.json (completion signal).
+tmux -f /dev/null new-session -d -x {cols} -y {rows} -s "$session" {agent_q}
+(
+  i=0
+  while [ "$i" -lt {secs} ]; do
+    if [ -f "$result" ]; then
+      sleep 2
+      tmux send-keys -t "$session" C-c 2>/dev/null || true
+      sleep 1
+      tmux send-keys -t "$session" C-c 2>/dev/null || true
+      sleep 2
+      tmux kill-session -t "$session" 2>/dev/null || true
+      exit 0
+    fi
+    tmux has-session -t "$session" 2>/dev/null || exit 0
+    sleep 1
+    i=$((i+1))
+  done
+  tmux kill-session -t "$session" 2>/dev/null || true
+) >/dev/null 2>&1 &
+asciinema rec -q --overwrite --return --headless -f asciicast-v3 \
+  --window-size {cols}x{rows} -c "tmux attach -r -t $session" {cast}
+wait || true
+tmux kill-session -t "$session" 2>/dev/null || true
+"#,
+    dir = crate::runtime::shell_quote(&dir.to_string_lossy()),
+    trust_slug = trust_slug,
+    nonce = crate::runtime::random_nonce_6(),
+    cols = term.cols,
+    rows = term.rows,
+    agent_q = crate::runtime::shell_quote(&agent),
+    secs = ANNOTATE_TIMEOUT.as_secs(),
+    cast = crate::runtime::shell_quote(&cast_out.to_string_lossy()),
+  );
+  let child =
+    Command::new("sh").arg("-c").arg(&script).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn();
+  let ok = child.ok().and_then(|c| wait_capped_status(c, ANNOTATE_TIMEOUT + Duration::from_secs(30)));
+  let result_path = dir.join("annotation.json");
+  let reply = if result_path.is_file() { std::fs::read_to_string(&result_path).ok() } else { None };
+  let _ = std::fs::remove_dir_all(&dir);
+  if ok.is_none() && reply.is_none() {
+    return None;
+  }
+  reply
 }
 
 /// Wait for `child`, capturing its stdout, but kill it and report [`RunFailure::TimedOut`]
@@ -439,6 +574,24 @@ fn wait_capped(mut child: Child, timeout: Duration) -> Result<String, RunFailure
       }
       Ok(None) => std::thread::sleep(Duration::from_millis(100)),
       Err(_) => return Err(RunFailure::Failed),
+    }
+  }
+}
+
+/// Like [`wait_capped`] but ignores stdout and returns `Some(())` when the process exits
+/// (success or not) before the timeout — used for the outer recorder shell.
+fn wait_capped_status(mut child: Child, timeout: Duration) -> Option<()> {
+  let deadline = Instant::now() + timeout;
+  loop {
+    match child.try_wait() {
+      Ok(Some(_)) => return Some(()),
+      Ok(None) if Instant::now() >= deadline => {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+      }
+      Ok(None) => std::thread::sleep(Duration::from_millis(100)),
+      Err(_) => return None,
     }
   }
 }
@@ -592,6 +745,23 @@ mod tests {
     assert!(written.contains("\"summary\": \"Did work.\""), "got: {written}");
     assert!(written.contains("\"title\": \"Start\""), "got: {written}");
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn annotation_prompt_file_asks_for_annotation_json() {
+    let p = annotation_prompt_file("hello transcript");
+    assert!(p.contains("annotation.json"), "got: {p}");
+    assert!(p.contains("hello transcript"), "got: {p}");
+  }
+
+  #[test]
+  fn wait_capped_status_returns_and_times_out() {
+    let quick = Command::new("sh").args(["-c", "true"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+    assert_eq!(wait_capped_status(quick, Duration::from_secs(10)), Some(()));
+    let slow = Command::new("sh").args(["-c", "sleep 30"]).stdin(Stdio::null()).stdout(Stdio::null()).spawn().unwrap();
+    let start = Instant::now();
+    assert_eq!(wait_capped_status(slow, Duration::from_millis(300)), None);
+    assert!(start.elapsed() < Duration::from_secs(5));
   }
 
   #[test]

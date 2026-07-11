@@ -1634,7 +1634,7 @@ pub fn shell_join(args: &[String]) -> String {
   args.iter().map(|a| shell_quote(a)).collect::<Vec<_>>().join(" ")
 }
 
-fn shell_quote(s: &str) -> String {
+pub(crate) fn shell_quote(s: &str) -> String {
   let safe = !s.is_empty()
     && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | '/' | ':' | '=' | '+'));
   if safe {
