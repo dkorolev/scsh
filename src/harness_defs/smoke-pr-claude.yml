@@ -1,0 +1,44 @@
+# Per-harness smoke: minimal fake PR on Claude only. Start this alone from Run when
+# you want to verify Claude can commit a feature note + PR-DESCRIPTION.md.
+description: "Smoke fake-PR on Claude — feature note + PR-DESCRIPTION.md (two commits)."
+params:
+  TITLE:
+    type: string
+    default: "Hello from smoke-pr-claude"
+    description: "Title used in the feature note and PR-DESCRIPTION.md"
+task: |
+  You are running inside an scsh container for the built-in `smoke-pr-claude` smoke test.
+
+  Read TITLE from the environment (default "Hello from smoke-pr-claude" if empty). Do exactly
+  this — no other files, no network, no tests:
+
+  1. Write `demo_pr_note.txt` at the repository root with this exact body (substitute TITLE):
+
+     # <TITLE>
+
+     A one-line feature stub committed by the smoke-pr smoke test so the job page has a
+     real file diff to show next to `PR-DESCRIPTION.md`.
+
+  2. Write `PR-DESCRIPTION.md` at the repository root with this exact body (substitute TITLE):
+
+     # <TITLE>
+
+     ## Summary
+     - Add `demo_pr_note.txt` — a tiny tracked feature stub.
+     - Add `PR-DESCRIPTION.md` — this pull-request description (packdiff lifts it into
+       the review page's Description panel via the notes-author convention).
+
+     ## Test plan
+     - [x] Open the job page ⇄ commits diff and confirm the Description panel renders.
+
+  3. Commit ONLY `demo_pr_note.txt` with message: `smoke-pr: add feature note (<TITLE>)`
+  4. Commit ONLY `PR-DESCRIPTION.md` with message: `smoke-pr: add PR-DESCRIPTION.md`
+  5. Write {"ok": true, "title": "<TITLE>", "harness": "claude", "files": ["demo_pr_note.txt", "PR-DESCRIPTION.md"]}
+     to the file named by `SCSH_RESULT`.
+
+  Do nothing else.
+invocations:
+  run:
+    harness: claude
+    model: sonnet
+    commits: true

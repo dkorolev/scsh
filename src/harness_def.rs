@@ -20,9 +20,9 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research`/`demo-pr` (flat) and `fruits`/`code-review`/`arith`/`greet` (workflows) are
-/// always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 8] {
+/// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
+/// (workflows) are always available regardless of the repo. `(name, yaml)`.
+pub fn builtin_defs() -> [(&'static str, &'static str); 12] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -32,6 +32,10 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 8] {
     ("arith", include_str!("harness_defs/arith.yml")),
     ("greet", include_str!("harness_defs/greet.yml")),
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
+    ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
+    ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
+    ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
+    ("smoke-pr-cursor", include_str!("harness_defs/smoke-pr-cursor.yml")),
   ]
 }
 
@@ -1164,6 +1168,33 @@ mod tests {
     assert!(task.contains("demo_pr_note.txt"), "task writes a feature stub: {task}");
     let title = def.params.iter().find(|p| p.name == "TITLE").expect("TITLE param");
     assert_eq!(title.default.as_deref(), Some("Hello from demo-pr"));
+  }
+
+  #[test]
+  fn builtin_smoke_pr_defs_are_one_harness_each() {
+    let expected = [
+      ("smoke-pr-claude", "claude", "sonnet"),
+      ("smoke-pr-codex", "codex", "gpt-5.5"),
+      ("smoke-pr-grok", "grok", "grok-build"),
+      ("smoke-pr-cursor", "cursor", "composer-2.5-fast"),
+    ];
+    for (name, harness, model) in expected {
+      let def = builtin(name);
+      assert!(!def.is_workflow(), "{name} is a flat one-shot");
+      assert_eq!(def.invocations.len(), 1, "{name} is a single-harness smoke");
+      let route = &def.invocations[0];
+      assert_eq!(route.harness.as_str(), harness, "{name}");
+      assert_eq!(route.model.as_deref(), Some(model), "{name}");
+      assert_eq!(route.commits, Some(true), "{name} commits for packdiff");
+      let task = def.task.as_deref().expect("task");
+      assert!(task.contains("PR-DESCRIPTION.md") && task.contains("demo_pr_note.txt"), "{name}: {task}");
+      let skill = def.to_skill();
+      let cfg = crate::config::Config { skills: vec![skill], terminal: crate::config::Terminal::default() };
+      let inv = crate::config::expand_invocations(&cfg);
+      assert_eq!(inv.len(), 1);
+      assert_eq!(inv[0].name, format!("{name}-run"));
+      assert_eq!(inv[0].harness.as_str(), harness);
+    }
   }
 
   #[test]
