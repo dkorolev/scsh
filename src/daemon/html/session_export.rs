@@ -11,8 +11,9 @@
 //! text, the sidecar summary, and the chapter markers ride in a single JSON block, and a
 //! small boot script mounts the players with the exact options the live page uses
 //! (`fit: 'both'`, idle compression, chapter markers, `fullscreenEl` = the cast box,
-//! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads —
-//! simply is not there. Packed commits-diff pages (when present) ride as sandboxed
+//! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads,
+//! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
+//! commits-diff pages (when present) ride as sandboxed
 //! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
 //! engine and localStorage work — packdiff ≥ 0.3 document-first review) so the snapshot
 //! stays a single file.

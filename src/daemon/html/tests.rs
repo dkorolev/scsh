@@ -231,8 +231,7 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
     procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#),
     "skip reason in the collapsed row: {procs}"
   );
-  assert!(procs.contains("data-proc-stop"), "kill control stays in place (WEB-UI §2): {procs}");
-  assert!(procs.contains("disabled title="), "skipped step's kill is grayed: {procs}");
+  assert!(!procs.contains("data-proc-stop"), "skipped step has no Force stop: {procs}");
   // Live updates speak the same phrases; workflow graph keeps its own icon map.
   let js = live_client_js();
   assert!(js.contains("function elapsedPhrase"));
@@ -392,14 +391,14 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
 
 #[test]
 fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
-  // A dead client's session keeps procs "running" forever. Kill buttons stay visible but
-  // DISABLED (WEB-UI §2) — there is nothing left to stop.
+  // A dead client's session keeps procs "running" forever. Force stop is omitted —
+  // there is nothing left to stop.
   let store = store_with_cast_proc(ProcStatus::Running);
   let html = super::index_page(&store);
   assert!(!html.contains(r#"data-harness-stop=""#), "zombie sessions must not raise stop-all buttons");
   let page = session_page(&store, "castab").expect("session renders");
-  assert!(page.contains(r#"data-proc-stop="0""#), "zombie still shows the kill control");
-  assert!(page.contains("disabled title=\"Job is no longer running"), "zombie kill is grayed: {page}");
+  assert!(!page.contains(r#"data-proc-stop="0""#), "zombie omits per-proc Force stop: {page}");
+  assert!(!page.contains(r#"id="session-stop""#), "zombie omits job Force stop: {page}");
 
   // The same session, seen moments ago, gets an enabled kill.
   let mut live = store_with_cast_proc(ProcStatus::Running);
@@ -409,6 +408,7 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   let page = session_page(&live, "castab").expect("session renders");
   assert!(page.contains(r#"data-proc-stop="0""#), "live sessions offer per-proc kill");
   assert!(!page.contains(r#"data-proc-stop="0" disabled"#), "live kill is enabled: {page}");
+  assert!(page.contains(r#"id="session-stop""#), "live job offers Force stop");
 }
 
 #[test]
@@ -572,8 +572,14 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");
   assert!(js.contains("function renderRepoJobs"), "client js renders jobs by repository");
   assert!(js.contains("function renderInternalJobs"), "client js renders Internal section");
-  assert!(js.contains("chapters pending ⬇"), "export label for pending chapters");
+  assert!(js.contains("Chapters pending ⬇"), "export label for pending chapters");
   assert!(js.contains("function syncChaptersPending"), "live chapters-pending sync");
+  assert!(
+    js.contains("SESSION_ID && liveSessions ? liveSessions[SESSION_ID]"),
+    "pollForChapters must not index null liveSessions (TypeError reading session id)"
+  );
+  assert!(!js.contains("SESSION_ID && liveSessions[SESSION_ID]"), "no bare liveSessions[SESSION_ID] without null check");
+  assert!(js.contains("const live = life === 'running'"), "Ready only while the job is live");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
   assert!(js.contains("function initTabs"), "client js wires the tabs");
   assert!(js.contains("history.pushState"), "tab clicks push history (WEB-UI §1)");
@@ -630,9 +636,9 @@ fn session_proc_html_has_no_stray_backslashes() {
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
   assert!(!html.contains("\\\n"), "raw-string line continuations must not leak backslashes");
-  assert!(!procs.contains("\\\n"), "autoscroll markup must not leak backslashes");
-  assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
-  assert!(procs.contains("Auto-scroll to bottom"));
+  assert!(!procs.contains("\\\n"), "proc markup must not leak backslashes");
+  assert!(!procs.contains("autoscroll-ctl"), "no Auto-scroll checkbox");
+  assert!(!procs.contains("Auto-scroll to bottom"), "no Auto-scroll checkbox");
   assert!(html.contains(r#"id="session-stop""#), "running session should offer Force stop");
   assert!(html.contains("Force stop"));
 }
@@ -716,7 +722,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
 }
 
 #[test]
-fn ended_session_grays_force_stop_button_in_place() {
+fn ended_session_hides_force_stop_button() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
     "done01".into(),
@@ -738,9 +744,8 @@ fn ended_session_grays_force_stop_button_in_place() {
     },
   );
   let html = session_page(&store, "done01").expect("session page");
-  // WEB-UI §2: the control stays, grayed, with an explanation — it does not vanish.
-  assert!(html.contains(r#"id="session-stop""#), "ended session still shows Force stop");
-  assert!(html.contains(r#"id="session-stop" data-session="done01" disabled"#), "Force stop is disabled: {html}");
+  // Settled jobs omit Force stop — no grayed-out stub.
+  assert!(!html.contains(r#"id="session-stop""#), "ended session hides Force stop: {html}");
   assert!(html.contains(r#"class="page-lede""#), "session page has a plain-language lede");
   assert!(
     html.contains("· completed ·") || html.contains("completed"),
@@ -789,6 +794,11 @@ fn offline_export_carries_lede_and_full_meta() {
   assert!(html.contains("<dt>Ended</dt>"), "export meta shows when the job ended: {html}");
   assert!(html.contains("<dt>Duration</dt><dd>9s</dd>"), "export meta shows how long the job took: {html}");
   assert!(html.contains("accessibility: 'snapshot'"), "export player opts enable a11y snapshot");
+  // Offline snapshots must not carry live Force stop chrome (markup or styles).
+  assert!(!html.contains("Force stop"), "export must not mention Force stop: {html}");
+  assert!(!html.contains("session-stop"), "export must not ship #session-stop: {html}");
+  assert!(!html.contains("proc-kill"), "export must not ship .proc-kill: {html}");
+  assert!(!html.contains("scsh-dialog"), "export must not ship the Force stop dialog: {html}");
 }
 
 #[test]
@@ -1004,14 +1014,14 @@ fn offline_export_includes_workflow_graph() {
   ];
   let html = session_export_page(&session, &exports, 100);
   assert!(html.contains(r#"id="workflow-graph""#), "export carries the workflow card: {html}");
-  assert!(html.contains(r#"class="wf-terminal wf-term-start""#), "graph keeps its start terminal");
-  assert!(html.contains(r#"class="wf-terminal wf-term-finish""#), "graph keeps its finish terminal");
+  assert!(html.contains(r#"class="wf-bookend wf-start""#), "graph keeps its start bookend");
+  assert!(html.contains(r#"class="wf-bookend wf-finish""#), "graph keeps its finish bookend");
   assert!(html.contains(r#"data-workflow-step="add""#) && html.contains(r#"data-workflow-step="summarize""#));
   // The graph's jump links resolve offline: proc rows carry the same task anchors as live.
   assert!(html.contains("href=\"#task-add\""), "node links target task anchors");
   assert!(html.contains(r#"<details open class="proc ok" data-index="0" id="task-add""#), "proc row anchors: {html}");
   // The graph CSS rides in the shared stylesheet the export inlines.
-  assert!(html.contains(".wf-terminal"), "terminal CSS is inlined in the export");
+  assert!(html.contains(".wf-bookend"), "bookend CSS is inlined in the export");
 }
 
 /// The standalone play page accepts BOTH deep-link forms: '#t=' (primary — what its copy
@@ -1368,13 +1378,13 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
     "snapshot is outside the cast toolbar"
   );
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
-  // A recorded proc shows the player, NOT the text output / autoscroll control.
+  // A recorded proc shows the player, NOT the text output.
   assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
   assert!(!procs.contains("autoscroll-ctl"), "no autoscroll control for recorded proc");
 }
 
 #[test]
-fn session_proc_html_shows_autoscroll_while_running() {
+fn session_proc_html_has_no_autoscroll_checkbox() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
     "test".into(),
@@ -1420,8 +1430,12 @@ fn session_proc_html_shows_autoscroll_while_running() {
   );
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
-  assert!(procs.contains(r#"<label class="autoscroll-ctl">"#));
-  assert!(procs.contains(r#"<div class="output">"#), "streamed lines keep their output box");
+  assert!(procs.contains(r#"<div class="output">"#), "text fallback output remains");
+  assert!(!procs.contains("autoscroll-ctl"), "Auto-scroll checkbox removed");
+  assert!(!procs.contains("Auto-scroll to bottom"), "Auto-scroll checkbox removed");
+  let js = live_client_js();
+  assert!(!js.contains("Auto-scroll to bottom"), "client JS has no Auto-scroll checkbox");
+  assert!(js.contains("followOutput"), "sticky follow without a checkbox");
 }
 
 /// A one-proc store whose proc is an `Annotate` row: no recording, no log lines — the
@@ -1438,7 +1452,8 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
       kind: Some("annotate".into()),
       repo: "(internal)".into(),
       branch: "".into(),
-      last_seen_at: 1,
+      // Fresh heartbeat: per-proc Force stop renders only for sessions still alive.
+      last_seen_at: crate::daemon::paths::now_unix_secs(),
       client_connected: true,
       run_pid: None,
       skills: vec![],
@@ -1473,24 +1488,28 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
 
 #[test]
 fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
-  // An annotate proc is not tmux-based: no recording, no streamed lines. Its row keeps
-  // the summary line, status, and Force stop, but must NOT wear the recorded-terminal
-  // chrome — no auto-scroll checkbox and no empty "No output." box.
+  // An annotate proc without a recording has no streamed lines. Its row keeps the
+  // summary line and status, but must NOT wear the recorded-terminal chrome — no
+  // auto-scroll checkbox and no empty "No output." box. Force stop appears only while
+  // the row is live (finished rows drop the button entirely).
   for status in [ProcStatus::Running, ProcStatus::Ok, ProcStatus::Fail] {
     let html = session_page(&store_with_annotate_proc(status), "annjob").expect("session page");
     let procs = session_procs_html(&html);
     assert!(procs.contains("annotate · add-20260711-114749-utc-ufakca"), "row renders: {procs}");
-    assert!(procs.contains("Force stop"), "per-proc Force stop stays");
+    if status == ProcStatus::Running {
+      assert!(procs.contains("Force stop"), "per-proc Force stop while live");
+    } else {
+      assert!(!procs.contains("Force stop"), "no Force stop on a settled row ({status:?})");
+    }
     assert!(!procs.contains("autoscroll-ctl"), "no auto-scroll control on a slim row ({status:?}): {procs}");
     assert!(!procs.contains(r#"<div class="output">"#), "no output box on a slim row ({status:?}): {procs}");
     assert!(!procs.contains("No output"), "no empty-output placeholder ({status:?}): {procs}");
   }
   // The live-update path renders the same slim shape, so a WS tick never grows the
-  // chrome back: the client builds the output box (and its auto-scroll control) only
-  // once log lines exist, and tears a stale control down otherwise.
+  // chrome back: the client builds the output box only once log lines exist.
   let js = live_client_js();
   assert!(
-    js.contains("lines.length ? autoscrollCtlHtml(p) + '<div class=\"output\">'"),
+    js.contains("lines.length ? '<div class=\"output\">'"),
     "procHtml keeps line-less procs slim"
   );
   assert!(js.contains("if (!lines.length || hasCast(p)) return;"), "syncProcOutput never creates an empty box");
@@ -1593,14 +1612,14 @@ fn export_html_download_renders_on_both_pages_and_hides_without_frames() {
   assert!(
     procs.contains(r#"class="chamfer btn btn--cyan btn--sm proc-snapshot""#)
       && procs.contains(r#"href="/cast/castab/0/export.html" data-cast-export download hidden"#)
-      && procs.contains("<span>run snapshot ⬇</span>"),
+      && procs.contains("<span>Run snapshot ⬇</span>"),
     "run snapshot button: {procs}"
   );
   let js = live_client_js();
   assert!(js.contains("ensureProcSnapshot"));
   assert!(js.contains("exportLink.hidden = !stats.events;"));
-  assert!(js.contains("incomplete ⬇"), "live cast export says incomplete while running");
-  assert!(js.contains("run snapshot ⬇"), "finished cast export says run snapshot");
+  assert!(js.contains("Incomplete run ⬇"), "live cast export says incomplete run while running");
+  assert!(js.contains("Run snapshot ⬇"), "finished cast export says run snapshot");
 }
 
 #[test]
@@ -1742,21 +1761,22 @@ fn review_round_four_fixes_hold() {
   assert!(shtml.contains(">Force stop</button>") || shtml.contains("<span>Force stop</span>"), "got: {shtml}");
   assert!(!shtml.contains("✕ Force stop"), "no leading ✕ on Force stop");
   assert!(!shtml.contains("✕ kill"));
-  assert!(shtml.contains("<span>incomplete ⬇</span>"), "running job export says incomplete: {shtml}");
+  assert!(shtml.contains("<span>Incomplete job ⬇</span>"), "running job export says incomplete job: {shtml}");
   assert!(shtml.contains(r#"class="chamfer btn btn--cyan btn--sm session-export""#), "export matches Force stop size");
   assert!(
     shtml.find("session-export").unwrap() < shtml.find("id=\"session-stop\"").unwrap(),
     "job snapshot sits above Force stop in the actions stack"
   );
-  assert!(shtml.contains("job snapshot ⬇") || shtml.contains("incomplete ⬇"), "snapshot wording is explicit");
+  assert!(shtml.contains("Job snapshot ⬇") || shtml.contains("Incomplete job ⬇"), "snapshot wording is explicit");
   // Finished job with a cast but no chapters sidecar → chapters pending (not incomplete).
   let done = session_page(&store_with_cast_proc(ProcStatus::Ok), "castab").expect("done session");
   assert!(
-    done.contains("<span>chapters pending ⬇</span>"),
+    done.contains("<span>Chapters pending ⬇</span>"),
     "finished job missing sidecar uses chapters pending: {done}"
   );
   assert!(done.contains("1 cast finalizing chapters"), "pending counter on job page: {done}");
-  assert!(!done.contains("<span>incomplete ⬇</span>"), "finished job meta export is not incomplete");
+  assert!(!done.contains("<span>Incomplete job ⬇</span>"), "finished job meta export is not incomplete");
+  assert!(!done.contains("<span>Incomplete run ⬇</span>"), "finished job has no incomplete-run label");
   assert!(!done.contains(r#"<ul class="skills">"#), "no skills list on job page island");
   // Settled: cast + sidecar on disk → job snapshot.
   let dir = std::env::temp_dir().join(format!("scsh-chap-ready-{}", crate::runtime::random_nonce_6()));
@@ -1772,7 +1792,7 @@ fn review_round_four_fixes_hold() {
   }
   let settled_html = session_page(&settled, "castab").expect("settled session");
   assert!(
-    settled_html.contains("<span>job snapshot ⬇</span>"),
+    settled_html.contains("<span>Job snapshot ⬇</span>"),
     "settled job export label: {settled_html}"
   );
   assert!(
@@ -1989,15 +2009,15 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(html.contains(r#"data-workflow-step="summarize""#));
   assert!(html.contains(r#"id="task-add""#));
   assert!(html.contains("href=\"#task-summarize\""));
-  // Two fan-in edges into summarize plus the terminals: start → add, start → multiply,
-  // summarize → finish (paths in the graph SVG — not the embedded client JS).
+  assert!(html.contains(r#"class="wf-bookend wf-start""#), "Start bookend on multi-node graphs too");
+  assert!(html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
+  // Two DAG fan-in edges + Start→add + Start→multiply + summarize→Finish.
   let graph = html.split(r#"id="workflow-graph""#).nth(1).expect("graph card");
   let graph = graph.split("</svg>").next().expect("svg");
   assert_eq!(graph.matches("marker-end=\"url(#wf-arrow)\"").count(), 5);
-  assert_eq!(graph.matches(r#"class="wf-edge wf-edge-term""#).count(), 3, "start fans out to 2 roots, 1 leaf finishes");
   assert!(html.contains(r#"class="wf-arrowhead""#), "open chevron arrowheads, not filled triangles");
   // Fan-in ports land at distinct y on summarize (not a single shared tip).
-  let mut end_ys = Vec::new();
+  let mut ends: Vec<(String, String)> = Vec::new();
   for part in graph.split(r#"class="wf-edge" d=""#) {
     if !part.contains(r#"marker-end="url(#wf-arrow)""#) {
       continue;
@@ -2005,12 +2025,21 @@ fn workflow_graph_renders_builtin_shapes() {
     let Some(d) = part.split('"').next() else {
       continue;
     };
-    if let Some(y) = d.rsplit(',').next() {
-      end_ys.push(y.to_string());
-    }
+    // Path ends `… x2,y2` — last comma-separated pair.
+    let Some((x, y)) = d.rsplit_once(',') else {
+      continue;
+    };
+    let x = x.rsplit([' ', 'C']).next().unwrap_or(x);
+    ends.push((x.to_string(), y.to_string()));
   }
-  assert_eq!(end_ys.len(), 2, "expected two edge end ys, got {end_ys:?}");
-  assert_ne!(end_ys[0], end_ys[1], "fan-in edges must enter at different heights: {end_ys:?}");
+  assert_eq!(ends.len(), 5, "expected five edges, got {ends:?}");
+  // The two edges into summarize share an end x and differ in y.
+  let mut by_x: std::collections::BTreeMap<String, Vec<String>> = std::collections::BTreeMap::new();
+  for (x, y) in ends {
+    by_x.entry(x).or_default().push(y);
+  }
+  let fan_in = by_x.values().find(|ys| ys.len() == 2).expect("summarize fan-in pair missing");
+  assert_ne!(fan_in[0], fan_in[1], "fan-in edges must enter at different heights: {fan_in:?}");
 
   // All-done graph: legend only lists Done, not unused statuses.
   assert!(html.contains(r#"<li class="wf-leg wf-leg-done""#));
@@ -2090,7 +2119,7 @@ fn workflow_graph_renders_builtin_shapes() {
       .unwrap()
       .matches("marker-end=\"url(#wf-arrow)\"")
       .count(),
-    5
+    5 // categorize→2 sorts + Start→categorize + 2 sinks→Finish
   );
   assert!(fruits.contains(r#"data-workflow-step="categorize""#));
 
@@ -2160,7 +2189,7 @@ fn workflow_graph_renders_builtin_shapes() {
       .unwrap()
       .matches("marker-end=\"url(#wf-arrow)\"")
       .count(),
-    3
+    3 // Start→root + one DAG edge + sink→Finish
   );
 
   // Waiting tip names the blocker (WEB-UI §4 disclosure; not a bare "1 waiting on").
@@ -2271,12 +2300,34 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(summary.contains("failed"), "natural failure stays failed: {summary}");
   assert!(stopped.contains("wf-leg-force-stopped"), "legend lists force-stopped");
 
-  // Flat skill session (no authored DAG): still gets a job graph from its skill proc.
+  // Flat skill session (no authored DAG): still gets a job graph from its skill proc,
+  // bookended Start → task → Finish so even a single-run job shows arrows.
   let flat = store_with_cast_proc(ProcStatus::Ok);
   let flat_html = session_page(&flat, "castab").expect("flat");
   assert!(flat_html.contains(r#"id="workflow-graph""#), "every job with skills gets a graph");
   assert!(flat_html.contains("Job graph"), "card title is Job graph");
   assert!(flat_html.contains(r#"data-workflow-step="add""#) || flat_html.contains("wf-node"), "skill node present");
+  assert!(flat_html.contains(r#"class="wf-bookend wf-start""#), "Start bookend");
+  assert!(flat_html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
+  assert!(flat_html.contains("wf-start-play"), "play-triangle start glyph");
+  assert!(flat_html.contains("wf-finish-flag"), "checkered finish flag");
+  assert!(!flat_html.contains("wf-start-line"), "dashed race-line start glyph is gone");
+  assert!(!flat_html.contains("wf-bookend-label"), "bookends are icon-only");
+  let edge_count = flat_html.matches(r#"class="wf-edge""#).count();
+  assert!(edge_count >= 2, "single-run job still has Start→task and task→Finish edges: {edge_count}");
+  // Same-row bookend edges must be straight horizontals (not S-curve cubics).
+  let flat_graph = flat_html.split(r#"id="workflow-graph""#).nth(1).expect("flat graph");
+  let flat_graph = flat_graph.split("</svg>").next().expect("flat svg");
+  let flat_edges: Vec<&str> = flat_graph
+    .split(r#"class="wf-edge" d=""#)
+    .skip(1)
+    .filter_map(|p| p.split('"').next())
+    .collect();
+  assert!(flat_edges.len() >= 2, "flat edges: {flat_edges:?}");
+  for d in &flat_edges {
+    assert!(d.contains(" L"), "same-row edge must be horizontal L, got {d}");
+    assert!(!d.contains(" C"), "same-row edge must not be a cubic S-curve, got {d}");
+  }
 
   // Client wiring
   let js = live_client_js();
@@ -2285,6 +2336,7 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("function initWorkflowGraph"));
   assert!(js.contains("function wfLegendHtml"));
   assert!(js.contains("function wfBuildGraphHtml"), "late graph creation without reload");
+  assert!(js.contains("function wfLayoutWithBookends"), "live graph mirrors Start/Finish");
   assert!(js.contains("function wfNodeTip"), "useful node tooltips");
   assert!(js.contains("function wfSummaryHtml"), "status counters are jump links");
   assert!(js.contains("a.wf-jump"), "summary jump click wiring");
@@ -2351,35 +2403,32 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
   let graph = html.split(r#"id="workflow-graph""#).nth(1).expect("graph card");
   let svg = graph.split("</svg>").next().expect("svg");
 
-  // Starting line and finish flag are present, decorative, and announced to AT.
-  assert!(
-    graph.contains(r#"class="wf-terminal wf-term-start" role="img" aria-label="start""#),
-    "start terminal markup"
-  );
-  assert!(
-    graph.contains(r#"class="wf-terminal wf-term-finish" role="img" aria-label="finish""#),
-    "finish terminal markup"
-  );
-  // Terminals are spans, not links — they must never read (or click) as runs.
-  assert!(!graph.contains(r#"wf-terminal wf-term-start" href"#), "start is not a link");
-  assert!(!graph.contains(r#"wf-terminal wf-term-finish" href"#), "finish is not a link");
-  assert!(!graph.contains(r#"wf-terminal wf-term-start" tabindex"#), "start never steals focus");
+  // Play-triangle Start and checkered-flag Finish bookends are present and decorative.
+  assert!(graph.contains(r#"class="wf-bookend wf-start""#), "start bookend markup");
+  assert!(graph.contains(r#"class="wf-bookend wf-finish""#), "finish bookend markup");
+  assert!(graph.contains("wf-start-play"), "play-triangle start glyph");
+  assert!(graph.contains("wf-finish-flag"), "checkered finish flag");
+  // Bookends are divs, not links — they must never read (or click) as runs.
+  assert!(!graph.contains(r#"wf-bookend wf-start" href"#), "start is not a link");
+  assert!(!graph.contains(r#"wf-bookend wf-finish" href"#), "finish is not a link");
+  assert!(!graph.contains(r#"wf-bookend wf-start" tabindex"#), "start never steals focus");
 
-  // Exactly two arrows for a single-run job: start → add, add → finish. Both are terminal edges.
-  assert_eq!(svg.matches("marker-end=\"url(#wf-arrow)\"").count(), 2, "start → run → finish is two arrows");
-  assert_eq!(svg.matches(r#"class="wf-edge wf-edge-term""#).count(), 2, "both arrows are terminal edges");
-  assert_eq!(svg.matches(r#"class="wf-edge" "#).count(), 0, "no dependency edges in a one-run job");
+  // Exactly two arrows for a single-run job: start → add, add → finish. Same-row edges
+  // draw as straight horizontals, not S-curve cubics (skip the arrowhead in <defs>).
+  let edges = svg.split("</defs>").last().expect("edge paths");
+  assert_eq!(edges.matches("marker-end=\"url(#wf-arrow)\"").count(), 2, "start → run → finish is two arrows");
+  assert_eq!(edges.matches(" L").count(), 2, "same-row bookend edges are horizontal lines");
+  assert_eq!(edges.matches(" C").count(), 0, "no cubic S-curves in a one-run job");
 
   // Styles ship with the page: not-interactive bookends, checkered flag at the finish.
-  assert!(html.contains(".wf-terminal"), "terminal styles shipped");
-  assert!(html.contains("\u{1F3C1}"), "checkered finish flag glyph");
-  assert!(html.contains(".wf-term-start::after"), "start dot inside the ring");
+  assert!(html.contains(".wf-bookend"), "bookend styles shipped");
+  assert!(html.contains(".wf-start-play"), "play-triangle styles shipped");
+  assert!(html.contains(".wf-finish-flag"), "finish flag styles shipped");
 
-  // Client-side rebuild draws the same terminals so live updates stay consistent.
+  // Client-side rebuild draws the same bookends so live updates stay consistent.
   let js = live_client_js();
-  assert!(js.contains("function wfTerminals"), "client JS re-render draws terminals");
-  assert!(js.contains("wf-term-start"), "client start terminal class");
-  assert!(js.contains("wf-term-finish"), "client finish terminal class");
-  assert!(js.contains("wf-edge wf-edge-term"), "client terminal edge class");
-  assert!(js.contains("aria-label=\"' + label"), "client terminals carry aria-labels");
+  assert!(js.contains("function wfBookendHtml"), "client JS re-render draws bookends");
+  assert!(js.contains("function wfLayoutWithBookends"), "client layout mirrors the bookends");
+  assert!(js.contains("wf-start-play"), "client start glyph class");
+  assert!(js.contains("wf-finish-flag"), "client finish flag class");
 }

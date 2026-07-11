@@ -14,10 +14,11 @@ const NODE_H: f64 = 72.0;
 const GAP_X: f64 = 56.0;
 const GAP_Y: f64 = 28.0;
 const PAD: f64 = 16.0;
-// Synthetic start / finish terminal discs flanking the DAG.
-const TERM_W: f64 = 40.0;
-const TERM_H: f64 = 40.0;
-const TERM_GAP_X: f64 = 72.0;
+/// Narrow Start / Finish markers — not full task cards.
+const BOOKEND_W: f64 = 48.0;
+const BOOKEND_H: f64 = 48.0;
+const START_ID: &str = "__start";
+const FINISH_ID: &str = "__finish";
 
 #[derive(Clone)]
 struct LaidOut {
@@ -25,6 +26,10 @@ struct LaidOut {
   x: f64,
   y: f64,
   order: usize,
+  /// Card width (bookends are narrower than task nodes).
+  w: f64,
+  /// Card height (bookends are shorter squares; tasks use NODE_H).
+  h: f64,
 }
 
 /// Job dependency graph HTML (every session with skills and/or image builds), or empty.
@@ -36,22 +41,18 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     return String::new();
   }
 
-  let mut layout = layout_nodes(session, &meta, now);
+  let (layout, start, finish) = layout_with_bookends(session, &meta, now);
   if layout.is_empty() {
     return String::new();
   }
-  // Shift the DAG right so the start terminal gets its own little column.
-  for n in &mut layout {
-    n.x += TERM_W + TERM_GAP_X;
-  }
-  let height = layout.iter().map(|n| n.y + NODE_H).fold(0.0_f64, f64::max) + PAD;
+  let width = layout.iter().chain([&start, &finish]).map(|n| n.x + n.w).fold(0.0_f64, f64::max) + PAD;
+  let height = layout.iter().chain([&start, &finish]).map(|n| n.y + n.h).fold(0.0_f64, f64::max) + PAD;
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
-  let mut edges_svg = render_edges(&meta, &by_id);
-  let (term_edges, term_html, width) = render_terminals(&meta, &by_id);
-  edges_svg.push_str(&term_edges);
+  let edges_svg = render_edges(&meta, &by_id, &start, &finish);
 
   let mut nodes_html = String::new();
+  nodes_html.push_str(&bookend_html(&start, true));
   let mut present = std::collections::BTreeSet::new();
   let mut counts = StatusCounts::default();
   // First node per status in visual order (top→bottom, left→right) for summary jump links.
@@ -79,7 +80,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     counts.tally(state);
     nodes_html.push_str(&node_html(session, &meta, node, pos, now));
   }
-  nodes_html.push_str(&term_html);
+  nodes_html.push_str(&bookend_html(&finish, false));
 
   format!(
     r#"<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>
@@ -122,8 +123,11 @@ struct EdgeGeom {
 
 /// Draw dependency edges: horizontal tangents at both ends, fan-in/out ports spaced along the
 /// node sides (so two arrows into `summarize` do not share one tip), open chevron heads.
-fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &LaidOut>) -> String {
-  // Collect (src_id, dst_id) in stable order.
+/// Also draws Start→roots and sinks→Finish so even a single-node job shows arrows.
+fn render_edges(
+  meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &LaidOut>, start: &LaidOut, finish: &LaidOut,
+) -> String {
+  // Collect (src_id, dst_id) in stable order — real needs, then bookend edges.
   let mut pairs: Vec<(&str, &str)> = Vec::new();
   for node in &meta.nodes {
     if !by_id.contains_key(node.id.as_str()) {
@@ -135,6 +139,22 @@ fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &L
       }
     }
   }
+  let roots = graph_roots(meta);
+  let sinks = graph_sinks(meta);
+  for id in &roots {
+    if by_id.contains_key(id.as_str()) {
+      pairs.push((START_ID, id.as_str()));
+    }
+  }
+  for id in &sinks {
+    if by_id.contains_key(id.as_str()) {
+      pairs.push((id.as_str(), FINISH_ID));
+    }
+  }
+
+  let mut all_by_id: std::collections::BTreeMap<&str, &LaidOut> = by_id.clone();
+  all_by_id.insert(START_ID, start);
+  all_by_id.insert(FINISH_ID, finish);
 
   // Outgoing / incoming multiplicity per node (for port spacing).
   let mut out_n: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
@@ -153,15 +173,15 @@ fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &L
   }
   for idxs in out_rank.values_mut() {
     idxs.sort_by(|&a, &b| {
-      let ya = by_id.get(pairs[a].1).map(|n| n.y).unwrap_or(0.0);
-      let yb = by_id.get(pairs[b].1).map(|n| n.y).unwrap_or(0.0);
+      let ya = all_by_id.get(pairs[a].1).map(|n| n.y).unwrap_or(0.0);
+      let yb = all_by_id.get(pairs[b].1).map(|n| n.y).unwrap_or(0.0);
       ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(&b))
     });
   }
   for idxs in in_rank.values_mut() {
     idxs.sort_by(|&a, &b| {
-      let ya = by_id.get(pairs[a].0).map(|n| n.y).unwrap_or(0.0);
-      let yb = by_id.get(pairs[b].0).map(|n| n.y).unwrap_or(0.0);
+      let ya = all_by_id.get(pairs[a].0).map(|n| n.y).unwrap_or(0.0);
+      let yb = all_by_id.get(pairs[b].0).map(|n| n.y).unwrap_or(0.0);
       ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(&b))
     });
   }
@@ -181,113 +201,62 @@ fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &L
 
   let mut svg = String::new();
   for (i, &(s, d)) in pairs.iter().enumerate() {
-    let src = by_id[s];
-    let dst = by_id[d];
+    let src = all_by_id[s];
+    let dst = all_by_id[d];
     let geom = EdgeGeom {
-      x1: src.x + NODE_W,
-      y1: port_y(src.y, out_port[&i], out_n[s]),
+      x1: src.x + src.w,
+      y1: port_y(src.y, src.h, out_port[&i], out_n[s]),
       x2: dst.x,
-      y2: port_y(dst.y, in_port[&i], in_n[d]),
+      y2: port_y(dst.y, dst.h, in_port[&i], in_n[d]),
     };
     svg.push_str(&edge_path(&geom));
   }
   svg
 }
 
-/// Synthetic start / finish terminals: a starting-line dot with an arrow into every root task
-/// and a checkered finish disc fed by every leaf, so even a single-run job reads
-/// start → run → finish (exactly two arrows). Decorative only — not focusable, not clickable.
-/// Returns (terminal edge paths, terminal markup, total stage width).
-fn render_terminals(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &LaidOut>) -> (String, String, f64) {
-  let min_y = by_id.values().map(|n| n.y).fold(f64::INFINITY, f64::min);
-  let max_y = by_id.values().map(|n| n.y + NODE_H).fold(0.0_f64, f64::max);
-  let term_y = (min_y + max_y) / 2.0 - TERM_H / 2.0;
-  let start_x = PAD;
-  let finish_x = by_id.values().map(|n| n.x + NODE_W).fold(0.0_f64, f64::max) + TERM_GAP_X;
-  let width = finish_x + TERM_W + PAD;
-
-  let mut has_incoming: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-  let mut has_outgoing: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
-  for node in &meta.nodes {
-    if !by_id.contains_key(node.id.as_str()) {
-      continue;
-    }
-    for need in &node.needs {
-      if by_id.contains_key(need.as_str()) {
-        has_incoming.insert(node.id.as_str());
-        has_outgoing.insert(need.as_str());
-      }
-    }
-  }
-  // Top→bottom port order so the fan never crosses itself.
-  let mut roots: Vec<&&LaidOut> = by_id.iter().filter(|(id, _)| !has_incoming.contains(*id)).map(|(_, n)| n).collect();
-  let mut leaves: Vec<&&LaidOut> = by_id.iter().filter(|(id, _)| !has_outgoing.contains(*id)).map(|(_, n)| n).collect();
-  roots.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-  leaves.sort_by(|a, b| a.y.partial_cmp(&b.y).unwrap_or(std::cmp::Ordering::Equal));
-
-  let mut edges = String::new();
-  for (i, root) in roots.iter().enumerate() {
-    let geom =
-      EdgeGeom { x1: start_x + TERM_W, y1: term_port_y(term_y, i, roots.len()), x2: root.x, y2: root.y + NODE_H / 2.0 };
-    edges.push_str(&edge_path_class(&geom, "wf-edge wf-edge-term"));
-  }
-  for (i, leaf) in leaves.iter().enumerate() {
-    let geom = EdgeGeom {
-      x1: leaf.x + NODE_W,
-      y1: leaf.y + NODE_H / 2.0,
-      x2: finish_x,
-      y2: term_port_y(term_y, i, leaves.len()),
-    };
-    edges.push_str(&edge_path_class(&geom, "wf-edge wf-edge-term"));
-  }
-
-  let html = format!(
-    concat!(
-      r#"<span class="wf-terminal wf-term-start" role="img" aria-label="start" style="left:{sx:.1}px;top:{ty:.1}px"></span>"#,
-      r#"<span class="wf-terminal wf-term-finish" role="img" aria-label="finish" style="left:{fx:.1}px;top:{ty:.1}px"></span>"#
-    ),
-    sx = start_x,
-    fx = finish_x,
-    ty = term_y,
-  );
-  (edges, html, width)
+/// Nodes with no inbound edges from other real nodes (entry points of the DAG).
+fn graph_roots(meta: &WorkflowMeta) -> Vec<String> {
+  let ids: std::collections::BTreeSet<&str> = meta.nodes.iter().map(|n| n.id.as_str()).collect();
+  meta.nodes.iter().filter(|n| n.needs.iter().all(|need| !ids.contains(need.as_str()))).map(|n| n.id.clone()).collect()
 }
 
-/// Vertical attachment along a terminal disc face — `port_y` scaled down to the disc height.
-fn term_port_y(term_y: f64, index: usize, count: usize) -> f64 {
-  if count <= 1 {
-    return term_y + TERM_H / 2.0;
-  }
-  let margin = TERM_H * 0.28;
-  let usable = TERM_H - 2.0 * margin;
-  term_y + margin + usable * (index as f64) / ((count - 1) as f64)
+/// Nodes nothing else depends on (exit points of the DAG).
+fn graph_sinks(meta: &WorkflowMeta) -> Vec<String> {
+  let ids: std::collections::BTreeSet<&str> = meta.nodes.iter().map(|n| n.id.as_str()).collect();
+  let depended_on: std::collections::BTreeSet<&str> =
+    meta.nodes.iter().flat_map(|n| n.needs.iter().map(|s| s.as_str())).filter(|id| ids.contains(id)).collect();
+  meta.nodes.iter().filter(|n| !depended_on.contains(n.id.as_str())).map(|n| n.id.clone()).collect()
 }
 
 /// Vertical attachment along a node face: single edge → center; several → evenly spaced
-/// with a margin so tips do not sit on the corners.
-fn port_y(node_y: f64, index: usize, count: usize) -> f64 {
+/// with a margin so tips do not sit on the corners. Uses each node's real height so
+/// short bookends do not get task-card ports (which bent same-row edges into S-curves).
+fn port_y(node_y: f64, node_h: f64, index: usize, count: usize) -> f64 {
   if count <= 1 {
-    return node_y + NODE_H / 2.0;
+    return node_y + node_h / 2.0;
   }
-  let margin = NODE_H * 0.22;
-  let usable = NODE_H - 2.0 * margin;
+  let margin = node_h * 0.22;
+  let usable = node_h - 2.0 * margin;
   node_y + margin + usable * (index as f64) / ((count - 1) as f64)
 }
 
-/// Cubic with horizontal tangents at both ends — reads as a clean ribbon, not a merged Y.
+/// Same-row edges are a straight horizontal; otherwise a cubic with horizontal tangents.
 fn edge_path(e: &EdgeGeom) -> String {
-  edge_path_class(e, "wf-edge")
-}
-
-fn edge_path_class(e: &EdgeGeom, class: &str) -> String {
+  // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
+  let x2 = e.x2 - 1.5;
+  if (e.y1 - e.y2).abs() < 0.5 {
+    return format!(
+      r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} L{x2:.1},{y1:.1}" marker-end="url(#wf-arrow)" />"#,
+      x1 = e.x1,
+      y1 = e.y1,
+      x2 = x2,
+    );
+  }
   let dx = (e.x2 - e.x1).max(24.0);
   let c1x = e.x1 + dx * 0.42;
   let c2x = e.x2 - dx * 0.42;
-  // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
-  let x2 = e.x2 - 1.5;
   format!(
-    r#"<path class="{class}" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
-    class = class,
+    r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
     x1 = e.x1,
     y1 = e.y1,
     y2 = e.y2,
@@ -413,11 +382,61 @@ fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut
     let x = PAD + (*rank as f64) * (NODE_W + GAP_X);
     for (row, &i) in idxs.iter().enumerate() {
       let node = &meta.nodes[i];
-      out.push(LaidOut { id: node.id.clone(), x, y: y0 + row as f64 * (NODE_H + GAP_Y), order: node.order });
+      out.push(LaidOut {
+        id: node.id.clone(),
+        x,
+        y: y0 + row as f64 * (NODE_H + GAP_Y),
+        order: node.order,
+        w: NODE_W,
+        h: NODE_H,
+      });
     }
   }
   out.sort_by_key(|a| a.order);
   out
+}
+
+/// Real nodes shifted right of Start; Finish after the rightmost column. Vertically centered.
+fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Vec<LaidOut>, LaidOut, LaidOut) {
+  let mut layout = layout_nodes(session, meta, now);
+  let shift = BOOKEND_W + GAP_X;
+  for n in &mut layout {
+    n.x += shift;
+  }
+  let stage_h = layout.iter().map(|n| n.y + n.h).fold(PAD + NODE_H, f64::max) + PAD;
+  let bookend_y = ((stage_h - BOOKEND_H) / 2.0).max(PAD);
+  let start = LaidOut { id: START_ID.into(), x: PAD, y: bookend_y, order: 0, w: BOOKEND_W, h: BOOKEND_H };
+  let finish_x = layout.iter().map(|n| n.x + n.w).fold(PAD + BOOKEND_W, f64::max) + GAP_X;
+  let finish =
+    LaidOut { id: FINISH_ID.into(), x: finish_x, y: bookend_y, order: usize::MAX, w: BOOKEND_W, h: BOOKEND_H };
+  (layout, start, finish)
+}
+
+/// Decorative Start (play) / Finish (checkered flag) — icon cards, not clickable.
+fn bookend_html(pos: &LaidOut, is_start: bool) -> String {
+  if is_start {
+    format!(
+      r#"<div class="wf-bookend wf-start" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Start" aria-hidden="true">
+<span class="wf-start-play" aria-hidden="true"></span>
+</div>"#,
+      id = START_ID,
+      x = pos.x,
+      y = pos.y,
+      w = pos.w,
+      h = BOOKEND_H,
+    )
+  } else {
+    format!(
+      r#"<div class="wf-bookend wf-finish" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Finish" aria-hidden="true">
+<span class="wf-finish-flag" aria-hidden="true"></span>
+</div>"#,
+      id = FINISH_ID,
+      x = pos.x,
+      y = pos.y,
+      w = pos.w,
+      h = BOOKEND_H,
+    )
+  }
 }
 
 /// Vertical stack priority inside a rank column (lower = higher on screen).
@@ -512,7 +531,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
     proc_attr = proc_attr,
     x = pos.x,
     y = pos.y,
-    w = NODE_W,
+    w = pos.w,
     h = NODE_H,
     tip = esc(&tip),
     tip_running = tip_running,
