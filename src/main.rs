@@ -98,13 +98,13 @@ fn run(args: &[String]) -> i32 {
   }
 }
 
-/// The Composer model annotation uses, overridable via `SCSH_ANNOTATE_MODEL`.
+/// The Codex model annotation uses, overridable via `SCSH_ANNOTATE_MODEL`.
 fn annotate_model() -> String {
-  std::env::var("SCSH_ANNOTATE_MODEL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "composer-2.5-fast".into())
+  std::env::var("SCSH_ANNOTATE_MODEL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "gpt-5.4-mini".into())
 }
 
 /// `annotate-cast <cast>…`: write a `{summary, chapters}` sidecar next to each cast using
-/// cursor-agent on the Composer model. Human output (progress, notes) goes to stderr; with
+/// Codex on the fast GPT-5.4 Mini route. Human output (progress, notes) goes to stderr; with
 /// `--json` (or when stdout is not a TTY) the sidecar paths are emitted as JSON on stdout,
 /// and errors as a single-key `{"Error": …}` object (§2).
 ///
@@ -122,7 +122,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
     );
   }
   if !annotate::host_can_annotate() {
-    return annotate_error(as_json, 1, "cursor-agent not available (need the `cursor-agent` CLI and a cursor login)");
+    return annotate_error(as_json, 1, "Codex not available (need the `codex` CLI and a Codex login)");
   }
   let model = annotate_model();
   let parent = paths.iter().find_map(|p| parent_session_from_cast_path(p));
@@ -171,7 +171,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
           &label,
           daemon::ProcKind::Annotate,
           None,
-          Some("cursor"),
+          Some("codex"),
           Some(model.as_str()),
           None,
           None,
@@ -377,7 +377,7 @@ fn export_error(as_json: bool, code: i32, message: &str) -> i32 {
 /// After a run, annotate the recordings it produced (best-effort, in parallel), so chapters
 /// and summaries appear in the session browser. Also copy new chapters onto matching
 /// `.sccache` cast copies so a later cache hit replays chapters with the recording.
-/// No-op when cursor/Composer is unavailable.
+/// No-op when Codex is unavailable.
 ///
 /// When `client` is `Some`, each pending cast becomes a live [`daemon::ProcKind::Annotate`]
 /// row (indices from `next_proc_index`) so the job page shows annotate progress before the
@@ -394,13 +394,15 @@ fn annotate_run_casts(
   let pending: Vec<std::path::PathBuf> = cast_paths
     .into_iter()
     .filter(|c| {
-      daemon::chapters_sidecar_path(&c.to_string_lossy()).map(|s| annotate::sidecar_is_stale(c, &s)).unwrap_or(false)
+      daemon::chapters_sidecar_path(&c.to_string_lossy())
+        .map(|s| annotate::sidecar_is_stale(c, &s) && !annotation_marker(c).exists())
+        .unwrap_or(false)
     })
     .collect();
   if pending.is_empty() || !annotate::host_can_annotate() {
     return;
   }
-  eprintln!("scsh: annotating {} cast(s) with cursor · {} …", pending.len(), annotate_model());
+  eprintln!("scsh: annotating {} cast(s) with codex · {} …", pending.len(), annotate_model());
   let model = annotate_model();
   let mut done = 0;
   if let Some(client) = client {
@@ -422,7 +424,7 @@ fn annotate_run_casts(
           &label,
           daemon::ProcKind::Annotate,
           None,
-          Some("cursor"),
+          Some("codex"),
           Some(model.as_str()),
           None,
           None,
@@ -456,6 +458,10 @@ fn annotate_run_casts(
             Ok(res) => {
               if let Some(ref cpath) = res.cast_path {
                 client.proc_cast(idx, &cpath.to_string_lossy());
+              } else {
+                // A headless fallback may succeed after the recorded TUI failed. Do not
+                // present that failed recording as evidence of the successful annotation.
+                client.proc_cast(idx, "");
               }
               client.proc_finish(idx, daemon::ProcStatus::Ok, None, None, elapsed);
             }
@@ -485,7 +491,7 @@ fn annotate_run_casts(
       .map(|cast| {
         let model = model.clone();
         std::thread::spawn(move || {
-          let result = annotate::annotate_cast_with(&cast, &model, annotate::run_cursor_agent);
+          let result = annotate::annotate_cast_with(&cast, &model, annotate::run_codex);
           // No daemon row to carry the reason here, so a failure is at least named on
           // stderr instead of silently folding into the final "annotated N" count.
           if let Err(err) = &result {
@@ -503,6 +509,51 @@ fn annotate_run_casts(
     }
   }
   eprintln!("scsh: annotated {done} cast(s)");
+}
+
+fn annotation_marker(cast: &Path) -> PathBuf {
+  let mut marker = cast.as_os_str().to_os_string();
+  marker.push(".annotating");
+  PathBuf::from(marker)
+}
+
+/// Start annotation as soon as one run's durable recording exists. The marker prevents
+/// the end-of-job catch-up sweep from duplicating live work; the child shell removes it on
+/// every exit, while a successful child leaves the chapters sidecar that makes catch-up a no-op.
+fn spawn_cast_annotation(cast: &Path) {
+  if !annotate::host_can_annotate() {
+    return;
+  }
+  let Some(sidecar) = daemon::chapters_sidecar_path(&cast.to_string_lossy()) else {
+    return;
+  };
+  if !annotate::sidecar_is_stale(cast, &sidecar) {
+    return;
+  }
+  let marker = annotation_marker(cast);
+  if std::fs::OpenOptions::new().write(true).create_new(true).open(&marker).is_err() {
+    return;
+  }
+  let Ok(exe) = std::env::current_exe() else {
+    let _ = std::fs::remove_file(marker);
+    return;
+  };
+  let script = format!(
+    "trap 'rm -f {marker}' EXIT; {exe} annotate-cast {cast} --json >/dev/null 2>&1",
+    marker = runtime::shell_quote(&marker.to_string_lossy()),
+    exe = runtime::shell_quote(&exe.to_string_lossy()),
+    cast = runtime::shell_quote(&cast.to_string_lossy()),
+  );
+  if Command::new("sh")
+    .args(["-c", &script])
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::null())
+    .spawn()
+    .is_err()
+  {
+    let _ = std::fs::remove_file(marker);
+  }
 }
 
 /// If `path` contains `/sessions/<id>/`, return that session id (parent of a standalone annotate).
@@ -545,7 +596,7 @@ enum Mode {
   Prune,
   /// Reclaim old `$SCSH_HOME/sessions/` dirs (dry-run by default; `--apply` to delete).
   Gc,
-  /// Summarize + chapter cast recordings with cursor/Composer (`annotate-cast <cast>…`).
+  /// Summarize + chapter cast recordings with Codex (`annotate-cast <cast>…`).
   AnnotateCasts,
   /// Render cast recordings into self-contained offline HTML player pages
   /// (`export-cast <cast>… [-o <file>]`).
@@ -812,7 +863,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         None
       }
       // `annotate-cast <cast>…`: summarize each recording and detect chapters with
-      // cursor-agent on the Composer model, writing a `<cast>.chapters.json` sidecar.
+      // Codex on GPT-5.4 Mini, writing a `<cast>.chapters.json` sidecar.
       "annotate-cast" | "annotate-casts" => Some(Mode::AnnotateCasts),
       // `export-cast <cast>… [-o <file>]`: render each recording (+ its chapters sidecar)
       // into one self-contained offline HTML player page next to it.
@@ -3578,6 +3629,9 @@ fn run_one_skill(
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
   }
+  if let Some(durable) = durable_cast.as_deref() {
+    spawn_cast_annotation(Path::new(durable));
+  }
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
   }
@@ -6115,9 +6169,9 @@ fn print_help_command(name: &str) {
       "summarize + chapter recordings",
       "scsh annotate-cast <cast…> [--json]",
       &[
-        ("<cast…>", "One or more .cast files to annotate via cursor-agent on the Composer model."),
+        ("<cast…>", "One or more .cast files to annotate via Codex on GPT-5.4 Mini."),
         ("--json", "Emit the written sidecar paths as JSON; on by default when stdout is not a TTY."),
-        ("SCSH_ANNOTATE_MODEL", "Override the model (default composer-2.5-fast)."),
+        ("SCSH_ANNOTATE_MODEL", "Override the model (default gpt-5.4-mini)."),
       ],
     ),
     "export-cast" => (
@@ -6189,7 +6243,7 @@ fn print_help_overview() {
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
-  help_row("annotate-cast <cast…>", "Summarize + chapter recordings via cursor/Composer (--json).");
+  help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / GPT-5.4 Mini (--json).");
   help_row("export-cast <cast…>", "Render recordings to self-contained offline HTML pages (-o, --json).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");

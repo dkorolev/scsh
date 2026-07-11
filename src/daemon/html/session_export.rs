@@ -99,6 +99,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 <style>{css}{player_css}{extra_css}</style>
 </head>
 <body>
+<main class="page-shell">
 <p class="page-lede">{lede}</p>
 <div class="card card--accent-left-purple">
 <dl class="session-meta">
@@ -113,6 +114,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 <p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
 {workflow}{fleets}<div class="procs">
 {sections}</div>
+</main>
 <script>{player_js}</script>
 <script>
 const CASTS = {data};

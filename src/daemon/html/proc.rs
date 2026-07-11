@@ -37,7 +37,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
     _ => String::new(),
   };
   format!(
-    r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}"{ended}>
+    r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}" data-kind="{kind}"{ended}>
 <div class="cast-toolbar">
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed<span data-chapter-keys></span> · f fullscreen</span>
@@ -46,6 +46,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 </div>
 "#,
     status = proc.status.as_str(),
+    kind = proc.kind.as_str(),
   )
 }
 
