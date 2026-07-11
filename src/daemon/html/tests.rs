@@ -227,7 +227,8 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
   // not the transient step note — same rule that puts a finished skill's answer in the row.
   assert!(procs.contains(r#"<span class="note dim">skipped — its when: gate is false</span>"#), "skip reason in the collapsed row: {procs}");
-  assert!(!procs.contains("data-proc-stop"), "a skipped step offers no kill button: {procs}");
+  assert!(procs.contains("data-proc-stop"), "kill control stays in place (WEB-UI §2): {procs}");
+  assert!(procs.contains("disabled title="), "skipped step's kill is grayed: {procs}");
   // Live updates speak the same phrases; workflow graph keeps its own icon map.
   let js = live_client_js();
   assert!(js.contains("function elapsedPhrase"));
@@ -336,24 +337,23 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
 
 #[test]
 fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
-  // A dead client's session stays un-ended with "running" procs forever. It must get NO
-  // stop-all-harness button on the index and NO per-proc kill button on its session page —
-  // there is nothing left to stop. (store_with_cast_proc's session was last seen at t=1.)
+  // A dead client's session keeps procs "running" forever. Kill buttons stay visible but
+  // DISABLED (WEB-UI §2) — there is nothing left to stop.
   let store = store_with_cast_proc(ProcStatus::Running);
   let html = super::index_page(&store);
-  // (The embedded client JS always contains the bare attribute selectors, so assert on the
-  // rendered `attr="` form, which only a server-side button carries.)
   assert!(!html.contains(r#"data-harness-stop=""#), "zombie sessions must not raise stop-all buttons");
   let page = session_page(&store, "castab").expect("session renders");
-  assert!(!page.contains(r#"data-proc-stop=""#), "zombie sessions must not offer per-proc kill");
+  assert!(page.contains(r#"data-proc-stop="0""#), "zombie still shows the kill control");
+  assert!(page.contains("disabled title=\"Job is no longer running"), "zombie kill is grayed: {page}");
 
-  // The same session, seen moments ago, gets both.
+  // The same session, seen moments ago, gets an enabled kill.
   let mut live = store_with_cast_proc(ProcStatus::Running);
   live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
   let html = super::index_page(&live);
   assert!(html.contains(r#"data-harness-stop="claude""#), "live sessions raise the stop-all button");
   let page = session_page(&live, "castab").expect("session renders");
   assert!(page.contains(r#"data-proc-stop="0""#), "live sessions offer per-proc kill");
+  assert!(!page.contains(r#"data-proc-stop="0" disabled"#), "live kill is enabled: {page}");
 }
 
 #[test]
@@ -463,6 +463,9 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(js.contains("history.pushState"), "tab clicks push history (WEB-UI §1)");
   assert!(js.contains("popstate"), "Back/Forward restore the active tab");
   assert!(js.contains("function sessionEndedLabel"), "Ended label shares lifecycle with the badge");
+  assert!(js.contains("function activateProcPanel"), "fleet and workflow share arrival cues");
+  assert!(js.contains("localStorage"), "UI prefs persist (WEB-UI §7)");
+  assert!(!js.contains("fonts.googleapis.com"), "no Google Fonts in the live client");
 }
 
 #[test]
@@ -601,7 +604,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
 }
 
 #[test]
-fn ended_session_hides_force_stop_button() {
+fn ended_session_grays_force_stop_button_in_place() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
     "done01".into(),
@@ -622,10 +625,9 @@ fn ended_session_hides_force_stop_button() {
     },
   );
   let html = session_page(&store, "done01").expect("session page");
-  assert!(!html.contains(r#"id="session-stop""#), "ended session must not offer Force stop");
-  // The resting lifecycle badge FOLLOWS the heading — the kind/name stays flush-left with
-  // the meta labels below it — not the top-right actions slot, where it sat awkwardly
-  // against the taller download button. The actions slot keeps only the buttons.
+  // WEB-UI §2: the control stays, grayed, with an explanation — it does not vanish.
+  assert!(html.contains(r#"id="session-stop""#), "ended session still shows Force stop");
+  assert!(html.contains(r#"id="session-stop" data-session="done01" disabled"#), "Force stop is disabled: {html}");
   assert!(html.contains(r#"session-status completed"#), "ended session shows the completed badge");
   assert!(
     html.contains(r#"</strong> <span class="chamfer session-status completed">"#),
@@ -635,6 +637,7 @@ fn ended_session_hides_force_stop_button() {
     !html.contains(r#"session-actions"><span class="chamfer session-status"#),
     "no badge in the top-right actions slot"
   );
+  assert!(html.contains(r#"class="page-lede""#), "session page has a plain-language lede");
 }
 
 #[test]
@@ -1068,28 +1071,33 @@ fn live_client_js_shows_connecting_on_ws_close() {
 #[test]
 fn wrap_page_connecting_status_uses_blue() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, "", "<p>body</p>");
   assert!(html.contains("class=\"daemon-status connecting\""));
   assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
+  assert!(!html.contains("fonts.googleapis.com"), "offline-first: no CDN fonts (WEB-UI §5)");
+  assert!(html.contains("position: sticky"), "status chrome is pinned");
 }
 
 #[test]
 fn every_daemon_page_carries_the_inline_favicon() {
   use super::layout::wrap_page;
   // A data: URI, so the dashboard and the standalone player page stay request-free.
-  let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, "", "<p>body</p>");
   assert!(html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "dashboard favicon");
   let player = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
   assert!(player.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "player-page favicon");
+  assert!(!player.contains("fonts.googleapis.com"), "cast player page is offline-first too");
 }
 
 #[test]
 fn wrap_page_serves_valid_css_braces() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, "Hello lede", "<p>body</p>");
   assert!(html.contains(":root {"));
   assert!(!html.contains(":root {{"));
   assert!(html.contains(".daemon-status {"));
+  assert!(html.contains(r#"class="page-lede""#), "lede renders above pinned chrome");
+  assert!(html.contains("Hello lede"));
 }
 
 #[test]

@@ -4,7 +4,7 @@ use super::client_js::live_client_js;
 use super::escape::{esc, quote_js};
 
 /// Page chrome for the session browser — tokens and components from the prnui stylebook
-/// (Ubuntu, dark surfaces, chamfered buttons/badges/inputs).
+/// (system UI stack, dark surfaces, chamfered buttons/badges/inputs — no CDN fonts; WEB-UI §5).
 pub(crate) const PAGE_CSS: &str = r#"
   *,*::before,*::after{box-sizing:border-box}
   :root {
@@ -24,7 +24,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   html, body { width: 100%; margin: 0; }
   body {
-    font-family: 'Ubuntu', ui-sans-serif, system-ui, sans-serif;
+    font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
     background: var(--bg);
     color: var(--text);
     padding: 28px 24px 48px;
@@ -198,8 +198,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .agent-badge::before { background: var(--surface); }
   .form-title { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px; }
 
-  /* ── status bar ── */
+  /* ── status bar (pinned chrome — WEB-UI §1 / §2) ── */
+  .page-lede {
+    margin: 0 0 0.85rem; font-size: 1.02rem; line-height: 1.45; color: var(--text);
+    max-width: 52rem;
+  }
+  .page-lede .dim { color: var(--text-muted); }
   .daemon-status {
+    position: sticky; top: 0; z-index: 20;
     display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap;
     font-size: 0.85rem; margin-bottom: 1.25rem; padding: 0.55rem 0.85rem;
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
@@ -222,10 +228,12 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-status.connecting .dot { background: var(--cyan); box-shadow: 0 0 0 3px rgba(88,166,255,0.25); }
   .daemon-status.connecting { color: var(--cyan); }
 
-  /* ── tabs ── */
+  /* ── tabs (pinned under the status island — WEB-UI §1) ── */
   .tabs {
+    position: sticky; top: 3.1rem; z-index: 19;
     display: flex; gap: 0.15rem; border-bottom: 1px solid var(--border);
-    margin-bottom: 1.1rem; flex-wrap: wrap;
+    margin: -0.4rem 0 1.1rem; flex-wrap: wrap;
+    background: var(--bg); padding-top: 0.35rem;
   }
   .tab {
     font: inherit; color: var(--text-muted); background: none; border: none;
@@ -475,9 +483,10 @@ pub(crate) const PAGE_CSS: &str = r#"
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
     color: var(--red); background: transparent; border: 1px solid var(--red);
     border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+    min-width: 5.75rem; /* reserve the slot so enable/disable never shifts the row (WEB-UI §2) */
   }
   .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
-  .proc-kill:disabled { cursor: default; opacity: 0.55; }
+  .proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); border-color: var(--border); }
   /* The "⇄ commits diff" chip shares the kill button's right-edge slot: the diff appears
      only after a step finished, the kill button only while it runs — never both. */
   a.proc-diff, span.proc-diff {
@@ -485,6 +494,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
     color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
     border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+    min-width: 5.75rem; text-align: center; box-sizing: border-box;
   }
   a.proc-diff:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); text-decoration: none; }
   /* Offline export: packed commits-diff embedded as a sandboxed iframe (not the live chip). */
@@ -502,8 +512,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .autoscroll-ctl {
     display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
     cursor: pointer; user-select: none; color: var(--text-muted);
+    min-height: 1.35rem; /* reserved even when idle so finishing a proc does not jump (WEB-UI §2) */
   }
   .autoscroll-ctl input { margin-right: 0.35rem; }
+  .autoscroll-ctl:has(input:disabled) { opacity: 0.45; cursor: default; }
   .output {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
     max-height: 24rem; overflow: auto; margin: 0.5rem 0; padding: 0.65rem;
@@ -573,6 +585,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }
   /* Pinned to the meta island's top-right corner (the card is the positioning context). */
   .session-actions { position: absolute; top: 0.7rem; right: 0.85rem; display: flex; gap: 0.6rem; align-items: center; margin: 0; z-index: 2; }
+  .session-actions #session-stop { min-width: 6.5rem; } /* gray-in-place, never remove (WEB-UI §2) */
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
     grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem 1rem;
@@ -611,11 +624,13 @@ fn scsh_version_html() -> String {
 /// every page (the live dashboard AND the downloaded offline exports) stays request-free.
 pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d1117'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2358a6ff'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
 
-pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: &str) -> String {
+pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, lede: &str, body: &str) -> String {
   let session_js = match session_id {
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
     None => "const SESSION_ID = null;".to_string(),
   };
+  // Plain-language summary ABOVE the pinned chrome so it scrolls away (WEB-UI §1).
+  let lede_html = if lede.is_empty() { String::new() } else { format!("<p class=\"page-lede\">{lede}</p>\n") };
   // The session page embeds an asciinema player per proc; the index page does not need it.
   let (player_css, player_js) = if session_id.is_some() {
     (
@@ -633,13 +648,11 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, body: 
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {favicon}
 <title>{title}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&display=swap" rel="stylesheet">
 {player_css}
 <style>{css}</style>
 </head>
 <body>
+{lede}
 <div id="daemon-status" class="daemon-status connecting">
 <span class="crumbs">{crumbs}</span>
 <span class="daemon-right"><span id="status-label">connecting…</span>
@@ -660,6 +673,7 @@ const PROJECTS_DIR = {projects_dir};
     player_css = player_css,
     css = PAGE_CSS,
     scsh_version = scsh_version_html(),
+    lede = lede_html,
     crumbs = crumbs_html(session_id),
     projects_dir = quote_js(&crate::daemon::paths::projects_dir().to_string_lossy()),
     body = body,

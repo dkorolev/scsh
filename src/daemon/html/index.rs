@@ -43,7 +43,13 @@ pub fn index_page(store: &Store) -> String {
     start = start_panel(),
     images = images_panel()
   );
-  wrap_page("scsh", port, None, &body)
+  wrap_page(
+    "scsh",
+    port,
+    None,
+    "Browse local <code>scsh</code> jobs, open a repository, and start a harness definition — everything stays on this machine.",
+    &body,
+  )
 }
 
 /// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a
