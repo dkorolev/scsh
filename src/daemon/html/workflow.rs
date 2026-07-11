@@ -15,9 +15,9 @@ const GAP_X: f64 = 56.0;
 const GAP_Y: f64 = 28.0;
 const PAD: f64 = 16.0;
 // Synthetic start / finish terminal discs flanking the DAG.
-const TERM_W: f64 = 28.0;
-const TERM_H: f64 = 28.0;
-const TERM_GAP_X: f64 = 40.0;
+const TERM_W: f64 = 40.0;
+const TERM_H: f64 = 40.0;
+const TERM_GAP_X: f64 = 72.0;
 
 #[derive(Clone)]
 struct LaidOut {

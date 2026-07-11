@@ -1106,7 +1106,7 @@ function wfFirstIdByState(session, nodes, nowUnix) {
 }
 // Layout constants — keep in lockstep with src/daemon/html/workflow.rs.
 const WF_NODE_W = 200, WF_NODE_H = 72, WF_GAP_X = 56, WF_GAP_Y = 28, WF_PAD = 16;
-const WF_TERM_W = 28, WF_TERM_H = 28, WF_TERM_GAP_X = 40;
+const WF_TERM_W = 40, WF_TERM_H = 40, WF_TERM_GAP_X = 72;
 let pendingWorkflowStep = null;
 let wfHistorySilent = false;
 function wfNodeRanks(nodes) {
