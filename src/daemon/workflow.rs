@@ -25,6 +25,9 @@ pub struct WorkflowNodeMeta {
   pub needs: Vec<String>,
   /// True when the step has a `when:` gate.
   pub conditional: bool,
+  /// Human-readable gate summary for the job-page marker (e.g. `Runs only if step.ok = true`).
+  /// Absent on older session snapshots that only stored [`Self::conditional`].
+  pub when_summary: Option<String>,
 }
 
 /// User-facing graph node state (includes derived `stalled`).
@@ -81,6 +84,7 @@ pub fn workflow_meta_from_def(def: &HarnessDef) -> Option<WorkflowMeta> {
         order,
         needs: s.needs.clone(),
         conditional: s.when.is_some(),
+        when_summary: s.when.as_ref().map(crate::harness_def::format_when_summary),
       })
       .collect(),
   };
@@ -197,6 +201,10 @@ pub fn parse_workflow_value(v: Option<&crate::json::Value>) -> Option<WorkflowMe
       Some(crate::json::Value::Bool(b)) => *b,
       _ => false,
     };
+    let when_summary = match nobj.iter().find(|(k, _)| k == "when_summary").map(|(_, v)| v) {
+      Some(crate::json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+      _ => None,
+    };
     let needs = match nobj.iter().find(|(k, _)| k == "needs").map(|(_, v)| v) {
       Some(crate::json::Value::Array(a)) => a
         .iter()
@@ -207,7 +215,7 @@ pub fn parse_workflow_value(v: Option<&crate::json::Value>) -> Option<WorkflowMe
         .collect(),
       _ => Vec::new(),
     };
-    nodes.push(WorkflowNodeMeta { id, proc_index, order, needs, conditional });
+    nodes.push(WorkflowNodeMeta { id, proc_index, order, needs, conditional, when_summary });
   }
   let meta = WorkflowMeta { nodes };
   validate_workflow_meta(&meta).ok()?;
@@ -224,8 +232,12 @@ pub fn workflow_json(meta: &WorkflowMeta) -> String {
         Some(i) => format!("{i}"),
         None => "null".into(),
       };
+      let when_summary = match &n.when_summary {
+        Some(s) => crate::json::quote(s),
+        None => "null".into(),
+      };
       format!(
-        "{{ \"id\": {}, \"proc_index\": {proc}, \"order\": {}, \"needs\": [{}], \"conditional\": {} }}",
+        "{{ \"id\": {}, \"proc_index\": {proc}, \"order\": {}, \"needs\": [{}], \"conditional\": {}, \"when_summary\": {when_summary} }}",
         crate::json::quote(&n.id),
         n.order,
         needs.join(", "),
@@ -341,14 +353,29 @@ mod tests {
   fn arith_meta() -> WorkflowMeta {
     WorkflowMeta {
       nodes: vec![
-        WorkflowNodeMeta { id: "add".into(), proc_index: Some(0), order: 0, needs: vec![], conditional: false },
-        WorkflowNodeMeta { id: "multiply".into(), proc_index: Some(1), order: 1, needs: vec![], conditional: false },
+        WorkflowNodeMeta {
+          id: "add".into(),
+          proc_index: Some(0),
+          order: 0,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        },
+        WorkflowNodeMeta {
+          id: "multiply".into(),
+          proc_index: Some(1),
+          order: 1,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        },
         WorkflowNodeMeta {
           id: "summarize".into(),
           proc_index: Some(2),
           order: 2,
           needs: vec!["add".into(), "multiply".into()],
           conditional: false,
+          when_summary: None,
         },
       ],
     }
@@ -423,6 +450,12 @@ mod tests {
       let meta = workflow_meta_from_def(&def).expect(name);
       assert!(validate_workflow_meta(&meta).is_ok(), "{name}");
     }
+    let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "code-review").unwrap();
+    let def = crate::harness_def::validate("code-review", src, crate::harness_def::DefSource::Builtin).unwrap();
+    let meta = workflow_meta_from_def(&def).unwrap();
+    let review = meta.nodes.iter().find(|n| n.id == "review").unwrap();
+    assert!(review.conditional);
+    assert_eq!(review.when_summary.as_deref(), Some("Runs only if probe_credentials.ok = true"));
     let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "add").unwrap();
     let add = crate::harness_def::validate("add", src, crate::harness_def::DefSource::Builtin).unwrap();
     assert!(workflow_meta_from_def(&add).is_none());

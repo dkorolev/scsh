@@ -1,0 +1,57 @@
+# Built-in harness definition: the minimal "fake PR" — two files, two commits, Description
+# panel. Same idea as the demo-pr example skill, but runnable via `scsh run --def demo-pr`
+# from any clean repo (no .skills/ scaffold required).
+description: "Commit a tiny feature note + PR-DESCRIPTION.md — a one-shot fake PR for packdiff."
+params:
+  TITLE:
+    type: string
+    default: "Hello from demo-pr"
+    description: "Title used in demo_pr_note.txt and PR-DESCRIPTION.md"
+task: |
+  You are running inside an scsh container for the built-in `demo-pr` self-test.
+
+  Read TITLE from the environment (default "Hello from demo-pr" if empty). Do exactly this
+  — no other files, no network, no tests:
+
+  1. Write `demo_pr_note.txt` at the repository root with this exact body (substitute TITLE):
+
+     # <TITLE>
+
+     A one-line feature stub committed by the `demo-pr` skill so the job page has a
+     real file diff to show next to `PR-DESCRIPTION.md`.
+
+  2. Write `PR-DESCRIPTION.md` at the repository root with this exact body (substitute TITLE):
+
+     # <TITLE>
+
+     ## Summary
+     - Add `demo_pr_note.txt` — a tiny tracked feature stub.
+     - Add `PR-DESCRIPTION.md` — this pull-request description (packdiff lifts it into
+       the review page's Description panel via the notes-author convention).
+
+     ## Test plan
+     - [x] Open the job page ⇄ commits diff and confirm the Description panel renders.
+
+  3. Commit ONLY `demo_pr_note.txt` with message: `demo-pr: add feature note (<TITLE>)`
+  4. Commit ONLY `PR-DESCRIPTION.md` with message: `demo-pr: add PR-DESCRIPTION.md`
+  5. Write {"ok": true, "title": "<TITLE>", "files": ["demo_pr_note.txt", "PR-DESCRIPTION.md"]}
+     to the file named by `SCSH_RESULT`.
+
+  Do nothing else.
+invocations:
+  codex-gpt-5.5:
+    harness: codex
+    model: gpt-5.5
+    commits: true
+  claude-sonnet:
+    harness: claude
+    model: sonnet
+    commits: true
+  cursor-composer-fast:
+    harness: cursor
+    model: composer-2.5-fast
+    commits: true
+  grok-build:
+    harness: grok
+    model: grok-build
+    commits: true

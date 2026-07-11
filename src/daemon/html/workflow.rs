@@ -8,7 +8,7 @@ use crate::daemon::workflow::{
   display_state, node_ranks, unmet_needs, validate_workflow_meta, WorkflowDisplayState, WorkflowMeta, WorkflowNodeMeta,
 };
 
-const NODE_W: f64 = 168.0;
+const NODE_W: f64 = 200.0;
 const NODE_H: f64 = 72.0;
 const GAP_X: f64 = 56.0;
 const GAP_Y: f64 = 28.0;
@@ -40,25 +40,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
   let height = layout.iter().map(|n| n.y + NODE_H).fold(0.0_f64, f64::max) + PAD;
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
-  let mut edges_svg = String::new();
-  for node in &meta.nodes {
-    let Some(dst) = by_id.get(node.id.as_str()) else {
-      continue;
-    };
-    for need in &node.needs {
-      let Some(src) = by_id.get(need.as_str()) else {
-        continue;
-      };
-      let x1 = src.x + NODE_W;
-      let y1 = src.y + NODE_H / 2.0;
-      let x2 = dst.x;
-      let y2 = dst.y + NODE_H / 2.0;
-      let mx = (x1 + x2) / 2.0;
-      edges_svg.push_str(&format!(
-        r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} C{mx:.1},{y1:.1} {mx:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#
-      ));
-    }
-  }
+  let edges_svg = render_edges(meta, &by_id);
 
   let mut nodes_html = String::new();
   let mut present = std::collections::BTreeSet::new();
@@ -84,8 +66,8 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
 <svg class="workflow-edges" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.1} {h:.1}" aria-hidden="true">
 <defs>
-<marker id="wf-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-<path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
+<path class="wf-arrowhead" d="M3.5 2.5 L11 7 L3.5 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
 </marker>
 </defs>
 {edges}
@@ -101,6 +83,114 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     h = height,
     edges = edges_svg,
     nodes = nodes_html,
+  )
+}
+
+/// One dependency edge after port assignment (distinct exit/entry y when a node fans in/out).
+struct EdgeGeom {
+  x1: f64,
+  y1: f64,
+  x2: f64,
+  y2: f64,
+}
+
+/// Draw dependency edges: horizontal tangents at both ends, fan-in/out ports spaced along the
+/// node sides (so two arrows into `summarize` do not share one tip), open chevron heads.
+fn render_edges(meta: &WorkflowMeta, by_id: &std::collections::BTreeMap<&str, &LaidOut>) -> String {
+  // Collect (src_id, dst_id) in stable order.
+  let mut pairs: Vec<(&str, &str)> = Vec::new();
+  for node in &meta.nodes {
+    if !by_id.contains_key(node.id.as_str()) {
+      continue;
+    }
+    for need in &node.needs {
+      if by_id.contains_key(need.as_str()) {
+        pairs.push((need.as_str(), node.id.as_str()));
+      }
+    }
+  }
+
+  // Outgoing / incoming multiplicity per node (for port spacing).
+  let mut out_n: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+  let mut in_n: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+  for &(s, d) in &pairs {
+    *out_n.entry(s).or_default() += 1;
+    *in_n.entry(d).or_default() += 1;
+  }
+
+  // Sort each node's edges by the other end's y so ports top→bottom match visual order.
+  let mut out_rank: std::collections::BTreeMap<&str, Vec<usize>> = std::collections::BTreeMap::new();
+  let mut in_rank: std::collections::BTreeMap<&str, Vec<usize>> = std::collections::BTreeMap::new();
+  for (i, &(s, d)) in pairs.iter().enumerate() {
+    out_rank.entry(s).or_default().push(i);
+    in_rank.entry(d).or_default().push(i);
+  }
+  for idxs in out_rank.values_mut() {
+    idxs.sort_by(|&a, &b| {
+      let ya = by_id.get(pairs[a].1).map(|n| n.y).unwrap_or(0.0);
+      let yb = by_id.get(pairs[b].1).map(|n| n.y).unwrap_or(0.0);
+      ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(&b))
+    });
+  }
+  for idxs in in_rank.values_mut() {
+    idxs.sort_by(|&a, &b| {
+      let ya = by_id.get(pairs[a].0).map(|n| n.y).unwrap_or(0.0);
+      let yb = by_id.get(pairs[b].0).map(|n| n.y).unwrap_or(0.0);
+      ya.partial_cmp(&yb).unwrap_or(std::cmp::Ordering::Equal).then_with(|| a.cmp(&b))
+    });
+  }
+
+  let mut out_port: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+  let mut in_port: std::collections::BTreeMap<usize, usize> = std::collections::BTreeMap::new();
+  for idxs in out_rank.values() {
+    for (port, &ei) in idxs.iter().enumerate() {
+      out_port.insert(ei, port);
+    }
+  }
+  for idxs in in_rank.values() {
+    for (port, &ei) in idxs.iter().enumerate() {
+      in_port.insert(ei, port);
+    }
+  }
+
+  let mut svg = String::new();
+  for (i, &(s, d)) in pairs.iter().enumerate() {
+    let src = by_id[s];
+    let dst = by_id[d];
+    let geom = EdgeGeom {
+      x1: src.x + NODE_W,
+      y1: port_y(src.y, out_port[&i], out_n[s]),
+      x2: dst.x,
+      y2: port_y(dst.y, in_port[&i], in_n[d]),
+    };
+    svg.push_str(&edge_path(&geom));
+  }
+  svg
+}
+
+/// Vertical attachment along a node face: single edge → center; several → evenly spaced
+/// with a margin so tips do not sit on the corners.
+fn port_y(node_y: f64, index: usize, count: usize) -> f64 {
+  if count <= 1 {
+    return node_y + NODE_H / 2.0;
+  }
+  let margin = NODE_H * 0.22;
+  let usable = NODE_H - 2.0 * margin;
+  node_y + margin + usable * (index as f64) / ((count - 1) as f64)
+}
+
+/// Cubic with horizontal tangents at both ends — reads as a clean ribbon, not a merged Y.
+fn edge_path(e: &EdgeGeom) -> String {
+  let dx = (e.x2 - e.x1).max(24.0);
+  let c1x = e.x1 + dx * 0.42;
+  let c2x = e.x2 - dx * 0.42;
+  // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
+  let x2 = e.x2 - 1.5;
+  format!(
+    r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
+    x1 = e.x1,
+    y1 = e.y1,
+    y2 = e.y2,
   )
 }
 
@@ -240,9 +330,10 @@ fn node_html(session: &Session, node: &WorkflowNodeMeta, pos: &LaidOut, now: u64
     meta_bits.push("ready".into());
   }
   let gate = if node.conditional {
-    r#"<span class="wf-gate" title="Conditional task" aria-label="Conditional task">◇</span>"#
+    let tip = node.when_summary.as_deref().unwrap_or("Runs only if its when: gate holds");
+    format!(r#"<span class="wf-gate" title="{t}" aria-label="{t}">when</span>"#, t = esc(tip))
   } else {
-    ""
+    String::new()
   };
   let href = format!("#task-{}", esc(&node.id));
   let proc_attr = match node.proc_index {

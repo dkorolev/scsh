@@ -448,18 +448,33 @@ pub fn skill_prompt_clause(harness: Harness, skill_source: &str, global: bool) -
   }
 }
 
+/// How the agent is told what to do: either "run this skill file" or the free-form prompt itself.
+fn agent_task_prompt(harness: Harness, skill_source: &str, delivery: &crate::config::SkillDelivery) -> String {
+  const GIT_GUARD: &str =
+    "Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present.";
+  const RESULT: &str = "Write the required result file to the path in the SCSH_RESULT environment variable.";
+  match delivery {
+    crate::config::SkillDelivery::DirectPrompt(body) => {
+      format!("{}\n\n{RESULT} {GIT_GUARD}", body.trim_end())
+    }
+    crate::config::SkillDelivery::Repo => {
+      let clause = skill_prompt_clause(harness, skill_source, false);
+      format!("{clause} Follow its instructions exactly. {RESULT} {GIT_GUARD}")
+    }
+    crate::config::SkillDelivery::GlobalInstall(_) => {
+      let clause = skill_prompt_clause(harness, skill_source, true);
+      format!("{clause} Follow its instructions exactly. {RESULT} {GIT_GUARD}")
+    }
+  }
+}
+
 pub fn harness_command(
   harness: Harness, model: Option<&str>, effort: Option<&str>, skill_source: &str, result: &str,
-  term: crate::config::Terminal, global_skill: bool,
+  term: crate::config::Terminal, delivery: &crate::config::SkillDelivery,
 ) -> String {
-  let skill_clause = skill_prompt_clause(harness, skill_source, global_skill);
+  let prompt = agent_task_prompt(harness, skill_source, delivery);
   match harness {
     Harness::Opencode => {
-      let prompt = format!(
-        "{skill_clause} Follow its instructions exactly. \
-         Write the required result file to the path in the SCSH_RESULT environment variable. \
-         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
-      );
       // Full interactive TUI: opencode's default command IS the TUI, and `--prompt` seeds the
       // initial message (vs the old headless `opencode run`, which produced no recording — and
       // here no result). The ephemeral container is the sandbox.
@@ -474,11 +489,6 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Enter, result, term)
     }
     Harness::Claude => {
-      let prompt = format!(
-        "{skill_clause} Follow its instructions exactly. \
-         Write the required result file to the path in the SCSH_RESULT environment variable. \
-         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
-      );
       // Full interactive TUI (no -p): the recording shows the real Claude Code screen, and
       // no dialog blocks it. `bypassPermissions` auto-approves EVERY tool (bash, edits, fetch,
       // MCP, …) — scsh runs arbitrary skills, so a per-tool allowlist would not be enough. Its
@@ -495,11 +505,6 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
     Harness::Codex => {
-      let prompt = format!(
-        "{skill_clause} Follow its instructions exactly. \
-         Write the required result file to the path in the SCSH_RESULT environment variable. \
-         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
-      );
       // Full interactive TUI (no `exec`): the recording shows the real Codex screen. The
       // container IS the sandbox (ephemeral, --rm), so codex's own sandbox/approvals are
       // bypassed; the repo mount is pre-trusted in the forwarded config.toml (see main's
@@ -518,11 +523,6 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Grok => {
-      let prompt = format!(
-        "{skill_clause} Follow its instructions exactly. \
-         Write the required result file to the path in the SCSH_RESULT environment variable. \
-         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
-      );
       // Full interactive TUI: grok's default IS the Build TUI, and a positional prompt seeds
       // the interactive session (`grok "fix the bug"`) — vs the old headless `grok -p`, which
       // recorded no real terminal. `--always-approve` auto-approves; the container is the sandbox.
@@ -540,11 +540,6 @@ pub fn harness_command(
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Cursor => {
-      let prompt = format!(
-        "{skill_clause} Follow its instructions exactly. \
-         Write the required result file to the path in the SCSH_RESULT environment variable. \
-         Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present."
-      );
       // Full interactive TUI (no -p): the recording shows the real cursor-agent screen.
       // The ephemeral container is the sandbox; --force auto-approves. cursor's `--trust`
       // is print-mode-only, and its TUI workspace-trust prompt has no flag or seedable
@@ -1789,10 +1784,12 @@ pub fn push_transport_refs(root: &Path, bare: &Path) -> Result<(), String> {
 }
 
 /// Commit a single file into a bare repo's checked-out branch, on top of HEAD, so a container
-/// that clones the transport sees it in its working tree. scsh uses this to place a harness
-/// definition's `SKILL.md` into the Apple Container git-transport clone without dirtying the
-/// caller's repo. `commit_name`/`commit_email` identify the scaffolding commit (it lives only
-/// in the throwaway transport repo and is never returned to the caller).
+/// that clones the transport sees it in its working tree. Previously used to place a synthetic
+/// `SKILL.md` for harness-def runs; those now use [`crate::config::SkillDelivery::DirectPrompt`]
+/// instead. Kept for git-transport callers that still need to inject a file without dirtying
+/// the caller's repo. `commit_name`/`commit_email` identify the scaffolding commit (it lives
+/// only in the throwaway transport repo and is never returned to the caller).
+#[allow(dead_code)]
 pub fn inject_file_into_bare(
   bare: &Path, rel_path: &str, content: &str, commit_name: &str, commit_email: &str,
 ) -> Result<(), String> {
@@ -2422,11 +2419,40 @@ TAG
   #[test]
   fn harness_command_global_skill_prompts() {
     let term = crate::config::Terminal::default();
-    let claude = harness_command(Harness::Claude, Some("sonnet"), None, "code-review", "tmp/r.json", term, true);
+    let claude = harness_command(
+      Harness::Claude,
+      Some("sonnet"),
+      None,
+      "code-review",
+      "tmp/r.json",
+      term,
+      &crate::config::SkillDelivery::GlobalInstall("x".into()),
+    );
     assert!(claude.contains("globally installed skill named"), "got: {claude}");
     assert!(!claude.contains(".skills/code-review"), "got: {claude}");
-    let opencode = harness_command(Harness::Opencode, Some("openai/gpt-5.5"), None, "greet", "tmp/r.json", term, true);
+    let opencode = harness_command(
+      Harness::Opencode,
+      Some("openai/gpt-5.5"),
+      None,
+      "greet",
+      "tmp/r.json",
+      term,
+      &crate::config::SkillDelivery::GlobalInstall("x".into()),
+    );
     assert!(opencode.contains("tmp/.scsh-skills/greet/SKILL.md"), "got: {opencode}");
+  }
+
+  #[test]
+  fn harness_command_direct_prompt_skips_skill_indirection() {
+    let term = crate::config::Terminal::default();
+    let body = "Write {\"ok\": true} to $SCSH_RESULT and stop.";
+    let delivery = crate::config::SkillDelivery::DirectPrompt(body.into());
+    let cmd =
+      harness_command(Harness::Claude, Some("sonnet"), None, "probe_credentials", "tmp/p.json", term, &delivery);
+    assert!(cmd.contains("Write {\"ok\": true} to $SCSH_RESULT and stop."), "prompt body inlined: {cmd}");
+    assert!(!cmd.contains("Run the skill defined"), "no skill clause: {cmd}");
+    assert!(!cmd.contains(".skills/probe_credentials"), "no synthetic skill path: {cmd}");
+    assert!(!cmd.contains("Follow its instructions exactly"), "direct prompt is the instructions: {cmd}");
   }
 
   #[test]
@@ -2439,7 +2465,7 @@ TAG
       "add",
       "tmp/add.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains("scsh: harness=opencode"));
     assert!(cmd.contains("mkdir -p \"$(dirname \"${SCSH_RUN_LOG}\")\""), "got: {cmd}");
@@ -2457,7 +2483,7 @@ TAG
       "multiply",
       "tmp/mul.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(bare.contains("opencode --prompt "), "got: {bare}");
     assert!(!bare.contains(" -m "), "got: {bare}");
@@ -2472,7 +2498,7 @@ TAG
       "add",
       "tmp/add_claude_sonnet_4_6_result.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains(".skills/add/SKILL.md"));
     // Interactive TUI recorded via scsh-tui-record (no inline shell, no screen-scraping).
@@ -2499,7 +2525,7 @@ TAG
       "add",
       "tmp/add_codex_result.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains("scsh: harness=codex"));
     // Interactive TUI (no `exec` subcommand) via scsh-tui-record. Folder-trust is seeded
@@ -2520,7 +2546,7 @@ TAG
       "multiply",
       "tmp/mul.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(bare.contains("codex --dangerously-bypass-approvals-and-sandbox"));
     assert!(!bare.contains(" -m "));
@@ -2537,7 +2563,7 @@ TAG
       "add",
       "tmp/add_grok.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains("scsh: harness=grok"));
     assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_grok.json "), "got: {cmd}");
@@ -2548,8 +2574,15 @@ TAG
     assert!(cmd.contains(".skills/add/SKILL.md"));
     assert!(cmd.contains("SCSH_RESULT"));
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
-    let bare =
-      harness_command(Harness::Grok, None, None, "multiply", "tmp/mul.json", crate::config::Terminal::default(), false);
+    let bare = harness_command(
+      Harness::Grok,
+      None,
+      None,
+      "multiply",
+      "tmp/mul.json",
+      crate::config::Terminal::default(),
+      &crate::config::SkillDelivery::Repo,
+    );
     assert!(bare.contains("grok --always-approve"), "got: {bare}");
     assert!(!bare.contains(" --effort "));
     assert!(!bare.contains(" -m "));
@@ -2564,7 +2597,7 @@ TAG
       "add",
       "tmp/add_cursor.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains("scsh: harness=cursor"));
     // The launcher's auto-updater can SIGTERM a freshly started run (the ~1.5s early-exit
@@ -2589,7 +2622,7 @@ TAG
       "multiply",
       "tmp/mul.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(bare.contains("cursor-agent --force --sandbox disabled"));
     assert!(!bare.contains(" --model "));
@@ -2610,7 +2643,7 @@ TAG
     // the recording path is always ${SCSH_RUN_LOG}.cast.
     let term = crate::config::Terminal { cols: 120, rows: 30 };
     for h in [Harness::Claude, Harness::Codex, Harness::Cursor, Harness::Opencode, Harness::Grok] {
-      let cmd = harness_command(h, Some("m"), None, "add", "tmp/add.json", term, false);
+      let cmd = harness_command(h, Some("m"), None, "add", "tmp/add.json", term, &crate::config::SkillDelivery::Repo);
       assert!(cmd.contains("scsh-tui-record 120 30 "), "harness {h:?} got: {cmd}");
       assert!(cmd.contains("cast=${SCSH_RUN_LOG}.cast"), "harness {h:?} got: {cmd}");
     }
@@ -2625,7 +2658,7 @@ TAG
       "add",
       "tmp/add.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
     let without = harness_command(
@@ -2635,7 +2668,7 @@ TAG
       "add",
       "tmp/add.json",
       crate::config::Terminal::default(),
-      false,
+      &crate::config::SkillDelivery::Repo,
     );
     assert!(!without.contains("model_reasoning_effort"));
   }

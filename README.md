@@ -192,8 +192,9 @@ See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 **Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
 runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
 `~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits`, `code-review`,
-`arith`, and `greet` workflows — `greet` is the fake-PR demo: scaffold a broken `greet()`,
-fix it, commit `PR-DESCRIPTION.md`). A flat
+`arith`, and `greet` workflows — `greet` is the multi-step fake-PR demo: scaffold a broken `greet()`,
+fix it, commit `PR-DESCRIPTION.md` — plus the flat `demo-pr` definition: one shot that commits a
+tiny feature note + `PR-DESCRIPTION.md` on claude/codex/cursor/grok). A flat
 definition declares a `description`, typed `params` (which become environment variables), a
 `task` body, and an `invocations:` agent matrix. A **workflow** definition instead declares
 `steps:` — a DAG where each step runs an agent, writes typed `output` (plus any declared

@@ -410,13 +410,21 @@ mod tests {
       run_pid: None,
       workflow: Some(WorkflowMeta {
         nodes: vec![
-          WorkflowNodeMeta { id: "add".into(), proc_index: Some(0), order: 0, needs: vec![], conditional: false },
+          WorkflowNodeMeta {
+            id: "add".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
           WorkflowNodeMeta {
             id: "summarize".into(),
             proc_index: None,
             order: 1,
             needs: vec!["add".into()],
             conditional: false,
+            when_summary: None,
           },
         ],
       }),

@@ -23,7 +23,9 @@ All symlinks point at this directory so one edit updates every host.
 | [scsh-harness-demo-and-selftest](scsh-harness-demo-and-selftest/SKILL.md) | Follow `DEMO.md` to bootstrap a tiny `scsh` demo repo and run it, reporting PASS/FAIL — scsh's bundled demo + self-test (installed by a no-URL `scsh installskills`) |
 | [harness-smoke](harness-smoke/SKILL.md) | Minimal JSON OK smoke test for **grok** and **cursor** harnesses — run via [`HARNESS-SMOKE.md`](../HARNESS-SMOKE.md) or `./scripts/harness-smoke.sh` |
 | [add](add/SKILL.md) | Sum of env vars `A`+`B` (defaults `2`,`3`); reports `A + B = sum` |
+| [subtract](subtract/SKILL.md) | Difference `C`−`D` (defaults `10`,`4`); commit-enabled companion to `add` |
 | [multiply](multiply/SKILL.md) | Product of `X`·`Y` with **no defaults** — errors if either `X` or `Y` is unset |
+| [demo-pr](demo-pr/SKILL.md) | Minimal fake PR: write `demo_pr_note.txt` + `PR-DESCRIPTION.md`, two commits (packdiff Description panel) |
 
 > This is the **scsh tool repo**, not a consumer project: it has no root `.scsh.yml`, so
 > `add`/`multiply` here are the reference examples `scsh init-demo-project` scaffolds — not
