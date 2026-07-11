@@ -405,29 +405,49 @@ function procIsLive(status) {
   return status === 'running' || status === 'waiting';
 }
 function autoscrollCtlHtml(p) {
-  if (!procIsLive(p.status)) return '';
+  // Always reserve the control (WEB-UI §2); disable when the proc is no longer live.
+  const live = procIsLive(p.status);
   const scrollChecked = autoScrollEnabled(p.index) ? ' checked' : '';
+  const disabled = live ? '' : ' disabled';
   return '<label class="autoscroll-ctl"><input type="checkbox" data-autoscroll' + scrollChecked +
-    '> Auto-scroll to bottom</label>';
+    disabled + '> Auto-scroll to bottom</label>';
 }
 function syncAutoscrollCtl(det, p) {
   const live = procIsLive(p.status);
-  const ctl = det.querySelector('.autoscroll-ctl');
-  if (live) {
-    if (!ctl) {
-      const label = document.createElement('label');
-      label.className = 'autoscroll-ctl';
-      label.innerHTML = '<input type="checkbox" data-autoscroll checked> Auto-scroll to bottom';
-      const out = det.querySelector('.output');
-      if (out) det.insertBefore(label, out);
-    }
-  } else if (ctl) {
-    ctl.remove();
+  let ctl = det.querySelector('.autoscroll-ctl');
+  if (!ctl) {
+    const label = document.createElement('label');
+    label.className = 'autoscroll-ctl';
+    label.innerHTML = '<input type="checkbox" data-autoscroll> Auto-scroll to bottom';
+    const out = det.querySelector('.output');
+    if (out) det.insertBefore(label, out);
+    ctl = label;
+  }
+  const input = ctl && ctl.querySelector('input');
+  if (input) {
+    input.disabled = !live;
+    if (live && autoScrollEnabled(p.index)) input.checked = true;
   }
 }
 const autoScrollByProc = new Map();
+function uiPrefsKey() {
+  return 'scsh.ui.' + (typeof SESSION_ID === 'string' && SESSION_ID ? SESSION_ID : 'index');
+}
+function loadUiPrefs() {
+  try { return JSON.parse(localStorage.getItem(uiPrefsKey()) || '{}') || {}; }
+  catch (_) { return {}; }
+}
+function saveUiPrefs(patch) {
+  const next = Object.assign(loadUiPrefs(), patch);
+  try { localStorage.setItem(uiPrefsKey(), JSON.stringify(next)); } catch (_) {}
+  return next;
+}
 function autoScrollEnabled(index) {
-  return autoScrollByProc.get(String(index)) !== false;
+  if (autoScrollByProc.has(String(index))) return autoScrollByProc.get(String(index)) !== false;
+  const prefs = loadUiPrefs();
+  const m = prefs.autoscroll || {};
+  if (Object.prototype.hasOwnProperty.call(m, String(index))) return m[String(index)] !== false;
+  return true;
 }
 function isAtBottom(el, slack) {
   slack = slack ?? 4;
@@ -497,9 +517,15 @@ function updateProcFields(det, p, nowUnix) {
     if (finished && looksLikeArtifactPath(text)) noteEl.innerHTML = '<code>' + esc(text) + '</code>';
     else noteEl.textContent = text;
   }
-  // The per-proc kill button only makes sense while the proc still runs.
+  // Per-proc kill stays in place grayed (WEB-UI §2) — never remove mid-job.
   const killEl = det.querySelector('button[data-proc-stop]');
-  if (killEl && p.status !== 'running' && p.status !== 'waiting') killEl.remove();
+  if (killEl) {
+    const live = p.status === 'running' || p.status === 'waiting';
+    killEl.disabled = !live;
+    killEl.title = live
+      ? 'Force-stop this container only — the rest of the job continues'
+      : 'This step already finished';
+  }
   // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
   // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
   if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
@@ -924,10 +950,7 @@ function updateWorkflowGraph(session, nowUnix) {
     }
   }
 }
-function activateWorkflowTask(stepId) {
-  if (!stepId) return;
-  const det = document.getElementById('task-' + stepId) ||
-    document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
+function activateProcPanel(det, hash) {
   if (!det) return;
   det.open = true;
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -938,9 +961,31 @@ function activateWorkflowTask(stepId) {
   }
   det.classList.add('wf-dest-flash');
   setTimeout(() => det.classList.remove('wf-dest-flash'), 1200);
-  if (location.hash !== '#task-' + stepId) {
-    history.replaceState(null, '', '#task-' + stepId);
-  }
+  if (hash && location.hash !== hash) history.replaceState(null, '', hash);
+  persistOpenProcs();
+}
+function activateWorkflowTask(stepId) {
+  if (!stepId) return;
+  const det = document.getElementById('task-' + stepId) ||
+    document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
+  activateProcPanel(det, '#task-' + stepId);
+}
+function persistOpenProcs() {
+  if (typeof SESSION_ID !== 'string' || !SESSION_ID) return;
+  const open = [];
+  document.querySelectorAll('details.proc[data-index]').forEach((det) => {
+    if (det.open) open.push(det.dataset.index);
+  });
+  saveUiPrefs({ openProcs: open });
+}
+function restoreOpenProcs() {
+  if (typeof SESSION_ID !== 'string' || !SESSION_ID) return;
+  const open = loadUiPrefs().openProcs;
+  if (!Array.isArray(open)) return;
+  open.forEach((idx) => {
+    const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(idx)) + '"]');
+    if (det) det.open = true;
+  });
 }
 function initWorkflowGraph() {
   const root = document.querySelector('[data-workflow-graph]');
@@ -970,8 +1015,15 @@ function bindSessionProcs(root) {
     const out = det && det.querySelector('.output');
     if (!det || !out) return;
     autoScrollByProc.set(det.dataset.index, ev.target.checked);
+    const prefs = loadUiPrefs();
+    const m = Object.assign({}, prefs.autoscroll || {});
+    m[det.dataset.index] = ev.target.checked;
+    saveUiPrefs({ autoscroll: m });
     if (ev.target.checked) scrollOutputToBottom(out);
   });
+  root.addEventListener('toggle', (ev) => {
+    if (ev.target && ev.target.matches && ev.target.matches('details.proc')) persistOpenProcs();
+  }, true);
 }
 function setupOutputScroll(out) {
   if (!out || out.dataset.scrollBound) return;
@@ -1104,6 +1156,7 @@ startProcClock();
   initHarnessStops();
   initFleetJumps();
   initWorkflowGraph();
+  restoreOpenProcs();
 })();
 function initFleetJumps() {
   document.querySelectorAll('.fleet-jump').forEach((btn) => {
@@ -1111,20 +1164,25 @@ function initFleetJumps() {
       ev.preventDefault();
       const idx = btn.getAttribute('data-proc');
       if (idx == null) return;
-      const det = document.querySelector('details.proc[data-index="' + idx + '"]');
-      if (!det) return;
-      det.open = true;
-      det.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      const det = document.querySelector('details.proc[data-index="' + CSS.escape(idx) + '"]');
+      const step = det && det.getAttribute('data-workflow-step');
+      activateProcPanel(det, step ? '#task-' + step : null);
     });
   });
 }
 function syncSessionStopButton(session) {
   const lifecycle = sessionLifecycle(session, Date.now() / 1000);
   const btn = document.getElementById('session-stop');
-  // Match SSR: Force stop only while genuinely running. Heartbeat-stale (terminated)
-  // jobs lose the button and gain the resting badge — never "still running" + Force stop.
+  // Gray in place (WEB-UI §2) — never remove. Badge still follows the heading when resting.
+  if (btn) {
+    const running = lifecycle.class === 'running';
+    btn.disabled = !running;
+    btn.title = running
+      ? 'Force-stop this job? Running containers will be killed.'
+      : ('Job is ' + lifecycle.label + ' — nothing left to stop');
+    setBtnLabel(btn, 'Force stop');
+  }
   if (lifecycle.class === 'running') return;
-  if (btn) btn.remove();
   const kind = document.querySelector('.session-kind');
   if (kind && !kind.querySelector('.session-status')) {
     kind.insertAdjacentHTML('beforeend', ' ' + sessionStatusBadge(lifecycle));
@@ -1449,6 +1507,7 @@ const DEFS_BY_NAME = {};  // name -> definition
     const hash = '#tab=' + id;
     if (mode === 'push') history.pushState({ tab: id }, '', hash);
     else if (location.hash !== hash) history.replaceState({ tab: id }, '', hash);
+    if (typeof SESSION_ID !== 'string' || !SESSION_ID) saveUiPrefs({ tab: id });
   }
   tabs.forEach(t => {
     t.setAttribute('role', 'tab');
@@ -1459,7 +1518,8 @@ const DEFS_BY_NAME = {};  // name -> definition
     activate(m ? m[1] : 'jobs', 'sync');
   });
   const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
-  activate(m ? m[1] : 'jobs', 'sync');
+  const saved = (!m && loadUiPrefs().tab) || null;
+  activate(m ? m[1] : (saved || 'jobs'), 'sync');
 })();
 function defSourceBadge(src) {
   // builtin wears purple (the setup color); repo/home keep the muted status hues.

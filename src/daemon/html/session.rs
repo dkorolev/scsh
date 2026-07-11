@@ -102,34 +102,50 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   } else {
     String::new()
   };
-  // While the session genuinely runs, offer Force stop top-right; once it is over (ended,
-  // or a dead client's Terminated zombie), the resting lifecycle badge follows the heading
-  // instead — the kind/name stays flush-left with the meta labels below it, the status
-  // reads right after it, and neither sits beside the taller download button.
+  // Force stop always occupies its slot (WEB-UI §2): enabled while running, otherwise
+  // grayed with an explanation. The resting lifecycle badge still follows the heading.
   let lifecycle = session.lifecycle_status(now);
-  let (status_chip, stop_btn) = if lifecycle == SessionLifecycle::Running {
-    (
-      String::new(),
-      format!(
-        "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"><span>Force stop</span></button>\n",
-        id = id
-      ),
-    )
+  let status_chip = if lifecycle == SessionLifecycle::Running {
+    String::new()
   } else {
-    (
-      format!(
-        " <span class=\"chamfer session-status {}\"><span>{}</span></span>",
-        lifecycle.css_class(),
-        esc(lifecycle.label())
-      ),
-      String::new(),
+    format!(
+      " <span class=\"chamfer session-status {}\"><span>{}</span></span>",
+      lifecycle.css_class(),
+      esc(lifecycle.label())
     )
   };
+  let stop_enabled = lifecycle == SessionLifecycle::Running;
+  let stop_btn = format!(
+    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"{disabled} title=\"{title}\"><span>Force stop</span></button>\n",
+    id = id,
+    disabled = if stop_enabled { "" } else { " disabled" },
+    title = if stop_enabled {
+      "Force-stop this job? Running containers will be killed."
+    } else {
+      // Keep the control visible so it does not read as a missing feature.
+      match lifecycle {
+        SessionLifecycle::Terminated => "Job terminated abruptly — nothing left to stop",
+        SessionLifecycle::Completed => "Job already completed",
+        SessionLifecycle::Failed => "Job already failed",
+        SessionLifecycle::Cancelled => "Job already cancelled",
+        SessionLifecycle::Running => "",
+      }
+    },
+  );
   // The location breadcrumb lives in the top island (see `wrap_page`); the purple island
   // opens with what the session IS — its kind and name — with the controls top-right.
   let kind = session.kind.as_deref().unwrap_or("profile");
   let workflow = workflow_graph_html(session, now);
   let fleets = fleet_sections_html(session);
+  let n = session.procs.len();
+  let lede = format!(
+    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}. <span class=\"dim\">Recordings and results stay on this machine.</span>",
+    kind = esc(kind),
+    profile = esc(profile),
+    life = esc(lifecycle.label()),
+    n = n,
+    plural = if n == 1 { "" } else { "s" },
+  );
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
 <p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
@@ -145,7 +161,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     fleets = fleets,
     procs = procs_html,
   );
-  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &body))
+  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))
 }
 
 /// A bare repo-relative artifact path (`tmp/scsh/<id>/add.json`-shaped) — system info, not
@@ -173,23 +189,27 @@ fn proc_diff_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord)
   )
 }
 
-/// A small per-proc "✕ Force stop" button, shown only while that proc still runs: it stops
-/// just this container (`POST /api/v1/proc/stop`) — unlike the job-level Force stop, the
-/// rest of the job keeps going.
+/// A small per-proc "✕ Force stop" button. Always rendered (WEB-UI §2): enabled only while
+/// that proc still runs on a live session; otherwise grayed with an explanation so the
+/// control does not vanish mid-job.
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::{ProcStatus, SessionLifecycle};
-  // A dead client's session keeps its procs "running" forever; only a genuinely live
-  // session (recent ping) has containers a kill button could reach.
-  if session.lifecycle_status(now) != SessionLifecycle::Running {
-    return String::new();
-  }
-  if proc.status != ProcStatus::Running && proc.status != ProcStatus::Waiting {
-    return String::new();
-  }
+  let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
+  let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
+  let enabled = live_session && live_proc;
+  let title = if enabled {
+    "Force-stop this container only — the rest of the job continues"
+  } else if !live_session {
+    "Job is no longer running — nothing left to stop"
+  } else {
+    "This step already finished"
+  };
   format!(
-    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Force-stop this container only — the rest of the job continues\">✕ Force stop</button>",
+    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\">✕ Force stop</button>",
     index = proc.index,
     id = esc(&session.id),
+    disabled = if enabled { "" } else { " disabled" },
+    title = esc(title),
   )
 }
 

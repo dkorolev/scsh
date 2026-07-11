@@ -42,9 +42,6 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {favicon}
 <title>cast · {label} · {sid}</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Ubuntu:wght@400;500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/scsh-cast-player.css">
 <style>
 :root {{
@@ -54,7 +51,7 @@ pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> O
 }}
 body {{
   margin: 0; background: var(--bg); color: var(--text);
-  font: 14px/1.5 'Ubuntu', ui-sans-serif, system-ui, sans-serif;
+  font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
 }}
 header {{
   padding: 16px 20px 8px; display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
