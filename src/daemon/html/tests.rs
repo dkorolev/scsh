@@ -261,6 +261,8 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
   assert!(js.contains("projectNameOk"), "client rejects dots/slashes before POST");
   assert!(html.contains("no dots/slashes"), "placeholder documents the name rules");
   assert!(html.contains(".toast"), "toast styles ship with the page");
+  assert!(html.contains(r#"class="section-label">Definitions"#), "defs panel is labeled Definitions");
+  assert!(js.contains("panel.scrollIntoView"), "open/create scrolls Definitions into view");
 }
 
 /// Syntax-check the whole live client script under Node. Catches redeclared `const`/`let`,

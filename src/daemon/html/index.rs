@@ -305,7 +305,8 @@ gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job
 </div>
 <div id="repo-blockers" class="blockers" hidden></div>
 <div id="defs-panel" hidden>
-<p class="dim">definitions in <code id="open-repo-path"></code></p>
+<p class="section-label">Definitions</p>
+<p class="dim">Harness definitions in <code id="open-repo-path"></code> — pick one to configure and start.</p>
 <div id="defs-list"></div>
 <div id="def-form"></div>
 </div>
