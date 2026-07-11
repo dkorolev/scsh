@@ -82,7 +82,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       body_html = body_html
     ));
   }
-  let profile = session.profile.as_deref().unwrap_or("default");
   let id = esc(&session.id);
   let session_meta = session_meta_html(session, now);
   let lifecycle = session.lifecycle_status(now);
@@ -119,18 +118,9 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       }
     },
   );
-  let kind = session.kind.as_deref().unwrap_or("profile");
   let workflow = workflow_graph_html(session, now);
   let fleets = fleet_sections_html(session);
-  let n = session.procs.len();
-  let lede = format!(
-    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}.",
-    kind = esc(kind),
-    profile = esc(profile),
-    life = esc(lifecycle.label()),
-    n = n,
-    plural = if n == 1 { "" } else { "s" },
-  );
+  let lede = session_lede_html(session, lifecycle);
   let chapters_pending = chapters_pending_html(pending);
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{export_btn}{stop_btn}</div>\
@@ -145,6 +135,37 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))
+}
+
+/// The one-line page lede shared by the live job page and the offline export: kind,
+/// profile, lifecycle, and task count — enough to tell at a glance what ran and whether
+/// it succeeded.
+pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) -> String {
+  let kind = session.kind.as_deref().unwrap_or("profile");
+  let profile = session.profile.as_deref().unwrap_or("default");
+  let n = session.procs.len();
+  format!(
+    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}.",
+    kind = esc(kind),
+    profile = esc(profile),
+    life = esc(lifecycle.label()),
+    n = n,
+    plural = if n == 1 { "" } else { "s" },
+  )
+}
+
+/// The human "Ended" cell shared by the live meta and the offline export: the wall-clock
+/// end when known, "still running" while live, and the last heartbeat for a terminated
+/// (heartbeat-stale) session — when we last heard from the run is its effective end.
+pub(crate) fn session_ended_text(session: &Session, lifecycle: SessionLifecycle) -> String {
+  match (session.ended_at, lifecycle) {
+    (Some(t), _) => format!("{} UTC", crate::runtime::format_utc_timestamp(t)),
+    (None, SessionLifecycle::Running) => "still running".into(),
+    (None, SessionLifecycle::Terminated) => {
+      format!("{} UTC", crate::runtime::format_utc_timestamp(session.last_seen_at))
+    }
+    (None, _) => "—".into(),
+  }
 }
 
 /// Non-annotate procs that have a cast but no chapters sidecar yet.
@@ -258,15 +279,7 @@ fn session_meta_html(session: &Session, now: u64) -> String {
   use super::format::format_duration_secs;
   let lifecycle = session.lifecycle_status(now);
   let started = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
-  let ended = match (session.ended_at, lifecycle) {
-    (Some(t), _) => format!("{} UTC", crate::runtime::format_utc_timestamp(t)),
-    (None, SessionLifecycle::Running) => "still running".into(),
-    // Heartbeat-stale: last_seen is the effective end (when we last heard from the run).
-    (None, SessionLifecycle::Terminated) => {
-      format!("{} UTC", crate::runtime::format_utc_timestamp(session.last_seen_at))
-    }
-    (None, _) => "—".into(),
-  };
+  let ended = session_ended_text(session, lifecycle);
   let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());
   let last_seen = session.last_seen_at;
   format!(

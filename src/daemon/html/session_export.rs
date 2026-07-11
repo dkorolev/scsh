@@ -2,7 +2,10 @@
 //! page, served at `/job/<id>/export.html` as a download attachment.
 //!
 //! The page is a REPLICA of the live job page: the same stylesheet (`layout::PAGE_CSS`),
-//! the same purple island and collapsible per-run rows, and the same `beecast-player` —
+//! the same lede and full meta (ended, duration), the same workflow DAG and fleet
+//! comparison sections (static, frozen at export time), the same purple island and
+//! collapsible per-run rows — text-log procs keep their timestamped lines — and the same
+//! `beecast-player` —
 //! one shared bundle, one player per recording, mounted from inline data (no iframes, no
 //! per-cast page copies). What the live page does over HTTP the export inlines: the cast
 //! text, the sidecar summary, and the chapter markers ride in a single JSON block, and a
@@ -15,8 +18,12 @@
 //! stays a single file.
 
 use super::escape::esc;
+use super::fleet::fleet_sections_html;
+use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{elapsed_phrase, proc_meta_html};
+use super::session::{session_ended_text, session_lede_html};
+use super::workflow::{proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcRecord, Session};
 use crate::json::quote;
 
@@ -44,16 +51,28 @@ const EXPORT_EXTRA_CSS: &str = r#"
 "#;
 
 /// Assemble the whole-job page from the session's metadata and the per-proc exports
-/// (`exports[i]` belongs to `session.procs[i]` — board order). Pure: all file I/O (casts,
-/// sidecars, diffs) happened in the caller.
-pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> String {
+/// (`exports[i]` belongs to `session.procs[i]` — board order). `now` is the export
+/// instant: lifecycle, duration, and the workflow-node states freeze at it. Pure beyond
+/// that: all file I/O (casts, sidecars, diffs) happened in the caller.
+pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now: u64) -> String {
   let id = esc(&session.id);
-  // Kind/lifecycle live on the live page lede; offline export keeps meta + recordings only.
+  // Parity with the live job page: the lede (kind · lifecycle · task count) and the full
+  // meta (ended, duration) ride along, so the offline copy answers "did it succeed, and
+  // how long did it take" without the daemon.
+  let lifecycle = session.lifecycle_status(now);
+  let lede = session_lede_html(session, lifecycle);
   let when = format!("{} UTC", crate::runtime::format_utc_timestamp(session.started_at));
+  let ended = session_ended_text(session, lifecycle);
+  let duration = session.duration_secs(now).map(format_duration_secs).unwrap_or_else(|| "—".into());
+  // The workflow DAG (with its start/finish terminals) and the fleet comparison tables
+  // are server-rendered markup styled by the shared stylesheet, so the export embeds them
+  // as-is — the static state at export time, no live-update wiring.
+  let workflow = workflow_graph_html(session, now);
+  let fleets = fleet_sections_html(session);
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
   for (proc, export) in session.procs.iter().zip(exports) {
-    sections.push_str(&proc_section(proc, export));
+    sections.push_str(&proc_section(session, proc, export));
     if let CastExport::Cast { ndjson, summary, chapters, .. } = export {
       let markers: Vec<String> = chapters.iter().map(|(t, title)| format!("[{t}, {}]", quote(title))).collect();
       data_entries.push(format!(
@@ -79,16 +98,19 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport]) -> 
 <style>{css}{player_css}{extra_css}</style>
 </head>
 <body>
+<p class="page-lede">{lede}</p>
 <div class="card card--accent-left-purple">
 <dl class="session-meta">
 <dt>Job</dt><dd><code>{id}</code></dd>
 <dt>Started</dt><dd>{when}</dd>
-<dt>Branch</dt><dd><code>{branch}</code></dd>
+<dt>Ended</dt><dd>{ended}</dd>
+<dt>Duration</dt><dd>{duration}</dd>
 <dt>Repo</dt><dd><code class="repo-path">{repo}</code></dd>
+<dt>Branch</dt><dd><code>{branch}</code></dd>
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
-<div class="procs">
+{workflow}{fleets}<div class="procs">
 {sections}</div>
 <script>{player_js}</script>
 <script>
@@ -118,6 +140,11 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     player_css = super::PLAYER_CSS,
     player_js = super::PLAYER_JS,
     extra_css = EXPORT_EXTRA_CSS,
+    lede = lede,
+    ended = esc(&ended),
+    duration = esc(&duration),
+    workflow = workflow,
+    fleets = fleets,
     branch = esc(&session.branch),
     repo = esc(&session.repo),
   )
@@ -150,8 +177,9 @@ fn diff_chip_html(has_diff: bool) -> String {
 }
 
 /// One per-run row: the SAME `details.proc` markup as the live job page (triangle,
-/// label, elapsed phrase, note), with the cast box carrying only the keys hint — no live controls.
-fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
+/// label, elapsed phrase, note, task anchor for the workflow graph's jump links), with
+/// the cast box carrying only the keys hint — no live controls.
+fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
   let elapsed = elapsed_phrase(proc.status, proc.elapsed, proc.fail_reason.as_deref());
   let diff = export.diff_html();
@@ -169,12 +197,27 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
         diff = diff_embed_html(diff),
       )
     }
+    // Parity with the live page: a proc that ran without a recording keeps its full
+    // timestamped log lines offline (same static markup as the live text-log body; the
+    // auto-scroll control is live-only). The no-recording note is dropped here because
+    // the lines ARE the record; it stays only when there is truly no output to show.
+    CastExport::Note { .. } if !proc.lines.is_empty() => {
+      let mut lines_html = String::new();
+      for line in &proc.lines {
+        lines_html.push_str(&format!(
+          "<div class=\"line\"><span class=\"at\">+{at:.1}s</span> {text}</div>\n",
+          at = line.at,
+          text = esc(&line.text)
+        ));
+      }
+      format!("<div class=\"output\">{lines_html}</div>\n{}", diff_embed_html(diff))
+    }
     CastExport::Note { text, .. } => {
       format!("<div class=\"detail dim\">{}</div>\n{}", esc(text), diff_embed_html(diff))
     }
   };
   format!(
-    r#"<details open class="proc {status}" data-index="{idx}">
+    r#"<details open class="proc {status}" data-index="{idx}"{task_attrs}>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>
@@ -186,6 +229,7 @@ fn proc_section(proc: &ProcRecord, export: &CastExport) -> String {
 "#,
     status = proc.status.as_str(),
     idx = proc.index,
+    task_attrs = proc_task_attrs(session, proc),
     label = esc(&proc.label),
     elapsed = esc(&elapsed),
     note = esc(note),

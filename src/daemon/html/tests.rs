@@ -764,7 +764,10 @@ fn ended_session_grays_force_stop_button_in_place() {
 }
 
 #[test]
-fn offline_export_keeps_meta_without_kind_heading() {
+fn offline_export_carries_lede_and_full_meta() {
+  // Parity with the live job page: the export shows the lede (kind · lifecycle · task
+  // count) and the FULL meta — ended and duration included — so the offline copy answers
+  // "did it succeed, and how long did it take" without the daemon.
   let session = Session {
     id: "exp01".into(),
     started_at: 1,
@@ -781,10 +784,16 @@ fn offline_export_keeps_meta_without_kind_heading() {
     workflow: None,
     parent_session: None,
   };
-  let html = session_export_page(&session, &[]);
-  assert!(!html.contains(r#"class="session-kind""#), "export drops session-kind: {html}");
+  let html = session_export_page(&session, &[], 100);
+  assert!(html.contains(r#"class="page-lede""#), "export carries the live page's lede: {html}");
+  assert!(
+    html.contains("profile <strong>code-review</strong> · completed · 0 tasks."),
+    "lede shows kind, profile, lifecycle, and task count: {html}"
+  );
   assert!(html.contains(r#"<dl class="session-meta">"#), "export keeps session-meta: {html}");
   assert!(html.contains("<code>exp01</code>"), "job id in meta: {html}");
+  assert!(html.contains("<dt>Ended</dt>"), "export meta shows when the job ended: {html}");
+  assert!(html.contains("<dt>Duration</dt><dd>9s</dd>"), "export meta shows how long the job took: {html}");
   assert!(html.contains("accessibility: 'snapshot'"), "export player opts enable a11y snapshot");
 }
 
@@ -829,7 +838,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
-  let html = session_export_page(&session, &exports);
+  let html = session_export_page(&session, &exports, 100);
   assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
   assert!(html.contains(r#"<details class="proc-diff">"#), "body embeds the packed diff");
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
@@ -839,6 +848,205 @@ fn offline_export_embeds_commits_diff_when_present() {
   );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
+}
+
+#[test]
+fn offline_export_keeps_text_log_lines() {
+  use super::session_export::CastExport;
+  use crate::daemon::model::OutputLine;
+  // A proc that ran WITHOUT a recording shows full timestamped log lines on the live page;
+  // the export must carry the same lines statically (same markup/classes) instead of
+  // collapsing them to a one-line "no recording" note.
+  let session = Session {
+    id: "explog".into(),
+    started_at: 1,
+    ended_at: Some(10),
+    profile: Some("default".into()),
+    kind: Some("profile".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 10,
+    client_connected: false,
+    run_pid: None,
+    skills: vec![],
+    procs: vec![ProcRecord {
+      index: 0,
+      kind: ProcKind::Build,
+      label: "build: claude".into(),
+      status: ProcStatus::Ok,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      container_name: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      harness: Some("claude".into()),
+      skill_name: None,
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(9.0),
+      lines: vec![
+        OutputLine { at: 0.5, text: "Step 1/4 : FROM ubuntu".into() },
+        OutputLine { at: 2.0, text: "<hostile> & escaped".into() },
+      ],
+    }],
+    workflow: None,
+    parent_session: None,
+  };
+  let note = "no recording — image build ran without asciinema on PATH (text log only)";
+  let exports = [CastExport::Note { text: note.into(), diff_html: None }];
+  let html = session_export_page(&session, &exports, 100);
+  assert!(html.contains(r#"<div class="output">"#), "export embeds the text-log output box: {html}");
+  assert!(
+    html.contains(r#"<div class="line"><span class="at">+0.5s</span> Step 1/4 : FROM ubuntu</div>"#),
+    "export keeps the live page's timestamped line markup: {html}"
+  );
+  assert!(html.contains("&lt;hostile&gt; &amp; escaped"), "log lines are HTML-escaped: {html}");
+  assert!(!html.contains(note), "the one-line note gives way to the actual log lines: {html}");
+  // A proc with truly no output still gets the explanatory note, not an empty box.
+  let mut bare = session.clone();
+  bare.procs[0].lines.clear();
+  let exports = [CastExport::Note { text: note.into(), diff_html: None }];
+  let bare_html = session_export_page(&bare, &exports, 100);
+  assert!(bare_html.contains(note), "no lines → the note explains why there is nothing to embed: {bare_html}");
+  assert!(!bare_html.contains(r#"<div class="output">"#), "no lines → no empty output box: {bare_html}");
+}
+
+#[test]
+fn offline_export_includes_workflow_graph() {
+  use super::session_export::CastExport;
+  use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+  // The live job page renders the workflow DAG above the proc rows; the export must carry
+  // the same server-rendered graph (frozen at export time), start/finish terminals and
+  // task anchors included, so the offline copy shows how the job was wired.
+  let session = Session {
+    id: "expwf".into(),
+    started_at: 1,
+    ended_at: Some(10),
+    profile: Some("arith".into()),
+    kind: Some("workflow".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 10,
+    client_connected: false,
+    run_pid: None,
+    skills: vec![],
+    procs: vec![
+      ProcRecord {
+        index: 0,
+        kind: ProcKind::Skill,
+        label: "claude: add".into(),
+        status: ProcStatus::Ok,
+        note: None,
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: None,
+        diff_path: None,
+        skill_source: Some("add".into()),
+        route: None,
+        result_path: None,
+        harness: Some("claude".into()),
+        skill_name: Some("add".into()),
+        model: None,
+        started_at: Some(1),
+        elapsed: Some(4.0),
+        lines: vec![],
+      },
+      ProcRecord {
+        index: 1,
+        kind: ProcKind::Skill,
+        label: "codex: summarize".into(),
+        status: ProcStatus::Ok,
+        note: None,
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: None,
+        diff_path: None,
+        skill_source: Some("summarize".into()),
+        route: None,
+        result_path: None,
+        harness: Some("codex".into()),
+        skill_name: Some("summarize".into()),
+        model: None,
+        started_at: Some(5),
+        elapsed: Some(5.0),
+        lines: vec![],
+      },
+    ],
+    workflow: Some(WorkflowMeta {
+      nodes: vec![
+        WorkflowNodeMeta {
+          id: "add".into(),
+          proc_index: Some(0),
+          order: 0,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        },
+        WorkflowNodeMeta {
+          id: "summarize".into(),
+          proc_index: Some(1),
+          order: 1,
+          needs: vec!["add".into()],
+          conditional: false,
+          when_summary: None,
+        },
+      ],
+    }),
+    parent_session: None,
+  };
+  let exports = [
+    CastExport::Note { text: "no recording".into(), diff_html: None },
+    CastExport::Note { text: "no recording".into(), diff_html: None },
+  ];
+  let html = session_export_page(&session, &exports, 100);
+  assert!(html.contains(r#"id="workflow-graph""#), "export carries the workflow card: {html}");
+  assert!(html.contains(r#"class="wf-terminal wf-term-start""#), "graph keeps its start terminal");
+  assert!(html.contains(r#"class="wf-terminal wf-term-finish""#), "graph keeps its finish terminal");
+  assert!(html.contains(r#"data-workflow-step="add""#) && html.contains(r#"data-workflow-step="summarize""#));
+  // The graph's jump links resolve offline: proc rows carry the same task anchors as live.
+  assert!(html.contains("href=\"#task-add\""), "node links target task anchors");
+  assert!(html.contains(r#"<details open class="proc ok" data-index="0" id="task-add""#), "proc row anchors: {html}");
+  // The graph CSS rides in the shared stylesheet the export inlines.
+  assert!(html.contains(".wf-terminal"), "terminal CSS is inlined in the export");
+}
+
+/// The standalone play page accepts BOTH deep-link forms: '#t=' (primary — what its copy
+/// button writes) and '?t=' (what beecast-generated offline pages link with), so links
+/// work across surfaces. Also parse-gates the page's inline script under Node, same
+/// pattern as `live_client_js_parses_under_node`.
+#[test]
+fn cast_play_page_accepts_query_time_deep_links() {
+  let page = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(page.contains("location.hash.match(/^#t=([0-9:.]+)$/)"), "hash form stays primary");
+  assert!(
+    page.contains("new URLSearchParams(location.search).get('t')"),
+    "query form is parsed from location.search: {page}"
+  );
+  assert!(page.contains("/^[0-9:.]+$/.test(q)"), "query values pass the same seconds/mm:ss shape check");
+  assert!(page.contains("'#t=' + t"), "the copy button still writes the hash form");
+  if crate::runtime::which("node").is_none() {
+    return;
+  }
+  let script = page.rsplit("<script>").next().expect("inline boot script");
+  let script = script.split("</script>").next().expect("script end");
+  let dir = std::env::temp_dir().join(format!("scsh-cast-js-check-{}", std::process::id()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let path = dir.join("cast-page.js");
+  std::fs::write(&path, script).unwrap();
+  let out = std::process::Command::new("node").arg("--check").arg(&path).output().expect("spawn node --check");
+  assert!(
+    out.status.success(),
+    "cast page inline script must parse: {}\n{}",
+    String::from_utf8_lossy(&out.stderr),
+    String::from_utf8_lossy(&out.stdout)
+  );
+  let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
