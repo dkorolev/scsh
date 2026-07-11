@@ -45,7 +45,7 @@ pub fn install() {
     Err(_) => return, // couldn't register — fall back to the default disposition
   };
   thread::spawn(move || {
-    for sig in signals.forever() {
+    if let Some(sig) = signals.forever().next() {
       // A kill / terminal close / off-TTY Ctrl-C: put the terminal back (the live board may have
       // it in raw mode with mouse reporting on), tear everything down, then exit.
       super::screen::restore_terminal();

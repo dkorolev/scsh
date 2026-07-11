@@ -280,13 +280,14 @@ fn export_casts_cmd(paths: &[String], output: Option<&str>, json_flag: bool) -> 
   worst
 }
 
+/// One successful export: `(output name, page bytes, chapter count, sidecar warning)`.
+type ExportSummary = (String, usize, usize, Option<String>);
+
 /// Export one cast: read it, pick up its sidecar (a malformed one warns on stderr and is
 /// reported in the JSON entry — both channels — but never fails the export), render, and
-/// write (or stream, for `-o -`). Returns `(output name, page bytes, chapter count,
-/// sidecar warning)` on success, or an actionable `(✗ problem, → fix)` pair on failure.
-fn export_one_cast(
-  cast_path: &Path, output: Option<&str>,
-) -> Result<(String, usize, usize, Option<String>), (String, String)> {
+/// write (or stream, for `-o -`). Returns an [`ExportSummary`] on success, or an actionable
+/// `(✗ problem, → fix)` pair on failure.
+fn export_one_cast(cast_path: &Path, output: Option<&str>) -> Result<ExportSummary, (String, String)> {
   let ndjson = std::fs::read_to_string(cast_path).map_err(|e| {
     (format!("cannot read the cast: {e}"), format!("check the path — is {} a recording file?", cast_path.display()))
   })?;
@@ -1352,10 +1353,7 @@ fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String
 fn extract_step_outputs(
   content: &str, outputs: &[harness_def::OutputField],
 ) -> Result<std::collections::HashMap<String, String>, String> {
-  let obj = match parse_result_object(content) {
-    Ok(o) => o,
-    Err(e) => return Err(e),
-  };
+  let obj = parse_result_object(content)?;
   let mut out = std::collections::HashMap::new();
   for f in outputs {
     let Some(value) = obj.get(&f.name) else {
@@ -1384,9 +1382,9 @@ fn extract_step_outputs(
   Ok(out)
 }
 
-/// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body (prompt
-/// + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step result file
-/// under the session scratch dir.
+/// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body
+/// (prompt + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step
+/// result file under the session scratch dir.
 fn step_invocation(
   step: &harness_def::Step, session_dir_rel: &str, inputs: Vec<(String, String)>,
 ) -> ResolvedInvocation {
@@ -3273,6 +3271,7 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
 
 /// Run a single skill end to end in its own clone and container, driving `spinner`
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
+#[allow(clippy::too_many_arguments)]
 fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
   daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
@@ -4199,32 +4198,26 @@ fn forward_cursor(run_dir: &Path) -> bool {
     let mut any = false;
     for name in ["cli-config.json", "mcp.json"] {
       let src = host_home.join(name);
-      if src.is_file() {
-        if std::fs::create_dir_all(&dest).is_ok() {
-          if std::fs::copy(&src, dest.join(name)).is_ok() {
-            #[cfg(unix)]
-            {
-              use std::os::unix::fs::PermissionsExt;
-              let _ = std::fs::set_permissions(dest.join(name), std::fs::Permissions::from_mode(0o600));
-            }
-            any = true;
-          }
+      if src.is_file() && std::fs::create_dir_all(&dest).is_ok() && std::fs::copy(&src, dest.join(name)).is_ok() {
+        #[cfg(unix)]
+        {
+          use std::os::unix::fs::PermissionsExt;
+          let _ = std::fs::set_permissions(dest.join(name), std::fs::Permissions::from_mode(0o600));
         }
+        any = true;
       }
     }
     forwarded |= any;
   }
   let auth_dest = run_dir.join(runtime::CURSOR_AUTH_FORWARD_REL);
   if let Some(src) = runtime::cursor_auth_file_on_host() {
-    if std::fs::create_dir_all(&auth_dest).is_ok() {
-      if std::fs::copy(&src, auth_dest.join("auth.json")).is_ok() {
-        #[cfg(unix)]
-        {
-          use std::os::unix::fs::PermissionsExt;
-          let _ = std::fs::set_permissions(auth_dest.join("auth.json"), std::fs::Permissions::from_mode(0o600));
-        }
-        forwarded = true;
+    if std::fs::create_dir_all(&auth_dest).is_ok() && std::fs::copy(&src, auth_dest.join("auth.json")).is_ok() {
+      #[cfg(unix)]
+      {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(auth_dest.join("auth.json"), std::fs::Permissions::from_mode(0o600));
       }
+      forwarded = true;
     }
   } else if let Some(access) = runtime::cursor_keychain_access_token() {
     let refresh = runtime::cursor_keychain_refresh_token().unwrap_or_else(|| access.clone());
@@ -4746,6 +4739,7 @@ fn now_secs() -> u64 {
 /// with the daemon so the session page embeds the player instead of a text log. Falls back to
 /// the old piped text pump only when `asciinema` is not on PATH.
 /// `no_cache` forces every layer to rebuild (`build-images --force` / `--rebuild-base`).
+#[allow(clippy::too_many_arguments)]
 fn run_build(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
   fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str, session_id: &str,
@@ -4830,6 +4824,7 @@ fn image_build_failure(
 
 /// Record one image build under a host PTY via `asciinema rec --headless`, register the cast
 /// with the daemon, and return Ok/Err from the builder's exit status.
+#[allow(clippy::too_many_arguments)]
 fn run_build_tui(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
   tz: &str, fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str,
@@ -5118,6 +5113,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   0
 }
 
+#[allow(clippy::too_many_arguments)]
 fn print_build_command(
   runtime_name: &str, tag: &str, target: &str, _dockerfile: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
 ) {
@@ -6205,7 +6201,10 @@ the run fails only when every selected skill is skipped.",
   println!();
 }
 
-/// `scsh help .scsh.yml` — the project config file, in full.
+/// `scsh help .scsh.yml` — the project config file, in full. The YAML sample contains literal
+/// `${...}` and `{skill}` placeholders; inlining it into the format string would require
+/// doubling every brace and hurt readability, so the lint is allowed here.
+#[allow(clippy::print_literal)]
 fn print_help_config() {
   println!();
   println!("{} {}", h_head(".scsh.yml"), console::style("\u{2014} the project config file").bold());
@@ -6445,7 +6444,6 @@ fn print_help_cache() {
   println!();
   println!("{}", h_head("The cache key"));
   print!(
-    "{}",
     r#"  Before running a skill, scsh hashes (sha256) a deterministic blob of:
     • the repo's committed content (the git HEAD tree),
     • the skill's own files (SKILL.md + scripts), and
@@ -6457,7 +6455,6 @@ fn print_help_cache() {
   println!();
   println!("{}", h_head("Where it lives"));
   print!(
-    "{}",
     r#"  Under the repo's gitignored tmp/: tmp/.sccache/<sha256>.json (plus .cast / .chapters.json),
   and nowhere else. Each entry holds the skill's result, when it was cached, the original
   duration and recording, chapters once annotation finishes, AND — for a commit-enabled skill —
@@ -6469,7 +6466,6 @@ fn print_help_cache() {
   println!();
   println!("{}", h_head("Commits are journaled and replayed (a hit reproduces them)"));
   print!(
-    "{}",
     r#"  A commit-enabled skill (commits: true) changes the repo when it commits, so the very
   next run sees a NEW HEAD tree => a different key => a miss => it runs (and commits) again.
   But the commits ARE journaled in the cache. Revert to the same committed state (e.g.
@@ -6482,7 +6478,6 @@ fn print_help_cache() {
   println!();
   println!("{}", h_head("The author you'll recognize (a tripwire)"));
   print!(
-    "{}",
     r#"  scsh stamps the commits a skill makes with a deliberately unmistakable author —
   dkorolev-neon-elon-bot <dmitry.korolev+elon-presley@gmail.com> (yes, a neon-cyberpunk
   Elon). It is never a real contributor. These commits are LOCAL-ONLY by design: scsh
@@ -7173,11 +7168,11 @@ Subject: [PATCH] add: 2 + 3 = 5
     let root = repo("tmp-ensure");
     assert!(!root.join("tmp").is_dir());
     assert!(!tmp_is_gitignored(&root));
-    assert_eq!(ensure_tmp_gitignored(&root).unwrap(), true);
+    assert!(ensure_tmp_gitignored(&root).unwrap());
     assert!(tmp_is_gitignored(&root));
     assert!(root.join("tmp").is_dir());
     // Second call is a no-op for the rule, but still keeps the dir.
-    assert_eq!(ensure_tmp_gitignored(&root).unwrap(), false);
+    assert!(!ensure_tmp_gitignored(&root).unwrap());
     assert!(root.join("tmp").is_dir());
   }
 }

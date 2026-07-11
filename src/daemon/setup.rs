@@ -78,8 +78,8 @@ fn image_json(s: &ImageStatus) -> String {
     s.exists,
     s.up_to_date,
     quote(image_status_word(s)),
-    s.created.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
-    s.size.as_deref().map(|v| quote(v)).unwrap_or_else(|| "null".into()),
+    s.created.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+    s.size.as_deref().map(quote).unwrap_or_else(|| "null".into()),
   )
 }
 

@@ -67,7 +67,7 @@ fn ensure_daemon(mode: DaemonMode) -> std::io::Result<()> {
     }
     std::thread::sleep(std::time::Duration::from_millis(200));
   }
-  Err(std::io::Error::new(std::io::ErrorKind::Other, "session browser daemon did not become reachable on localhost"))
+  Err(std::io::Error::other("session browser daemon did not become reachable on localhost"))
 }
 
 /// Drop a wedged PID file or stop a process that still holds the pid file but is not serving HTTP.

@@ -500,14 +500,9 @@ fn render_loop(
   while !stop.load(Ordering::SeqCst) {
     // 1. Handle input that arrived in the last tick (drain, so a flurry of wheel events is snappy).
     if poll(TICK).unwrap_or(false) {
-      loop {
-        match read() {
-          Ok(ev) => {
-            if handle_event(ev, &model, &last_rows, board_top) {
-              return; // a Ctrl-C abort already restored the terminal and exited the run
-            }
-          }
-          Err(_) => break,
+      while let Ok(ev) = read() {
+        if handle_event(ev, &model, &last_rows, board_top) {
+          return; // a Ctrl-C abort already restored the terminal and exited the run
         }
         if !poll(Duration::from_millis(0)).unwrap_or(false) {
           break;

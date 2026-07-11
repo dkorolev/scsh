@@ -177,7 +177,7 @@ mod tests {
     let c = write_session(&home, "cccccc", b"c");
     set_mtime(&a, now - 40 * 86400);
     set_mtime(&b, now - 40 * 86400);
-    set_mtime(&c, now - 1 * 86400);
+    set_mtime(&c, now - 86400);
     // projects/ must never appear as a candidate.
     fs::create_dir_all(home.join("projects").join("demo")).unwrap();
     fs::write(home.join("projects").join("demo").join("x"), b"keep").unwrap();
@@ -206,7 +206,7 @@ mod tests {
     let old = write_session(&home, "oldold", b"deadbeef");
     let keep = write_session(&home, "newnew", b"live");
     set_mtime(&old, now - 60 * 86400);
-    set_mtime(&keep, now - 1 * 86400);
+    set_mtime(&keep, now - 86400);
     let opts = GcOpts { apply: true, days: 30, keep: 1, legacy: false };
     let p = plan(&home, &opts, now);
     assert_eq!(p.candidates.len(), 1);

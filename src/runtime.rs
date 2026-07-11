@@ -283,12 +283,7 @@ pub fn cursor_home_on_host() -> Option<PathBuf> {
 /// Host `auth.json` when cursor-agent wrote tokens to disk (typical on Linux).
 pub fn cursor_auth_file_on_host() -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from)?;
-  for path in [home.join(".config/cursor/auth.json"), home.join(".cursor/auth.json")] {
-    if path.is_file() {
-      return Some(path);
-    }
-  }
-  None
+  [home.join(".config/cursor/auth.json"), home.join(".cursor/auth.json")].into_iter().find(|path| path.is_file())
 }
 
 /// Non-empty `CURSOR_API_KEY` on the host, if set.
@@ -620,6 +615,7 @@ impl TuiSubmit {
 /// harness that still blocks is a setup bug that should surface, not be auto-clicked.
 ///
 /// The output still tees to the run log, and scsh's container timeout remains the hard stop.
+#[allow(clippy::too_many_arguments)]
 fn wrap_tui_shell(
   harness: Harness, skill_source: &str, model: Option<&str>, tui_cmd: &str, quit: TuiQuit, submit: TuiSubmit,
   result: &str, term: crate::config::Terminal,
@@ -1008,6 +1004,7 @@ fn format_image_size(bytes: u64) -> String {
 /// `--no-cache` so a forced rebuild re-runs every layer instead of no-op'ing on the cache.
 /// Prefer [`build_command_context`] when recording a TUI cast — a PTY cannot feed stdin the
 /// same way `Proc::run_with_stdin` does.
+#[allow(clippy::too_many_arguments)]
 pub fn build_command_stdin(
   runtime: &str, tag: &str, target: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str, no_cache: bool,
 ) -> Vec<String> {
@@ -1021,6 +1018,7 @@ pub fn build_command_stdin(
   v
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn build_command_context(
   runtime: &str, tag: &str, target: &str, context_dir: &str, uid: u32, gid: u32, tz: &str, fingerprint: &str,
   no_cache: bool,
@@ -1207,6 +1205,7 @@ pub enum RepoMountMode {
 /// rootless podman, `--userns=keep-id` maps the host UID to the same UID inside the
 /// container so the `agent` user can read/write the mount; docker (and Apple
 /// `container`) map the UID directly and need no such flag.
+#[allow(clippy::too_many_arguments)]
 pub fn run_command(
   runtime: &str, tag: &str, run_dir: &str, name: &str, env: &[(String, String)], volumes: &[(&str, &str)],
   command: &str, repo_mount: RepoMountMode,

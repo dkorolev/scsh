@@ -22,7 +22,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
     }
 
     let (mut a, mut b, mut c, mut d, mut e) = (h[0], h[1], h[2], h[3], h[4]);
-    for i in 0..80 {
+    for (i, &wi) in w.iter().enumerate() {
       let (f, k) = if i < 20 {
         ((b & c) | ((!b) & d), 0x5A827999)
       } else if i < 40 {
@@ -32,7 +32,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
       } else {
         (b ^ c ^ d, 0xCA62C1D6)
       };
-      let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(w[i]);
+      let temp = a.rotate_left(5).wrapping_add(f).wrapping_add(e).wrapping_add(k).wrapping_add(wi);
       e = d;
       d = c;
       c = b.rotate_left(30);
