@@ -34,14 +34,14 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }
 
-/// Inline beecast-player embed for a proc's recording: a toolbar (live toggle, `.cast` +
-/// self-contained `.html` downloads) above an empty `.cast-player` box the client JS
-/// mounts the player into. Playback chrome — the big play button, chapters panel, speed
-/// menu, fullscreen — is the player's own. Works mid-run too: the cast endpoint serves
-/// the partial file, and the Live toggle (visible only while the proc runs) follows the
-/// growing tail; no manual reload — the stream drives itself. The `.html` export link
-/// starts hidden; the client JS unhides it once the recording has frames (the export
-/// endpoint 404s on a frameless cast). Replaces the text-line output for recorded procs.
+/// Inline beecast-player embed for a proc's recording: a toolbar (`.cast` + self-contained
+/// `.html` downloads) above an empty `.cast-player` box the client JS mounts the player into.
+/// Playback chrome — play, chapters, speed, fullscreen, and **● Live** for still-running
+/// casts — is the player's own. Works mid-run too: the cast endpoint serves the partial
+/// file, and declared-live mode follows the growing tail until the viewer seeks back.
+/// The `.html` export link starts hidden; the client JS unhides it once the recording has
+/// frames (the export endpoint 404s on a frameless cast). Replaces the text-line output
+/// for recorded procs.
 pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   let sid = esc(session_id);
   let idx = proc.index;
@@ -54,7 +54,6 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
   format!(
     r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}"{ended}>
 <div class="cast-toolbar">
-<button type="button" data-cast-live{live_hidden}>● Live</button>
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
 <a href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>
 <span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>
@@ -63,7 +62,6 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 </div>
 "#,
     status = proc.status.as_str(),
-    live_hidden = if proc.status == ProcStatus::Running { "" } else { " hidden" },
   )
 }
 

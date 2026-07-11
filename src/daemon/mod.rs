@@ -14,6 +14,7 @@ pub mod prune;
 pub mod reap;
 mod server;
 mod websocket;
+mod workflow;
 
 pub use client::{post_once, spawn_daemon, Client};
 /// Generate a session id: six lowercase letters (delegates to runtime nonce helper).
@@ -26,6 +27,7 @@ pub use paths::{
   absolutize_repo_path, base_url, daemon_dir, daemon_port, daemon_port_reachable, now_unix_secs, read_live_pid,
 };
 pub use server::{chapters_sidecar_path, Server};
+pub use workflow::workflow_meta_from_def;
 
 const ENSURE_ATTEMPTS: usize = 3;
 

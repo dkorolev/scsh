@@ -762,6 +762,8 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let kind = field_str(&obj, "kind");
       let skills = parse_skills_array(&obj);
       let run_pid = field_num(&obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
+      let workflow =
+        crate::daemon::workflow::parse_workflow_value(obj.iter().find(|(k, _)| k == "workflow").map(|(_, v)| v));
       if id.is_empty() {
         return false;
       }
@@ -782,6 +784,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if run_pid.is_some() {
           s.run_pid = run_pid;
         }
+        if workflow.is_some() {
+          s.workflow = workflow;
+        }
         return true;
       }
       let session = Session {
@@ -797,6 +802,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         last_seen_at: now,
         client_connected: false,
         run_pid,
+        workflow,
       };
       store.insert_session(id, session);
       true
@@ -867,7 +873,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
         p.label = label;
         p.kind = kind;
-        p.skill_name = skill_name;
+        p.skill_name = skill_name.clone();
         p.harness = harness;
         p.model = model;
         p.skill_source = skill_source;
@@ -878,7 +884,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           label,
           kind,
           status: ProcStatus::Waiting,
-          skill_name,
+          skill_name: skill_name.clone(),
           harness,
           model,
           started_at: None,
@@ -894,6 +900,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           result_path: None,
           lines: Vec::new(),
         });
+      }
+      if let (Some(meta), Some(step_id)) = (s.workflow.as_mut(), skill_name.as_deref()) {
+        crate::daemon::workflow::bind_workflow_proc(meta, step_id, proc_index, kind);
       }
       true
     }
@@ -1191,6 +1200,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           last_seen_at: now,
           client_connected: false,
           run_pid,
+          workflow: None,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1500,6 +1510,8 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
       });
       let mut store = lock_store(store);
       store.touch(now);
+      let workflow = crate::daemon::workflow::workflow_meta_from_def(def);
+      let kind = if def.is_workflow() { Some("workflow".into()) } else { None };
       store.insert_session(
         session_id.clone(),
         Session {
@@ -1507,7 +1519,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           started_at: now,
           ended_at: None,
           profile: Some(def_name.clone()),
-          kind: None,
+          kind,
           repo: repo.clone(),
           branch,
           skills: planned,
@@ -1515,6 +1527,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
           last_seen_at: now,
           client_connected: false,
           run_pid,
+          workflow,
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -2121,6 +2134,7 @@ mod tests {
           last_seen_at: 50,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2171,6 +2185,7 @@ mod tests {
           last_seen_at: 1,
           client_connected: false,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2223,6 +2238,7 @@ mod tests {
           last_seen_at: 10,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2295,6 +2311,7 @@ mod tests {
           last_seen_at: 50,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2354,6 +2371,7 @@ mod tests {
           client_connected: true,
           // No live PID — we assert store state, not kill success.
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2416,6 +2434,7 @@ mod tests {
           last_seen_at: 50,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2525,6 +2544,7 @@ mod tests {
       last_seen_at,
       client_connected: true,
       run_pid: None,
+      workflow: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -2625,6 +2645,7 @@ mod tests {
           last_seen_at: now,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2732,6 +2753,7 @@ mod tests {
           last_seen_at: 50,
           client_connected: true,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2834,6 +2856,7 @@ mod tests {
           last_seen_at: 50,
           client_connected: false,
           run_pid: None,
+          workflow: None,
         },
       );
     }
@@ -2915,6 +2938,7 @@ mod tests {
         last_seen_at: 60,
         client_connected: false,
         run_pid: None,
+        workflow: None,
       },
     );
     store
@@ -3062,6 +3086,7 @@ mod tests {
             last_seen_at: 1,
             client_connected: true,
             run_pid: None,
+            workflow: None,
           },
         );
       }
@@ -3255,6 +3280,7 @@ mod tests {
         last_seen_at: 50,
         client_connected: false,
         run_pid: None,
+        workflow: None,
       },
     );
     reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
@@ -3285,6 +3311,7 @@ mod tests {
         last_seen_at: 55,
         client_connected: false,
         run_pid: None,
+        workflow: None,
       },
     );
     reconcile_finished_job(&store, "done", Some(0), "");
@@ -3311,6 +3338,7 @@ mod tests {
         last_seen_at: 50,
         client_connected: false,
         run_pid: None,
+        workflow: None,
       },
     );
     let out = repos_json(&store, 51);

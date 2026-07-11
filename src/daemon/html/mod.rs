@@ -12,6 +12,7 @@ mod layout;
 mod proc;
 mod session;
 mod session_export;
+mod workflow;
 
 pub use cast::{cast_player_page, PLAYER_CSS, PLAYER_JS};
 pub use index::index_page;

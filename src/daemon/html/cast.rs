@@ -75,8 +75,6 @@ header code {{
   border-radius: 4px; padding: 5px 12px; font: inherit; cursor: pointer; text-decoration: none;
 }}
 .controls button:hover, .controls a:hover {{ border-color: var(--cyan); color: var(--cyan); }}
-.controls button.on {{ border-color: var(--red); color: var(--red); }}
-.controls button:disabled {{ opacity: 0.5; cursor: default; }}
 #copied {{ color: var(--green); visibility: hidden; }}
 #summary {{ padding: 0 20px 8px; font-size: 14px; max-width: 70ch; }}
 #summary:empty {{ display: none; }}
@@ -98,7 +96,6 @@ header code {{
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
 <a id="dl-html" href="{cast_url}/export.html" download hidden>⬇ download .html</a>
 <button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
-<button id="live-toggle"{live_toggle_hidden}>● Live</button>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
 <div id="summary" class="dim"></div>
@@ -112,8 +109,7 @@ const LIVE = {live_js};
 let player = null;
 let MARKERS = [];
 // A live recording opens in declared-live mode (parked at the growing edge, green pinned
-// bar) unless a #t= deep link chose a position. The player drops live on a rewind; the
-// livechange listener below re-syncs the toggle.
+// bar) unless a #t= deep link chose a position. ● Live lives in the player toolbar.
 function hashStart() {{
   const m = location.hash.match(/^#t=([0-9:.]+)$/);
   return m ? m[1] : null;
@@ -158,12 +154,20 @@ function create(startAt, autoplay) {{
       return;
     }}
     mount.innerHTML = '';
-    const opts = {{ fit: 'both', idleTimeLimit: 2, markers: MARKERS, accessibility: 'snapshot' }};
+    const wantLive = liveMode && castRunning;
+    const opts = {{
+      fit: 'both',
+      idleTimeLimit: 2,
+      markers: MARKERS,
+      accessibility: 'snapshot',
+      controls: wantLive ? {{ live: true }} : true,
+      live: wantLive,
+    }};
     if (startAt === 'end') startAt = stats.duration;
     // Numbers are clamped to what is loaded; '#t=mm:ss' strings pass through to the player.
     if (startAt != null) opts.startAt = typeof startAt === 'number' ? Math.max(0, Math.min(startAt, stats.duration)) : startAt;
     player = BeeCastPlayer.create({{ data: text }}, mount, opts);
-    if (liveMode && player.setLive) player.setLive(true);
+    if (wantLive && player.setLive) {{ follow(); player.setLive(true); }}
     if (autoplay) {{ try {{ player.play(); }} catch (_) {{}} }}
     // Keyboard-first: the page IS the player — space and f work without a click.
     const proot = mount.querySelector('.beecast-player');
@@ -208,29 +212,19 @@ function follow() {{
     loadedDuration = player.cast.duration;
   }}).catch(() => {{ appending = false; }});
 }}
-// The Live toggle parks the playhead at the live edge (the follow policy is positional).
+// Declared-live until the viewer seeks back (player ● Live to return).
 let liveMode = LIVE && !hashStart();
-function setLiveMode(on) {{
-  liveMode = !!on && castRunning;
-  document.getElementById('live-toggle').classList.toggle('on', liveMode);
-  if (!player || !player.setLive) return;
-  if (liveMode) {{ follow(); player.setLive(true); }}
-  else player.setLive(false);
-}}
-document.getElementById('live-toggle').addEventListener('click', () => setLiveMode(!liveMode));
 document.getElementById('player').addEventListener('beecast-livechange', (e) => {{
   liveMode = !!(e.detail && e.detail.live);
-  document.getElementById('live-toggle').classList.toggle('on', liveMode);
 }});
 // The proc finished: one last reload picks up the complete cast (keeping the current
 // position — the durable copy may live at a different path than the live file), live mode
-// ends cleanly (toggle off + disabled), and the WS is no longer needed.
+// ends, and the WS is no longer needed.
 function finishCast() {{
   castRunning = false;
   if (ws) {{ try {{ ws.close(); }} catch (_) {{}} ws = null; }}
-  setLiveMode(false);
-  const toggle = document.getElementById('live-toggle');
-  toggle.disabled = true;
+  liveMode = false;
+  if (player && player.setLive) player.setLive(false);
   const note = document.getElementById('live-note');
   if (note) note.innerHTML = '<span class="dim">recording finished</span>';
   create(player ? player.getCurrentTime() : hashStart());
@@ -271,6 +265,5 @@ document.getElementById('copy-t').addEventListener('click', () => {{
     sid_js = quote_js(session_id),
     proc_index = proc_index,
     live_js = if live { "true" } else { "false" },
-    live_toggle_hidden = if live { "" } else { " hidden" },
   ))
 }

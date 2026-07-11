@@ -94,10 +94,14 @@ fn session_json(s: &Session) -> String {
     Some(p) => format!("{p}"),
     None => "null".to_string(),
   };
+  let workflow = match &s.workflow {
+    Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(w)),
+    None => String::new(),
+  };
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid} }}",
+\"run_pid\": {run_pid}{workflow} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -185,6 +189,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   let last_seen_at = field_num(obj, "last_seen_at").map(|n| n as u64).unwrap_or(started_at);
   let client_connected = field_bool(obj, "client_connected").unwrap_or(false);
   let run_pid = field_num(obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
+  let workflow = super::workflow::parse_workflow_value(field_value(obj, "workflow").ok());
   Ok(Session {
     id,
     started_at,
@@ -198,6 +203,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
     last_seen_at,
     client_connected,
     run_pid,
+    workflow,
   })
 }
 
@@ -374,6 +380,7 @@ mod tests {
       last_seen_at: 105,
       client_connected: false,
       run_pid: None,
+      workflow: None,
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
     let s = parse_session_json(&session_json_api(&session)).unwrap();
@@ -383,6 +390,46 @@ mod tests {
     assert_eq!(s.procs[0].diff_path.as_deref(), Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html"));
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
+  }
+
+  #[test]
+  fn roundtrip_workflow_graph_and_legacy_without_it() {
+    use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+    let mut session = Session {
+      id: "wf0001".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("arith".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![],
+      last_seen_at: 1,
+      client_connected: false,
+      run_pid: None,
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta { id: "add".into(), proc_index: Some(0), order: 0, needs: vec![], conditional: false },
+          WorkflowNodeMeta {
+            id: "summarize".into(),
+            proc_index: None,
+            order: 1,
+            needs: vec!["add".into()],
+            conditional: false,
+          },
+        ],
+      }),
+    };
+    let parsed = parse_session_json(&session_json_api(&session)).unwrap();
+    assert_eq!(parsed.workflow.as_ref().unwrap().nodes.len(), 2);
+    assert_eq!(parsed.workflow.as_ref().unwrap().nodes[1].needs, vec!["add".to_string()]);
+    session.workflow = None;
+    let legacy = parse_session_json(&session_json_api(&session)).unwrap();
+    assert!(legacy.workflow.is_none());
+    // Missing key entirely (older builds)
+    let bare = r#"{ "id": "old", "started_at": 1, "ended_at": null, "profile": null, "kind": null, "repo": "/r", "branch": "main", "skills": [], "procs": [], "last_seen_at": 1, "client_connected": false, "run_pid": null }"#;
+    assert!(parse_session_json(bare).unwrap().workflow.is_none());
   }
 
   #[test]
@@ -428,6 +475,7 @@ mod tests {
         last_seen_at: 100,
         client_connected: false,
         run_pid: None,
+        workflow: None,
       },
     );
     let light = tick_json_light(&store, 105);
