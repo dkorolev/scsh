@@ -160,7 +160,7 @@ fn proc_json(p: &ProcRecord) -> String {
     "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
 \"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"diff_path\": {}, \
-\"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"lines\": [{}] }}",
+\"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -178,6 +178,7 @@ fn proc_json(p: &ProcRecord) -> String {
     opt_str(&p.skill_source),
     opt_str(&p.route),
     opt_str(&p.result_path),
+    opt_str(&p.annotate_target),
     lines.join(", ")
   )
 }
@@ -284,6 +285,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     skill_source,
     route,
     result_path,
+    annotate_target: field_str(obj, "annotate_target"), // absent on sessions persisted by older builds
     lines,
   })
 }
@@ -356,6 +358,7 @@ mod tests {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -394,6 +397,7 @@ mod tests {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
       }],
       last_seen_at: 105,

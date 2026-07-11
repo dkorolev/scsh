@@ -204,12 +204,6 @@ function syncIndexRow(row, session, nowUnix) {
     if (procsCell.innerHTML !== next) procsCell.innerHTML = next;
   }
 }
-function emptyOutputLabel(status) {
-  return (status === 'ok' || status === 'fail') ? 'No output.' : 'No output yet.';
-}
-function emptyOutputHtml(status) {
-  return '<div class="dim">' + emptyOutputLabel(status) + '</div>';
-}
 // A bare repo-relative artifact path (a system pointer like tmp/scsh/<id>/add.json), as
 // opposed to an agent's prose answer. Mirrored by the server-side renderer in session.rs.
 function looksLikeArtifactPath(text) {
@@ -500,14 +494,20 @@ function autoscrollCtlHtml(p) {
     disabled + '> Auto-scroll to bottom</label>';
 }
 function syncAutoscrollCtl(det, p) {
-  const live = procIsLive(p.status);
+  // The control belongs to a text-output box: a slim row (no recording, no log lines yet)
+  // must not grow it back, so bail — the box's creation re-invokes this sync.
+  const out = det.querySelector('.output');
   let ctl = det.querySelector('.autoscroll-ctl');
+  if (!out) {
+    if (ctl) ctl.remove();
+    return;
+  }
+  const live = procIsLive(p.status);
   if (!ctl) {
     const label = document.createElement('label');
     label.className = 'autoscroll-ctl';
     label.innerHTML = '<input type="checkbox" data-autoscroll> Auto-scroll to bottom';
-    const out = det.querySelector('.output');
-    if (out) det.insertBefore(label, out);
+    det.insertBefore(label, out);
     ctl = label;
   }
   const input = ctl && ctl.querySelector('input');
@@ -565,21 +565,18 @@ function lineHtml(l) {
   return '<div class="line"><span class="at">+' + esc(Number(l.at).toFixed(1)) + 's</span> ' + esc(l.text) + '</div>';
 }
 function syncProcOutput(det, p) {
-  const out = det.querySelector('.output');
-  if (!out) return;
   const lines = p.lines || [];
-  let existing = out.querySelectorAll('.line').length;
-  if (existing === 0 && out.querySelector('.dim')) {
-    out.innerHTML = '';
-    existing = 0;
+  let out = det.querySelector('.output');
+  if (!out) {
+    // Unrecorded procs start as slim rows; the output box (with its auto-scroll control)
+    // exists only once the first log line arrives — annotate rows never grow one.
+    if (!lines.length || hasCast(p)) return;
+    det.insertAdjacentHTML('beforeend', '<div class="output"></div>');
+    out = det.querySelector('.output');
+    setupOutputScroll(out);
+    syncAutoscrollCtl(det, p);
   }
-  if (lines.length === 0 && existing === 0) {
-    const label = emptyOutputLabel(p.status);
-    const dim = out.querySelector('.dim');
-    if (!dim) out.innerHTML = emptyOutputHtml(p.status);
-    else if (dim.textContent !== label) dim.textContent = label;
-    return;
-  }
+  const existing = out.querySelectorAll('.line').length;
   if (lines.length > existing) {
     const chunk = lines.slice(existing).map(lineHtml).join('');
     out.insertAdjacentHTML('beforeend', chunk);
@@ -640,8 +637,11 @@ function updateProcFields(det, p, nowUnix) {
       const div = document.createElement('div');
       div.className = 'container dim';
       div.textContent = 'container: ' + p.container_name;
+      // A slim row (no recording, no lines yet) has no body element to anchor on, so the
+      // container line simply closes out the row until an output box appears above it.
       const before = det.querySelector('.cast') || det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
       if (before) det.insertBefore(div, before);
+      else det.appendChild(div);
     }
   } else if (containerEl) containerEl.remove();
   // A proc that gained a cast (rendered earlier as text) swaps its output for the embed
@@ -845,7 +845,7 @@ function createCastPlayer(box, startAt, autoplay) {
     // none yet shows a clear "summarizing…" element and swaps the chapters in live when the
     // sidecar lands — no browser refresh. (Polling stops quietly if annotation never comes,
     // e.g. no cursor-agent on the host.)
-    if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl);
+    if (!chapters.length && box.dataset.status !== 'running') pollForChapters(box, chaptersUrl, meta.summarizing_job);
   });
 }
 function focusCastPlayer(box) {
@@ -857,7 +857,18 @@ function focusCastPlayer(box) {
 // never (no annotator on the host, or a recording from before annotation existed). Show the
 // indicator and poll only inside that window — an old cast gets neither.
 const CHAPTERS_WAIT_SECS = 300;
-function pollForChapters(box, chaptersUrl) {
+// The pending note's content: a plain "summarizing…" until the annotating job is known,
+// then a deep link to that job's page (the annotation runs as a real daemon job — the
+// chapters endpoint reports its id as summarizing_job while the sidecar is pending).
+function setChapPending(pending, jobId) {
+  if (jobId && pending.dataset.job !== jobId) {
+    pending.dataset.job = jobId;
+    pending.innerHTML = '⏳ chapters: <a href="/job/' + esc(jobId) + '">summarizing…</a>';
+  } else if (!jobId && !pending.dataset.job) {
+    pending.textContent = '⏳ chapters: summarizing…';
+  }
+}
+function pollForChapters(box, chaptersUrl, summarizingJob) {
   if (box._chapPoll) return;
   const endedAt = Number(box.dataset.ended || 0);
   const sinceEnd = () => Date.now() / 1000 - endedAt;
@@ -865,14 +876,19 @@ function pollForChapters(box, chaptersUrl) {
   const bar = box.querySelector('.cast-toolbar');
   const pending = document.createElement('span');
   pending.className = 'dim chap-pending';
-  pending.textContent = '⏳ chapters: summarizing…';
+  setChapPending(pending, summarizingJob);
   if (bar) bar.appendChild(pending);
   if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]);
   box._chapPoll = setInterval(() => {
     if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]); return; }
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
       const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
-      if (!chapters.length) return;
+      if (!chapters.length) {
+        // The annotate job may register only after this poll started (post-run catch-up,
+        // or a standalone `scsh annotate-cast`) — link up as soon as its id appears.
+        setChapPending(pending, meta.summarizing_job);
+        return;
+      }
       clearInterval(box._chapPoll);
       box._chapPoll = null;
       pending.remove();
@@ -948,9 +964,13 @@ document.addEventListener('fullscreenchange', () => {
 });
 function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
+  // Mirrors the server-rendered shape (session.rs): recorded procs embed the player;
+  // text-logging procs keep the output box with auto-scroll; a proc with neither — an
+  // annotate row, say — stays a slim summary-only row without the terminal chrome.
+  const lines = p.lines || [];
   const body = hasCast(p)
     ? castEmbedHtml(p)
-    : autoscrollCtlHtml(p) + '<div class="output">' + ((p.lines || []).map(l => lineHtml(l)).join('') || emptyOutputHtml(p.status)) + '</div>';
+    : (lines.length ? autoscrollCtlHtml(p) + '<div class="output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';

@@ -669,6 +669,7 @@ mod tests {
         skill_source: Some("add".into()),
         route: None,
         result_path: None,
+        annotate_target: None,
       }],
       last_seen_at: 60, // stale vs now=100 with SESSION_STALE_SECS=30
       client_connected: true,
@@ -720,6 +721,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 1,
@@ -741,6 +743,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 2,
@@ -762,6 +765,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 3,
@@ -783,6 +787,7 @@ mod tests {
           skill_source: Some("demo-pr".into()),
           route: Some("claude-sonnet".into()),
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 4,
@@ -804,6 +809,7 @@ mod tests {
           skill_source: Some("demo-pr".into()),
           route: Some("cursor-composer-fast".into()),
           result_path: None,
+          annotate_target: None,
         },
       ],
       last_seen_at: 1,
@@ -856,6 +862,7 @@ mod tests {
           skill_source: None,
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 1,
@@ -877,6 +884,7 @@ mod tests {
           skill_source: Some("add".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 2,
@@ -898,6 +906,7 @@ mod tests {
           skill_source: Some("multiply".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 3,
@@ -919,6 +928,7 @@ mod tests {
           skill_source: Some("summarize".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
       ],
       last_seen_at: 1,
@@ -972,6 +982,7 @@ mod tests {
           skill_source: Some("add".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 1,
@@ -993,6 +1004,7 @@ mod tests {
           skill_source: Some("multiply".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 2,
@@ -1014,6 +1026,7 @@ mod tests {
           skill_source: Some("summarize".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
       ],
       last_seen_at: 1,
@@ -1090,6 +1103,7 @@ mod tests {
           skill_source: Some("add".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 1,
@@ -1111,6 +1125,7 @@ mod tests {
           skill_source: Some("multiply".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
         ProcRecord {
           index: 2,
@@ -1132,6 +1147,7 @@ mod tests {
           skill_source: Some("summarize".into()),
           route: None,
           result_path: None,
+          annotate_target: None,
         },
       ],
       last_seen_at: 1,

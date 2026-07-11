@@ -150,6 +150,7 @@ mod tests {
         skill_source: None,
         route: None,
         result_path: None,
+        annotate_target: None,
       }],
       last_seen_at: 1,
       client_connected: false,

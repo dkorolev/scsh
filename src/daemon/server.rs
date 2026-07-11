@@ -521,18 +521,50 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
 
 /// `GET /cast/<session>/<proc>/chapters` — the cast's analysis sidecar
 /// (`{ "summary": …, "chapters": [{ "t", "title" }] }`), written next to the cast file by
-/// the cursor/Composer analysis pass as `<cast-basename>.chapters.json`. Returns `{}` when
-/// no sidecar exists yet, so the player can ask unconditionally.
+/// the cursor/Composer analysis pass as `<cast-basename>.chapters.json`. While no sidecar
+/// exists yet the body is `{}` — or `{ "summarizing_job": "<id>" }` when a live annotate
+/// proc covering this cast is registered, so the page's "chapters: summarizing…" note can
+/// deep-link to the job doing the work.
 fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
   let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/chapters").unwrap_or("");
   let Some((session_id, proc_index)) = parse_cast_route(rest) else {
     return (404, "{}".into());
   };
-  let sidecar = proc_cast_path(store, session_id, proc_index).and_then(|c| chapters_sidecar_path(&c));
-  match sidecar.and_then(|p| std::fs::read_to_string(p).ok()) {
+  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
+    return (200, "{}".into());
+  };
+  match chapters_sidecar_path(&cast_path).and_then(|p| std::fs::read_to_string(p).ok()) {
     Some(json) => (200, json),
-    None => (200, "{}".into()),
+    None => match summarizing_job_for_cast(store, &cast_path) {
+      Some(job) => (200, format!("{{ \"summarizing_job\": {} }}", quote(&job))),
+      None => (200, "{}".into()),
+    },
   }
+}
+
+/// The id of the job whose LIVE annotate proc is summarizing `cast_path` right now —
+/// post-run annotation registers those procs on the same session, a standalone
+/// `scsh annotate-cast` on its own `(internal)` one; either way the id is a job page the
+/// pending note can link to. Paths are compared whole and by file name: the two sides may
+/// spell the same file differently (relative CLI argument vs the absolute registered
+/// path), and the nonce-stamped stem (`add-…-utc-ufakca.cast`) is unique per recording.
+fn summarizing_job_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<String> {
+  let file_name = std::path::Path::new(cast_path).file_name();
+  let store = lock_store(store);
+  for (id, session) in store.sessions.iter() {
+    for proc in &session.procs {
+      if proc.kind != ProcKind::Annotate || !matches!(proc.status, ProcStatus::Waiting | ProcStatus::Running) {
+        continue;
+      }
+      let Some(target) = proc.annotate_target.as_deref() else {
+        continue;
+      };
+      if target == cast_path || (file_name.is_some() && std::path::Path::new(target).file_name() == file_name) {
+        return Some(id.clone());
+      }
+    }
+  }
+  None
 }
 
 /// The chapters-sidecar path for a cast file: `<dir>/<stem>.chapters.json`
@@ -910,6 +942,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let model = field_str(&obj, "model");
       let skill_source = field_str(&obj, "skill_source");
       let route = field_str(&obj, "route");
+      let annotate_target = field_str(&obj, "annotate_target");
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
         p.label = label;
         p.kind = kind;
@@ -918,6 +951,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         p.model = model;
         p.skill_source = skill_source;
         p.route = route;
+        p.annotate_target = annotate_target;
       } else {
         s.procs.push(ProcRecord {
           index: proc_index,
@@ -938,6 +972,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           skill_source,
           route,
           result_path: None,
+          annotate_target,
           lines: Vec::new(),
         });
       }
@@ -1726,6 +1761,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
     });
   }
 }
@@ -2283,6 +2319,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2335,6 +2372,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -2389,6 +2427,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -2463,6 +2502,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2523,6 +2563,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -2574,6 +2615,7 @@ mod tests {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -2695,6 +2737,7 @@ mod tests {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
     };
     let now = now_unix_secs();
     let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
@@ -2918,6 +2961,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -3022,6 +3066,7 @@ mod tests {
             skill_source: None,
             route: None,
             result_path: None,
+            annotate_target: None,
           }],
           last_seen_at: 50,
           client_connected: false,
@@ -3089,6 +3134,7 @@ mod tests {
       skill_source: None,
       route: None,
       result_path: None,
+      annotate_target: None,
     }
   }
 
@@ -3114,6 +3160,69 @@ mod tests {
       },
     );
     store
+  }
+
+  #[test]
+  fn chapters_response_names_the_live_summarizing_job_while_the_sidecar_is_pending() {
+    let dir = std::env::temp_dir().join(format!("scsh-chap-job-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("add-20260711-114749-utc-ufakca.cast");
+    std::fs::write(&cast, "{\"version\":3}\n[0.5,\"o\",\"hi\"]\n").unwrap();
+    let cast_path = cast.to_string_lossy().into_owned();
+    let store = store_with_export_session("srcjob", vec![export_test_proc(0, "claude: add", Some(cast_path.clone()))]);
+    // No sidecar and no annotate job registered yet: the body stays the empty object.
+    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(status, 200);
+    assert_eq!(body, "{}");
+    // A LIVE annotate proc covering this cast names its job — the id the pending
+    // "summarizing…" note on the job page links to.
+    let mut annotate = export_test_proc(0, "annotate · add-20260711-114749-utc-ufakca", None);
+    annotate.kind = ProcKind::Annotate;
+    annotate.status = ProcStatus::Running;
+    annotate.annotate_target = Some(cast_path.clone());
+    store.lock().unwrap().insert_session(
+      "annjob".into(),
+      Session {
+        id: "annjob".into(),
+        started_at: 61,
+        ended_at: None,
+        profile: Some("annotate".into()),
+        kind: Some("annotate".into()),
+        repo: INTERNAL_REPO.into(),
+        branch: String::new(),
+        skills: Vec::new(),
+        procs: vec![annotate],
+        last_seen_at: 61,
+        client_connected: true,
+        run_pid: None,
+        workflow: None,
+        parent_session: Some("srcjob".into()),
+      },
+    );
+    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(status, 200);
+    assert_eq!(body, r#"{ "summarizing_job": "annjob" }"#);
+    // The match also holds across path spellings: a standalone `scsh annotate-cast` may
+    // register a relative argument while the run registered the absolute path — the
+    // nonce-stamped file name is the shared key.
+    store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].annotate_target =
+      Some("casts/add-20260711-114749-utc-ufakca.cast".into());
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(body, r#"{ "summarizing_job": "annjob" }"#);
+    // A finished annotate proc is no longer "summarizing" — an id would be a stale link.
+    store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].status = ProcStatus::Ok;
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(body, "{}");
+    // Once the sidecar lands its content wins outright.
+    std::fs::write(
+      dir.join("add-20260711-114749-utc-ufakca.chapters.json"),
+      r#"{"summary":"ok","chapters":[{"t":0,"title":"Start"}]}"#,
+    )
+    .unwrap();
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert!(body.contains("\"chapters\""), "sidecar content served: {body}");
+    assert!(!body.contains("summarizing_job"), "no job id once chapters exist");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   /// Every `srcdoc="…"` attribute value in the page. `esc` turns every embedded `"` into

@@ -147,7 +147,7 @@ impl Client {
   #[allow(clippy::too_many_arguments)]
   pub fn proc_add(
     &self, proc_index: usize, label: &str, kind: ProcKind, skill_name: Option<&str>, harness: Option<&str>,
-    model: Option<&str>, skill_source: Option<&str>, route: Option<&str>,
+    model: Option<&str>, skill_source: Option<&str>, route: Option<&str>, annotate_target: Option<&str>,
   ) {
     let mut extras = Vec::new();
     if let Some(s) = skill_name {
@@ -164,6 +164,11 @@ impl Client {
     }
     if let Some(r) = route {
       extras.push(format!("\"route\": {}", quote(r)));
+    }
+    // The cast an Annotate proc summarizes — how the daemon later answers "which job is
+    // summarizing this recording?" for the chapters-pending link on the job page.
+    if let Some(t) = annotate_target {
+      extras.push(format!("\"annotate_target\": {}", quote(t)));
     }
     let tail = if extras.is_empty() { String::new() } else { format!(", {}", extras.join(", ")) };
     let body = format!(

@@ -4,16 +4,12 @@ use super::escape::esc;
 use super::format::{format_elapsed_clock, format_idle, line_count_label};
 use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus};
 
-pub(crate) fn empty_output_label(status: ProcStatus) -> &'static str {
-  match status {
-    ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped => "No output.",
-    ProcStatus::Waiting | ProcStatus::Running => "No output yet.",
-  }
-}
-
 fn proc_is_live(status: ProcStatus) -> bool {
   matches!(status, ProcStatus::Running | ProcStatus::Waiting)
 }
+
+// The retired "No output." placeholder box is gone on purpose: a proc with no recording
+// and no log lines now renders as a slim summary-only row, so there is nothing to label.
 
 pub(crate) fn autoscroll_ctl_html(status: ProcStatus) -> String {
   if proc_is_live(status) {
@@ -22,10 +18,6 @@ pub(crate) fn autoscroll_ctl_html(status: ProcStatus) -> String {
   } else {
     String::new()
   }
-}
-
-pub(crate) fn empty_output_html(status: ProcStatus) -> String {
-  format!("<div class=\"dim\">{}</div>\n", empty_output_label(status))
 }
 
 /// Whether this proc has an asciinema recording to embed (skills always; builds when the
