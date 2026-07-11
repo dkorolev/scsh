@@ -76,7 +76,7 @@ pub fn is_snap_confined(path: &Path) -> bool {
 
 /// Resolve an executable on `$PATH` (like the `which` command).
 /// Container runtimes INSTALLED on this host, in preference order — what the browser's
-/// Containers tab offers. Apple `container` is suggested only on macOS (on Linux it never
+/// Setup tab offers. Apple `container` is suggested only on macOS (on Linux it never
 /// appears); docker and podman appear wherever installed.
 pub fn available_runtimes() -> Vec<&'static str> {
   let mut out = Vec::new();
@@ -902,7 +902,7 @@ fn id_value(flag: &str) -> Option<u32> {
 }
 
 /// Status of one scsh image on the host runtime — for `scsh build-images` and the
-/// dashboard's images panel.
+/// dashboard's Setup / images panel.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImageStatus {
   /// Display name: `base`, or the harness name (`opencode`, `claude`, …).
@@ -1345,6 +1345,122 @@ pub fn claude_container_auth_ready() -> bool {
   claude_oauth_token().is_some()
     || claude_credentials_file_on_host().is_some()
     || claude_keychain_credentials_json().is_some()
+}
+
+/// Whether credential forwarding for `harness` is enabled (on unless `SCSH_NO_<HARNESS>_AUTH`).
+pub fn auth_forwarding_enabled(harness: Harness) -> bool {
+  let env = match harness {
+    Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
+    Harness::Claude => "SCSH_NO_CLAUDE_AUTH",
+    Harness::Codex => "SCSH_NO_CODEX_AUTH",
+    Harness::Grok => "SCSH_NO_GROK_AUTH",
+    Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
+  };
+  !matches!(std::env::var(env).ok().as_deref(), Some("1") | Some("true"))
+}
+
+/// Local login preflight for the Setup tab — never includes secret values, only safe labels.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoginPreflight {
+  /// `found`, `expired`, `missing`, or `disabled`.
+  pub status: &'static str,
+  /// Short browser-safe label (e.g. "Found via auth.json").
+  pub label: String,
+  /// Actionable next step when not found.
+  pub hint: String,
+}
+
+/// Host credential detection for Setup: presence/expiry/opt-out only — not proof of model access.
+pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
+  if !auth_forwarding_enabled(harness) {
+    let env = match harness {
+      Harness::Opencode => "SCSH_NO_OPENCODE_AUTH",
+      Harness::Claude => "SCSH_NO_CLAUDE_AUTH",
+      Harness::Codex => "SCSH_NO_CODEX_AUTH",
+      Harness::Grok => "SCSH_NO_GROK_AUTH",
+      Harness::Cursor => "SCSH_NO_CURSOR_AUTH",
+    };
+    return LoginPreflight {
+      status: "disabled",
+      label: "Disabled".into(),
+      hint: format!("Unset {env} to forward host credentials into containers"),
+    };
+  }
+  match harness {
+    Harness::Opencode => {
+      if opencode_auth_ready() {
+        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      } else {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Run `opencode auth login` on the host".into(),
+        }
+      }
+    }
+    Harness::Claude => {
+      if claude_oauth_token().is_some() {
+        LoginPreflight { status: "found", label: "Found via CLAUDE_CODE_OAUTH_TOKEN".into(), hint: String::new() }
+      } else if claude_credentials_file_on_host().is_some() {
+        LoginPreflight { status: "found", label: "Found via credentials file".into(), hint: String::new() }
+      } else if claude_keychain_credentials_json().is_some() {
+        LoginPreflight { status: "found", label: "Found via keychain".into(), hint: String::new() }
+      } else {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Log in with `claude`, or run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN".into(),
+        }
+      }
+    }
+    Harness::Codex => {
+      if codex_auth_file_on_host().is_some() {
+        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      } else if std::env::var(OPENAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false) {
+        LoginPreflight { status: "found", label: "Found via OPENAI_API_KEY".into(), hint: String::new() }
+      } else {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Run `codex login`, or export OPENAI_API_KEY".into(),
+        }
+      }
+    }
+    Harness::Grok => {
+      if !grok_container_auth_ready() {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Run `grok login`, or export XAI_API_KEY".into(),
+        }
+      } else if grok_auth_expired() {
+        LoginPreflight {
+          status: "expired",
+          label: "Expired".into(),
+          hint: "Run `grok` on the host and sign in again".into(),
+        }
+      } else if grok_auth_file_on_host().is_some() {
+        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      } else {
+        LoginPreflight { status: "found", label: "Found via XAI_API_KEY".into(), hint: String::new() }
+      }
+    }
+    Harness::Cursor => {
+      if cursor_api_key().is_some() {
+        LoginPreflight { status: "found", label: "Found via CURSOR_API_KEY".into(), hint: String::new() }
+      } else if cursor_auth_file_on_host().is_some() {
+        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      } else if cursor_keychain_access_token().is_some() {
+        LoginPreflight { status: "found", label: "Found via keychain".into(), hint: String::new() }
+      } else {
+        LoginPreflight {
+          status: "missing",
+          label: "Missing".into(),
+          hint: "Run `cursor agent login`, or export CURSOR_API_KEY".into(),
+        }
+      }
+    }
+  }
 }
 
 pub fn check_harness_host(harness: Harness) -> Result<(), String> {

@@ -92,19 +92,21 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   };
   let id = esc(&session.id);
   let session_meta = session_meta_html(session, now);
-  // Same style as the per-run "⬇ Download run snapshot" in the cast toolbar (.dl-snap):
-  // the two downloads read as one family, not a chamfered button next to a plain link.
+  let lifecycle = session.lifecycle_status(now);
+  // Export sits left of Force stop. While the job is still running the label is
+  // "incomplete" so a mid-run download is obviously a partial snapshot.
   let export_btn = if session.procs.iter().any(proc_has_cast) {
+    let label = if lifecycle == SessionLifecycle::Running { "incomplete ⬇" } else { "job snapshot ⬇" };
     format!(
-      "<a class=\"dl-snap session-export\" href=\"/session/{id}/export.html\" download>⬇ Download job snapshot</a>\n",
-      id = id
+      "<a class=\"chamfer btn btn--cyan btn--sm session-export\" href=\"/session/{id}/export.html\" download title=\"Offline HTML snapshot of this job\"><span>{label}</span></a>\n",
+      id = id,
+      label = label,
     )
   } else {
     String::new()
   };
   // Force stop always occupies its slot (WEB-UI §2): enabled while running, otherwise
   // grayed with an explanation. The resting lifecycle badge still follows the heading.
-  let lifecycle = session.lifecycle_status(now);
   let status_chip = if lifecycle == SessionLifecycle::Running {
     String::new()
   } else {
@@ -147,7 +149,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     plural = if n == 1 { "" } else { "s" },
   );
   let body = format!(
-    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{stop_btn}{export_btn}</div>\
+    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{export_btn}{stop_btn}</div>\
 <p class=\"session-kind\">{kind} <strong>{profile}</strong>{status_chip}</p>{session_meta}\n{skills}</div>\n\
 {workflow}{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     kind = esc(kind),
@@ -189,7 +191,7 @@ fn proc_diff_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRecord)
   )
 }
 
-/// A small per-proc "✕ Force stop" button. Always rendered (WEB-UI §2): enabled only while
+/// A small per-proc "Force stop" button. Always rendered (WEB-UI §2): enabled only while
 /// that proc still runs on a live session; otherwise grayed with an explanation so the
 /// control does not vanish mid-job.
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
@@ -205,7 +207,7 @@ fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::
     "This step already finished"
   };
   format!(
-    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\">✕ Force stop</button>",
+    "<button type=\"button\" class=\"proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\">Force stop</button>",
     index = proc.index,
     id = esc(&session.id),
     disabled = if enabled { "" } else { " disabled" },

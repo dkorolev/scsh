@@ -408,6 +408,7 @@ fn format_ref(r: &Ref) -> String {
   }
 }
 
+#[allow(dead_code)] // kept for tests / future UI that wants a human gate phrase offline
 fn format_cond(c: &Cond) -> String {
   let lhs = format_ref(&c.reference);
   match c.op {
@@ -422,6 +423,7 @@ fn format_cond(c: &Cond) -> String {
 }
 
 /// One-line human summary of a `when:` gate for UI tooltips (AND of every condition).
+#[allow(dead_code)] // privacy: not persisted on WorkflowMeta; still unit-tested
 pub fn format_when_summary(when: &When) -> String {
   let body = when.iter().map(format_cond).collect::<Vec<_>>().join(" and ");
   format!("Runs only if {body}")

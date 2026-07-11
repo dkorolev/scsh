@@ -248,7 +248,7 @@ impl Server {
       let store = lock_store(&self.store);
       let dirty: Vec<(String, String)> = dirty_ids
         .into_iter()
-        .filter_map(|id| store.sessions.get(&id).map(|s| (id, crate::daemon::jsonio::session_json_api(s))))
+        .filter_map(|id| store.sessions.get(&id).map(|s| (id, crate::daemon::jsonio::session_json_store(s))))
         .collect();
       let keep: HashSet<String> = store.sessions.keys().cloned().collect();
       (dirty, keep)
@@ -671,9 +671,16 @@ fn route(
   if req.method != "GET" {
     return (405, "method not allowed".into(), "text/plain", false);
   }
-  match req.path.as_str() {
+  match req.path.split('?').next().unwrap_or(req.path.as_str()) {
     "/" => {
       let html = html::index_page(&*lock_store(store));
+      (200, html, "text/html; charset=utf-8", false)
+    }
+    path if path.starts_with("/project") || path.starts_with("/repo") => {
+      // Filtered Projects view. Extra slashes are normalized by parse_index_filter.
+      // Bare `/project` or `/repo` (no name/path) falls through to the unfiltered index.
+      let filter = html::parse_index_filter(path);
+      let html = html::index_page_with_filter(&*lock_store(store), filter);
       (200, html, "text/html; charset=utf-8", false)
     }
     path if path.starts_with("/session/") => {
@@ -707,6 +714,10 @@ fn route(
     path if path == "/api/v1/images" || path.starts_with("/api/v1/images?") => {
       let runtime = path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
       (200, images_json(runtime), "application/json", false)
+    }
+    path if path == "/api/v1/setup" || path.starts_with("/api/v1/setup?") => {
+      let runtime = path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
+      (200, super::setup::setup_json(runtime), "application/json", false)
     }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
     path if path.starts_with("/api/v1/session/") => {

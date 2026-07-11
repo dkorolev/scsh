@@ -9,16 +9,22 @@ fn sessions_json(map: &std::collections::BTreeMap<String, Session>) -> String {
   }
   let mut parts = Vec::new();
   for (id, s) in map {
-    parts.push(format!("{}: {}", quote(id), session_json(s)));
+    parts.push(format!("{}: {}", quote(id), session_json(s, true)));
   }
   format!("{{ {} }}", parts.join(", "))
 }
 
 pub fn session_json_api(s: &Session) -> String {
-  session_json(s)
+  // Live view for HTTP + WebSocket ticks: include the synthesized job graph (builds + skills).
+  session_json(s, true)
 }
 
-/// Parse one session from its JSON (the inverse of [`session_json_api`]) — how the daemon's
+/// Persistable session JSON (authored `workflow` only — no synthesized build nodes).
+pub fn session_json_store(s: &Session) -> String {
+  session_json(s, false)
+}
+
+/// Parse one session from its JSON (the inverse of [`session_json_store`]) — how the daemon's
 /// redb store deserializes each per-session record on load.
 pub fn parse_session_json(text: &str) -> Result<Session, String> {
   parse_session(&parse(text)?)
@@ -71,7 +77,7 @@ pub fn cast_growth_json(session: &str, proc: usize, duration: f64, running: bool
   )
 }
 
-fn session_json(s: &Session) -> String {
+fn session_json(s: &Session, effective_workflow: bool) -> String {
   let profile = match &s.profile {
     Some(p) => quote(p),
     None => "null".to_string(),
@@ -94,9 +100,16 @@ fn session_json(s: &Session) -> String {
     Some(p) => format!("{p}"),
     None => "null".to_string(),
   };
-  let workflow = match &s.workflow {
-    Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(w)),
-    None => String::new(),
+  let workflow = if effective_workflow {
+    match super::workflow::effective_workflow_meta(s) {
+      Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(&w)),
+      None => String::new(),
+    }
+  } else {
+    match &s.workflow {
+      Some(w) => format!(", \"workflow\": {}", super::workflow::workflow_json(w)),
+      None => String::new(),
+    }
   };
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
@@ -383,7 +396,7 @@ mod tests {
       workflow: None,
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
-    let s = parse_session_json(&session_json_api(&session)).unwrap();
+    let s = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(s.procs[0].lines[0].text, "step 1");
     assert_eq!(s.procs[0].detail.as_deref(), Some("up to date"));
     assert_eq!(s.procs[0].cast_path.as_deref(), Some("/tmp/scsh-daemon/casts/abcdef-p0.cast"));
@@ -429,12 +442,15 @@ mod tests {
         ],
       }),
     };
-    let parsed = parse_session_json(&session_json_api(&session)).unwrap();
+    let parsed = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(parsed.workflow.as_ref().unwrap().nodes.len(), 2);
     assert_eq!(parsed.workflow.as_ref().unwrap().nodes[1].needs, vec!["add".to_string()]);
     session.workflow = None;
-    let legacy = parse_session_json(&session_json_api(&session)).unwrap();
+    let legacy = parse_session_json(&session_json_store(&session)).unwrap();
     assert!(legacy.workflow.is_none());
+    // Live API synthesizes a graph from skills/procs even without authored workflow.
+    let live = session_json_api(&session);
+    assert!(!live.contains(", \"workflow\":"), "empty session has no effective graph: {live}");
     // Missing key entirely (older builds)
     let bare = r#"{ "id": "old", "started_at": 1, "ended_at": null, "profile": null, "kind": null, "repo": "/r", "branch": "main", "skills": [], "procs": [], "last_seen_at": 1, "client_connected": false, "run_pid": null }"#;
     assert!(parse_session_json(bare).unwrap().workflow.is_none());

@@ -132,7 +132,7 @@ cd "$REPO" && WORDS="apple, carrot, pear, onion" "$SCSH_BIN" run --def fruits
 
 **Expect:** every step appears in the session browser immediately — one row per step, noted
 `step k/n` (plus `needs …`), waiting rows included; a step whose gate is false finishes as a
-dim ⊘ `skipped` row instead of vanishing. Above the rows, a **Workflow** card shows the DAG
+dim ⊘ `skipped` row instead of vanishing. Above the rows, a **Job graph** card shows the DAG
 (`categorize` → `sort_fruits` / `sort_vegetables`); node colors track live state, and clicking a
 node opens that step's panel (`#task-…`). `categorize` runs first, then `sort_fruits` and
 `sort_vegetables` run in parallel;
@@ -152,7 +152,7 @@ cd "$REPO" && "$SCSH_BIN" run --def arith
 
 **Expect:** the three harness images build FIRST, each as its own tracked row, before any step
 starts; then three step rows (`step 1/3` … `step 3/3 · needs add, multiply`) with `add` and
-`multiply` running in parallel and `summarize` waiting on both. The **Workflow** card shows the
+`multiply` running in parallel and `summarize` waiting on both. The **Job graph** card shows the
 fan-in DAG (`add` + `multiply` → `summarize`) from first paint. Afterwards the session dir holds
 `add.json` (`sum: 5`), `multiply.json` (`product: 20`), `summarize.json` (a `summary` string) —
 **and `summary.txt`**, the declared step artifact: a standalone plain-English sentence about
@@ -167,10 +167,60 @@ steps use claude/sonnet by default).
 cd "$REPO" && NAME=Ada "$SCSH_BIN" run --def greet
 ```
 
-**Expect:** the **Workflow** card shows `scaffold → implement → describe`. After the run,
+**Expect:** the **Job graph** card shows `scaffold → implement → describe`. After the run,
 the branch has `greet.py` / `test_greet.py` / `PR-DESCRIPTION.md`; `NAME=Ada python3 test_greet.py`
 passes; each step's row has a **⇄ commits diff** chip — open **implement** for the source
 fix and **describe** for the Description panel lifted from `PR-DESCRIPTION.md`.
+
+## 12. Job graph — interaction acceptance (manual)
+
+Use an `arith` or `fruits` session URL from steps 9–10. Report PASS/FAIL per bullet.
+
+### Fan-out (`fruits`)
+
+1. Graph shows `categorize → sort_fruits` and `categorize → sort_vegetables`.
+2. Both downstream nodes run in parallel without rearranging node coordinates.
+3. Clicking every node opens the matching proc panel (`#task-<id>`).
+
+### Fan-in (`arith`)
+
+1. Graph shows `add → summarize` and `multiply → summarize` (plus any `build_*` image nodes).
+2. `summarize` stays grey while prerequisites are incomplete.
+3. Each root independently becomes green; `summarize` turns purple only after both finish.
+
+### Conditional gate (`code-review`)
+
+1. `review` shows a **when** gate marker; tooltip is generic (“Runs only when its gate passes”)
+   — no raw gate literals.
+2. When the gate is false, `review` becomes **Skipped**, stays visible, and remains clickable;
+   its detail explains the skip.
+
+### Failure / stall
+
+1. Force one step to fail → node is red; other nodes and edges remain; all remain clickable.
+2. Kill the run process without deregistering; after `SESSION_STALE_SECS`, incomplete nodes
+   become orange **Stalled**. A healthy agent with no output stays purple **Running**.
+
+### Navigation
+
+1. Click three different tasks → URL fragments update; **Back** / **Forward** restore prior
+   selections (open + focus + highlight).
+2. Copy/reload `#task-summarize` → that panel opens.
+3. Click a task before its proc row exists → status says details are not available yet; when
+   the row appears, that panel opens once (no focus stealing on later ticks).
+
+### Accessibility / responsive
+
+1. Tab through every graph node; Enter activates; focus lands on the proc `summary`.
+2. Enable reduced motion → no running pulse; scroll is instant.
+3. Narrow phone width and 200% zoom: every node remains reachable via the scroll region
+   (labeled “Job dependency graph”); nodes do not overlap.
+
+### Regression
+
+1. Flat definition / `demo-pr` / build-images sessions still show a **Job graph** when they
+   have skills or image builds (builds are nodes with edges into skills).
+2. Casts, results, commits diffs, Force stop, and job snapshot export still work.
 
 ## Cleanup
 

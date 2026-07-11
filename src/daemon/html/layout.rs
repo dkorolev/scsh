@@ -20,6 +20,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     --red: #f85149;
     --magenta: #bc4dff;
     --purple: #8957e5;
+    /* Status bar padding (0.55*2) + crumbs line-box (1rem * 1.5) — tabs stick flush under it. */
+    --daemon-status-height: calc(1.1rem + 1.5rem);
     color-scheme: dark;
   }
   html, body { width: 100%; margin: 0; }
@@ -55,6 +57,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em;
     text-transform: uppercase; color: var(--text-muted); margin: 0 0 14px;
   }
+  .card > p.dim { margin: 0 0 0.85rem; max-width: 62rem; line-height: 1.45; }
+  .card > p.dim + p.dim { margin-top: -0.35rem; }
 
   /* ── chamfer (octagon clip) ── */
   .chamfer {
@@ -122,6 +126,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .btn--red::before { background: var(--surface); }
   .btn--green { --btn-fill: rgba(63,185,80,0.2); background: var(--green); }
   .btn--green::before { background: var(--surface); }
+  .btn--muted { --btn-fill: rgba(125,133,144,0.2); background: var(--border); }
+  .btn--muted::before { background: var(--surface); }
   .btn--disabled, .btn:disabled {
     background: var(--border); color: var(--text-muted); cursor: not-allowed;
     transform: none;
@@ -203,6 +209,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .form-title { font-size: 1.05rem; font-weight: 600; margin: 0 0 10px; }
 
   /* ── status bar (full-width pinned chrome — WEB-UI §1 / §2) ── */
+  /* Tabs use --daemon-status-height so they stick flush under this bar with no
+     see-through gap (scrolled rows must not peek between the two sticky layers). */
   .page-lede {
     margin: 0 0 0.85rem; font-size: 1.02rem; line-height: 1.45; color: var(--text);
     max-width: 52rem;
@@ -211,16 +219,17 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-status {
     position: sticky; top: 0; z-index: 40;
     width: 100%; box-sizing: border-box;
-    display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap;
+    display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap;
+    height: var(--daemon-status-height);
     font-size: 0.85rem; margin: 0; padding: 0.55rem 24px;
     background: var(--surface);
     border: none; border-bottom: 1px solid var(--border); border-radius: 0;
   }
-  .daemon-status .crumbs { font-weight: 700; font-size: 1rem; }
+  .daemon-status .crumbs { font-weight: 700; font-size: 1rem; line-height: 1.5; }
   .crumbs a { color: inherit; text-decoration: none; }
   .crumbs a:hover { color: var(--cyan); }
   .crumb-sep { color: var(--text-muted); margin: 0 0.4rem; font-weight: 400; }
-  .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: wrap; }
+  .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap; }
   .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
   .session-kind strong { color: var(--text); }
   /* The resting lifecycle badge follows the heading (the kind/name stays flush-left with
@@ -234,12 +243,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-status.connecting .dot { background: var(--cyan); box-shadow: 0 0 0 3px rgba(88,166,255,0.25); }
   .daemon-status.connecting { color: var(--cyan); }
 
-  /* ── tabs (pinned under the status island — WEB-UI §1) ── */
+  /* ── tabs (pinned flush under the status island — WEB-UI §1) ── */
   .tabs {
-    position: sticky; top: 3.1rem; z-index: 19;
+    position: sticky; top: var(--daemon-status-height); z-index: 19;
     display: flex; gap: 0.15rem; border-bottom: 1px solid var(--border);
-    margin: -0.4rem 0 1.1rem; flex-wrap: wrap;
+    margin: 0 0 1.1rem; flex-wrap: wrap;
     background: var(--bg); padding-top: 0.35rem;
+    /* Opaque seal into the status bar so subpixel gaps never show scrolled content. */
+    box-shadow: 0 -0.5rem 0 0 var(--bg);
   }
   .tab {
     font: inherit; color: var(--text-muted); background: none; border: none;
@@ -301,6 +312,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-head { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; align-items: baseline; margin-bottom: 0.75rem; }
   .workflow-title { margin: 0; font-size: 1.05rem; }
   .workflow-summary { margin: 0; }
+  .workflow-summary a.wf-jump {
+    color: inherit; text-decoration: underline; text-decoration-color: transparent;
+    text-underline-offset: 0.15em; border-radius: 2px;
+  }
+  .workflow-summary a.wf-jump:hover {
+    color: var(--cyan); text-decoration-color: var(--cyan);
+  }
+  .workflow-summary a.wf-jump:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .workflow-legend {
     list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 0.85rem;
     font-size: 0.78rem; color: var(--text-muted);
@@ -309,10 +328,24 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-running { color: var(--purple); }
   .wf-leg-done { color: var(--green); }
   .wf-leg-failed { color: var(--red); }
+  .wf-leg-force-stopped { color: var(--orange); }
   .wf-leg-stalled { color: var(--orange); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
-  .workflow-scroll { overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem; }
-  .workflow-stage { position: relative; min-height: 4rem; }
+  .workflow-scroll {
+    overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem;
+    /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
+    background:
+      linear-gradient(90deg, var(--bg) 30%, transparent) left center / 1.25rem 100% no-repeat,
+      linear-gradient(270deg, var(--bg) 30%, transparent) right center / 1.25rem 100% no-repeat,
+      radial-gradient(farthest-side at 0 50%, rgba(0,0,0,0.35), transparent) left center / 0.75rem 100% no-repeat local,
+      radial-gradient(farthest-side at 100% 50%, rgba(0,0,0,0.35), transparent) right center / 0.75rem 100% no-repeat local,
+      var(--bg);
+    background-attachment: local, local, scroll, scroll, local;
+  }
+  .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .wf-node.wf-selected { box-shadow: 0 0 0 2px var(--cyan); }
+  /* Center when the graph fits; when it overflows, auto margins collapse and scroll works. */
+  .workflow-stage { position: relative; min-height: 4rem; margin-inline: auto; }
   .workflow-edges { position: absolute; inset: 0; color: #8b949e; pointer-events: none; }
   .wf-edge {
     fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round;
@@ -352,12 +385,16 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { border-left-color: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
+  .wf-node.wf-force-stopped { border-left-color: var(--orange); }
+  .wf-node.wf-force-stopped .wf-state, .wf-node.wf-force-stopped .wf-id { color: var(--orange); }
   .wf-node.wf-stalled { border-left-color: var(--orange); }
   .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--orange); }
   .wf-node.wf-waiting, .wf-node.wf-ready { border-left-color: var(--text-muted); }
   .wf-node.wf-waiting .wf-state, .wf-node.wf-ready .wf-state { color: var(--text-muted); }
   .wf-node.wf-skipped { border-left-color: var(--text-muted); opacity: 0.75; }
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
+  .wf-node.wf-build { border-left-color: var(--cyan); }
+  .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
   /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
   .fleet {
@@ -439,9 +476,61 @@ pub(crate) const PAGE_CSS: &str = r#"
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; direction: rtl; text-align: left;
   }
-  /* Containers tab: the runtime switcher is a segmented control — a view toggle between
-     the (separate) Apple Containers and docker/podman image stores, not an action. */
-  .images-runtimes { display: block; margin: 0 0 0.75rem; }
+  a.repo-filter-link {
+    color: inherit; text-decoration: none; direction: rtl;
+  }
+  a.repo-filter-link:hover { color: var(--cyan); text-decoration: underline; }
+  .filter-banner {
+    margin: 0 0 0.65rem; padding: 0.45rem 0.65rem;
+    background: rgba(88, 166, 255, 0.08); border: 1px solid rgba(88, 166, 255, 0.35);
+    border-radius: 6px; font-size: 0.9rem;
+  }
+  .filter-banner a.filter-clear { color: var(--cyan); }
+  /* Setup tab: runtime switcher + harness readiness cards; Advanced holds the image table. */
+  .images-runtimes { display: block; margin: 0; }
+  .setup-toolbar {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem 1rem;
+    margin: 0 0 0.75rem;
+  }
+  .setup-toolbar a { color: var(--cyan); font-size: 0.85rem; }
+  .setup-summary { margin: 0 0 0.85rem; font-size: 0.9rem; }
+  .setup-cards {
+    display: grid; gap: 0.75rem;
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 22rem), 1fr));
+    margin: 0 0 1rem;
+  }
+  .setup-card {
+    border: 1px solid var(--border); border-radius: 8px;
+    background: var(--surface); padding: 0.75rem 0.9rem;
+  }
+  .setup-card-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
+    margin: 0 0 0.55rem;
+  }
+  .setup-card-name { font-size: 1rem; }
+  .setup-card-layers {
+    display: grid; gap: 0.25rem; font-size: 0.85rem; margin: 0 0 0.55rem;
+  }
+  .setup-layer-label {
+    display: inline-block; min-width: 3.4rem; color: var(--text-muted); font-weight: 600;
+  }
+  .setup-tag { font-size: 0.75rem; color: var(--text-muted); }
+  .setup-ok { color: var(--green, #3fb950); }
+  .setup-warn { color: var(--orange, #d29922); }
+  .setup-models {
+    list-style: none; margin: 0 0 0.55rem; padding: 0; font-size: 0.8rem;
+  }
+  .setup-models li { margin: 0.15rem 0; }
+  .setup-card-actions { min-height: 1.5rem; }
+  .setup-next { margin: 0; font-size: 0.8rem; }
+  .setup-advanced {
+    margin: 0.5rem 0 0; border-top: 1px solid var(--border); padding-top: 0.65rem;
+  }
+  .setup-advanced > summary {
+    cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text-muted);
+    margin-bottom: 0.55rem;
+  }
+  .setup-advanced > summary:hover { color: var(--text); }
   .seg {
     display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
     overflow: hidden; background: var(--surface);
@@ -538,6 +627,29 @@ pub(crate) const PAGE_CSS: &str = r#"
   .toast.show {
     opacity: 1; transform: translateX(-50%) translateY(0);
   }
+  /* In-app confirm — replaces browser confirm() for destructive Force stop actions. */
+  .scsh-dialog-backdrop {
+    position: fixed; inset: 0; z-index: 3000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 1.25rem;
+    background: rgba(1, 4, 9, 0.72);
+  }
+  .scsh-dialog {
+    width: min(26rem, 100%);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.1rem 1.2rem 1rem;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  }
+  .scsh-dialog-title {
+    margin: 0 0 0.45rem; font-size: 1.05rem; font-weight: 600; color: var(--text);
+  }
+  .scsh-dialog-body {
+    margin: 0 0 1rem; font-size: 0.9rem; line-height: 1.45; color: var(--text-muted);
+  }
+  .scsh-dialog-actions {
+    display: flex; gap: 0.55rem; justify-content: flex-end; flex-wrap: wrap;
+  }
+  .scsh-dialog-actions .btn { min-width: 5.5rem; }
   #repo-path.flash-open, #repo-open.flash-open {
     box-shadow: 0 0 0 2px var(--cyan);
   }
@@ -617,7 +729,12 @@ pub(crate) const PAGE_CSS: &str = r#"
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }
   /* Pinned to the meta island's top-right corner (the card is the positioning context). */
   .session-actions { position: absolute; top: 0.7rem; right: 0.85rem; display: flex; gap: 0.6rem; align-items: center; margin: 0; z-index: 2; }
-  .session-actions #session-stop { min-width: 6.5rem; } /* gray-in-place, never remove (WEB-UI §2) */
+  .session-actions #session-stop,
+  .session-actions .session-export {
+    min-width: 6.5rem; /* gray-in-place Force stop; export matches its box (WEB-UI §2) */
+    box-sizing: border-box;
+    height: 1.85rem;
+  }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
     grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem 1rem;

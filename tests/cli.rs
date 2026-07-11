@@ -106,7 +106,7 @@ fn help_topics_are_separate_pages() {
   let cache = scsh(&d, &["help", "cache"]);
   assert_eq!(cache.code, 0, "got: {}", cache.out);
   assert!(
-    cache.out.contains("cache key") && cache.out.contains("tmp/.sccache") && cache.out.contains("(cached)"),
+    cache.out.contains("cache key") && cache.out.contains("tmp/.sccache") && cache.out.contains("(cached"),
     "got: {}",
     cache.out
   );
@@ -569,10 +569,10 @@ fn list_json_is_machine_readable() {
   let r = scsh(&d, &["list", "--json"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   assert!(r.out.contains("\"profiles\""), "got: {}", r.out);
-  // The reserved `default` (add + subtract) and the declared `multiply`, each with its skills.
+  // The reserved `default` (add + subtract + demo-pr) and the declared `multiply`.
   assert!(
     r.out.contains(
-      r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "subtract-opencode-gpt-5.4-mini-fast"] }"#
+      r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "subtract-opencode-gpt-5.4-mini-fast", "demo-pr-claude-sonnet", "demo-pr-codex-gpt-5.5", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"] }"#
     ),
     "got: {}",
     r.out

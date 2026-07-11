@@ -84,9 +84,23 @@ pub fn fleet_groups(procs: &[ProcRecord]) -> Vec<FleetGroup> {
       });
     }
     let summary = summarize_group(&skill_source, &routes);
+    // Completed → Running → Waiting top to bottom (route name is the tiebreak).
+    routes.sort_by(|a, b| {
+      fleet_status_stack_rank(a.status).cmp(&fleet_status_stack_rank(b.status)).then_with(|| a.route.cmp(&b.route))
+    });
     out.push(FleetGroup { skill_source, routes, summary });
   }
   out
+}
+
+fn fleet_status_stack_rank(status: ProcStatus) -> u8 {
+  match status {
+    ProcStatus::Ok => 0,
+    ProcStatus::Fail => 1,
+    ProcStatus::Skipped => 2,
+    ProcStatus::Running => 3,
+    ProcStatus::Waiting => 4,
+  }
 }
 
 /// Write deterministic rollup JSON for every multi-route skill_source.

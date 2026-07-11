@@ -142,8 +142,8 @@ mod tests {
     let db = StoreDb::open_path(&path).unwrap();
     // Write two sessions.
     let dirty = vec![
-      ("aaaaaa".to_string(), jsonio::session_json_api(&session("aaaaaa"))),
-      ("bbbbbb".to_string(), jsonio::session_json_api(&session("bbbbbb"))),
+      ("aaaaaa".to_string(), jsonio::session_json_store(&session("aaaaaa"))),
+      ("bbbbbb".to_string(), jsonio::session_json_store(&session("bbbbbb"))),
     ];
     db.sync(&dirty, &ids(&["aaaaaa", "bbbbbb"])).unwrap();
     let loaded = db.load_sessions();
@@ -163,7 +163,7 @@ mod tests {
     let path = temp_db_path();
     {
       let db = StoreDb::open_path(&path).unwrap();
-      db.sync(&[("persb".to_string(), jsonio::session_json_api(&session("persb")))], &ids(&["persb"])).unwrap();
+      db.sync(&[("persb".to_string(), jsonio::session_json_store(&session("persb")))], &ids(&["persb"])).unwrap();
     } // db dropped → redb releases the file lock
     let reopened = StoreDb::open_path(&path).unwrap();
     let store = Store { sessions: reopened.load_sessions(), ..Store::new(DaemonMode::Persistent, 7274, 0) };

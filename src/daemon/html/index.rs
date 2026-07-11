@@ -1,31 +1,99 @@
 //! Session index table page.
 
-use super::escape::esc;
+use super::escape::{collapse_slashes, encode_repo_url_path, esc, percent_decode};
 use super::format::{format_duration_secs, format_relative_age, format_short_age};
 use super::layout::wrap_page;
 use crate::daemon::model::{sessions_for_index, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
+/// Filtered Projects/Jobs view from `/project/…` or `/repo/…`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IndexFilter {
+  /// Bare project name under `$SCSH_HOME/projects/<name>`.
+  Project(String),
+  /// Absolute repository path.
+  Repo(String),
+}
+
+impl IndexFilter {
+  /// Absolute repo path this filter matches (projects resolve under `projects_dir`).
+  pub fn repo_path(&self) -> String {
+    match self {
+      Self::Project(name) => crate::daemon::paths::projects_dir().join(name).to_string_lossy().into_owned(),
+      Self::Repo(path) => path.clone(),
+    }
+  }
+
+  pub fn label(&self) -> String {
+    match self {
+      Self::Project(name) => format!("project · {name}"),
+      Self::Repo(path) => path.clone(),
+    }
+  }
+}
+
+/// Parse `/project/…` or `/repo/…` (extra slashes allowed). `None` for bare `/project` / `/repo`.
+pub fn parse_index_filter(path: &str) -> Option<IndexFilter> {
+  let path = path.split('?').next().unwrap_or(path);
+  if let Some(rest) = path.strip_prefix("/project") {
+    let name = collapse_slashes(&percent_decode(rest)).trim_matches('/').to_string();
+    if name.is_empty() || name.contains('/') {
+      return None;
+    }
+    return Some(IndexFilter::Project(name));
+  }
+  if let Some(rest) = path.strip_prefix("/repo") {
+    let mut p = collapse_slashes(&percent_decode(rest));
+    if p.is_empty() || p == "/" {
+      return None;
+    }
+    if !p.starts_with('/') {
+      p.insert(0, '/');
+    }
+    return Some(IndexFilter::Repo(p));
+  }
+  None
+}
+
 pub fn index_page(store: &Store) -> String {
+  index_page_with_filter(store, None)
+}
+
+pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> String {
   let port = store.port;
   let now = now_unix_secs();
+  let filter_repo = filter.as_ref().map(|f| f.repo_path());
   let sessions = sessions_for_index(&store.sessions, now);
   let mut rows = String::new();
   for session in sessions {
+    if let Some(ref want) = filter_repo {
+      if &session.repo != want {
+        continue;
+      }
+    }
     rows.push_str(&index_session_row(session, now));
   }
   if rows.is_empty() {
-    rows = "<tr><td colspan=\"7\" class=\"dim\">No jobs yet — run <code>scsh run</code> to start one.</td></tr>\n"
-      .to_string();
+    rows = if filter.is_some() {
+      "<tr><td colspan=\"7\" class=\"dim\">No jobs for this project or repository.</td></tr>\n".into()
+    } else {
+      "<tr><td colspan=\"7\" class=\"dim\">No jobs yet — run <code>scsh run</code> to start one.</td></tr>\n".into()
+    };
   }
+  // Default landing tab is Run (`start`). Filtered /project|/repo URLs open Projects.
+  let dirs_active = if filter.is_some() { " active" } else { "" };
+  let start_active = if filter.is_some() { "" } else { " active" };
+  let dirs_panel_active = if filter.is_some() { " active" } else { "" };
+  let start_panel_active = if filter.is_some() { "" } else { " active" };
   let body = format!(
     "<nav class=\"tabs\">\
-<button class=\"tab active\" data-tab=\"jobs\">Jobs</button>\
-<button class=\"tab\" data-tab=\"dirs\">Projects</button>\
-<button class=\"tab\" data-tab=\"start\">New job</button>\
-<button class=\"tab\" data-tab=\"images\">Containers</button>\
+<button class=\"tab{start_active}\" data-tab=\"start\">Run</button>\
+<button class=\"tab\" data-tab=\"jobs\">Jobs</button>\
+<button class=\"tab{dirs_active}\" data-tab=\"dirs\">Projects</button>\
+<button class=\"tab\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
-<section class=\"tab-panel active\" id=\"tab-jobs\">\n\
+<section class=\"tab-panel{start_panel_active}\" id=\"tab-start\">\n{start}</section>\n\
+<section class=\"tab-panel\" id=\"tab-jobs\">\n\
 <div class=\"card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
@@ -34,22 +102,19 @@ pub fn index_page(store: &Store) -> String {
 <tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
 </div>\n\
 </section>\n\
-<section class=\"tab-panel\" id=\"tab-dirs\">\n{dirs}</section>\n\
-<section class=\"tab-panel\" id=\"tab-start\">\n{start}</section>\n\
-<section class=\"tab-panel\" id=\"tab-images\">\n{images}</section>\n",
+<section class=\"tab-panel{dirs_panel_active}\" id=\"tab-dirs\">\n{dirs}</section>\n\
+<section class=\"tab-panel\" id=\"tab-setup\">\n{images}</section>\n",
+    start_active = start_active,
+    dirs_active = dirs_active,
+    start_panel_active = start_panel_active,
+    dirs_panel_active = dirs_panel_active,
     rows = rows,
     harness_stops = harness_stop_strip(store, now),
-    dirs = dirs_panel(store, now),
+    dirs = dirs_panel(store, now, filter.as_ref()),
     start = start_panel(),
     images = images_panel()
   );
-  wrap_page(
-    "scsh",
-    port,
-    None,
-    "Browse local <code>scsh</code> jobs, open a repository, and start a harness definition — everything stays on this machine.",
-    &body,
-  )
+  wrap_page("scsh", port, None, "", &body)
 }
 
 /// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a
@@ -87,15 +152,17 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
   format!("<div class=\"harness-stops\">{buttons}</div>\n")
 }
 
-/// The images panel: a table of every scsh image (populated by the client from
-/// `GET /api/v1/images`) plus the Build buttons that POST `/api/v1/images/build` and
-/// deep-link into the spawned `scsh build-images` session.
+/// The Setup panel: per-harness readiness (image + login), with the low-level image
+/// inventory under a collapsed Advanced disclosure. Populated by `GET /api/v1/setup`.
 ///
-/// First paint already lists every known image in a `checking…` state (base + each harness).
-/// That is deliberate: §13 of the eng principles forbids a limbo where the panel looks empty
-/// while the (slow) runtime inspect is still in flight — the set of images is known a priori;
-/// only their status is pending.
+/// First paint already lists every harness in a `checking…` state (§13: no empty limbo
+/// while the runtime inspect runs). Tab id is `setup`; `#tab=images` remains a
+/// compatibility alias in the client.
 fn images_panel() -> String {
+  let mut cards = String::new();
+  for h in crate::config::Harness::ALL {
+    cards.push_str(&setup_skeleton_card(h));
+  }
   let mut rows = String::new();
   rows.push_str(&images_skeleton_row("base", crate::runtime::BASE_IMAGE_TAG, true));
   for h in crate::config::Harness::ALL {
@@ -103,11 +170,22 @@ fn images_panel() -> String {
   }
   format!(
     r##"<div class="card card--accent-left-orange">
-<p class="section-label">Containers</p>
-<p class="dim">The base container images scsh builds: the shared base, plus one per harness.
-Stale means the image exists but no longer matches this scsh build's embedded Dockerfile —
-rebuild it here.</p>
+<p class="section-label">Agent setup</p>
+<p class="dim">Prepare and verify the agents scsh can run. Choose a runtime, build missing
+images, and sign in on the host. Image freshness alone is not readiness — login is checked
+separately.</p>
+<p class="dim">Model access tests are not run automatically.</p>
+<div class="setup-toolbar">
 <div id="images-runtimes" class="images-runtimes"></div>
+<span id="setup-checked" class="dim"></span>
+<a href="#" id="setup-refresh">refresh</a>
+</div>
+<p id="setup-summary" class="setup-summary dim">checking agents…</p>
+<div id="setup-cards" class="setup-cards">{cards}</div>
+<details class="setup-advanced">
+<summary>Advanced image management</summary>
+<p class="dim">Image tags, sizes, timestamps, base rebuilds, and force rebuilds for the
+selected runtime. Prefer the harness cards above for everyday setup.</p>
 <div class="table-scroll"><table>
 <thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th><th></th></tr></thead>
 <tbody id="images-body">
@@ -121,9 +199,31 @@ rebuild it here.</p>
 <a href="#" id="images-refresh">refresh</a>
 <span id="images-note" class="dim">checking container runtime…</span>
 </div>
+</details>
 </div>
 "##,
+    cards = cards,
     rows = rows
+  )
+}
+
+fn setup_skeleton_card(h: crate::config::Harness) -> String {
+  format!(
+    r#"<article class="setup-card" data-harness="{id}" data-pending="1">
+<header class="setup-card-head">
+<strong class="setup-card-name">{name}</strong>
+<span class="chamfer session-status checking"><span>checking…</span></span>
+</header>
+<div class="setup-card-layers">
+<div><span class="setup-layer-label">Image</span> <span class="setup-layer-value dim">checking…</span></div>
+<div><span class="setup-layer-label">Login</span> <span class="setup-layer-value dim">checking…</span></div>
+</div>
+<ul class="setup-models dim"><li>Models not tested yet</li></ul>
+<div class="setup-card-actions"></div>
+</article>
+"#,
+    id = esc(h.as_str()),
+    name = esc(h.display_name()),
   )
 }
 
@@ -143,18 +243,18 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
   )
 }
 
-/// The "New job" tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
+/// The Run tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
 /// runnable and why not), pick a harness definition, fill the rendered param form, and start a
 /// job (POST `/api/v1/jobs/start`, deep-linking to the spawned session). Start is disabled until
-/// the repo is runnable.
+/// the repo is runnable. Default landing tab on the index page.
 fn start_panel() -> &'static str {
   r##"<div class="card card--accent-left-green">
-<p class="section-label">New job</p>
+<p class="section-label">Run</p>
 <p class="dim">Open a git repository — an absolute path, or the bare name of a project under
 <code>~/.scsh/projects/</code> — to configure and start a harness-definition job in it; the
 daemon runs it just like <code>scsh run</code>. The repo must be committed, clean, and have a
-gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job per repository at a time.
-Or <strong>create a new project</strong>: a fresh git repository under
+gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job per repository at a time.</p>
+<p class="dim">Or <strong>create a new project</strong>: a fresh git repository under
 <code>~/.scsh/projects/&lt;name&gt;</code>, born runnable (its first commit gitignores
 <code>/tmp</code>) — tests and demos start right here, no terminal needed.</p>
 <div class="images-controls">
@@ -185,19 +285,29 @@ Or <strong>create a new project</strong>: a fresh git repository under
 /// in (plus repositories opened from the UI that have no jobs yet). Rendered server-side so
 /// the tab is populated on first paint; `renderRepoJobs` in the client JS re-renders the
 /// same markup from live tick snapshots — keep the two byte-identical.
-fn dirs_panel(store: &Store, now: u64) -> String {
+fn dirs_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
+  let banner = match filter {
+    Some(f) => format!(
+      "<p class=\"filter-banner\" data-repo-filter=\"{path}\">Showing <strong>{label}</strong> · \
+<a class=\"filter-clear\" href=\"/#tab=dirs\">Show all</a></p>\n",
+      path = esc(&f.repo_path()),
+      label = esc(&f.label()),
+    ),
+    None => String::new(),
+  };
   format!(
     r##"<div class="card card--accent-left-magenta">
 <p class="section-label">Projects</p>
-<p class="dim">Current jobs, grouped by where they run: a project under <code>~/.scsh/projects/</code> shows its
-name; anything else shows its repository path.</p>
+{banner}<p class="dim">Current jobs, grouped by where they run: a project under <code>~/.scsh/projects/</code> shows its
+name; anything else shows its repository path. Click a name to filter.</p>
 <div class="table-scroll"><table>
 <thead><tr><th>Project / repository</th><th>Jobs</th></tr></thead>
 <tbody id="repos-body">{rows}</tbody>
 </table></div>
 </div>
 "##,
-    rows = repo_jobs_rows(store, now)
+    banner = banner,
+    rows = repo_jobs_rows(store, now, filter),
   )
 }
 
@@ -205,20 +315,30 @@ name; anything else shows its repository path.</p>
 /// ran (the workflow/profile name), running groups above finished ones, newest first, each
 /// job with a compact age stamp. Mirrored by `renderRepoJobs` in the client JS
 /// (`client_js.rs`) — keep the markup identical.
-fn repo_jobs_rows(store: &Store, now: u64) -> String {
+fn repo_jobs_rows(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
+  let filter_repo = filter.map(|f| f.repo_path());
   let mut by_repo: std::collections::BTreeMap<&str, Vec<&Session>> = std::collections::BTreeMap::new();
   for path in store.open_repos.keys() {
+    if filter_repo.as_ref().is_some_and(|want| path != want) {
+      continue;
+    }
     by_repo.entry(path).or_default();
   }
   for s in store.sessions.values() {
     if s.repo.is_empty() || s.repo == crate::daemon::server::IMAGE_BUILDS_REPO {
       continue;
     }
+    if filter_repo.as_ref().is_some_and(|want| &s.repo != want) {
+      continue;
+    }
     by_repo.entry(&s.repo).or_default().push(s);
   }
   if by_repo.is_empty() {
-    return "<tr><td colspan=\"2\" class=\"dim\">No jobs yet — open or create a project under “New job”.</td></tr>"
-      .to_string();
+    return if filter.is_some() {
+      "<tr><td colspan=\"2\" class=\"dim\">No jobs for this project or repository.</td></tr>".into()
+    } else {
+      "<tr><td colspan=\"2\" class=\"dim\">No jobs yet — open or create a project under Run.</td></tr>".to_string()
+    };
   }
   // A job's "activity" moment: when it finished, or when it started if still going.
   let activity = |s: &Session| s.ended_at.unwrap_or(s.started_at);
@@ -271,14 +391,24 @@ fn repo_jobs_rows(store: &Store, now: u64) -> String {
         .collect::<Vec<_>>()
         .join("")
     };
+    let href = repo_filter_href(repo, &projects_root);
     rows.push_str(&format!(
-      "<tr><td class=\"repo-path\" title=\"{repo}\">{label}</td><td>{cells}</td></tr>",
+      "<tr data-repo=\"{repo}\"><td class=\"repo-path\" title=\"{repo}\"><a class=\"repo-filter-link\" href=\"{href}\">{label}</a></td><td>{cells}</td></tr>",
       repo = esc(repo),
+      href = esc(&href),
       label = esc(&repo_display_label(repo, &projects_root)),
       cells = cells,
     ));
   }
   rows
+}
+
+/// `/project/<name>` for scsh projects, `/repo/<abs-path>` for everything else.
+fn repo_filter_href(repo: &str, projects_root: &str) -> String {
+  match repo.strip_prefix(projects_root) {
+    Some(name) if !name.is_empty() && !name.contains('/') => format!("/project/{name}"),
+    _ => format!("/repo{}", encode_repo_url_path(repo)),
+  }
 }
 
 /// A repo under `~/.scsh/projects/` displays as `project · <name>`; anything else shows its

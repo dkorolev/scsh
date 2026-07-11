@@ -68,6 +68,66 @@ function setBtnLabel(btn, text) {
   if (span) span.textContent = text;
   else btn.textContent = text;
 }
+// In-app confirm dialog (Promise<boolean>). Replaces the browser confirm dialog for Force stop UX.
+function scshConfirm(opts) {
+  const title = (opts && opts.title) || 'Confirm';
+  const body = (opts && opts.body) || '';
+  const confirmLabel = (opts && opts.confirmLabel) || 'Confirm';
+  const cancelLabel = (opts && opts.cancelLabel) || 'Cancel';
+  const danger = !!(opts && opts.danger);
+  return new Promise((resolve) => {
+    const existing = document.getElementById('scsh-dialog');
+    if (existing) existing.remove();
+    const backdrop = document.createElement('div');
+    backdrop.id = 'scsh-dialog';
+    backdrop.className = 'scsh-dialog-backdrop';
+    const panel = document.createElement('div');
+    panel.className = 'scsh-dialog';
+    panel.setAttribute('role', 'alertdialog');
+    panel.setAttribute('aria-modal', 'true');
+    panel.setAttribute('aria-labelledby', 'scsh-dialog-title');
+    const h = document.createElement('p');
+    h.id = 'scsh-dialog-title';
+    h.className = 'scsh-dialog-title';
+    h.textContent = title;
+    const p = document.createElement('p');
+    p.className = 'scsh-dialog-body';
+    p.textContent = body;
+    const actions = document.createElement('div');
+    actions.className = 'scsh-dialog-actions';
+    const cancelBtn = document.createElement('button');
+    cancelBtn.type = 'button';
+    cancelBtn.className = 'chamfer btn btn--sm btn--muted';
+    cancelBtn.innerHTML = '<span></span>';
+    cancelBtn.querySelector('span').textContent = cancelLabel;
+    const okBtn = document.createElement('button');
+    okBtn.type = 'button';
+    okBtn.className = 'chamfer btn btn--sm ' + (danger ? 'btn--red' : 'btn--cyan');
+    okBtn.innerHTML = '<span></span>';
+    okBtn.querySelector('span').textContent = confirmLabel;
+    actions.appendChild(cancelBtn);
+    actions.appendChild(okBtn);
+    panel.appendChild(h);
+    panel.appendChild(p);
+    panel.appendChild(actions);
+    backdrop.appendChild(panel);
+    const finish = (ok) => {
+      document.removeEventListener('keydown', onKey, true);
+      backdrop.remove();
+      resolve(ok);
+    };
+    const onKey = (ev) => {
+      if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
+      else if (ev.key === 'Enter' && document.activeElement === okBtn) { ev.preventDefault(); finish(true); }
+    };
+    backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) finish(false); });
+    cancelBtn.addEventListener('click', () => finish(false));
+    okBtn.addEventListener('click', () => finish(true));
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(backdrop);
+    okBtn.focus();
+  });
+}
 function sessionStartedCell(session, nowUnix) {
   const ts = session.started_at || 0;
   const abs = formatUnixTime(ts);
@@ -184,6 +244,7 @@ function elapsedPhrase(status, elapsed, failReason) {
   if (status === 'ok') return clock ? 'done in ' + clock : 'done';
   if (status === 'skipped') return 'skipped';
   if (status === 'fail') {
+    if (failReason === 'force_stopped') return clock ? 'force-stopped after ' + clock : 'force-stopped';
     if (failReason === 'container_inactive') return clock ? 'stalled after ' + clock : 'stalled';
     if (failReason === 'container_timeout') return clock ? 'timed out after ' + clock : 'timed out';
     return clock ? 'failed in ' + clock : 'failed';
@@ -290,10 +351,20 @@ function renderIndex(sessions, nowUnix) {
   const body = document.getElementById('sessions-body');
   if (!body || sessions == null) return;
   nowUnix = nowUnix ?? (Date.now() / 1000);
-  const ids = sortSessionIds(sessions, nowUnix);
+  const filter = parseIndexFilter(location.pathname);
+  const wantRepo = filter && filter.repo;
+  const filtered = {};
+  Object.keys(sessions).forEach(id => {
+    const s = sessions[id];
+    if (!s) return;
+    if (wantRepo && s.repo !== wantRepo) return;
+    filtered[id] = s;
+  });
+  const ids = sortSessionIds(filtered, nowUnix);
   if (!ids.length) {
-    body.innerHTML =
-      '<tr><td colspan="7" class="dim">No jobs yet — run <code>scsh run</code> to start one.</td></tr>';
+    body.innerHTML = wantRepo
+      ? '<tr><td colspan="7" class="dim">No jobs for this project or repository.</td></tr>'
+      : '<tr><td colspan="7" class="dim">No jobs yet — run <code>scsh run</code> to start one.</td></tr>';
     return;
   }
   const existing = new Map();
@@ -301,16 +372,16 @@ function renderIndex(sessions, nowUnix) {
     existing.set(row.getAttribute('data-session-id'), row);
   });
   if (existing.size === 0) {
-    body.innerHTML = ids.map(id => indexRowHtml(id, sessions[id], nowUnix)).join('');
+    body.innerHTML = ids.map(id => indexRowHtml(id, filtered[id], nowUnix)).join('');
     return;
   }
-  const nextHtml = ids.map(id => indexRowHtml(id, sessions[id], nowUnix)).join('');
+  const nextHtml = ids.map(id => indexRowHtml(id, filtered[id], nowUnix)).join('');
   if (body.innerHTML !== nextHtml) {
     body.innerHTML = nextHtml;
   } else {
     ids.forEach(id => {
       const row = existing.get(id);
-      if (row) syncIndexRow(row, sessions[id], nowUnix);
+      if (row) syncIndexRow(row, filtered[id], nowUnix);
     });
   }
 }
@@ -559,6 +630,11 @@ function updateProcFields(det, p, nowUnix) {
     // one; keep the viewer's position and leave live mode (player remounts without live).
     const wasRunning = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
     castEl.dataset.status = p.status;
+    const exportLink = castEl.querySelector('[data-cast-export]');
+    if (exportLink) {
+      const live = p.status === 'running' || p.status === 'waiting';
+      exportLink.textContent = live ? '⬇ incomplete' : '⬇ Download run snapshot';
+    }
     if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
       castEl.dataset.ended = String(Math.round(Date.now() / 1000));
       if (castEl._live) setCastLive(castEl, false);
@@ -593,11 +669,13 @@ function castEmbedHtml(p) {
   const base = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index;
   const ended = (p.started_at && p.elapsed != null && p.status !== 'running' && p.status !== 'waiting')
     ? ' data-ended="' + Math.round(p.started_at + p.elapsed) + '"' : '';
+  const live = p.status === 'running' || p.status === 'waiting';
+  const exportLabel = live ? '⬇ incomplete' : '⬇ Download run snapshot';
   return '<div class="cast" data-cast-url="' + esc(base) + '" data-proc="' + esc(String(p.index)) +
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
+    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>' + exportLabel + '</a>' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
-    '<a href="' + esc(base) + '/export.html" data-cast-export download hidden>⬇ Download run snapshot</a>' +
     '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
@@ -836,15 +914,17 @@ function workflowStepIdForProc(p) {
     const hit = nodes.find(n => n.proc_index === p.index);
     if (hit) return hit.id;
   }
+  if (p.kind === 'build') return p.harness ? ('build_' + p.harness) : 'build_base';
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'○',ready:'○',running:'◉',done:'✓',failed:'✗',skipped:'⊘',stalled:'!'})[state] || '○';
+  return ({waiting:'○',ready:'○',running:'◉',done:'✓',failed:'✗','force-stopped':'✕',skipped:'⊘',stalled:'!'})[state] || '○';
 }
 function wfStateLabel(state) {
-  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Done',failed:'Failed',skipped:'Skipped',stalled:'Stalled'})[state] || state;
+  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Done',failed:'Failed',
+    'force-stopped':'Force-stopped',skipped:'Skipped',stalled:'Stalled'})[state] || state;
 }
-function wfUnmetNeeds(session, node) {
+function wfUnmetNeedIds(session, node) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const procs = session.procs || [];
@@ -854,7 +934,48 @@ function wfUnmetNeeds(session, node) {
     if (!n || n.proc_index == null) return true;
     const p = procs.find(x => x.index === n.proc_index);
     return !p || !terminal(p.status);
-  }).length;
+  });
+}
+function wfUnmetNeeds(session, node) {
+  return wfUnmetNeedIds(session, node).length;
+}
+function wfNodeTitle(id) {
+  if (id === 'build_base') return 'base';
+  if (id.indexOf('build_') === 0) return id.slice(6);
+  return id;
+}
+function wfBlockerLine(session, id, nowUnix) {
+  const nodes = (session.workflow && session.workflow.nodes) || [];
+  const dep = nodes.find(n => n.id === id);
+  const title = wfNodeTitle(id);
+  const isBuild = id === 'build_base' || id.indexOf('build_') === 0;
+  const kind = isBuild ? 'image build' : 'task';
+  if (!dep) return title + ' (missing)';
+  const p = (session.procs || []).find(x => x.index === dep.proc_index);
+  if (!p) return title + ' (' + kind + ', not registered yet)';
+  const st = wfDisplayState(session, dep, nowUnix);
+  const bits = [];
+  if (!isBuild && p.harness) bits.push(p.harness);
+  bits.push(kind, st);
+  return title + ' (' + bits.join(' · ') + ')';
+}
+function wfNodeTip(session, node, state, unmetIds, nowUnix) {
+  const title = wfNodeTitle(node.id);
+  const lines = [title];
+  if (state === 'waiting' && unmetIds.length) {
+    lines.push('Waiting on:');
+    unmetIds.forEach(id => lines.push('• ' + wfBlockerLine(session, id, nowUnix)));
+  } else if (state === 'waiting') lines.push('Waiting to start');
+  else if (state === 'ready') lines.push('Ready — dependencies finished; not started yet');
+  else if (state === 'running') {
+    lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
+  }   else if (state === 'done') lines.push('Done');
+  else if (state === 'failed') lines.push('Failed');
+  else if (state === 'force-stopped') lines.push('Force-stopped from the session browser');
+  else if (state === 'skipped') lines.push('Skipped');
+  else if (state === 'stalled') lines.push('Stalled — job stopped updating');
+  if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
+  return lines.join('\n');
 }
 function wfDisplayState(session, node, nowUnix) {
   const life = sessionLifecycle(session, nowUnix).class;
@@ -863,7 +984,9 @@ function wfDisplayState(session, node, nowUnix) {
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
   if (!p) return stalled ? 'stalled' : 'waiting';
   if (p.status === 'ok') return 'done';
-  if (p.status === 'fail') return 'failed';
+  if (p.status === 'fail') {
+    return p.fail_reason === 'force_stopped' ? 'force-stopped' : 'failed';
+  }
   if (p.status === 'skipped') return 'skipped';
   if (p.status === 'running') return stalled ? 'stalled' : 'running';
   if (p.status === 'waiting') {
@@ -873,27 +996,243 @@ function wfDisplayState(session, node, nowUnix) {
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','done','failed','stalled','waiting','ready','skipped'];
+  const order = ['running','done','failed','force-stopped','stalled','waiting','ready','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
   ).join('');
   return items ? '<ul class="workflow-legend" aria-label="Status legend">' + items + '</ul>' : '';
 }
-function wfSummaryText(counts, total) {
+function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   for (const [n, label] of [[counts.done,'done'],[counts.running,'running'],[counts.waiting,'waiting'],
-    [counts.failed,'failed'],[counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
-    if (n > 0) parts.push(n + ' ' + label);
+    [counts.ready,'ready'],[counts.failed,'failed'],[counts.force_stopped,'force-stopped'],
+    [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
+    if (n <= 0) continue;
+    const id = first && first[label];
+    if (id) {
+      parts.push('<a class="wf-jump" href="' + '#task-' + encodeURIComponent(id) +
+        '" data-wf-status="' + label + '" title="Jump to first ' + label + ' task">' +
+        n + ' ' + label + '</a>');
+    } else {
+      parts.push(n + ' ' + label);
+    }
   }
   return parts.join(' · ');
 }
-function updateWorkflowGraph(session, nowUnix) {
-  const root = document.querySelector('[data-workflow-graph]');
-  if (!root || !session || !session.workflow) return;
+function wfFirstIdByState(session, nodes, nowUnix) {
+  const layout = wfLayoutNodes(session, nodes, nowUnix).slice().sort((a, b) => a.y - b.y || a.x - b.x);
+  const first = Object.create(null);
+  layout.forEach(pos => {
+    const node = nodes.find(n => n.id === pos.id);
+    if (!node) return;
+    const st = wfDisplayState(session, node, nowUnix);
+    if (first[st] == null) first[st] = node.id;
+  });
+  return first;
+}
+// Layout constants — keep in lockstep with src/daemon/html/workflow.rs.
+const WF_NODE_W = 200, WF_NODE_H = 72, WF_GAP_X = 56, WF_GAP_Y = 28, WF_PAD = 16;
+let pendingWorkflowStep = null;
+let wfHistorySilent = false;
+function wfNodeRanks(nodes) {
+  const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
+  const ranks = Object.create(null);
+  function rankOf(id) {
+    if (ranks[id] != null) return ranks[id];
+    const node = byId[id];
+    if (!node) { ranks[id] = 0; return 0; }
+    const needs = node.needs || [];
+    const r = needs.length ? (1 + Math.max(...needs.map(rankOf))) : 0;
+    ranks[id] = r;
+    return r;
+  }
+  return nodes.map(n => rankOf(n.id));
+}
+function wfStatusStackRank(state) {
+  return ({done:0,failed:1,'force-stopped':2,skipped:3,running:4,stalled:5,ready:6,waiting:7})[state] ?? 9;
+}
+function wfLayoutNodes(session, nodes, nowUnix) {
+  const ranks = wfNodeRanks(nodes);
+  const byRank = Object.create(null);
+  nodes.forEach((n, i) => {
+    const r = ranks[i];
+    (byRank[r] || (byRank[r] = [])).push(i);
+  });
+  Object.keys(byRank).forEach(r => byRank[r].sort((a, b) => {
+    const sa = wfStatusStackRank(wfDisplayState(session, nodes[a], nowUnix));
+    const sb = wfStatusStackRank(wfDisplayState(session, nodes[b], nowUnix));
+    return sa - sb || (nodes[a].order || 0) - (nodes[b].order || 0) ||
+      String(nodes[a].id).localeCompare(String(nodes[b].id));
+  }));
+  const maxInRank = Math.max(1, ...Object.keys(byRank).map(r => byRank[r].length));
+  const colH = maxInRank * WF_NODE_H + (maxInRank - 1) * WF_GAP_Y;
+  const out = [];
+  Object.keys(byRank).map(Number).sort((a, b) => a - b).forEach(rank => {
+    const idxs = byRank[rank];
+    const n = idxs.length;
+    const blockH = n * WF_NODE_H + (n - 1) * WF_GAP_Y;
+    const y0 = WF_PAD + (colH - blockH) / 2;
+    const x = WF_PAD + rank * (WF_NODE_W + WF_GAP_X);
+    idxs.forEach((i, row) => {
+      out.push({ id: nodes[i].id, x, y: y0 + row * (WF_NODE_H + WF_GAP_Y), order: nodes[i].order || 0, index: i });
+    });
+  });
+  out.sort((a, b) => a.order - b.order);
+  return out;
+}
+function wfPortY(nodeY, index, count) {
+  if (count <= 1) return nodeY + WF_NODE_H / 2;
+  const margin = WF_NODE_H * 0.22;
+  const usable = WF_NODE_H - 2 * margin;
+  return nodeY + margin + usable * index / (count - 1);
+}
+function wfEdgesSvg(nodes, layout) {
+  const byId = Object.fromEntries(layout.map(n => [n.id, n]));
+  const pairs = [];
+  nodes.forEach(node => {
+    (node.needs || []).forEach(need => {
+      if (byId[need] && byId[node.id]) pairs.push([need, node.id]);
+    });
+  });
+  const outN = Object.create(null), inN = Object.create(null);
+  pairs.forEach(([s, d]) => { outN[s] = (outN[s] || 0) + 1; inN[d] = (inN[d] || 0) + 1; });
+  const outRank = Object.create(null), inRank = Object.create(null);
+  pairs.forEach((p, i) => {
+    (outRank[p[0]] || (outRank[p[0]] = [])).push(i);
+    (inRank[p[1]] || (inRank[p[1]] = [])).push(i);
+  });
+  Object.keys(outRank).forEach(src => outRank[src].sort((a, b) => byId[pairs[a][1]].y - byId[pairs[b][1]].y || a - b));
+  Object.keys(inRank).forEach(dst => inRank[dst].sort((a, b) => byId[pairs[a][0]].y - byId[pairs[b][0]].y || a - b));
+  const outPort = Object.create(null), inPort = Object.create(null);
+  Object.keys(outRank).forEach(src => outRank[src].forEach((ei, port) => { outPort[ei] = port; }));
+  Object.keys(inRank).forEach(dst => inRank[dst].forEach((ei, port) => { inPort[ei] = port; }));
+  return pairs.map((p, i) => {
+    const src = byId[p[0]], dst = byId[p[1]];
+    const x1 = src.x + WF_NODE_W;
+    const y1 = wfPortY(src.y, outPort[i], outN[p[0]]);
+    const x2 = dst.x - 1.5;
+    const y2 = wfPortY(dst.y, inPort[i], inN[p[1]]);
+    const dx = Math.max(24, x2 - x1);
+    const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
+    return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+      ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
+      ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
+  }).join('');
+}
+function wfBuildGraphHtml(session, nowUnix) {
+  const nodes = (session.workflow && session.workflow.nodes) || [];
+  if (!nodes.length) return '';
+  const layout = wfLayoutNodes(session, nodes, nowUnix);
+  const w = Math.max(...layout.map(n => n.x + WF_NODE_W)) + WF_PAD;
+  const h = Math.max(...layout.map(n => n.y + WF_NODE_H)) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, running: 0, waiting: 0, failed: 0, stalled: 0, skipped: 0 };
-  const nodes = session.workflow.nodes || [];
+  const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
+  const byId = Object.fromEntries(layout.map(n => [n.id, n]));
+  const nodesHtml = nodes.map(node => {
+    const pos = byId[node.id];
+    if (!pos) return '';
+    const state = wfDisplayState(session, node, nowUnix);
+    present[state] = true;
+    if (state === 'done') counts.done++;
+    else if (state === 'running') counts.running++;
+    else if (state === 'waiting') counts.waiting++;
+    else if (state === 'ready') counts.ready++;
+    else if (state === 'failed') counts.failed++;
+    else if (state === 'force-stopped') counts.force_stopped++;
+    else if (state === 'stalled') counts.stalled++;
+    else if (state === 'skipped') counts.skipped++;
+    const p = (session.procs || []).find(x => x.index === node.proc_index);
+    const isBuild = node.id === 'build_base' || node.id.indexOf('build_') === 0;
+    const title = wfNodeTitle(node.id);
+    const unmetIds = wfUnmetNeedIds(session, node);
+    const tip = wfNodeTip(session, node, state, unmetIds, nowUnix);
+    const bits = [];
+    if (isBuild) bits.push('image build');
+    else if (p && p.harness) bits.push(p.harness);
+    if (p && p.model) bits.push(p.model);
+    if (state === 'waiting' && unmetIds.length === 1) bits.push('waiting on ' + wfNodeTitle(unmetIds[0]));
+    else if (state === 'waiting' && unmetIds.length > 1 && unmetIds.length <= 3) {
+      bits.push('waiting on ' + unmetIds.map(wfNodeTitle).join(', '));
+    } else if (state === 'waiting' && unmetIds.length > 3) bits.push('waiting on ' + unmetIds.length + ' tasks');
+    if (state === 'ready') bits.push('ready');
+    const gate = node.conditional
+      ? '<span class="wf-gate" data-tip="Runs only when its gate passes" aria-label="Runs only when its gate passes">when</span>'
+      : '';
+    const procAttr = node.proc_index != null ? ' data-proc-index="' + esc(String(node.proc_index)) + '"' : '';
+    const tipRunning = (state === 'running' && p && p.started_at)
+      ? ' data-tip-running="' + esc(String(p.started_at)) + '"' : '';
+    return '<a class="wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
+      '" href="' + '#task-' + encodeURIComponent(node.id) + '" id="wf-node-' + esc(node.id) +
+      '" data-workflow-step="' + esc(node.id) + '" data-wf-state="' + state + '"' + procAttr +
+      ' style="left:' + pos.x.toFixed(1) + 'px;top:' + pos.y.toFixed(1) + 'px;width:' + WF_NODE_W +
+      'px;min-height:' + WF_NODE_H + 'px" data-tip="' + esc(tip) + '"' + tipRunning +
+      ' aria-label="' + esc(tip.replace(/\n/g, ', ')) +
+      '"><span class="wf-state"><span class="wf-ico" aria-hidden="true">' + wfStateIcon(state) +
+      '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span></span><span class="wf-id">' +
+      esc(title) + gate + '</span><span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
+  }).join('');
+  return '<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>' +
+    '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
+    '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
+    wfLegendHtml(present) + '</div>' +
+    '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
+    '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
+    '<svg class="workflow-edges" width="' + w.toFixed(0) + '" height="' + h.toFixed(0) +
+    '" viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" aria-hidden="true"><defs>' +
+    '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
+    '<path class="wf-arrowhead" d="M3.5 2.5 L11 7 L3.5 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</marker></defs>' + wfEdgesSvg(nodes, layout) + '</svg>' +
+    '<div class="workflow-nodes">' + nodesHtml + '</div></div></div></div>';
+}
+function ensureWorkflowGraphMounted(session, nowUnix) {
+  const nodes = (session && session.workflow && session.workflow.nodes) || [];
+  let root = document.querySelector('[data-workflow-graph]');
+  if (!nodes.length) {
+    if (root) root.remove();
+    return null;
+  }
+  const liveIds = nodes.map(n => {
+    const st = wfDisplayState(session, n, nowUnix);
+    return n.id + '\t' + wfStatusStackRank(st);
+  }).slice().sort().join('\0');
+  if (root) {
+    const domIds = Array.from(root.querySelectorAll('[data-workflow-step]'))
+      .map(el => {
+        const id = el.getAttribute('data-workflow-step');
+        const st = el.getAttribute('data-wf-state') || '';
+        return id + '\t' + wfStatusStackRank(st);
+      }).filter(Boolean).sort().join('\0');
+    if (domIds === liveIds) return root;
+    root.remove();
+    root = null;
+  }
+  const html = wfBuildGraphHtml(session, nowUnix);
+  if (!html) return null;
+  const procs = document.getElementById('session-procs');
+  if (procs) procs.insertAdjacentHTML('beforebegin', html);
+  else {
+    const main = document.querySelector('.page-shell') || document.body;
+    main.insertAdjacentHTML('beforeend', html);
+  }
+  root = document.querySelector('[data-workflow-graph]');
+  if (root) {
+    delete root.dataset.bound;
+    initWorkflowGraph();
+  }
+  return root;
+}
+function updateWorkflowGraph(session, nowUnix) {
+  const nodes = (session && session.workflow && session.workflow.nodes) || [];
+  if (!nodes.length) {
+    const gone = document.querySelector('[data-workflow-graph]');
+    if (gone) gone.remove();
+    return;
+  }
+  const root = ensureWorkflowGraphMounted(session, nowUnix);
+  if (!root) return;
+  const present = Object.create(null);
+  const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
@@ -901,13 +1240,16 @@ function updateWorkflowGraph(session, nowUnix) {
     present[state] = true;
     if (state === 'done') counts.done++;
     else if (state === 'running') counts.running++;
-    else if (state === 'waiting' || state === 'ready') counts.waiting++;
+    else if (state === 'waiting') counts.waiting++;
+    else if (state === 'ready') counts.ready++;
     else if (state === 'failed') counts.failed++;
+    else if (state === 'force-stopped') counts.force_stopped++;
     else if (state === 'stalled') counts.stalled++;
     else if (state === 'skipped') counts.skipped++;
     const prev = el.dataset.wfState;
     if (prev !== state) {
-      el.className = 'wf-node wf-' + state;
+      const build = el.classList.contains('wf-build') ? ' wf-build' : '';
+      el.className = 'wf-node wf-' + state + build;
       el.dataset.wfState = state;
       const ico = el.querySelector('.wf-ico');
       const lab = el.querySelector('.wf-state-label');
@@ -916,19 +1258,27 @@ function updateWorkflowGraph(session, nowUnix) {
     }
     if (node.proc_index != null) el.setAttribute('data-proc-index', String(node.proc_index));
     const p = (session.procs || []).find(x => x.index === node.proc_index);
-    const unmet = wfUnmetNeeds(session, node);
-    const deps = !(node.needs || []).length ? 'no dependencies' : 'depends on ' + node.needs.join(' and ');
-    el.setAttribute('aria-label', node.id + ', ' + wfStateLabel(state) + ', ' + deps);
+    const unmetIds = wfUnmetNeedIds(session, node);
+    const tip = wfNodeTip(session, node, state, unmetIds, nowUnix);
+    el.setAttribute('data-tip', tip);
+    el.setAttribute('aria-label', tip.replace(/\n/g, ', '));
+    if (state === 'running' && p && p.started_at) el.setAttribute('data-tip-running', String(p.started_at));
+    else el.removeAttribute('data-tip-running');
     const meta = el.querySelector('.wf-meta');
     if (meta) {
       const bits = [];
-      if (p && p.harness) bits.push(p.harness);
+      if (node.id === 'build_base' || node.id.indexOf('build_') === 0) bits.push('image build');
+      else if (p && p.harness) bits.push(p.harness);
       if (p && p.model) bits.push(p.model);
       const elapsed = p ? procElapsed(p, nowUnix) : null;
-      if (elapsed != null && (state === 'running' || state === 'done' || state === 'failed' || state === 'stalled')) {
+      if (elapsed != null && (state === 'running' || state === 'done' || state === 'failed' ||
+          state === 'force-stopped' || state === 'stalled')) {
         bits.push(formatElapsedClock(elapsed));
       }
-      if (state === 'waiting' && unmet > 0) bits.push(unmet + ' waiting on');
+      if (state === 'waiting' && unmetIds.length === 1) bits.push('waiting on ' + wfNodeTitle(unmetIds[0]));
+      else if (state === 'waiting' && unmetIds.length > 1 && unmetIds.length <= 3) {
+        bits.push('waiting on ' + unmetIds.map(wfNodeTitle).join(', '));
+      } else if (state === 'waiting' && unmetIds.length > 3) bits.push('waiting on ' + unmetIds.length + ' tasks');
       if (state === 'ready') bits.push('ready');
       meta.textContent = bits.join(' · ');
     }
@@ -936,7 +1286,7 @@ function updateWorkflowGraph(session, nowUnix) {
   const head = root.querySelector('.workflow-head');
   if (head) {
     const summary = head.querySelector('.workflow-summary');
-    if (summary) summary.textContent = wfSummaryText(counts, nodes.length);
+    if (summary) summary.innerHTML = wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix));
     const next = wfLegendHtml(present);
     const cur = head.querySelector('.workflow-legend');
     if (next) {
@@ -949,9 +1299,54 @@ function updateWorkflowGraph(session, nowUnix) {
       cur.remove();
     }
   }
+  // Resolve a pending pre-registration selection exactly once when its panel appears.
+  if (pendingWorkflowStep) {
+    const det = document.getElementById('task-' + pendingWorkflowStep) ||
+      document.querySelector('details.proc[data-workflow-step="' + CSS.escape(pendingWorkflowStep) + '"]');
+    if (det) {
+      const step = pendingWorkflowStep;
+      pendingWorkflowStep = null;
+      setWorkflowPendingStatus('');
+      activateProcPanel(det, null, false);
+      markWorkflowNodeSelected(step);
+    }
+  }
 }
-function activateProcPanel(det, hash) {
-  if (!det) return;
+function setWorkflowPendingStatus(msg) {
+  let el = document.getElementById('wf-pending-status');
+  if (!msg) {
+    if (el) el.remove();
+    return;
+  }
+  if (!el) {
+    el = document.createElement('p');
+    el.id = 'wf-pending-status';
+    el.className = 'dim';
+    el.setAttribute('role', 'status');
+    el.setAttribute('aria-live', 'polite');
+    const root = document.querySelector('[data-workflow-graph] .workflow-head');
+    if (root) root.appendChild(el);
+    else return;
+  }
+  el.textContent = msg;
+}
+function markWorkflowNodeSelected(stepId) {
+  document.querySelectorAll('.wf-node.wf-selected').forEach(n => n.classList.remove('wf-selected'));
+  const a = document.querySelector('.wf-node[data-workflow-step="' + CSS.escape(stepId) + '"]');
+  if (a) {
+    a.classList.add('wf-selected');
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const scroller = a.closest('.workflow-scroll');
+    if (scroller) {
+      const ar = a.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
+      if (ar.left < sr.left || ar.right > sr.right) {
+        a.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', inline: 'nearest', block: 'nearest' });
+      }
+    }
+  }
+}
+function activateProcPanel(det, hash, pushHistory) {
+  if (!det) return false;
   det.open = true;
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
@@ -961,14 +1356,98 @@ function activateProcPanel(det, hash) {
   }
   det.classList.add('wf-dest-flash');
   setTimeout(() => det.classList.remove('wf-dest-flash'), 1200);
-  if (hash && location.hash !== hash) history.replaceState(null, '', hash);
+  if (hash) {
+    const cur = location.hash || '';
+    if (pushHistory && cur !== hash) {
+      history.pushState({ task: hash }, '', hash);
+    } else if (!pushHistory && cur !== hash) {
+      history.replaceState({ task: hash }, '', hash);
+    }
+  }
   persistOpenProcs();
+  return true;
 }
-function activateWorkflowTask(stepId) {
+function activateWorkflowTask(stepId, opts) {
   if (!stepId) return;
+  opts = opts || {};
+  const pushHistory = opts.pushHistory !== false && !opts.fromHistory;
+  const hash = '#task-' + encodeURIComponent(stepId);
   const det = document.getElementById('task-' + stepId) ||
     document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
-  activateProcPanel(det, '#task-' + stepId);
+  markWorkflowNodeSelected(stepId);
+  if (det) {
+    pendingWorkflowStep = null;
+    setWorkflowPendingStatus('');
+    if (pushHistory && (location.hash || '') === hash) {
+      activateProcPanel(det, null, false);
+    } else {
+      activateProcPanel(det, hash, pushHistory && !opts.fromHistory);
+    }
+    return;
+  }
+  // Pre-registration: remember selection; do not silently ignore the click.
+  pendingWorkflowStep = stepId;
+  setWorkflowPendingStatus('Task details are not available yet; waiting for the task to register.');
+  if (pushHistory && !opts.fromHistory) {
+    if ((location.hash || '') !== hash) history.pushState({ task: hash }, '', hash);
+  } else if ((location.hash || '') !== hash) {
+    history.replaceState({ task: hash }, '', hash);
+  }
+}
+function syncWorkflowTaskFromLocation() {
+  const m = /^#task-(.+)$/.exec(location.hash || '');
+  if (!m) {
+    document.querySelectorAll('.wf-node.wf-selected').forEach(n => n.classList.remove('wf-selected'));
+    return;
+  }
+  let step;
+  try { step = decodeURIComponent(m[1]); } catch (_) { return; }
+  activateWorkflowTask(step, { fromHistory: true, pushHistory: false });
+}
+function initWorkflowGraph() {
+  const root = document.querySelector('[data-workflow-graph]');
+  if (!root || root.dataset.bound) return;
+  root.dataset.bound = '1';
+  const scroller = root.querySelector('.workflow-scroll');
+  if (scroller && !scroller.getAttribute('aria-label')) {
+    scroller.setAttribute('role', 'region');
+    scroller.setAttribute('aria-label', 'Job dependency graph');
+    scroller.setAttribute('tabindex', '0');
+  }
+  root.addEventListener('click', (ev) => {
+    const jump = ev.target.closest('a.wf-jump');
+    if (jump && root.contains(jump)) {
+      const href = jump.getAttribute('href') || '';
+      const m = /^#task-(.+)$/.exec(href);
+      if (!m) return;
+      ev.preventDefault();
+      let step;
+      try { step = decodeURIComponent(m[1]); } catch (_) { return; }
+      activateWorkflowTask(step, { pushHistory: true });
+      return;
+    }
+    const a = ev.target.closest('a.wf-node');
+    if (!a || !root.contains(a)) return;
+    const step = a.getAttribute('data-workflow-step');
+    if (!step) return;
+    ev.preventDefault();
+    activateWorkflowTask(step, { pushHistory: true });
+  });
+  if (!window.__scshWfHistoryBound) {
+    window.__scshWfHistoryBound = true;
+    window.addEventListener('popstate', () => {
+      if (wfHistorySilent) return;
+      syncWorkflowTaskFromLocation();
+    });
+    window.addEventListener('hashchange', () => {
+      if (wfHistorySilent) return;
+      syncWorkflowTaskFromLocation();
+    });
+  }
+  // Initial fragment: replaceState semantics (no extra history entry).
+  if (/^#task-/.test(location.hash || '')) {
+    setTimeout(() => syncWorkflowTaskFromLocation(), 0);
+  }
 }
 function persistOpenProcs() {
   if (typeof SESSION_ID !== 'string' || !SESSION_ID) return;
@@ -986,25 +1465,6 @@ function restoreOpenProcs() {
     const det = document.querySelector('details.proc[data-index="' + CSS.escape(String(idx)) + '"]');
     if (det) det.open = true;
   });
-}
-function initWorkflowGraph() {
-  const root = document.querySelector('[data-workflow-graph]');
-  if (!root || root.dataset.bound) return;
-  root.dataset.bound = '1';
-  root.addEventListener('click', (ev) => {
-    const a = ev.target.closest('a.wf-node');
-    if (!a || !root.contains(a)) return;
-    const step = a.getAttribute('data-workflow-step');
-    if (!step) return;
-    ev.preventDefault();
-    activateWorkflowTask(step);
-  });
-  window.addEventListener('hashchange', () => {
-    const m = /^#task-(.+)$/.exec(location.hash || '');
-    if (m) activateWorkflowTask(decodeURIComponent(m[1]));
-  });
-  const m0 = /^#task-(.+)$/.exec(location.hash || '');
-  if (m0) setTimeout(() => activateWorkflowTask(decodeURIComponent(m0[1])), 0);
 }
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
@@ -1182,6 +1642,12 @@ function syncSessionStopButton(session) {
       : ('Job is ' + lifecycle.label + ' — nothing left to stop');
     setBtnLabel(btn, 'Force stop');
   }
+  const exportBtn = document.querySelector('a.session-export span') || document.querySelector('a.session-export');
+  if (exportBtn) {
+    const label = lifecycle.class === 'running' ? 'incomplete ⬇' : 'job snapshot ⬇';
+    if (exportBtn.tagName === 'SPAN') exportBtn.textContent = label;
+    else setBtnLabel(exportBtn, label);
+  }
   if (lifecycle.class === 'running') return;
   const kind = document.querySelector('.session-kind');
   if (kind && !kind.querySelector('.session-status')) {
@@ -1191,7 +1657,13 @@ function syncSessionStopButton(session) {
 async function forceStopSession(btn) {
   const id = btn.getAttribute('data-session') || SESSION_ID;
   if (!id) return;
-  if (!confirm('Force-stop this job? Running containers will be killed.')) return;
+  const ok = await scshConfirm({
+    title: 'Force stop this job?',
+    body: 'Running containers will be killed.',
+    confirmLabel: 'Force stop',
+    danger: true,
+  });
+  if (!ok) return;
   btn.disabled = true;
   setBtnLabel(btn, 'Stopping…');
   try {
@@ -1204,14 +1676,14 @@ async function forceStopSession(btn) {
     if (!resp.ok || data.ok === false) {
       btn.disabled = false;
       setBtnLabel(btn, 'Force stop');
-      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
+      showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
     setBtnLabel(btn, data.already_ended ? 'Already ended' : 'Stopped');
   } catch (e) {
     btn.disabled = false;
     setBtnLabel(btn, 'Force stop');
-    alert(String(e));
+    showToast(String(e));
   }
 }
 function initSessionStop() {
@@ -1224,7 +1696,13 @@ async function killProc(btn) {
   const session = btn.getAttribute('data-session');
   const proc = parseInt(btn.getAttribute('data-proc-stop'), 10);
   if (!session || Number.isNaN(proc)) return;
-  if (!confirm('Force-stop this container? Only this run stops; the rest of the job continues.')) return;
+  const ok = await scshConfirm({
+    title: 'Force stop this container?',
+    body: 'Only this run stops; the rest of the job continues.',
+    confirmLabel: 'Force stop',
+    danger: true,
+  });
+  if (!ok) return;
   btn.disabled = true;
   btn.textContent = 'stopping\u2026';
   try {
@@ -1236,22 +1714,28 @@ async function killProc(btn) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
-      btn.textContent = '\u2715 Force stop';
-      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
+      btn.textContent = 'Force stop';
+      showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
     btn.textContent = data.already_ended ? 'already ended' : 'stopped';
   } catch (e) {
     btn.disabled = false;
-    btn.textContent = '\u2715 Force stop';
-    alert(String(e));
+    btn.textContent = 'Force stop';
+    showToast(String(e));
   }
 }
 // ---- stop-all-of-a-harness (index page) ----
 async function stopHarness(btn) {
   const harness = btn.getAttribute('data-harness-stop');
   if (!harness) return;
-  if (!confirm('Stop ALL running ' + harness + ' containers, in every job?')) return;
+  const ok = await scshConfirm({
+    title: 'Stop all ' + harness + ' containers?',
+    body: 'Every running ' + harness + ' container across every job will be force-stopped.',
+    confirmLabel: 'Stop all ' + harness,
+    danger: true,
+  });
+  if (!ok) return;
   btn.disabled = true;
   setBtnLabel(btn, 'stopping\u2026');
   try {
@@ -1264,14 +1748,14 @@ async function stopHarness(btn) {
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
       setBtnLabel(btn, '\u2715 stop all ' + harness);
-      alert(data.error || ('stop failed (HTTP ' + resp.status + ')'));
+      showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
     setBtnLabel(btn, 'stopped ' + (data.stopped || 0));
   } catch (e) {
     btn.disabled = false;
     setBtnLabel(btn, '\u2715 stop all ' + harness);
-    alert(String(e));
+    showToast(String(e));
   }
 }
 function initHarnessStops() {
@@ -1288,7 +1772,7 @@ function initProcKills(root) {
     });
   });
 }
-// ---- images panel (index page only) ----
+// ---- Setup tab (index page only) ----
 function imageStatusBadge(img) {
   if (!img.exists) return '<span class="chamfer session-status failed"><span>missing</span></span>';
   if (!img.up_to_date) return '<span class="chamfer session-status cancelled"><span>stale</span></span>';
@@ -1296,6 +1780,82 @@ function imageStatusBadge(img) {
 }
 function imageCheckingBadge() {
   return '<span class="chamfer session-status checking"><span>checking…</span></span>';
+}
+function setupOverallBadge(overall, label) {
+  const text = label || overall || 'unknown';
+  let cls = 'cancelled';
+  if (overall === 'needs_build') cls = 'failed';
+  else if (overall === 'needs_login') cls = 'cancelled';
+  else if (overall === 'not_tested') cls = 'checking';
+  else if (overall === 'ready') cls = 'completed';
+  return '<span class="chamfer session-status ' + cls + '"><span>' + esc(text) + '</span></span>';
+}
+function setupImageLayer(img) {
+  if (!img) return '<span class="dim">—</span>';
+  const word = img.status || (img.exists ? (img.up_to_date ? 'ready' : 'stale') : 'missing');
+  let cls = 'dim';
+  if (word === 'ready') cls = 'setup-ok';
+  else if (word === 'missing' || word === 'stale') cls = 'setup-warn';
+  return '<span class="' + cls + '">' + esc(word.charAt(0).toUpperCase() + word.slice(1)) + '</span>' +
+    (img.tag ? ' <code class="setup-tag">' + esc(img.tag) + '</code>' : '');
+}
+function setupLoginLayer(login) {
+  if (!login) return '<span class="dim">—</span>';
+  let cls = 'dim';
+  if (login.status === 'found') cls = 'setup-ok';
+  else if (login.status === 'missing' || login.status === 'expired' || login.status === 'disabled') cls = 'setup-warn';
+  const tip = login.hint ? ' data-tip="' + esc(login.hint) + '"' : '';
+  return '<span class="' + cls + '"' + tip + '>' + esc(login.label || login.status) + '</span>';
+}
+function setupModelsHtml(models) {
+  const list = models || [];
+  if (!list.length) return '<ul class="setup-models dim"><li>No curated models</li></ul>';
+  return '<ul class="setup-models">' + list.map(m =>
+    '<li><code>' + esc(m.id) + '</code> <span class="dim">' + esc(m.status || 'not_tested') + '</span></li>'
+  ).join('') + '</ul>';
+}
+function setupCardActions(h) {
+  const a = h.action || {};
+  if (a.kind === 'build' || a.kind === 'update') {
+    return '<button type="button" class="chamfer btn btn--cyan btn--sm setup-build-btn" data-setup-build="' +
+      esc(h.id) + '" data-uptodate="' + (a.kind === 'update' ? '1' : '0') + '"><span>' +
+      esc(a.label || 'Build image') + '</span></button>';
+  }
+  if (a.kind === 'login' && a.hint) {
+    return '<p class="setup-next dim">' + esc(a.hint) + '</p>';
+  }
+  return '';
+}
+function setupCardHtml(h) {
+  return '<article class="setup-card" data-harness="' + esc(h.id) + '">' +
+    '<header class="setup-card-head">' +
+    '<strong class="setup-card-name">' + esc(h.name || h.id) + '</strong>' +
+    setupOverallBadge(h.overall, h.overall_label) +
+    '</header>' +
+    '<div class="setup-card-layers">' +
+    '<div><span class="setup-layer-label">Image</span> ' + setupImageLayer(h.image) + '</div>' +
+    '<div><span class="setup-layer-label">Login</span> ' + setupLoginLayer(h.login) + '</div>' +
+    '</div>' +
+    setupModelsHtml(h.models) +
+    '<div class="setup-card-actions">' + setupCardActions(h) + '</div>' +
+    '</article>';
+}
+function markSetupChecking() {
+  const cards = document.getElementById('setup-cards');
+  if (cards) {
+    cards.querySelectorAll('.setup-card').forEach(card => {
+      card.dataset.pending = '1';
+      const badge = card.querySelector('.setup-card-head .session-status');
+      if (badge) badge.outerHTML = imageCheckingBadge();
+      card.querySelectorAll('.setup-layer-value').forEach(el => {
+        el.textContent = 'checking…';
+        el.className = 'setup-layer-value dim';
+      });
+    });
+  }
+  const summary = document.getElementById('setup-summary');
+  if (summary) summary.textContent = 'checking agents…';
+  markImagesChecking();
 }
 // Keep every known image row visible while the runtime inspect runs (§13: no empty limbo).
 function markImagesChecking() {
@@ -1347,12 +1907,34 @@ function wireImageSelectButtons(body) {
   }));
   btn.disabled = body.querySelectorAll('.image-select:checked').length === 0;
 }
-function renderImages(data) {
+function wireSetupBuildButtons(root) {
+  (root || document).querySelectorAll('button[data-setup-build]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      btn.disabled = true;
+      startImageBuildOne(btn.getAttribute('data-setup-build'), btn.getAttribute('data-uptodate') === '1');
+    });
+  });
+}
+function renderSetupSummary(data) {
+  const el = document.getElementById('setup-summary');
+  if (!el) return;
+  const s = data.summary || {};
+  const parts = [];
+  if (s.needs_build) parts.push(s.needs_build + ' need' + (s.needs_build === 1 ? 's' : '') + ' build');
+  if (s.needs_login) parts.push(s.needs_login + ' need' + (s.needs_login === 1 ? 's' : '') + ' login');
+  if (s.not_tested) parts.push(s.not_tested + ' not tested');
+  const agents = s.agents || (data.harnesses || []).length || 0;
+  el.textContent = agents + ' agents' + (parts.length ? ' — ' + parts.join(' · ') : '');
+  const checked = document.getElementById('setup-checked');
+  if (checked && data.checked_at) {
+    checked.textContent = 'checked ' + formatDuration(Date.now() / 1000 - data.checked_at) + ' ago';
+  }
+}
+function renderImagesTable(data) {
   const body = document.getElementById('images-body');
   if (!body) return;
   const note = document.getElementById('images-note');
   if (data.error) {
-    // Keep the known image list; surface the failure in the note, not by emptying the table.
     body.querySelectorAll('tr[data-image]').forEach(tr => {
       delete tr.dataset.pending;
       const status = tr.querySelector('.image-status-cell');
@@ -1365,16 +1947,42 @@ function renderImages(data) {
   }
   body.innerHTML = (data.images || []).map(imageRowHtml).join('');
   if (note) note.textContent = data.runtime ? ('runtime: ' + data.runtime) : '';
-  renderRuntimeSelector(data);
   wireImageSelectButtons(body);
   wireImageBuildButtons(body);
 }
-function refreshImages() {
-  markImagesChecking();
-  const url = '/api/v1/images' + (IMAGES_RUNTIME ? '?runtime=' + encodeURIComponent(IMAGES_RUNTIME) : '');
-  fetch(url).then(r => r.json()).then(renderImages).catch(() => {
-    renderImages({ error: 'images unavailable (daemon error)' });
+function renderSetup(data) {
+  const cards = document.getElementById('setup-cards');
+  if (data.error) {
+    if (cards) {
+      cards.querySelectorAll('.setup-card').forEach(card => {
+        delete card.dataset.pending;
+        const badge = card.querySelector('.setup-card-head .session-status');
+        if (badge) badge.outerHTML = '<span class="chamfer session-status failed"><span>unavailable</span></span>';
+      });
+    }
+    const summary = document.getElementById('setup-summary');
+    if (summary) summary.textContent = data.error;
+    renderImagesTable(data);
+    return;
+  }
+  if (cards) {
+    cards.innerHTML = (data.harnesses || []).map(setupCardHtml).join('');
+    wireSetupBuildButtons(cards);
+  }
+  renderSetupSummary(data);
+  renderRuntimeSelector(data);
+  renderImagesTable(data);
+}
+function refreshSetup() {
+  markSetupChecking();
+  const url = '/api/v1/setup' + (IMAGES_RUNTIME ? '?runtime=' + encodeURIComponent(IMAGES_RUNTIME) : '');
+  fetch(url).then(r => r.json()).then(renderSetup).catch(() => {
+    renderSetup({ error: 'setup unavailable (daemon error)' });
   });
+}
+function refreshImages() {
+  // Advanced section refresh uses the same Setup payload (includes images[]).
+  refreshSetup();
 }
 let IMAGES_RUNTIME = ''; // '' = the host default; set by the selector in the panel
 function renderRuntimeSelector(data) {
@@ -1383,9 +1991,9 @@ function renderRuntimeSelector(data) {
   const available = data.available || [];
   if (available.length < 2) { box.innerHTML = ''; return; }
   // Apple `container` and docker/podman keep SEPARATE image stores — this segmented
-  // control says which world the whole tab (table + Build buttons) talks to.
+  // control says which world the whole tab (cards + Advanced builds) talks to.
   const label = (r) => r === 'container' ? 'Apple Containers' : r === 'docker' ? 'Docker' : r === 'podman' ? 'Podman' : r;
-  box.innerHTML = '<span class="seg" data-tip="Each runtime keeps its own image store — the table and the Build buttons apply to the selected one">' +
+  box.innerHTML = '<span class="seg" data-tip="Each runtime keeps its own image store — cards and Build buttons apply to the selected one">' +
     available.map(r =>
       '<button type="button" class="seg-opt' + (r === data.runtime ? ' active' : '') +
       '" data-runtime="' + esc(r) + '">' + esc(label(r)) + '</button>').join('') +
@@ -1393,7 +2001,7 @@ function renderRuntimeSelector(data) {
   box.querySelectorAll('[data-runtime]').forEach(b => b.addEventListener('click', () => {
     if (b.classList.contains('active')) return;
     IMAGES_RUNTIME = b.dataset.runtime;
-    refreshImages();
+    refreshSetup();
   }));
 }
 function postImagesBuild(req) {
@@ -1425,12 +2033,13 @@ function startImageBuildOne(name, upToDate) {
   // `base` rides the same path: harnesses:["base"] builds ONLY the shared base.
   postImagesBuild({ harnesses: [name], rebuild_base: false, force: upToDate });
 }
-(function initImagesPanel() {
-  if (!document.getElementById('images-body')) return;
-  refreshImages();
+(function initSetupPanel() {
+  if (!document.getElementById('setup-cards') && !document.getElementById('images-body')) return;
+  refreshSetup();
   document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild(false));
   document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
-  document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshImages(); });
+  document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
+  document.getElementById('setup-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
 })();
 // ---- instant tooltips ----
 // One floating tip for every [data-tip] element, wired by delegation so it works for
@@ -1489,12 +2098,18 @@ const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
 // ---- tabs ----
 // Explicit tab clicks push history (#tab=…); Back/Forward restore the panel (WEB-UI §1).
+// /project/… and /repo/… are filtered Projects views — keep the path, open the Projects tab.
 (function initTabs() {
   const tabs = document.querySelectorAll('.tab');
   if (!tabs.length) return;
+  function pathFilter() {
+    const p = location.pathname || '/';
+    return p === '/project' || p.indexOf('/project/') === 0 || p === '/repo' || p.indexOf('/repo/') === 0;
+  }
   function activate(id, mode) {
+    if (id === 'images') id = 'setup'; // compatibility alias for #tab=images / saved prefs
     const t = document.querySelector('.tab[data-tab="' + id + '"]');
-    if (!t) id = 'jobs';
+    if (!t) id = 'start';
     const active = document.querySelector('.tab[data-tab="' + id + '"]') || tabs[0];
     id = active.dataset.tab;
     document.querySelectorAll('.tab').forEach(x => {
@@ -1503,7 +2118,14 @@ const DEFS_BY_NAME = {};  // name -> definition
       x.setAttribute('aria-selected', on ? 'true' : 'false');
     });
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
-    if (id === 'images' && typeof refreshImages === 'function') refreshImages();
+    if (id === 'setup' && typeof refreshSetup === 'function') refreshSetup();
+    if (pathFilter()) {
+      // Stay on /project/… or /repo/…; only rewrite when leaving the filtered view.
+      if (mode === 'push' && id !== 'dirs') {
+        history.pushState({ tab: id }, '', '/#tab=' + id);
+      }
+      return;
+    }
     const hash = '#tab=' + id;
     if (mode === 'push') history.pushState({ tab: id }, '', hash);
     else if (location.hash !== hash) history.replaceState({ tab: id }, '', hash);
@@ -1514,12 +2136,17 @@ const DEFS_BY_NAME = {};  // name -> definition
     t.addEventListener('click', () => activate(t.dataset.tab, 'push'));
   });
   window.addEventListener('popstate', () => {
+    if (pathFilter()) { activate('dirs', 'sync'); return; }
     const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
-    activate(m ? m[1] : 'jobs', 'sync');
+    activate(m ? m[1] : 'start', 'sync');
   });
-  const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
-  const saved = (!m && loadUiPrefs().tab) || null;
-  activate(m ? m[1] : (saved || 'jobs'), 'sync');
+  if (pathFilter()) {
+    activate('dirs', 'sync');
+  } else {
+    const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
+    const saved = (!m && loadUiPrefs().tab) || null;
+    activate(m ? m[1] : (saved || 'start'), 'sync');
+  }
 })();
 function defSourceBadge(src) {
   // builtin wears purple (the setup color); repo/home keep the muted status hues.
@@ -1741,20 +2368,59 @@ function startJob(name) {
 }
 // Mirrors repo_jobs_rows in index.rs — keep the markup identical. The tbody arrives
 // server-rendered, so a null snapshot (no full tick yet) must leave it untouched.
+function collapseSlashes(s) {
+  return String(s || '').replace(/\/+/g, '/').replace(/(.+)\/$/, '$1') || '/';
+}
+function parseIndexFilter(pathname) {
+  const p = pathname || '/';
+  if (p === '/project' || p.indexOf('/project/') === 0) {
+    let name = collapseSlashes(decodeURIComponent(p.slice('/project'.length))).replace(/^\/+|\/+$/g, '');
+    if (!name || name.indexOf('/') >= 0) return null;
+    return { kind: 'project', name: name, repo: (PROJECTS_DIR ? PROJECTS_DIR + '/' + name : null) };
+  }
+  if (p === '/repo' || p.indexOf('/repo/') === 0) {
+    let rest = collapseSlashes(decodeURIComponent(p.slice('/repo'.length)));
+    if (!rest || rest === '/') return null;
+    if (rest.charAt(0) !== '/') rest = '/' + rest;
+    return { kind: 'repo', repo: rest };
+  }
+  return null;
+}
+function repoFilterHref(repo) {
+  const root = PROJECTS_DIR ? PROJECTS_DIR + '/' : null;
+  if (root && repo.indexOf(root) === 0) {
+    const name = repo.slice(root.length);
+    if (name && name.indexOf('/') < 0) return '/project/' + encodeURIComponent(name);
+  }
+  // Keep slashes; encode other unsafe bytes (mirrors encode_repo_url_path).
+  return '/repo' + String(repo).split('').map(ch => {
+    if (/[A-Za-z0-9\-._~/]/.test(ch)) return ch;
+    const hex = ch.charCodeAt(0).toString(16).toUpperCase();
+    return '%' + (hex.length === 1 ? '0' + hex : hex);
+  }).join('');
+}
 function renderRepoJobs(sessions, nowUnix) {
   const body = document.getElementById('repos-body');
   if (!body || !sessions) return;
   nowUnix = nowUnix ?? (Date.now() / 1000);
+  const filter = parseIndexFilter(location.pathname);
+  const wantRepo = filter && filter.repo;
   const byRepo = {};
-  Object.keys(OPEN_REPOS).forEach(r => { byRepo[r] = []; });
+  Object.keys(OPEN_REPOS).forEach(r => {
+    if (wantRepo && r !== wantRepo) return;
+    byRepo[r] = [];
+  });
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
     if (!s || !s.repo || s.repo === '(image builds)') return;
+    if (wantRepo && s.repo !== wantRepo) return;
     (byRepo[s.repo] = byRepo[s.repo] || []).push(Object.assign({ id: id }, s));
   });
   const repos = Object.keys(byRepo).sort();
   if (!repos.length) {
-    body.innerHTML = '<tr><td colspan="2" class="dim">No jobs yet — open or create a project under “New job”.</td></tr>';
+    body.innerHTML = wantRepo
+      ? '<tr><td colspan="2" class="dim">No jobs for this project or repository.</td></tr>'
+      : '<tr><td colspan="2" class="dim">No jobs yet — open or create a project under Run.</td></tr>';
     return;
   }
   const repoLabel = (repo) => {
@@ -1792,7 +2458,9 @@ function renderRepoJobs(sessions, nowUnix) {
         return '<div class="repo-jobgroup"><span class="repo-jobgroup-name">' + esc(task) + '</span>' + links + '</div>';
       }).join('');
     }
-    return '<tr><td class="repo-path" title="' + esc(repo) + '">' + esc(repoLabel(repo)) + '</td><td>' + cells + '</td></tr>';
+    return '<tr data-repo="' + esc(repo) + '"><td class="repo-path" title="' + esc(repo) +
+      '"><a class="repo-filter-link" href="' + esc(repoFilterHref(repo)) + '">' + esc(repoLabel(repo)) +
+      '</a></td><td>' + cells + '</td></tr>';
   }).join('');
 }
 (function initReposPanel() {

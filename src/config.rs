@@ -273,6 +273,17 @@ impl Harness {
     }
   }
 
+  /// Human-facing product name for the Setup tab and similar UI.
+  pub fn display_name(self) -> &'static str {
+    match self {
+      Harness::Opencode => "OpenCode",
+      Harness::Claude => "Claude",
+      Harness::Codex => "Codex",
+      Harness::Grok => "Grok",
+      Harness::Cursor => "Cursor",
+    }
+  }
+
   /// Every known harness name, for error messages.
   pub fn known() -> &'static [&'static str] {
     &["opencode", "claude", "codex", "grok", "cursor"]
