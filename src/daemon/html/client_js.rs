@@ -2527,36 +2527,43 @@ function createProject() {
 }
 // Shared tail of open/create: surface blockers, render definitions, remember the repo.
 function handleRepoOpened(resp, note) {
-    if (!resp.ok) { if (note) note.textContent = resp.error || 'could not open'; return; }
-    OPEN_REPO = resp.repo;
-    OPEN_REPO_RUNNABLE = !!resp.runnable;
-    OPEN_REPOS[resp.repo] = { clean: resp.runnable };
-    const panel = document.getElementById('defs-panel');
-    if (panel) { panel.hidden = false; panel.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-    const label = document.getElementById('open-repo-path');
-    if (label) label.textContent = resp.repo;
-    // Show any blockers prominently; Start stays disabled until they are cleared.
-    const bl = document.getElementById('repo-blockers');
-    if (bl) {
-      const list = resp.blockers || [];
-      if (list.length) {
-        bl.hidden = false;
-        bl.innerHTML = '<strong>Not ready to run:</strong><ul>' +
-          list.map(b => '<li>' + esc(b) + '</li>').join('') + '</ul>';
-      } else {
-        bl.hidden = true;
-        bl.innerHTML = '';
-      }
+  if (!resp.ok) { if (note) note.textContent = resp.error || 'could not open'; return; }
+  OPEN_REPO = resp.repo;
+  OPEN_REPO_RUNNABLE = !!resp.runnable;
+  OPEN_REPOS[resp.repo] = { clean: resp.runnable };
+  const panel = document.getElementById('defs-panel');
+  if (panel) panel.hidden = false;
+  const label = document.getElementById('open-repo-path');
+  if (label) label.textContent = resp.repo;
+  // Show any blockers prominently; Start stays disabled until they are cleared.
+  const bl = document.getElementById('repo-blockers');
+  if (bl) {
+    const list = resp.blockers || [];
+    if (list.length) {
+      bl.hidden = false;
+      bl.innerHTML = '<strong>Not ready to run:</strong><ul>' +
+        list.map(b => '<li>' + esc(b) + '</li>').join('') + '</ul>';
+    } else {
+      bl.hidden = true;
+      bl.innerHTML = '';
     }
-    if (note) {
-      const verb = resp.created ? 'created' : 'opened';
-      note.textContent = resp.runnable ? verb + ' — ready to run' : verb + ', but not ready to run (see below)';
-    }
-    renderDefs(resp.defs || []);
-    const form = document.getElementById('def-form');
-    if (form) form.innerHTML = '';
-    renderRepoJobs(liveSessions, Date.now() / 1000);
-    renderInternalJobs(liveSessions, Date.now() / 1000);
+  }
+  if (note) {
+    const verb = resp.created ? 'created' : 'opened';
+    note.textContent = resp.runnable ? verb + ' — ready to run' : verb + ', but not ready to run (see below)';
+  }
+  renderDefs(resp.defs || []);
+  const form = document.getElementById('def-form');
+  if (form) form.innerHTML = '';
+  renderRepoJobs(liveSessions, Date.now() / 1000);
+  renderInternalJobs(liveSessions, Date.now() / 1000);
+  // After the list is filled, scroll the Definitions section into view so Open / New project
+  // invites the next step (choose a definition) instead of leaving the viewport on the form.
+  if (panel) {
+    requestAnimationFrame(() => {
+      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    });
+  }
 }
 function renderDefs(defs) {
   const list = document.getElementById('defs-list');
