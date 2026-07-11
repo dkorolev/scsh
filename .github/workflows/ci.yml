@@ -11,24 +11,41 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
 
-      # PRs only: with auto-publish, a merged bump IS on crates.io moments later, so this
-      # check on main would go red the moment the release it demanded succeeds.
-      - name: Version is strictly above crates.io
+      - name: Release-shape gate self-tests
+        run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      # PRs only: on main there is no base to compare against, and with auto-publish a
+      # merged bump IS on crates.io moments later. The gate passes untouched-version PRs
+      # and enforces the full release shape when the PR bumps; it inspects the PR head
+      # explicitly because the pull_request checkout is GitHub's synthetic merge commit,
+      # whose subject and empty diff-tree carry no release shape.
+      - name: Release shape and version ladder
         if: github.event_name == 'pull_request'
-        run: python3 scripts/check-version-above-crates-io.py
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-release.py "$BASE_SHA" "$HEAD_SHA"
 
       - name: Format
         run: cargo fmt --check
+
+      - name: Clippy (debug)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (release)
+        run: cargo clippy --release --all-targets -- -D warnings
 
       - name: Build (debug)
         run: cargo build

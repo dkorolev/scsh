@@ -1,0 +1,16 @@
+#!/bin/sh
+# The local gate: the same checks CI runs, so code that leaves the machine is already
+# green. Enable once per clone with: git config core.hooksPath .githooks
+set -e
+cd "$(git rev-parse --show-toplevel)"
+export RUSTFLAGS='-D warnings'
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo clippy --release --all-targets -- -D warnings
+cargo test --bin scsh
+cargo test --release --bin scsh
+cargo test --test cli
+cargo test --release --test cli
+python3 -m unittest discover -s scripts -p 'test_*.py'
+# The release-shape comparison itself is PR-only: a local hook is not given GitHub's
+# chosen base SHA, so scripts/check-release.py runs in CI instead.

@@ -405,11 +405,27 @@ working tree, unstaged, for review. Never push or publish without an explicit
 request — those are the universal safety boundaries (along with anything
 destructive or irreversible), and they hold regardless of any other instruction.
 
+### Gates
+
+Enable the local gate once per clone: `git config core.hooksPath .githooks`. The
+pre-push hook runs the same checks as CI — `cargo fmt --check`, clippy in both
+profiles with `-D warnings`, unit and integration tests in both profiles, and the
+Python self-tests for the release gate — so code that leaves the machine is already
+green.
+
+On pull requests, CI additionally runs `scripts/check-release.py`: a PR that leaves
+the version alone passes (Cargo.lock must stay in sync with Cargo.toml); a PR that
+bumps it must be a proper release — exactly one patch/minor/major step from the base,
+the base version already on crates.io, and the final commit a manifest-only commit
+titled exactly `Bump version to X.Y.Z.`. A PR that is nothing but the bump commit is
+legal: the repair path when a release must be re-cut without code changes.
+
 ### Definition of done (PR checklist)
 
 - [ ] Changes follow [ENG-PRINCIPLES](https://github.com/dkorolev/principles/blob/main/ENG-PRINCIPLES.md); web UI also follows [WEB-UI-PRINCIPLES](https://github.com/dkorolev/principles/blob/main/WEB-UI-PRINCIPLES.md) (or an explicit waiver is noted in the PR).
 - [ ] `cargo fmt` is clean.
 - [ ] `cargo build --release` and `cargo test` pass with **zero compiler warnings**.
+- [ ] `cargo clippy --all-targets` is clean in both profiles (CI denies clippy warnings).
 - [ ] `cargo test` passes; the commit body states the count.
 - [ ] [`DEMO.md`](DEMO.md) still reflects how `scsh` behaves (it's the human-facing demo).
 - [ ] New errors are actionable (`✗` what's wrong / `→` how to fix).
