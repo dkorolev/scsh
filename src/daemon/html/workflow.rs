@@ -416,7 +416,7 @@ fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut
       out.push(LaidOut { id: node.id.clone(), x, y: y0 + row as f64 * (NODE_H + GAP_Y), order: node.order });
     }
   }
-  out.sort_by(|a, b| a.order.cmp(&b.order));
+  out.sort_by_key(|a| a.order);
   out
 }
 
