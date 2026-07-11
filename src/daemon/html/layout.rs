@@ -346,7 +346,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
-    overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem;
+    overflow: auto; max-width: 100%; padding-bottom: 0.25rem;
+    scrollbar-width: none;
     border-radius: 6px; /* same as the enclosing .card island */
     /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
     background:
@@ -357,17 +358,34 @@ pub(crate) const PAGE_CSS: &str = r#"
       var(--bg);
     background-attachment: local, local, scroll, scroll, local;
   }
+  .workflow-scroll::-webkit-scrollbar { display: none; }
   .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .wf-node.wf-selected { box-shadow: 0 0 0 2px var(--cyan); }
   /* Center when the graph fits; when it overflows, auto margins collapse and scroll works. */
   .workflow-stage { position: relative; min-height: 4rem; margin-inline: auto; }
+  .workflow-zoom { margin-left: auto; display: inline-flex; gap: 0.25rem; }
+  .workflow-zoom button {
+    min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
+    background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+  }
+  .workflow-zoom button:hover { color: var(--text); border-color: #3a4558; }
+  .workflow-zoom button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .wf-loop-island {
+    position: absolute; z-index: 0; box-sizing: border-box; pointer-events: none;
+    border: 1px solid rgba(139, 148, 158, 0.42); border-radius: 9px;
+    background: rgba(139, 148, 158, 0.07);
+  }
+  .wf-loop-island > span {
+    position: absolute; top: 4px; left: 10px; color: var(--text-muted);
+    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em;
+  }
   .workflow-edges { position: absolute; inset: 0; color: #8b949e; pointer-events: none; }
   .wf-edge {
     fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round;
     opacity: 0.92;
   }
   .wf-arrowhead { stroke: currentColor; }
-  .workflow-nodes { position: relative; width: 100%; height: 100%; }
+  .workflow-nodes { position: relative; z-index: 1; width: 100%; height: 100%; }
   .wf-node {
     position: absolute; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
     gap: 0.15rem; padding: 0.45rem 0.65rem; min-width: 44px; min-height: 44px;

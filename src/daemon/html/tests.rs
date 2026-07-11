@@ -2340,6 +2340,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(flat_html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
   assert!(flat_html.contains("wf-start-play"), "play-triangle start glyph");
   assert!(flat_html.contains("wf-finish-flag"), "checkered finish flag");
+  assert!(flat_html.contains("scrollbar-width: none"), "graph remains scrollable without visible scrollbar chrome");
+  assert!(flat_html.contains(".workflow-scroll::-webkit-scrollbar"), "WebKit scrollbar chrome is hidden too");
   assert!(!flat_html.contains("wf-start-line"), "dashed race-line start glyph is gone");
   assert!(!flat_html.contains("wf-bookend-label"), "bookends are icon-only");
   let edge_count = flat_html.matches(r#"class="wf-edge""#).count();
@@ -2366,6 +2368,9 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("function wfLegendHtml"));
   assert!(js.contains("function wfBuildGraphHtml"), "late graph creation without reload");
   assert!(js.contains("function wfLayoutWithBookends"), "live graph mirrors Start/Finish");
+  assert!(js.contains("function wfLoopIslandsHtml"), "dynamic repeat iterations share a loop island");
+  assert!(js.contains("data-wf-zoom-in"), "graph has explicit zoom controls");
+  assert!(js.contains("stage.style.zoom"), "zoom changes the graph without changing its topology");
   assert!(js.contains("function wfNodeTip"), "useful node tooltips");
   assert!(js.contains("function wfSummaryHtml"), "status counters are jump links");
   assert!(js.contains("a.wf-jump"), "summary jump click wiring");

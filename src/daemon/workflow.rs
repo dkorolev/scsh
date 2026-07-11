@@ -85,7 +85,7 @@ pub fn workflow_meta_from_def(def: &HarnessDef) -> Option<WorkflowMeta> {
       .iter()
       .enumerate()
       .map(|(order, s)| WorkflowNodeMeta {
-        id: s.id.clone(),
+        id: if s.repeat.is_some() { format!("{}__repeat", s.id) } else { s.id.clone() },
         proc_index: None,
         order,
         needs: s.needs.clone(),
@@ -182,6 +182,25 @@ pub fn bind_workflow_proc(meta: &mut WorkflowMeta, step_id: &str, proc_index: us
   }
   if let Some(node) = meta.nodes.iter_mut().find(|n| n.id == step_id) {
     node.proc_index = Some(proc_index);
+    return;
+  }
+  if let Some((base, iteration_text)) = step_id.rsplit_once("__repeat_") {
+    let Ok(iteration) = iteration_text.parse::<usize>() else { return };
+    if iteration == 0 {
+      return;
+    }
+    let template_id = format!("{base}__repeat");
+    let Some(template) = meta.nodes.iter().find(|n| n.id == template_id).cloned() else { return };
+    let previous = format!("{base}__repeat_{}", iteration - 1);
+    let needs = if iteration == 1 { template.needs } else { vec![previous] };
+    meta.nodes.push(WorkflowNodeMeta {
+      id: step_id.to_string(),
+      proc_index: Some(proc_index),
+      order: template.order + iteration,
+      needs,
+      conditional: false,
+      when_summary: None,
+    });
   }
 }
 
@@ -241,6 +260,11 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
   if let Some(authored) = &session.workflow {
     for n in &authored.nodes {
       if !is_safe_graph_id(&n.id) {
+        continue;
+      }
+      // A repeat template is orchestration metadata, not a task. Iteration nodes are
+      // appended to the authored graph by `bind_workflow_proc` only as they start.
+      if n.id.ends_with("__repeat") {
         continue;
       }
       let mut needs = n.needs.clone();
@@ -1277,7 +1301,7 @@ mod tests {
 
   #[test]
   fn builtins_yield_valid_workflow_meta() {
-    for name in ["arith", "fruits", "code-review", "greet"] {
+    for name in ["arith", "fruits", "code-review", "greet", "demo-loop-repeat"] {
       let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == name).unwrap();
       let def = crate::harness_def::validate(name, src, crate::harness_def::DefSource::Builtin)
         .unwrap_or_else(|e| panic!("{name}: {}", e.join("; ")));
@@ -1365,6 +1389,23 @@ mod tests {
     assert!(meta.nodes.iter().all(|n| n.proc_index != Some(7)), "unknown step ignored");
     bind_workflow_proc(&mut meta, "add", 42, ProcKind::Skill);
     assert_eq!(meta.nodes[0].proc_index, Some(42));
+  }
+
+  #[test]
+  fn repeat_nodes_are_appended_only_as_iterations_start() {
+    let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-loop-repeat").unwrap();
+    let def = crate::harness_def::validate("demo-loop-repeat", src, crate::harness_def::DefSource::Builtin).unwrap();
+    let mut meta = workflow_meta_from_def(&def).unwrap();
+    assert_eq!(meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["initialize", "increment__repeat"]);
+    bind_workflow_proc(&mut meta, "increment__repeat_1", 10, ProcKind::Skill);
+    bind_workflow_proc(&mut meta, "increment__repeat_2", 11, ProcKind::Skill);
+    let first = meta.nodes.iter().find(|n| n.id == "increment__repeat_1").unwrap();
+    let second = meta.nodes.iter().find(|n| n.id == "increment__repeat_2").unwrap();
+    assert_eq!(first.needs, ["initialize"]);
+    assert_eq!(second.needs, ["increment__repeat_1"]);
+    assert_eq!(first.proc_index, Some(10));
+    assert_eq!(second.proc_index, Some(11));
+    assert!(validate_workflow_meta(&meta).is_ok());
   }
 
   #[test]

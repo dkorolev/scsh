@@ -1,0 +1,30 @@
+# Built-in dynamic-loop demo: the graph learns each repeat iteration only when it starts.
+description: "Create number.txt at zero, then increment and commit it three times in a dynamically expanding repeat loop."
+steps:
+  initialize:
+    agent:
+      harness: grok
+      model: composer-2.5-fast
+    prompt: |
+      Create `number.txt` at the repository root with exactly `0` followed by one newline.
+      Commit only that file with the message `demo-loop-repeat: initialize number`. Put `0` in
+      the `number` result field. Do nothing else.
+    output:
+      number:
+        type: int
+    commits: true
+  increment:
+    needs: initialize
+    repeat: 3
+    agent:
+      harness: grok
+      model: composer-2.5-fast
+    prompt: |
+      Read the single integer in `number.txt`, increment it by exactly one, and overwrite the
+      file with the new integer followed by one newline. Commit only that file with the message
+      `demo-loop-repeat: increment number`. Put the new integer in the `number` result field.
+      Do nothing else.
+    output:
+      number:
+        type: int
+    commits: true

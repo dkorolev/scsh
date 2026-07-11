@@ -1010,6 +1010,8 @@ function wfUnmetNeeds(session, node) {
 function wfNodeTitle(id) {
   if (id === 'build_base') return 'base';
   if (id.indexOf('build_') === 0) return id.slice(6);
+  const repeated = id.match(/^(.*)__repeat_(\d+)$/);
+  if (repeated) return repeated[1] + ' · iteration ' + repeated[2];
   return id;
 }
 function wfBlockerLine(session, id, nowUnix) {
@@ -1158,7 +1160,8 @@ function wfLayoutNodes(session, nodes, nowUnix) {
 function wfLayoutWithBookends(session, nodes, nowUnix) {
   const layout = wfLayoutNodes(session, nodes, nowUnix);
   const shift = WF_BOOKEND_W + WF_GAP_X;
-  layout.forEach(n => { n.x += shift; });
+  const loopTop = nodes.some(n => /__repeat_\d+$/.test(n.id)) ? 36 : 0;
+  layout.forEach(n => { n.x += shift; n.y += loopTop; });
   const stageH = Math.max(WF_PAD + WF_NODE_H, ...layout.map(n => n.y + n.h)) + WF_PAD;
   const bookendY = Math.max(WF_PAD, (stageH - WF_BOOKEND_H) / 2);
   const start = { id: WF_START_ID, x: WF_PAD, y: bookendY, order: 0, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
@@ -1233,6 +1236,23 @@ function wfBookendHtml(pos, isStart) {
   return '<div class="' + cls + '" id="wf-node-' + id + '" style="left:' + pos.x.toFixed(1) +
     'px;top:' + pos.y.toFixed(1) + 'px;width:' + pos.w.toFixed(0) + 'px;min-height:' + WF_BOOKEND_H +
     'px" title="' + title + '" aria-hidden="true">' + glyph + '</div>';
+}
+function wfLoopIslandsHtml(layout) {
+  const groups = Object.create(null);
+  layout.forEach(pos => {
+    const match = pos.id.match(/^(.*)__repeat_(\d+)$/);
+    if (match) (groups[match[1]] || (groups[match[1]] = [])).push(pos);
+  });
+  return Object.entries(groups).map(([id, items]) => {
+    const pad = 14, labelH = 22;
+    const left = Math.min(...items.map(p => p.x)) - pad;
+    const top = Math.min(...items.map(p => p.y)) - pad - labelH;
+    const right = Math.max(...items.map(p => p.x + (p.w || WF_NODE_W))) + pad;
+    const bottom = Math.max(...items.map(p => p.y + (p.h || WF_NODE_H))) + pad;
+    return '<div class="wf-loop-island" style="left:' + left.toFixed(1) + 'px;top:' + top.toFixed(1) +
+      'px;width:' + (right - left).toFixed(1) + 'px;height:' + (bottom - top).toFixed(1) +
+      'px"><span>repeat · ' + esc(id) + '</span></div>';
+  }).join('');
 }
 function annotationForProc(session, proc) {
   if (!session || !proc || !proc.cast_path || !liveSessions) return null;
@@ -1314,9 +1334,13 @@ function wfBuildGraphHtml(session, nowUnix) {
   return '<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
-    wfLegendHtml(present) + '</div>' +
+    wfLegendHtml(present) + '<div class="workflow-zoom" aria-label="Graph zoom">' +
+    '<button type="button" data-wf-zoom-out aria-label="Zoom out">−</button>' +
+    '<button type="button" data-wf-zoom-reset>100%</button>' +
+    '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button></div></div>' +
     '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
+    wfLoopIslandsHtml(layout) +
     '<svg class="workflow-edges" width="' + w.toFixed(0) + '" height="' + h.toFixed(0) +
     '" viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" aria-hidden="true"><defs>' +
     '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
@@ -1560,6 +1584,22 @@ function initWorkflowGraph() {
     scroller.setAttribute('aria-label', 'Job dependency graph');
     scroller.setAttribute('tabindex', '0');
   }
+  const stage = root.querySelector('.workflow-stage');
+  const reset = root.querySelector('[data-wf-zoom-reset]');
+  let zoom = 1;
+  const applyZoom = next => {
+    zoom = Math.max(0.5, Math.min(2, next));
+    if (stage) stage.style.zoom = String(zoom);
+    if (reset) reset.textContent = Math.round(zoom * 100) + '%';
+  };
+  root.querySelector('[data-wf-zoom-out]')?.addEventListener('click', () => applyZoom(zoom - 0.1));
+  root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(zoom + 0.1));
+  reset?.addEventListener('click', () => applyZoom(1));
+  scroller?.addEventListener('wheel', ev => {
+    if (!ev.ctrlKey && !ev.metaKey) return;
+    ev.preventDefault();
+    applyZoom(zoom + (ev.deltaY < 0 ? 0.1 : -0.1));
+  }, { passive: false });
   root.addEventListener('click', (ev) => {
     const jump = ev.target.closest('a.wf-jump');
     if (jump && root.contains(jump)) {
