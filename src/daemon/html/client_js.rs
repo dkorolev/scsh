@@ -485,38 +485,6 @@ function procMetaHtml(p) {
 function procIsLive(status) {
   return status === 'running' || status === 'waiting';
 }
-function autoscrollCtlHtml(p) {
-  // Always reserve the control (WEB-UI §2); disable when the proc is no longer live.
-  const live = procIsLive(p.status);
-  const scrollChecked = autoScrollEnabled(p.index) ? ' checked' : '';
-  const disabled = live ? '' : ' disabled';
-  return '<label class="autoscroll-ctl"><input type="checkbox" data-autoscroll' + scrollChecked +
-    disabled + '> Auto-scroll to bottom</label>';
-}
-function syncAutoscrollCtl(det, p) {
-  // The control belongs to a text-output box: a slim row (no recording, no log lines yet)
-  // must not grow it back, so bail — the box's creation re-invokes this sync.
-  const out = det.querySelector('.output');
-  let ctl = det.querySelector('.autoscroll-ctl');
-  if (!out) {
-    if (ctl) ctl.remove();
-    return;
-  }
-  const live = procIsLive(p.status);
-  if (!ctl) {
-    const label = document.createElement('label');
-    label.className = 'autoscroll-ctl';
-    label.innerHTML = '<input type="checkbox" data-autoscroll> Auto-scroll to bottom';
-    det.insertBefore(label, out);
-    ctl = label;
-  }
-  const input = ctl && ctl.querySelector('input');
-  if (input) {
-    input.disabled = !live;
-    if (live && autoScrollEnabled(p.index)) input.checked = true;
-  }
-}
-const autoScrollByProc = new Map();
 function uiPrefsKey() {
   return 'scsh.ui.' + (typeof SESSION_ID === 'string' && SESSION_ID ? SESSION_ID : 'index');
 }
@@ -528,13 +496,6 @@ function saveUiPrefs(patch) {
   const next = Object.assign(loadUiPrefs(), patch);
   try { localStorage.setItem(uiPrefsKey(), JSON.stringify(next)); } catch (_) {}
   return next;
-}
-function autoScrollEnabled(index) {
-  if (autoScrollByProc.has(String(index))) return autoScrollByProc.get(String(index)) !== false;
-  const prefs = loadUiPrefs();
-  const m = prefs.autoscroll || {};
-  if (Object.prototype.hasOwnProperty.call(m, String(index))) return m[String(index)] !== false;
-  return true;
 }
 function isAtBottom(el, slack) {
   slack = slack ?? 4;
@@ -553,13 +514,9 @@ function scrollOutputToBottom(out) {
     });
   });
 }
-function applyAutoScrollAll(root) {
-  root.querySelectorAll('details.proc').forEach(det => {
-    const cb = det.querySelector('[data-autoscroll]');
-    const enabled = !cb || cb.checked;
-    autoScrollByProc.set(det.dataset.index, enabled);
-    if (enabled) scrollOutputToBottom(det.querySelector('.output'));
-  });
+function followOutput(out) {
+  // Sticky follow: stay pinned to the bottom unless the viewer scrolled up.
+  return !out || out._scshFollow !== false;
 }
 function lineHtml(l) {
   return '<div class="line"><span class="at">+' + esc(Number(l.at).toFixed(1)) + 's</span> ' + esc(l.text) + '</div>';
@@ -568,19 +525,18 @@ function syncProcOutput(det, p) {
   const lines = p.lines || [];
   let out = det.querySelector('.output');
   if (!out) {
-    // Unrecorded procs start as slim rows; the output box (with its auto-scroll control)
-    // exists only once the first log line arrives — annotate rows never grow one.
+    // Unrecorded procs start as slim rows; the output box exists only once the first log
+    // line arrives — annotate rows without a recording never grow one.
     if (!lines.length || hasCast(p)) return;
     det.insertAdjacentHTML('beforeend', '<div class="output"></div>');
     out = det.querySelector('.output');
     setupOutputScroll(out);
-    syncAutoscrollCtl(det, p);
   }
   const existing = out.querySelectorAll('.line').length;
   if (lines.length > existing) {
     const chunk = lines.slice(existing).map(lineHtml).join('');
     out.insertAdjacentHTML('beforeend', chunk);
-    if (autoScrollEnabled(det.dataset.index)) scrollOutputToBottom(out);
+    if (followOutput(out)) scrollOutputToBottom(out);
   }
 }
 function updateProcFields(det, p, nowUnix) {
@@ -601,20 +557,33 @@ function updateProcFields(det, p, nowUnix) {
     if (finished && looksLikeArtifactPath(text)) noteEl.innerHTML = '<code>' + esc(text) + '</code>';
     else noteEl.textContent = text;
   }
-  // Per-proc kill stays in place grayed (WEB-UI §2) — never remove mid-job.
+  // Per-proc Force stop: show only while the step is live; remove once it finishes.
   const killEl = det.querySelector('button[data-proc-stop]');
-  if (killEl) {
-    const live = p.status === 'running' || p.status === 'waiting';
-    killEl.disabled = !live;
-    killEl.title = live
-      ? 'Force-stop this container only — the rest of the job continues'
-      : 'This step already finished';
+  const live = p.status === 'running' || p.status === 'waiting';
+  if (killEl && !live) killEl.remove();
+  else if (!killEl && live) {
+    let actions = det.querySelector('.proc-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'proc-actions';
+      const summary = det.querySelector('summary');
+      if (summary) det.insertBefore(actions, summary);
+      else det.prepend(actions);
+    }
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chamfer btn btn--red btn--sm proc-kill';
+    btn.setAttribute('data-proc-stop', String(p.index));
+    btn.setAttribute('data-session', SESSION_ID);
+    btn.title = 'Force-stop this container only — the rest of the job continues';
+    btn.innerHTML = '<span>Force stop</span>';
+    actions.appendChild(btn);
+    btn.addEventListener('click', () => killProc(btn));
   }
   // Run snapshot label tracks live vs finished; the link itself is unhidden once frames exist.
   const exportLink = det.querySelector('a[data-cast-export]');
   if (exportLink) {
-    const live = p.status === 'running' || p.status === 'waiting';
-    const label = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+    const label = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
     const span = exportLink.querySelector('span');
     if (span) span.textContent = label;
     else exportLink.textContent = label;
@@ -639,7 +608,7 @@ function updateProcFields(det, p, nowUnix) {
       div.textContent = 'container: ' + p.container_name;
       // A slim row (no recording, no lines yet) has no body element to anchor on, so the
       // container line simply closes out the row until an output box appears above it.
-      const before = det.querySelector('.cast') || det.querySelector('.autoscroll-ctl') || det.querySelector('.output');
+      const before = det.querySelector('.cast') || det.querySelector('.output');
       if (before) det.insertBefore(div, before);
       else det.appendChild(div);
     }
@@ -648,7 +617,6 @@ function updateProcFields(det, p, nowUnix) {
   // and gets a run-snapshot link above Force stop.
   const castEl = det.querySelector('.cast');
   if (hasCast(p) && !castEl) {
-    det.querySelector('.autoscroll-ctl')?.remove();
     det.querySelector('.output')?.remove();
     ensureProcSnapshot(det, p);
     det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
@@ -674,7 +642,6 @@ function updateProcFields(det, p, nowUnix) {
       if (summary) summary.insertAdjacentHTML('afterend', metaHtml);
     }
   } else if (metaBlock) metaBlock.remove();
-  syncAutoscrollCtl(det, p);
 }
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
 // Insert the run-snapshot link above Force stop when a cast appears mid-job.
@@ -696,7 +663,7 @@ function ensureProcSnapshot(det, p) {
     }
   }
   const live = p.status === 'running' || p.status === 'waiting';
-  const label = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+  const label = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
   const href = '/cast/' + encodeURIComponent(SESSION_ID) + '/' + p.index + '/export.html';
   const a = document.createElement('a');
   a.className = 'chamfer btn btn--cyan btn--sm proc-snapshot';
@@ -878,9 +845,15 @@ function pollForChapters(box, chaptersUrl, summarizingJob) {
   pending.className = 'dim chap-pending';
   setChapPending(pending, summarizingJob);
   if (bar) bar.appendChild(pending);
-  if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]);
+  // liveSessions is null until the first WS tick — never index it bare (SESSION_ID is a
+  // property name; `null[SESSION_ID]` throws TypeError in the console).
+  const sessionForChapters = () => (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null);
+  {
+    const s = sessionForChapters();
+    if (s) syncChaptersPending(s);
+  }
   box._chapPoll = setInterval(() => {
-    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]); return; }
+    if (sinceEnd() > CHAPTERS_WAIT_SECS) { clearInterval(box._chapPoll); box._chapPoll = null; pending.remove(); const s = sessionForChapters(); if (s) syncChaptersPending(s); return; }
     fetch(chaptersUrl).then(r => r.ok ? r.json() : {}).then(meta => {
       const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
       if (!chapters.length) {
@@ -894,7 +867,8 @@ function pollForChapters(box, chaptersUrl, summarizingJob) {
       pending.remove();
       // Re-create at the same position so the timeline gains its markers too.
       createCastPlayer(box, box._player ? box._player.getCurrentTime() : null);
-      if (SESSION_ID && liveSessions[SESSION_ID]) syncChaptersPending(liveSessions[SESSION_ID]);
+      const s = sessionForChapters();
+      if (s) syncChaptersPending(s);
     }).catch(() => {});
   }, 5000);
 }
@@ -965,31 +939,30 @@ document.addEventListener('fullscreenchange', () => {
 function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
   // Mirrors the server-rendered shape (session.rs): recorded procs embed the player;
-  // text-logging procs keep the output box with auto-scroll; a proc with neither — an
-  // annotate row, say — stays a slim summary-only row without the terminal chrome.
+  // text-logging procs keep the output box (sticky follow); a proc with neither — an
+  // annotate row without a recording, say — stays a slim summary-only row.
   const lines = p.lines || [];
   const body = hasCast(p)
     ? castEmbedHtml(p)
-    : (lines.length ? autoscrollCtlHtml(p) + '<div class="output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
+    : (lines.length ? '<div class="output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
   const live = p.status === 'running' || p.status === 'waiting';
-  const snapLabel = live ? 'incomplete ⬇' : 'run snapshot ⬇';
+  const snapLabel = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
   const snap = hasCast(p)
     ? '<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/' + encodeURIComponent(SESSION_ID) +
       '/' + p.index + '/export.html" data-cast-export download hidden title="Offline HTML snapshot of this run"><span>' +
       snapLabel + '</span></a>'
     : '';
-  const kill = '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
-    esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) + '"' + (live ? '' : ' disabled') +
-    ' title="' + (live
-      ? 'Force-stop this container only — the rest of the job continues'
-      : 'This step already finished') +
-    '"><span>Force stop</span></button>';
+  const kill = live
+    ? '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
+      esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) +
+      '" title="Force-stop this container only — the rest of the job continues"><span>Force stop</span></button>'
+    : '';
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
-    '<div class="proc-actions">' + snap + kill + '</div>' +
+    ((snap || kill) ? '<div class="proc-actions">' + snap + kill + '</div>' : '') +
     '<summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
@@ -1070,18 +1043,20 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
 }
 function wfDisplayState(session, node, nowUnix) {
   const life = sessionLifecycle(session, nowUnix).class;
-  const stalled = life === 'terminated';
+  // Ready/Running only while the job is live — cancelled/terminated/failed must not keep a
+  // waiting step looking like it is about to start ("ready — not started yet").
+  const live = life === 'running';
   const procs = session.procs || [];
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
-  if (!p) return stalled ? 'stalled' : 'waiting';
+  if (!p) return live ? 'waiting' : 'stalled';
   if (p.status === 'ok') return 'done';
   if (p.status === 'fail') {
     return p.fail_reason === 'force_stopped' ? 'force-stopped' : 'failed';
   }
   if (p.status === 'skipped') return 'skipped';
-  if (p.status === 'running') return stalled ? 'stalled' : 'running';
+  if (p.status === 'running') return live ? 'running' : 'stalled';
   if (p.status === 'waiting') {
-    if (stalled) return 'stalled';
+    if (!live) return 'stalled';
     return wfUnmetNeeds(session, node) === 0 ? 'ready' : 'waiting';
   }
   return 'waiting';
@@ -1126,7 +1101,8 @@ function wfFirstIdByState(session, nodes, nowUnix) {
 }
 // Layout constants — keep in lockstep with src/daemon/html/workflow.rs.
 const WF_NODE_W = 200, WF_NODE_H = 72, WF_GAP_X = 56, WF_GAP_Y = 28, WF_PAD = 16;
-const WF_TERM_W = 40, WF_TERM_H = 40, WF_TERM_GAP_X = 72;
+const WF_BOOKEND_W = 48, WF_BOOKEND_H = 48;
+const WF_START_ID = '__start', WF_FINISH_ID = '__finish';
 let pendingWorkflowStep = null;
 let wfHistorySilent = false;
 function wfNodeRanks(nodes) {
@@ -1169,79 +1145,51 @@ function wfLayoutNodes(session, nodes, nowUnix) {
     const y0 = WF_PAD + (colH - blockH) / 2;
     const x = WF_PAD + rank * (WF_NODE_W + WF_GAP_X);
     idxs.forEach((i, row) => {
-      out.push({ id: nodes[i].id, x, y: y0 + row * (WF_NODE_H + WF_GAP_Y), order: nodes[i].order || 0, index: i });
+      out.push({ id: nodes[i].id, x, y: y0 + row * (WF_NODE_H + WF_GAP_Y), order: nodes[i].order || 0, index: i, w: WF_NODE_W, h: WF_NODE_H });
     });
   });
   out.sort((a, b) => a.order - b.order);
   return out;
 }
-function wfPortY(nodeY, index, count) {
-  if (count <= 1) return nodeY + WF_NODE_H / 2;
-  const margin = WF_NODE_H * 0.22;
-  const usable = WF_NODE_H - 2 * margin;
+function wfLayoutWithBookends(session, nodes, nowUnix) {
+  const layout = wfLayoutNodes(session, nodes, nowUnix);
+  const shift = WF_BOOKEND_W + WF_GAP_X;
+  layout.forEach(n => { n.x += shift; });
+  const stageH = Math.max(WF_PAD + WF_NODE_H, ...layout.map(n => n.y + n.h)) + WF_PAD;
+  const bookendY = Math.max(WF_PAD, (stageH - WF_BOOKEND_H) / 2);
+  const start = { id: WF_START_ID, x: WF_PAD, y: bookendY, order: 0, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
+  const finishX = Math.max(WF_PAD + WF_BOOKEND_W, ...layout.map(n => n.x + n.w)) + WF_GAP_X;
+  const finish = { id: WF_FINISH_ID, x: finishX, y: bookendY, order: 1e9, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
+  return { layout, start, finish };
+}
+function wfGraphRoots(nodes) {
+  const ids = new Set(nodes.map(n => n.id));
+  return nodes.filter(n => (n.needs || []).every(need => !ids.has(need))).map(n => n.id);
+}
+function wfGraphSinks(nodes) {
+  const ids = new Set(nodes.map(n => n.id));
+  const dependedOn = new Set();
+  nodes.forEach(n => (n.needs || []).forEach(need => { if (ids.has(need)) dependedOn.add(need); }));
+  return nodes.filter(n => !dependedOn.has(n.id)).map(n => n.id);
+}
+function wfPortY(nodeY, nodeH, index, count) {
+  if (count <= 1) return nodeY + nodeH / 2;
+  const margin = nodeH * 0.22;
+  const usable = nodeH - 2 * margin;
   return nodeY + margin + usable * index / (count - 1);
 }
-function wfTermPortY(termY, index, count) {
-  if (count <= 1) return termY + WF_TERM_H / 2;
-  const margin = WF_TERM_H * 0.28;
-  const usable = WF_TERM_H - 2 * margin;
-  return termY + margin + usable * index / (count - 1);
-}
-function wfEdgePath(x1, y1, dstX, y2, cls) {
-  // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
-  const x2 = dstX - 1.5;
-  const dx = Math.max(24, x2 - x1);
-  const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
-  return '<path class="' + cls + '" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
-    ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
-    ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
-}
-// Synthetic start / finish terminals — keep in lockstep with render_terminals in workflow.rs.
-// Start dot → every root; every leaf → checkered finish disc. Decorative, never interactive.
-function wfTerminals(nodes, layout) {
-  if (!layout.length) return { edges: '', html: '', width: 0 };
-  const present = Object.create(null);
-  layout.forEach(n => { present[n.id] = true; });
-  const hasIncoming = Object.create(null), hasOutgoing = Object.create(null);
-  nodes.forEach(node => {
-    if (!present[node.id]) return;
-    (node.needs || []).forEach(need => {
-      if (present[need]) { hasIncoming[node.id] = true; hasOutgoing[need] = true; }
-    });
-  });
-  const minY = Math.min(...layout.map(n => n.y));
-  const maxY = Math.max(...layout.map(n => n.y + WF_NODE_H));
-  const termY = (minY + maxY) / 2 - WF_TERM_H / 2;
-  const startX = WF_PAD;
-  const finishX = Math.max(...layout.map(n => n.x + WF_NODE_W)) + WF_TERM_GAP_X;
-  const byY = (a, b) => a.y - b.y;
-  const roots = layout.filter(n => !hasIncoming[n.id]).slice().sort(byY);
-  const leaves = layout.filter(n => !hasOutgoing[n.id]).slice().sort(byY);
-  let edges = '';
-  roots.forEach((n, i) => {
-    edges += wfEdgePath(startX + WF_TERM_W, wfTermPortY(termY, i, roots.length),
-      n.x, n.y + WF_NODE_H / 2, 'wf-edge wf-edge-term');
-  });
-  leaves.forEach((n, i) => {
-    edges += wfEdgePath(n.x + WF_NODE_W, n.y + WF_NODE_H / 2,
-      finishX, wfTermPortY(termY, i, leaves.length), 'wf-edge wf-edge-term');
-  });
-  const term = (cls, label, x) => '<span class="wf-terminal ' + cls + '" role="img" aria-label="' + label +
-    '" style="left:' + x.toFixed(1) + 'px;top:' + termY.toFixed(1) + 'px"></span>';
-  return {
-    edges,
-    html: term('wf-term-start', 'start', startX) + term('wf-term-finish', 'finish', finishX),
-    width: finishX + WF_TERM_W + WF_PAD,
-  };
-}
-function wfEdgesSvg(nodes, layout) {
+function wfEdgesSvg(nodes, layout, start, finish) {
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
+  byId[WF_START_ID] = start;
+  byId[WF_FINISH_ID] = finish;
   const pairs = [];
   nodes.forEach(node => {
     (node.needs || []).forEach(need => {
       if (byId[need] && byId[node.id]) pairs.push([need, node.id]);
     });
   });
+  wfGraphRoots(nodes).forEach(id => { if (byId[id]) pairs.push([WF_START_ID, id]); });
+  wfGraphSinks(nodes).forEach(id => { if (byId[id]) pairs.push([id, WF_FINISH_ID]); });
   const outN = Object.create(null), inN = Object.create(null);
   pairs.forEach(([s, d]) => { outN[s] = (outN[s] || 0) + 1; inN[d] = (inN[d] || 0) + 1; });
   const outRank = Object.create(null), inRank = Object.create(null);
@@ -1256,25 +1204,43 @@ function wfEdgesSvg(nodes, layout) {
   Object.keys(inRank).forEach(dst => inRank[dst].forEach((ei, port) => { inPort[ei] = port; }));
   return pairs.map((p, i) => {
     const src = byId[p[0]], dst = byId[p[1]];
-    const x1 = src.x + WF_NODE_W;
-    const y1 = wfPortY(src.y, outPort[i], outN[p[0]]);
-    const y2 = wfPortY(dst.y, inPort[i], inN[p[1]]);
-    return wfEdgePath(x1, y1, dst.x, y2, 'wf-edge');
+    const x1 = src.x + (src.w || WF_NODE_W);
+    const y1 = wfPortY(src.y, src.h || WF_NODE_H, outPort[i], outN[p[0]]);
+    const x2 = dst.x - 1.5;
+    const y2 = wfPortY(dst.y, dst.h || WF_NODE_H, inPort[i], inN[p[1]]);
+    if (Math.abs(y1 - y2) < 0.5) {
+      return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+        ' L' + x2.toFixed(1) + ',' + y1.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
+    }
+    const dx = Math.max(24, x2 - x1);
+    const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
+    return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+      ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
+      ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
   }).join('');
+}
+function wfBookendHtml(pos, isStart) {
+  const cls = isStart ? 'wf-bookend wf-start' : 'wf-bookend wf-finish';
+  const id = isStart ? WF_START_ID : WF_FINISH_ID;
+  const title = isStart ? 'Start' : 'Finish';
+  const glyph = isStart
+    ? '<span class="wf-start-play" aria-hidden="true"></span>'
+    : '<span class="wf-finish-flag" aria-hidden="true"></span>';
+  return '<div class="' + cls + '" id="wf-node-' + id + '" style="left:' + pos.x.toFixed(1) +
+    'px;top:' + pos.y.toFixed(1) + 'px;width:' + pos.w.toFixed(0) + 'px;min-height:' + WF_BOOKEND_H +
+    'px" title="' + title + '" aria-hidden="true">' + glyph + '</div>';
 }
 function wfBuildGraphHtml(session, nowUnix) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
   if (!nodes.length) return '';
-  const layout = wfLayoutNodes(session, nodes, nowUnix);
-  // Shift the DAG right so the start terminal gets its own little column.
-  layout.forEach(n => { n.x += WF_TERM_W + WF_TERM_GAP_X; });
-  const term = wfTerminals(nodes, layout);
-  const w = term.width;
-  const h = Math.max(...layout.map(n => n.y + WF_NODE_H)) + WF_PAD;
+  const { layout, start, finish } = wfLayoutWithBookends(session, nodes, nowUnix);
+  const all = layout.concat([start, finish]);
+  const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
+  const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
   const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
-  const nodesHtml = nodes.map(node => {
+  const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
     if (!pos) return '';
     const state = wfDisplayState(session, node, nowUnix);
@@ -1310,13 +1276,13 @@ function wfBuildGraphHtml(session, nowUnix) {
     return '<a class="wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
       '" href="' + '#task-' + encodeURIComponent(node.id) + '" id="wf-node-' + esc(node.id) +
       '" data-workflow-step="' + esc(node.id) + '" data-wf-state="' + state + '"' + procAttr +
-      ' style="left:' + pos.x.toFixed(1) + 'px;top:' + pos.y.toFixed(1) + 'px;width:' + WF_NODE_W +
+      ' style="left:' + pos.x.toFixed(1) + 'px;top:' + pos.y.toFixed(1) + 'px;width:' + (pos.w || WF_NODE_W) +
       'px;min-height:' + WF_NODE_H + 'px" data-tip="' + esc(tip) + '"' + tipRunning +
       ' aria-label="' + esc(tip.replace(/\n/g, ', ')) +
       '"><span class="wf-state"><span class="wf-ico" aria-hidden="true">' + wfStateIcon(state) +
       '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span></span><span class="wf-id">' +
       esc(title) + gate + '</span><span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
-  }).join('');
+  }).join('') + wfBookendHtml(finish, false);
   return '<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
@@ -1327,8 +1293,8 @@ function wfBuildGraphHtml(session, nowUnix) {
     '" viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" aria-hidden="true"><defs>' +
     '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
     '<path class="wf-arrowhead" d="M3.5 2.5 L11 7 L3.5 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</marker></defs>' + wfEdgesSvg(nodes, layout) + term.edges + '</svg>' +
-    '<div class="workflow-nodes">' + nodesHtml + term.html + '</div></div></div></div>';
+    '</marker></defs>' + wfEdgesSvg(nodes, layout, start, finish) + '</svg>' +
+    '<div class="workflow-nodes">' + nodesHtml + '</div></div></div></div>';
 }
 function ensureWorkflowGraphMounted(session, nowUnix) {
   const nodes = (session && session.workflow && session.workflow.nodes) || [];
@@ -1614,18 +1580,6 @@ function restoreOpenProcs() {
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
   root.dataset.changeBound = '1';
-  root.addEventListener('change', (ev) => {
-    if (!ev.target.matches('[data-autoscroll]')) return;
-    const det = ev.target.closest('details.proc');
-    const out = det && det.querySelector('.output');
-    if (!det || !out) return;
-    autoScrollByProc.set(det.dataset.index, ev.target.checked);
-    const prefs = loadUiPrefs();
-    const m = Object.assign({}, prefs.autoscroll || {});
-    m[det.dataset.index] = ev.target.checked;
-    saveUiPrefs({ autoscroll: m });
-    if (ev.target.checked) scrollOutputToBottom(out);
-  });
   root.addEventListener('toggle', (ev) => {
     if (ev.target && ev.target.matches && ev.target.matches('details.proc')) persistOpenProcs();
   }, true);
@@ -1633,6 +1587,7 @@ function bindSessionProcs(root) {
 function setupOutputScroll(out) {
   if (!out || out.dataset.scrollBound) return;
   out.dataset.scrollBound = '1';
+  out._scshFollow = true;
   const markUserScroll = () => { out._scshUserScroll = true; };
   out.addEventListener('wheel', markUserScroll, { passive: true });
   out.addEventListener('touchmove', markUserScroll, { passive: true });
@@ -1640,15 +1595,10 @@ function setupOutputScroll(out) {
   out.addEventListener('mousedown', markUserScroll);
   out.addEventListener('scroll', () => {
     if (out._scshAutoScroll) return;
-    const det = out.closest('details.proc');
-    if (!det) return;
     if (!out._scshUserScroll) return;
     out._scshUserScroll = false;
-    if (!isAtBottom(out)) {
-      autoScrollByProc.set(det.dataset.index, false);
-      const cb = det.querySelector('[data-autoscroll]');
-      if (cb) cb.checked = false;
-    }
+    // Scroll up → pause follow; return to the bottom → resume (no checkbox).
+    out._scshFollow = isAtBottom(out);
   }, { passive: true });
 }
 function renderSession(session, nowUnix) {
@@ -1666,10 +1616,7 @@ function renderSession(session, nowUnix) {
       det = wrap.firstElementChild;
       root.appendChild(det);
       setupOutputScroll(det.querySelector('.output'));
-      if (procIsLive(p.status)) {
-        autoScrollByProc.set(idx, true);
-        scrollOutputToBottom(det.querySelector('.output'));
-      }
+      if (procIsLive(p.status)) scrollOutputToBottom(det.querySelector('.output'));
     } else {
       det.open = userOpen;
       updateProcFields(det, p, nowUnix);
@@ -1710,7 +1657,7 @@ function onTick(msg) {
   }
   setDaemonStatus('live', label, msg.uptime_secs);
   if (SESSION_ID) {
-    const session = liveSessions[SESSION_ID];
+    const session = liveSessions ? liveSessions[SESSION_ID] : null;
     if (session) {
       renderSessionMeta(session, nowUnix);
       renderSession(session, nowUnix);
@@ -1749,12 +1696,10 @@ startProcClock();
   if (!root) return;
   initSessionMetaFromDom();
   bindSessionProcs(root);
-  root.querySelectorAll('.output').forEach(setupOutputScroll);
-  root.querySelectorAll('details.proc').forEach(det => {
-    const cb = det.querySelector('[data-autoscroll]');
-    if (cb) autoScrollByProc.set(det.dataset.index, cb.checked);
+  root.querySelectorAll('.output').forEach(out => {
+    setupOutputScroll(out);
+    if (followOutput(out)) scrollOutputToBottom(out);
   });
-  applyAutoScrollAll(root);
   initCasts(root);
   initSessionStop();
   initProcKills(root);
@@ -1778,23 +1723,36 @@ function initFleetJumps() {
 }
 function syncSessionStopButton(session) {
   const lifecycle = sessionLifecycle(session, Date.now() / 1000);
-  const btn = document.getElementById('session-stop');
-  // Gray in place (WEB-UI §2) — never remove. Kind/lifecycle live on the page lede.
-  if (btn) {
-    const running = lifecycle.class === 'running';
-    btn.disabled = !running;
-    btn.title = running
-      ? 'Force-stop this job? Running containers will be killed.'
-      : ('Job is ' + lifecycle.label + ' — nothing left to stop');
+  const running = lifecycle.class === 'running';
+  let btn = document.getElementById('session-stop');
+  // Force stop only while running — remove it when the job settles (no grayed stub).
+  if (!running) {
+    if (btn) btn.remove();
+  } else if (!btn) {
+    const actions = document.querySelector('.session-actions');
+    if (actions) {
+      btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'chamfer btn btn--red btn--sm';
+      btn.id = 'session-stop';
+      btn.setAttribute('data-session', session.id || SESSION_ID);
+      btn.title = 'Force-stop this job? Running containers will be killed.';
+      btn.innerHTML = '<span>Force stop</span>';
+      actions.appendChild(btn);
+      btn.addEventListener('click', () => forceStopSession(btn));
+    }
+  } else {
+    btn.disabled = false;
+    btn.title = 'Force-stop this job? Running containers will be killed.';
     setBtnLabel(btn, 'Force stop');
   }
   syncChaptersPending(session);
   const pending = chaptersPendingCount(session);
   const exportBtn = document.querySelector('a.session-export span') || document.querySelector('a.session-export');
   if (exportBtn) {
-    let label = 'job snapshot ⬇';
-    if (lifecycle.class === 'running') label = 'incomplete ⬇';
-    else if (pending > 0) label = 'chapters pending ⬇';
+    let label = 'Job snapshot ⬇';
+    if (lifecycle.class === 'running') label = 'Incomplete job ⬇';
+    else if (pending > 0) label = 'Chapters pending ⬇';
     if (exportBtn.tagName === 'SPAN') exportBtn.textContent = label;
     else setBtnLabel(exportBtn, label);
   }
@@ -1861,6 +1819,7 @@ async function forceStopSession(btn) {
       return;
     }
     setBtnLabel(btn, data.already_ended ? 'Already ended' : 'Stopped');
+    btn.remove();
   } catch (e) {
     btn.disabled = false;
     setBtnLabel(btn, 'Force stop');
@@ -1899,7 +1858,7 @@ async function killProc(btn) {
       showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
-    setBtnLabel(btn, data.already_ended ? 'already ended' : 'stopped');
+    btn.remove();
   } catch (e) {
     btn.disabled = false;
     setBtnLabel(btn, 'Force stop');

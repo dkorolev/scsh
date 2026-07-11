@@ -83,6 +83,22 @@ impl Server {
     for session in store.sessions.values_mut() {
       session.client_connected = false;
     }
+    // The previous daemon's wait/reconcile threads are gone. Any session whose recorded
+    // run_pid is already dead will never get an exit callback — end it now so waiting
+    // skills do not sit as "Ready" until the heartbeat stale window trips.
+    for session in store.sessions.values_mut() {
+      if session.ended_at.is_some() {
+        continue;
+      }
+      let dead = match session.run_pid {
+        Some(pid) => !crate::daemon::paths::pid_alive(pid),
+        None => false,
+      };
+      if dead {
+        session.ended_at = Some(session.last_seen_at.max(session.started_at));
+        session.run_pid = None;
+      }
+    }
     Server {
       store: Arc::new(Mutex::new(store)),
       prune: Arc::new(Mutex::new(PruneQueue::load(port))),
@@ -3383,6 +3399,73 @@ mod tests {
       assert!(store.sessions.contains_key("sessaa"), "session reloaded from redb");
       assert!(store.started_at >= before, "started_at refreshed on reload");
       assert!(!store.sessions["sessaa"].client_connected, "reload marks clients disconnected");
+    }
+    drop(server2);
+    let _ = std::fs::remove_file(&db_path);
+  }
+
+  #[test]
+  fn server_reload_ends_sessions_whose_run_pid_is_already_dead() {
+    let db_path = std::env::temp_dir().join(format!("scsh-reload-dead-{}.redb", crate::runtime::random_nonce_6()));
+    let port = 7274;
+    {
+      let db = crate::daemon::db::StoreDb::open_path(&db_path).unwrap();
+      let server = Server::with_db(DaemonMode::Persistent, port, Some(db));
+      {
+        let mut store = lock_store(&server.store);
+        store.insert_session(
+          "deadpid".into(),
+          Session {
+            id: "deadpid".into(),
+            started_at: 10,
+            ended_at: None,
+            profile: Some("smoke".into()),
+            kind: Some("definition".into()),
+            repo: "/r".into(),
+            branch: "main".into(),
+            skills: Vec::new(),
+            procs: vec![ProcRecord {
+              index: 0,
+              label: "skill".into(),
+              kind: ProcKind::Skill,
+              status: ProcStatus::Waiting,
+              skill_name: Some("s".into()),
+              harness: Some("grok".into()),
+              model: None,
+              started_at: None,
+              note: Some("waiting for image build…".into()),
+              detail: None,
+              fail_reason: None,
+              elapsed: None,
+              lines: Vec::new(),
+              container_name: None,
+              cast_path: None,
+              diff_path: None,
+              skill_source: None,
+              route: None,
+              result_path: None,
+              annotate_target: None,
+            }],
+            last_seen_at: 20,
+            client_connected: false,
+            // PIDs wrap; 2^31-1 is almost never a live process on the test host.
+            run_pid: Some(u32::MAX / 2),
+            workflow: None,
+            parent_session: None,
+          },
+        );
+      }
+      server.dirty_sessions.lock().unwrap().insert("deadpid".into());
+      server.persist_now();
+    }
+    let db = crate::daemon::db::StoreDb::open_path(&db_path).unwrap();
+    let server2 = Server::with_db(DaemonMode::Persistent, port, Some(db));
+    {
+      let store = lock_store(&server2.store);
+      let s = store.sessions.get("deadpid").expect("reloaded");
+      assert!(s.ended_at.is_some(), "dead run_pid must end the session on reload");
+      assert!(s.run_pid.is_none(), "run_pid cleared after orphan end");
+      assert_eq!(s.lifecycle_status(now_unix_secs()), SessionLifecycle::Cancelled);
     }
     drop(server2);
     let _ = std::fs::remove_file(&db_path);

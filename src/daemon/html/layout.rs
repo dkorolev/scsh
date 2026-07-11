@@ -236,8 +236,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .daemon-right { margin-left: auto; display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap; }
   .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
   .session-kind strong { color: var(--text); }
-  /* Clear the absolute top-right action stack (snapshot + Force stop). */
-  .card:has(.session-actions) .session-meta { padding-right: 9.5rem; }
   .chapters-pending { margin: 0.65rem 0 0; font-size: 0.9rem; }
   .daemon-status .dot {
     width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
@@ -346,6 +344,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
     overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem;
+    border-radius: 6px; /* same as the enclosing .card island */
     /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
     background:
       linear-gradient(90deg, var(--bg) 30%, transparent) left center / 1.25rem 100% no-repeat,
@@ -415,23 +414,41 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   .wf-node.wf-build { border-left-color: var(--cyan); }
   .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
-  /* Start / finish terminals — decorative bookends, never focusable or clickable. */
-  .wf-terminal {
-    position: absolute; box-sizing: border-box; width: 40px; height: 40px;
-    border: 2px solid var(--text-muted); border-radius: 50%; background: var(--bg);
+  /* Start / Finish bookends — small icon cards (play / checkered flag), not task cards. */
+  .wf-bookend {
+    position: absolute; box-sizing: border-box;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
     pointer-events: none; user-select: none;
   }
-  .wf-term-start::after {
-    /* Starting line: a filled dot inside the ring, like a race start marker. */
-    content: ""; position: absolute; inset: 9px; border-radius: 50%; background: var(--text-muted);
+  /* Solid play triangle — matches the start marker in the preferred graph mock. */
+  .wf-start-play {
+    display: block; width: 0; height: 0;
+    border-style: solid;
+    border-width: 0.5rem 0 0.5rem 0.85rem;
+    border-color: transparent transparent transparent #fff;
+    margin-left: 0.2rem; /* optical center in the square */
   }
-  .wf-term-finish {
-    /* Finish flag: the checkered flag itself, not a disc. */
-    border: none; background: none;
+  /* Checkered flag on a pole. */
+  .wf-finish-flag {
+    position: relative;
+    display: block; width: 1.15rem; height: 0.9rem;
+    margin-left: 0.2rem;
+    border: 1px solid var(--text-muted);
+    background-color: var(--bg);
+    background-image:
+      linear-gradient(45deg, var(--text-muted) 25%, transparent 25%),
+      linear-gradient(-45deg, var(--text-muted) 25%, transparent 25%),
+      linear-gradient(45deg, transparent 75%, var(--text-muted) 75%),
+      linear-gradient(-45deg, transparent 75%, var(--text-muted) 75%);
+    background-size: 6px 6px;
+    background-position: 0 0, 0 3px, 3px -3px, 3px 0;
   }
-  .wf-term-finish::after {
-    content: "🏁"; position: absolute; inset: 0;
-    font-size: 32px; line-height: 40px; text-align: center;
+  .wf-finish-flag::before {
+    content: '';
+    position: absolute; left: -4px; top: -1px; bottom: -5px;
+    width: 2px; border-radius: 1px;
+    background: var(--text-muted);
   }
   /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
@@ -465,16 +482,6 @@ pub(crate) const PAGE_CSS: &str = r#"
     background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border);
     border-radius: 6px; margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
   }
-  /* Snapshot above Force stop, pinned to the proc island's top-right. */
-  .proc-actions {
-    position: absolute; top: 0.35rem; right: 0.55rem; z-index: 2;
-    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
-  }
-  .proc-actions .proc-kill,
-  .proc-actions .proc-snapshot {
-    margin-left: 0; align-self: stretch;
-    min-width: 8.5rem; box-sizing: border-box; height: 1.85rem;
-  }
   details.proc[open] {
     border-top-color: #3a4558; border-right-color: #3a4558; border-bottom-color: #3a4558;
   }
@@ -488,8 +495,6 @@ pub(crate) const PAGE_CSS: &str = r#"
     cursor: pointer; list-style: none; display: flex; gap: 0.5rem;
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;
   }
-  /* Keep the summary text clear of the absolute top-right action stack. */
-  details.proc > summary { padding-right: 9.5rem; }
   summary::-webkit-details-marker { display: none; }
   summary .triangle {
     flex-shrink: 0; width: 0.85rem; text-align: center; font-size: 0.65rem;
@@ -649,15 +654,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .image-build-btn:hover:not(:disabled) { background: rgba(88, 166, 255, 0.12); }
   .image-build-btn:disabled { cursor: default; opacity: 0.55; }
-  .proc-kill {
-    flex-shrink: 0;
-    font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
-    color: var(--red); background: transparent; border: 1px solid var(--red);
-    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
-  }
-  .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
-  .proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); border-color: var(--border); }
-  /* Diff chip stays on the summary row (right edge); Force stop / snapshot live in `.proc-actions`. */
+  /* Diff chip stays on the summary row (right edge). */
   a.proc-diff, span.proc-diff {
     margin-left: auto; align-self: center; flex-shrink: 0; white-space: nowrap;
     font-size: 0.75rem; line-height: 1.4; text-decoration: none;
@@ -692,39 +689,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .toast.show {
     opacity: 1; transform: translateX(-50%) translateY(0);
   }
-  /* In-app confirm — replaces browser confirm() for destructive Force stop actions. */
-  .scsh-dialog-backdrop {
-    position: fixed; inset: 0; z-index: 3000;
-    display: flex; align-items: center; justify-content: center;
-    padding: 1.25rem;
-    background: rgba(1, 4, 9, 0.72);
-  }
-  .scsh-dialog {
-    width: min(26rem, 100%);
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
-    padding: 1.1rem 1.2rem 1rem;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
-  }
-  .scsh-dialog-title {
-    margin: 0 0 0.45rem; font-size: 1.05rem; font-weight: 600; color: var(--text);
-  }
-  .scsh-dialog-body {
-    margin: 0 0 1rem; font-size: 0.9rem; line-height: 1.45; color: var(--text-muted);
-  }
-  .scsh-dialog-actions {
-    display: flex; gap: 0.55rem; justify-content: flex-end; flex-wrap: wrap;
-  }
-  .scsh-dialog-actions .btn { min-width: 5.5rem; }
   #repo-path.flash-open, #repo-open.flash-open {
     box-shadow: 0 0 0 2px var(--cyan);
   }
-  .autoscroll-ctl {
-    display: block; font-size: 0.8rem; margin: 0.35rem 0 0.25rem;
-    cursor: pointer; user-select: none; color: var(--text-muted);
-    min-height: 1.35rem; /* reserved even when idle so finishing a proc does not jump (WEB-UI §2) */
-  }
-  .autoscroll-ctl input { margin-right: 0.35rem; }
-  .autoscroll-ctl:has(input:disabled) { opacity: 0.45; cursor: default; }
   .output {
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
     max-height: 24rem; overflow: auto; margin: 0.5rem 0; padding: 0.65rem;
@@ -768,9 +735,12 @@ pub(crate) const PAGE_CSS: &str = r#"
      Chapters, the big play button, the speed menu — all player chrome (beecast-player). */
   .cast-player { width: 100%; }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
+  /* minmax(0,…): a plain 1fr track still floors at the content's min width, so an
+     unscaled wide terminal blew the cell past the viewport (player wider than the
+     screen, then a sideways jump on the chapters toggle). */
   .cast:fullscreen {
     display: grid; background: #000;
-    grid-template-columns: 1fr; grid-template-rows: auto 1fr;
+    grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
   }
   .cast:fullscreen .cast-toolbar { grid-column: 1; }
   .cast:fullscreen .cast-summary { display: none; }
@@ -778,7 +748,7 @@ pub(crate) const PAGE_CSS: &str = r#"
      let the grid row size the player. Fill the cell so beecast's wrap-fullscreen mount
      measure matches the visible area (avoids a late scale jump that clips 1×). */
   .cast:fullscreen .cast-player {
-    grid-column: 1; grid-row: 2; min-height: 0;
+    grid-column: 1; grid-row: 2; min-height: 0; min-width: 0;
     height: 100% !important; max-height: none !important;
     display: flex; flex-direction: column;
   }
@@ -788,17 +758,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }
-  /* Snapshot above Force stop, pinned to the meta island's top-right. */
-  .session-actions {
-    position: absolute; top: 0.7rem; right: 0.85rem; z-index: 2; margin: 0;
-    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
-  }
-  .session-actions #session-stop,
-  .session-actions .session-export {
-    min-width: 8.5rem; /* gray-in-place Force stop; export matches its box (WEB-UI §2) */
-    box-sizing: border-box;
-    height: 1.85rem;
-  }
   .session-meta {
     font-size: 0.9rem; margin: 0.75rem 0 1rem; display: grid;
     grid-template-columns: max-content minmax(0, 1fr); gap: 0.25rem 1rem;
@@ -807,6 +766,68 @@ pub(crate) const PAGE_CSS: &str = r#"
   .session-meta dt { font-weight: 600; color: var(--text-muted); font-size: 0.75rem;
     text-transform: uppercase; letter-spacing: 0.05em; }
   .session-meta dd { margin: 0; min-width: 0; }
+"#;
+
+/// Live-daemon-only chrome: Force stop, snapshot download slots, and the in-app confirm.
+/// Omitted from offline job/cast HTML exports — those pages have nothing to stop and no
+/// daemon to talk to.
+pub(crate) const LIVE_ONLY_CSS: &str = r#"
+  /* Clear the absolute top-right action stack (snapshot + Force stop). */
+  .card:has(.session-actions) .session-meta { padding-right: 11.5rem; }
+  /* Snapshot above Force stop, pinned to the proc island's top-right. */
+  .proc-actions {
+    position: absolute; top: 0.35rem; right: 0.55rem; z-index: 2;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+  }
+  .proc-actions .proc-kill,
+  .proc-actions .proc-snapshot {
+    margin-left: 0; align-self: stretch;
+    min-width: 10.5rem; box-sizing: border-box; height: 1.85rem;
+  }
+  /* Keep the summary text clear of the absolute top-right action stack. */
+  details.proc:has(.proc-actions) > summary { padding-right: 11.5rem; }
+  .proc-kill {
+    flex-shrink: 0;
+    font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
+    color: var(--red); background: transparent; border: 1px solid var(--red);
+    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+  }
+  .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
+  .proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); border-color: var(--border); }
+  /* In-app confirm — replaces browser confirm() for destructive Force stop actions. */
+  .scsh-dialog-backdrop {
+    position: fixed; inset: 0; z-index: 3000;
+    display: flex; align-items: center; justify-content: center;
+    padding: 1.25rem;
+    background: rgba(1, 4, 9, 0.72);
+  }
+  .scsh-dialog {
+    width: min(26rem, 100%);
+    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    padding: 1.1rem 1.2rem 1rem;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+  }
+  .scsh-dialog-title {
+    margin: 0 0 0.45rem; font-size: 1.05rem; font-weight: 600; color: var(--text);
+  }
+  .scsh-dialog-body {
+    margin: 0 0 1rem; font-size: 0.9rem; line-height: 1.45; color: var(--text-muted);
+  }
+  .scsh-dialog-actions {
+    display: flex; gap: 0.55rem; justify-content: flex-end; flex-wrap: wrap;
+  }
+  .scsh-dialog-actions .btn { min-width: 5.5rem; }
+  /* Snapshot above Force stop, pinned to the meta island's top-right. */
+  .session-actions {
+    position: absolute; top: 0.7rem; right: 0.85rem; z-index: 2; margin: 0;
+    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+  }
+  .session-actions #session-stop,
+  .session-actions .session-export {
+    min-width: 10.5rem; /* Incomplete job / Job snapshot / Force stop share a stable width */
+    box-sizing: border-box;
+    height: 1.85rem;
+  }
 "#;
 
 /// The location path shown bold on the LEFT of the top island — `scsh` on the index,
@@ -863,7 +884,7 @@ pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, lede: 
 {favicon}
 <title>{title}</title>
 {player_css}
-<style>{css}</style>
+<style>{css}{live_css}</style>
 </head>
 <body>
 <div id="daemon-status" class="daemon-status connecting">
@@ -887,6 +908,7 @@ const PROJECTS_DIR = {projects_dir};
     favicon = FAVICON_LINK,
     player_css = player_css,
     css = PAGE_CSS,
+    live_css = LIVE_ONLY_CSS,
     scsh_version = scsh_version_html(),
     lede = lede_html,
     crumbs = crumbs_html(session_id),

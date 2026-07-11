@@ -4,20 +4,14 @@ use super::escape::esc;
 use super::format::{format_elapsed_clock, format_idle, line_count_label};
 use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus};
 
-fn proc_is_live(status: ProcStatus) -> bool {
-  matches!(status, ProcStatus::Running | ProcStatus::Waiting)
-}
-
 // The retired "No output." placeholder box is gone on purpose: a proc with no recording
 // and no log lines now renders as a slim summary-only row, so there is nothing to label.
+// The auto-scroll checkbox is gone too: following the tail is the sticky default, released
+// by scrolling up and re-armed by scrolling back to the bottom.
 
-pub(crate) fn autoscroll_ctl_html(status: ProcStatus) -> String {
-  if proc_is_live(status) {
-    r#"<label class="autoscroll-ctl"><input type="checkbox" data-autoscroll checked> Auto-scroll to bottom</label>"#
-      .to_string()
-  } else {
-    String::new()
-  }
+/// Whether the proc is still doing (or about to do) work.
+pub(crate) fn proc_is_live(status: ProcStatus) -> bool {
+  matches!(status, ProcStatus::Running | ProcStatus::Waiting)
 }
 
 /// Whether this proc has an asciinema recording to embed (skills always; builds when the

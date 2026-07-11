@@ -4,8 +4,7 @@ use super::escape::esc;
 use super::fleet::fleet_sections_html;
 use super::layout::wrap_page;
 use super::proc::{
-  autoscroll_ctl_html, cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html,
-  summary_stats_html,
+  cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html, summary_stats_html,
 };
 use super::workflow::{proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
@@ -29,10 +28,10 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       if finished && looks_like_artifact_path(note) { format!("<code>{}</code>", esc(note)) } else { esc(note) };
     let container = proc.container_name.as_deref().unwrap_or("");
     // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
-    // build fallbacks (no asciinema on PATH) keep the timestamped output with auto-scroll.
-    // A proc with neither a recording nor a single log line — annotate rows are the
-    // canonical case — stays a slim summary-only row: the terminal chrome (auto-scroll
-    // control, an empty output box) belongs to procs that actually stream output.
+    // build fallbacks (no asciinema on PATH) keep the timestamped output (sticky follow).
+    // A proc with neither a recording nor a single log line — annotate rows without a
+    // recording are the canonical case — stays a slim summary-only row: terminal chrome
+    // belongs to procs that actually stream output.
     let body_html = if proc_has_cast(proc) {
       cast_embed_html(&session.id, proc)
     } else if proc.lines.is_empty() {
@@ -46,7 +45,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
           text = esc(&line.text)
         ));
       }
-      format!("{}<div class=\"output\">{lines_html}</div>", autoscroll_ctl_html(proc.status))
+      format!("<div class=\"output\">{lines_html}</div>")
     };
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     procs_html.push_str(&format!(
@@ -100,26 +99,18 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   } else {
     String::new()
   };
-  // Force stop always occupies its slot (WEB-UI §2): enabled while running, otherwise
-  // grayed with an explanation. Kind/lifecycle live on the page lede, not in this island.
-  let stop_enabled = lifecycle == SessionLifecycle::Running;
-  let stop_btn = format!(
-    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\"{disabled} title=\"{title}\"><span>Force stop</span></button>\n",
-    id = id,
-    disabled = if stop_enabled { "" } else { " disabled" },
-    title = if stop_enabled {
-      "Force-stop this job? Running containers will be killed."
-    } else {
-      // Keep the control visible so it does not read as a missing feature.
-      match lifecycle {
-        SessionLifecycle::Terminated => "Job terminated abruptly — nothing left to stop",
-        SessionLifecycle::Completed => "Job already completed",
-        SessionLifecycle::Failed => "Job already failed",
-        SessionLifecycle::Cancelled => "Job already cancelled",
-        SessionLifecycle::Running => "",
-      }
-    },
-  );
+  // Force stop only while the job is running — hide it otherwise. A control that can
+  // never act again is noise, not a missing feature: the lifecycle badge already says
+  // completed / failed / cancelled. (Deliberate departure from the WEB-UI §2 gray-in-place
+  // rule; the offline export strips the whole actions island the same way.)
+  let stop_btn = if lifecycle == SessionLifecycle::Running {
+    format!(
+      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\" title=\"Force-stop this job? Running containers will be killed.\"><span>Force stop</span></button>\n",
+      id = id,
+    )
+  } else {
+    String::new()
+  };
   let workflow = workflow_graph_html(session, now);
   let fleets = fleet_sections_html(session);
   let lede = session_lede_html(session, lifecycle);
@@ -193,11 +184,11 @@ pub(crate) fn chapters_pending_count(session: &Session) -> usize {
 
 fn session_export_label(lifecycle: SessionLifecycle, pending: usize) -> &'static str {
   if lifecycle == SessionLifecycle::Running {
-    "incomplete ⬇"
+    "Incomplete job ⬇"
   } else if pending > 0 {
-    "chapters pending ⬇"
+    "Chapters pending ⬇"
   } else {
-    "job snapshot ⬇"
+    "Job snapshot ⬇"
   }
 }
 
@@ -244,7 +235,7 @@ fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRec
     return String::new();
   }
   let live = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
-  let label = if live { "incomplete ⬇" } else { "run snapshot ⬇" };
+  let label = if live { "Incomplete run ⬇" } else { "Run snapshot ⬇" };
   format!(
     r#"<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/{sid}/{idx}/export.html" data-cast-export download hidden title="Offline HTML snapshot of this run"><span>{label}</span></a>"#,
     sid = esc(session_id),
@@ -253,27 +244,19 @@ fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRec
   )
 }
 
-/// A small per-proc "Force stop" button. Always rendered (WEB-UI §2): enabled only while
-/// that proc still runs on a live session; otherwise grayed with an explanation so the
-/// control does not vanish mid-job. Lives under the run-snapshot link in `.proc-actions`.
+/// A small per-proc "Force stop" button. Only rendered while that proc still runs on a
+/// live session — finished/zombie steps omit it (no grayed-out stub).
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::{ProcStatus, SessionLifecycle};
   let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
   let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
-  let enabled = live_session && live_proc;
-  let title = if enabled {
-    "Force-stop this container only — the rest of the job continues"
-  } else if !live_session {
-    "Job is no longer running — nothing left to stop"
-  } else {
-    "This step already finished"
-  };
+  if !(live_session && live_proc) {
+    return String::new();
+  }
   format!(
-    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\"{disabled} title=\"{title}\"><span>Force stop</span></button>",
+    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Force-stop this container only — the rest of the job continues\"><span>Force stop</span></button>",
     index = proc.index,
     id = esc(&session.id),
-    disabled = if enabled { "" } else { " disabled" },
-    title = esc(title),
   )
 }
 

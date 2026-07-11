@@ -519,13 +519,16 @@ pub fn display_state(
   session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, now: u64,
 ) -> WorkflowDisplayState {
   let life = session.lifecycle_status(now);
-  let stalled_session = life == SessionLifecycle::Terminated;
+  // Ready / Running are live-only. A cancelled, failed, completed, or abruptly terminated job
+  // must not keep advertising "ready — not started yet" for waiting steps (that reads as the
+  // next task still being about to launch).
+  let live = life == SessionLifecycle::Running;
   match node_proc(session, node) {
     None => {
-      if stalled_session {
-        WorkflowDisplayState::Stalled
-      } else {
+      if live {
         WorkflowDisplayState::Waiting
+      } else {
+        WorkflowDisplayState::Stalled
       }
     }
     Some(p) => match p.status {
@@ -539,14 +542,14 @@ pub fn display_state(
       }
       ProcStatus::Skipped => WorkflowDisplayState::Skipped,
       ProcStatus::Running => {
-        if stalled_session {
-          WorkflowDisplayState::Stalled
-        } else {
+        if live {
           WorkflowDisplayState::Running
+        } else {
+          WorkflowDisplayState::Stalled
         }
       }
       ProcStatus::Waiting => {
-        if stalled_session {
+        if !live {
           WorkflowDisplayState::Stalled
         } else if unmet_needs(session, meta, node) == 0 {
           WorkflowDisplayState::Ready
@@ -684,6 +687,95 @@ mod tests {
     let meta = session.workflow.as_ref().unwrap();
     let node = &meta.nodes[0];
     assert_eq!(display_state(&session, meta, node, 100), WorkflowDisplayState::Stalled);
+  }
+
+  #[test]
+  fn waiting_skill_is_stalled_not_ready_when_job_ended_incomplete() {
+    // Build finished; skill never started; session ended mid-job (daemon restart / orphan
+    // reconcile). Lifecycle is Cancelled — must not keep advertising Ready.
+    let session = Session {
+      id: "cancel".into(),
+      started_at: 1,
+      ended_at: Some(50),
+      profile: Some("smoke".into()),
+      kind: Some("definition".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![
+        ProcRecord {
+          index: 0,
+          label: "build grok".into(),
+          kind: ProcKind::Build,
+          status: ProcStatus::Ok,
+          skill_name: None,
+          harness: Some("grok".into()),
+          model: None,
+          started_at: Some(1),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(10.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: None,
+          route: None,
+          result_path: None,
+          annotate_target: None,
+        },
+        ProcRecord {
+          index: 1,
+          label: "grok: smoke".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Waiting,
+          skill_name: Some("smoke".into()),
+          harness: Some("grok".into()),
+          model: None,
+          started_at: None,
+          note: Some("waiting for image build…".into()),
+          detail: None,
+          fail_reason: None,
+          elapsed: None,
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("smoke".into()),
+          route: Some("run".into()),
+          result_path: None,
+          annotate_target: None,
+        },
+      ],
+      last_seen_at: 50,
+      client_connected: false,
+      run_pid: None,
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "build_grok".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+          WorkflowNodeMeta {
+            id: "smoke".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec!["build_grok".into()],
+            conditional: false,
+            when_summary: None,
+          },
+        ],
+      }),
+      parent_session: None,
+    };
+    assert_eq!(session.lifecycle_status(60), SessionLifecycle::Cancelled);
+    let meta = session.workflow.as_ref().unwrap();
+    assert_eq!(display_state(&session, meta, &meta.nodes[1], 60), WorkflowDisplayState::Stalled);
   }
 
   #[test]
