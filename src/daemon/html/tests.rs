@@ -2279,9 +2279,9 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
   assert_eq!(svg.matches(r#"class="wf-edge wf-edge-term""#).count(), 2, "both arrows are terminal edges");
   assert_eq!(svg.matches(r#"class="wf-edge" "#).count(), 0, "no dependency edges in a one-run job");
 
-  // Styles ship with the page: not-interactive bookends, checkered finish disc.
+  // Styles ship with the page: not-interactive bookends, checkered flag at the finish.
   assert!(html.contains(".wf-terminal"), "terminal styles shipped");
-  assert!(html.contains("repeating-conic-gradient"), "checkered finish flag");
+  assert!(html.contains("\u{1F3C1}"), "checkered finish flag glyph");
   assert!(html.contains(".wf-term-start::after"), "start dot inside the ring");
 
   // Client-side rebuild draws the same terminals so live updates stay consistent.
