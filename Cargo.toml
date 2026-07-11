@@ -28,11 +28,11 @@ crossterm = { version = "0.29.0", default-features = false, features = ["events"
 redb = "4.1"
 # The first-party clean-room asciicast player + VT emulator, zero dependencies, MIT: the
 # session browser inlines its `PLAYER_JS`/`PLAYER_CSS` constants.
-beecast-player = "0.9.5"
+beecast-player = "0.10.0"
 # The page pipeline for `scsh export-cast`: one self-contained offline `.html` per
 # recording, embedding the same player as the live pages. Its only dependency is
 # `beecast-player`, so nothing third-party rides in.
-beecast-page = "0.9.5"
+beecast-page = "0.10.0"
 
 # Tuned for a small, self-contained release binary. `cargo test` uses the dev
 # profile (unwinding), so these settings do not affect the test run.
