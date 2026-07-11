@@ -185,16 +185,18 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
   let elapsed = elapsed_phrase(proc.status, proc.elapsed, proc.fail_reason.as_deref());
   let diff = export.diff_html();
   let body = match export {
-    CastExport::Cast { summary, .. } => {
+    CastExport::Cast { summary, chapters, .. } => {
       let summary_html = match summary.as_deref().filter(|s| !s.is_empty()) {
         Some(s) => format!("<div class=\"cast-summary\">{}</div>\n", esc(s)),
         None => String::new(),
       };
+      let chapter_keys = if chapters.is_empty() { "" } else { " · [/] chapter · c chapters" };
       format!(
         "<div class=\"cast\" data-proc=\"{idx}\">\n{summary_html}<div class=\"cast-toolbar\">\
-<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span></div>\n\
+<span class=\"cast-keys dim\">space · ←/→ seek · &lt;/&gt; speed{chapter_keys} · f fullscreen</span></div>\n\
 <div class=\"cast-player\"></div>\n</div>\n{diff}",
         idx = proc.index,
+        chapter_keys = chapter_keys,
         diff = diff_embed_html(diff),
       )
     }

@@ -332,6 +332,11 @@ reads like it belongs.
 - **Match the surrounding style.** Follow the naming, comment density, and idiom
   of the file you're editing. Keep the README and `--help` in sync with behavior
   changes (the existing commits always do).
+- **Visibly broken UI is not acceptable.** The session browser must fit its viewport
+  at every supported width: no clipped controls, off-screen content, accidental page
+  overflow, or terminal/player panes wider than their cards. Treat that kind of visible
+  ugliness as a correctness bug, not polish to defer. Check both live pages and offline
+  exports whenever shared player or layout CSS changes.
 
 For the full runtime/container design (clone strategy, in-memory Dockerfile, the
 opencode install layer, `--userns=keep-id`, result collection), see

@@ -4,18 +4,18 @@ version = 4
 
 [[package]]
 name = "beecast-page"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee8b1c133b661c98c0fad697542dc639bb5e5a9b42388d7d8c646414e7ff96b7"
+checksum = "7c36ac017a6e788e87a7c97956e814516aab11ee46b214bfc39d440fcacf3cc0"
 dependencies = [
  "beecast-player",
 ]
 
 [[package]]
 name = "beecast-player"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "27120c3e3ac03fd223294ad08b871cfe97a03658601cc52156b596ab61919f90"
+checksum = "679ed59dacbc90207995b8c85f275067e5e2d418e5ad825f490660a1d7e14eca"
 
 [[package]]
 name = "bitflags"

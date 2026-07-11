@@ -697,7 +697,7 @@ function castEmbedHtml(p) {
     '" data-status="' + esc(p.status) + '"' + ended + '>' +
     '<div class="cast-toolbar">' +
     '<a href="' + esc(base) + '?dl=1" download>⬇ .cast</a>' +
-    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>' +
+    '<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed<span data-chapter-keys></span> · f fullscreen</span>' +
     '</div><div class="cast-player"></div></div>';
 }
 // Mount an asciinema player into each not-yet-initialised .cast box, and wire its toolbar.
@@ -776,6 +776,7 @@ function createCastPlayer(box, startAt, autoplay) {
     }
     mount.innerHTML = '';
     const chapters = (meta.chapters || []).filter(c => typeof c.t === 'number');
+    setChapterKeys(box, chapters.length > 0);
     // Chapters are player chrome (the ☰ panel + seek-bar ticks + [/] keys): markers are
     // ALL the wiring they need. scsh renders only the one-line summary above the player.
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
@@ -819,6 +820,10 @@ function focusCastPlayer(box) {
   const root = box.querySelector('.beecast-player');
   if (!root) return;
   try { root.focus({ preventScroll: true }); } catch (_) { try { root.focus(); } catch (_) {} }
+}
+function setChapterKeys(box, hasChapters) {
+  const hint = box.querySelector('[data-chapter-keys]');
+  if (hint) hint.textContent = hasChapters ? ' · [/] chapter · c chapters' : '';
 }
 // The annotation pass starts right after the run ends, so chapters land within minutes or
 // never (no annotator on the host, or a recording from before annotation existed). Show the

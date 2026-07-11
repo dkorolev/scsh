@@ -40,7 +40,7 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
     r#"<div class="cast" data-cast-url="/cast/{sid}/{idx}" data-proc="{idx}" data-status="{status}"{ended}>
 <div class="cast-toolbar">
 <a href="/cast/{sid}/{idx}?dl=1" download>⬇ .cast</a>
-<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed · [/] chapter · c chapters · f fullscreen</span>
+<span class="cast-keys dim">space · ←/→ seek · &lt;/&gt; speed<span data-chapter-keys></span> · f fullscreen</span>
 </div>
 <div class="cast-player"></div>
 </div>

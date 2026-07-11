@@ -706,6 +706,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .cast {
     position: relative; margin: 0.5rem 0; border: 1px solid var(--border);
     border-radius: 6px; overflow: hidden; background: #000;
+    width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box;
   }
   .cast-toolbar {
     display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap;
@@ -733,7 +734,18 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* No fixed height: the player sizes its own box to the recording's aspect at full
      width (fit never scales up), so the pane is exactly as tall as the terminal wants.
      Chapters, the big play button, the speed menu — all player chrome (beecast-player). */
-  .cast-player { width: 100%; }
+  .cast-player {
+    width: 100%; min-width: 0; max-width: 100%; overflow: hidden;
+  }
+  .cast-player .beecast-player {
+    width: 100%; min-width: 0; max-width: 100%;
+  }
+  /* `screen-box` is beecast's stable part hook. Make its width budget the visible
+     pane, never the terminal's max-content width, so beecast scales wide recordings
+     down instead of centering a clipped terminal with both edges off-screen. */
+  .cast-player [part~="screen-box"] {
+    width: 100%; min-width: 0; max-width: 100%;
+  }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
   /* minmax(0,…): a plain 1fr track still floors at the content's min width, so an
      unscaled wide terminal blew the cell past the viewport (player wider than the
@@ -786,14 +798,14 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
   }
   /* Keep the summary text clear of the absolute top-right action stack. */
   details.proc:has(.proc-actions) > summary { padding-right: 11.5rem; }
-  .proc-kill {
+  button.proc-kill {
     flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
-    color: var(--red); background: transparent; border: 1px solid var(--red);
-    border-radius: 4px; padding: 0 0.45rem; opacity: 0.85;
+    color: var(--red); background: var(--red); border: none;
+    border-radius: 4px; padding: 0 0.45rem; opacity: 1;
   }
-  .proc-kill:hover:not(:disabled) { opacity: 1; background: rgba(224, 82, 82, 0.12); }
-  .proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); border-color: var(--border); }
+  button.proc-kill:hover:not(:disabled) { background: var(--red); }
+  button.proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); background: var(--border); }
   /* In-app confirm — replaces browser confirm() for destructive Force stop actions. */
   .scsh-dialog-backdrop {
     position: fixed; inset: 0; z-index: 3000;

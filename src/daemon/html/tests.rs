@@ -802,6 +802,30 @@ fn offline_export_carries_lede_and_full_meta() {
 }
 
 #[test]
+fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
+  use super::session_export::CastExport;
+  let store = store_with_cast_proc(ProcStatus::Ok);
+  let session = store.sessions.get("castab").unwrap();
+  let no_chapters = [CastExport::Cast {
+    ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n[0.1,\"o\",\"hello\"]\n".into(),
+    summary: None,
+    chapters: vec![],
+    diff_html: None,
+  }];
+  let html = session_export_page(session, &no_chapters, 100);
+  assert!(!html.contains("c chapters"), "an empty chapter panel must not be advertised: {html}");
+
+  let with_chapters = [CastExport::Cast {
+    ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n[0.1,\"o\",\"hello\"]\n".into(),
+    summary: None,
+    chapters: vec![(0.0, "Start".into())],
+    diff_html: None,
+  }];
+  let html = session_export_page(session, &with_chapters, 100);
+  assert!(html.contains("[/] chapter · c chapters"), "real chapters advertise their keyboard controls: {html}");
+}
+
+#[test]
 fn offline_export_embeds_commits_diff_when_present() {
   use super::session_export::CastExport;
   let session = Session {
@@ -1358,14 +1382,17 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   assert!(procs.contains("f fullscreen"), "the keys hint teaches f");
   // Streaming drives itself (WS growth appends + the finish reload), so there is no manual
   // Reload button; chapters are the player's own chrome (☰ panel + c key + seek ticks) —
-  // no scsh-side chip row or fullscreen sidebar.
+  // no scsh-side chip row or fullscreen sidebar. The external hint starts empty and is
+  // populated only after the sidecar proves chapters exist.
   assert!(!procs.contains("data-cast-reload"), "no manual reload in a streaming toolbar");
-  assert!(procs.contains("c chapters"), "the keys hint teaches the chapters panel");
+  assert!(!procs.contains("c chapters"), "do not advertise chapters before markers exist");
+  assert!(procs.contains("data-chapter-keys"), "the live client owns the conditional chapter hint");
   let js = live_client_js();
   assert!(!js.contains("data-cast-reload"), "client js builds no reload button");
   assert!(!js.contains("cast-chapters"), "no scsh-side chapter chips");
   assert!(!js.contains("cast-fs-chapters"), "no scsh-side fullscreen chapters sidebar");
   assert!(js.contains("markers"), "chapters reach the player as markers");
+  assert!(js.contains("function setChapterKeys") && js.contains("c chapters"), "the hint appears with real markers");
   assert!(js.contains("function focusCastPlayer"), "open sections hand the player the keyboard");
   assert!(js.contains("if (det.open) focusCastPlayer(box)"), "focus follows the section toggle");
   // Run snapshot sits in the proc island's top-right (above Force stop), cyan chamfer —
@@ -1856,8 +1883,17 @@ fn review_round_five_fixes_hold() {
   let shtml = session_page(&store, "castab").expect("session renders");
   assert!(!shtml.contains("sizeCastPane"), "the pane-sizing workaround must stay gone");
   assert!(!shtml.contains(".cast-player { width: 100%; height:"), "no forced pane height");
+  assert!(
+    shtml.contains(r#".cast-player [part~="screen-box"]"#)
+      && shtml.contains("width: 100%; min-width: 0; max-width: 100%;"),
+    "wide terminals must be budgeted to the visible player pane: {shtml}"
+  );
   assert!(shtml.contains("height: 100% !important"), "fullscreen fills the grid cell for a stable mount measure");
   assert!(shtml.contains(".cast:fullscreen .beecast-player"), "fullscreen styles the player root");
+  assert!(
+    shtml.contains("button.proc-kill") && shtml.contains("color: var(--red); background: var(--red); border: none;"),
+    "Force stop must keep its red chamfered border despite button.btn specificity: {shtml}"
+  );
 }
 
 #[test]
