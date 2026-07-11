@@ -89,6 +89,37 @@ mod tests {
   use super::*;
   use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, Store};
 
+  #[test]
+  fn load_szwwuv_backfills_graph_needs_when_present_in_store() {
+    let path = super::super::paths::store_db_file(7274);
+    if !path.exists() {
+      return;
+    }
+    let db = match StoreDb::open_path(&path) {
+      Ok(db) => db,
+      Err(e) if e.contains("Cannot acquire lock") => return,
+      Err(e) => panic!("open store: {e}"),
+    };
+    let sessions = db.load_sessions();
+    let Some(session) = sessions.get("szwwuv") else {
+      return;
+    };
+    assert!(session.workflow.is_none(), "szwwuv persisted before workflow DAG was stored");
+    let def_needs =
+      crate::daemon::workflow::needs_from_harness_profile_for_test(session).expect("def needs from arith profile");
+    assert_eq!(def_needs.get("summarize"), Some(&vec!["add".to_string(), "multiply".to_string()]));
+    let meta = crate::daemon::workflow::effective_workflow_meta(session).expect("graph");
+    let summarize = meta.nodes.iter().find(|n| n.id == "summarize").expect("summarize");
+    assert_eq!(
+      summarize.needs,
+      vec!["add".to_string(), "multiply".to_string()],
+      "profile={:?} kind={:?} repo={}",
+      session.profile,
+      session.kind,
+      session.repo
+    );
+  }
+
   fn session(id: &str) -> Session {
     Session {
       id: id.into(),

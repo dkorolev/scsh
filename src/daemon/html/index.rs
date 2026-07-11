@@ -170,22 +170,23 @@ fn images_panel() -> String {
   }
   format!(
     r##"<div class="card card--accent-left-orange">
-<p class="section-label">Agent setup</p>
+<p class="section-label">Harness setup</p>
 <p class="dim">Prepare and verify the agents scsh can run. Choose a runtime, build missing
 images, and sign in on the host. Image freshness alone is not readiness — login is checked
-separately.</p>
-<p class="dim">Model access tests are not run automatically.</p>
+separately. Model probes run only when you click <strong>Test</strong> (real provider calls).</p>
 <div class="setup-toolbar">
 <div id="images-runtimes" class="images-runtimes"></div>
 <span id="setup-checked" class="dim"></span>
 <a href="#" id="setup-refresh">refresh</a>
+<button type="button" class="chamfer btn btn--cyan btn--sm" id="setup-test-all" title="One primary smoke model per ready harness"><span>Test all defaults</span></button>
 </div>
 <p id="setup-summary" class="setup-summary dim">checking agents…</p>
 <div id="setup-cards" class="setup-cards">{cards}</div>
-<details class="setup-advanced">
-<summary>Advanced image management</summary>
+</div>
+<div class="card card--accent-left-purple">
+<p class="section-label">Images setup</p>
 <p class="dim">Image tags, sizes, timestamps, base rebuilds, and force rebuilds for the
-selected runtime. Prefer the harness cards above for everyday setup.</p>
+selected runtime.</p>
 <div class="table-scroll"><table>
 <thead><tr><th></th><th>Image</th><th>Status</th><th>Created</th><th>Size</th><th></th></tr></thead>
 <tbody id="images-body">
@@ -199,7 +200,6 @@ selected runtime. Prefer the harness cards above for everyday setup.</p>
 <a href="#" id="images-refresh">refresh</a>
 <span id="images-note" class="dim">checking container runtime…</span>
 </div>
-</details>
 </div>
 "##,
     cards = cards,
@@ -218,8 +218,8 @@ fn setup_skeleton_card(h: crate::config::Harness) -> String {
 <div><span class="setup-layer-label">Image</span> <span class="setup-layer-value dim">checking…</span></div>
 <div><span class="setup-layer-label">Login</span> <span class="setup-layer-value dim">checking…</span></div>
 </div>
-<ul class="setup-models dim"><li>Models not tested yet</li></ul>
-<div class="setup-card-actions"></div>
+<ul class="setup-models dim"><li class="setup-models-hint">Check models, then <strong>Test selected</strong></li></ul>
+<div class="setup-card-actions"><span class="dim setup-next">Real container probe — may incur provider cost</span></div>
 </article>
 "#,
     id = esc(h.as_str()),
@@ -257,19 +257,23 @@ gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job
 <p class="dim">Or <strong>create a new project</strong>: a fresh git repository under
 <code>~/.scsh/projects/&lt;name&gt;</code>, born runnable (its first commit gitignores
 <code>/tmp</code>) — tests and demos start right here, no terminal needed.</p>
-<div class="images-controls">
-<div class="chamfer input-wrap" style="flex:1;min-width:16rem">
+<div class="start-controls">
+<div class="chamfer input-wrap">
 <input class="input" type="text" id="repo-path" placeholder="/path/to/a/git/repo, or a project name (type, paste, or Pick…)">
 </div>
+<div class="start-actions">
 <button type="button" class="chamfer btn btn--purple btn--sm" id="repo-pick"><span>Pick…</span></button>
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="repo-open"><span>Open</span></button>
+</div>
 <span id="repo-note" class="dim"></span>
 </div>
-<div class="images-controls">
-<div class="chamfer input-wrap" style="flex:1;min-width:16rem">
+<div class="start-controls">
+<div class="chamfer input-wrap">
 <input class="input" type="text" id="project-name" placeholder="project name (letters, digits, - or _; no dots/slashes)" autocomplete="off" spellcheck="false">
 </div>
+<div class="start-actions">
 <button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New project</span></button>
+</div>
 </div>
 <div id="repo-blockers" class="blockers" hidden></div>
 <div id="defs-panel" hidden>

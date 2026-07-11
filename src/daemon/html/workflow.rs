@@ -251,15 +251,17 @@ impl StatusCounts {
         continue;
       }
       let label = state.as_str();
+      let shown = state.label().to_ascii_lowercase();
       if let Some(id) = first_of.get(&state) {
         parts.push(format!(
-          "<a class=\"wf-jump\" href=\"#task-{id}\" data-wf-status=\"{label}\" title=\"Jump to first {label} task\">{n} {label}</a>",
+          "<a class=\"wf-jump\" href=\"#task-{id}\" data-wf-status=\"{label}\" title=\"Jump to first {shown} task\">{n} {shown}</a>",
           id = esc(id),
           label = label,
+          shown = shown,
           n = n,
         ));
       } else {
-        parts.push(format!("{n} {label}"));
+        parts.push(format!("{n} {shown}"));
       }
     }
     parts.join(" · ")
@@ -472,7 +474,7 @@ fn node_tip(
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
     WorkflowDisplayState::ForceStopped => lines.push("Force-stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
-    WorkflowDisplayState::Stalled => lines.push("Stalled — job stopped updating".into()),
+    WorkflowDisplayState::Stalled => lines.push("Abandoned — job stopped updating".into()),
   }
   if node.conditional && !matches!(state, WorkflowDisplayState::Skipped) {
     lines.push("Runs only when its gate passes".into());

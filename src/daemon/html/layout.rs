@@ -285,6 +285,15 @@ pub(crate) const PAGE_CSS: &str = r#"
     margin: 0.75rem 0 0; font-size: 0.85rem;
   }
   .images-controls label { cursor: pointer; user-select: none; color: var(--text-muted); }
+  /* Run tab: input grows; action cluster pinned to the right edge of the card. */
+  .start-controls {
+    display: flex; width: 100%; gap: 0.75rem; align-items: center; flex-wrap: wrap;
+    margin: 0.75rem 0 0; font-size: 0.85rem;
+  }
+  .start-controls .input-wrap { flex: 1 1 16rem; min-width: 0; }
+  .start-actions {
+    display: flex; gap: 0.75rem; margin-left: auto; flex-shrink: 0;
+  }
   .image-select-cell { width: 1.5rem; }
   .blockers {
     border: 1px solid var(--red); border-radius: 6px; padding: 0.65rem 0.9rem;
@@ -325,11 +334,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.78rem; color: var(--text-muted);
   }
   .workflow-legend .wf-ico { margin-right: 0.2rem; }
-  .wf-leg-running { color: var(--purple); }
+  .wf-leg-running { color: var(--orange); }
   .wf-leg-done { color: var(--green); }
   .wf-leg-failed { color: var(--red); }
-  .wf-leg-force-stopped { color: var(--orange); }
-  .wf-leg-stalled { color: var(--orange); }
+  .wf-leg-force-stopped { color: var(--red); }
+  .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
     overflow-x: auto; max-width: 100%; padding-bottom: 0.25rem;
@@ -371,24 +380,24 @@ pub(crate) const PAGE_CSS: &str = r#"
     border-radius: 3px; color: var(--purple); font-weight: 600; font-size: 0.68rem;
     letter-spacing: 0.02em; vertical-align: middle; white-space: nowrap;
   }
-  .wf-node.wf-running { border-left-color: var(--purple); }
-  .wf-node.wf-running .wf-state { color: var(--purple); }
-  .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.45); }
+  .wf-node.wf-running { border-left-color: var(--orange); }
+  .wf-node.wf-running .wf-state { color: var(--orange); }
+  .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.45); }
   @media (prefers-reduced-motion: no-preference) {
     .wf-node.wf-running { animation: wf-pulse 1.6s ease-in-out infinite; }
     @keyframes wf-pulse {
-      0%, 100% { box-shadow: 0 0 0 1px rgba(137, 87, 229, 0.35); }
-      50% { box-shadow: 0 0 0 3px rgba(137, 87, 229, 0.55); }
+      0%, 100% { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35); }
+      50% { box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.55); }
     }
   }
   .wf-node.wf-done { border-left-color: var(--green); }
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { border-left-color: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
-  .wf-node.wf-force-stopped { border-left-color: var(--orange); }
-  .wf-node.wf-force-stopped .wf-state, .wf-node.wf-force-stopped .wf-id { color: var(--orange); }
-  .wf-node.wf-stalled { border-left-color: var(--orange); }
-  .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--orange); }
+  .wf-node.wf-force-stopped { border-left-color: var(--red); }
+  .wf-node.wf-force-stopped .wf-state, .wf-node.wf-force-stopped .wf-id { color: var(--red); }
+  .wf-node.wf-stalled { border-left-color: var(--purple); }
+  .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--purple); }
   .wf-node.wf-waiting, .wf-node.wf-ready { border-left-color: var(--text-muted); }
   .wf-node.wf-waiting .wf-state, .wf-node.wf-ready .wf-state { color: var(--text-muted); }
   .wf-node.wf-skipped { border-left-color: var(--text-muted); opacity: 0.75; }
@@ -486,7 +495,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     border-radius: 6px; font-size: 0.9rem;
   }
   .filter-banner a.filter-clear { color: var(--cyan); }
-  /* Setup tab: runtime switcher + harness readiness cards; Advanced holds the image table. */
+  /* Setup tab: runtime switcher + harness readiness cards; image inventory is a separate island. */
   .images-runtimes { display: block; margin: 0; }
   .setup-toolbar {
     display: flex; flex-wrap: wrap; align-items: center; gap: 0.65rem 1rem;
@@ -521,16 +530,34 @@ pub(crate) const PAGE_CSS: &str = r#"
     list-style: none; margin: 0 0 0.55rem; padding: 0; font-size: 0.8rem;
   }
   .setup-models li { margin: 0.15rem 0; }
-  .setup-card-actions { min-height: 1.5rem; }
+  .setup-model-row {
+    display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 0.5rem;
+    cursor: pointer;
+  }
+  .setup-model-remove {
+    border: none; background: transparent; color: var(--text-muted); cursor: pointer;
+    padding: 0 0.2rem; font-size: 0.75rem;
+  }
+  .setup-model-remove:hover { color: var(--red); }
+  .setup-add-model {
+    display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; margin: 0.35rem 0 0.55rem;
+  }
+  .setup-add-input {
+    flex: 1 1 10rem; min-width: 0; padding: 6px 10px;
+    background: rgba(255,255,255,0.06); border: 1px solid var(--border); border-radius: 4px;
+    color: var(--text); font: inherit; font-size: 0.8rem;
+  }
+  .setup-card-actions {
+    min-height: 1.5rem; display: flex; flex-wrap: wrap; gap: 0.45rem; align-items: center;
+  }
+  .setup-models-block { margin: 0 0 0.55rem; }
+  .setup-models-block > .setup-layer-label { display: block; margin: 0 0 0.25rem; }
+  .setup-models-hint { margin: 0 0 0.35rem; font-size: 0.78rem; line-height: 1.35; }
+  .setup-model-status--passed { color: var(--green); }
+  .setup-model-status--failed { color: var(--red); }
+  .setup-model-status--testing, .setup-model-status--queued { color: var(--orange); }
+  .session-status.setup-ready > span { color: var(--cyan); }
   .setup-next { margin: 0; font-size: 0.8rem; }
-  .setup-advanced {
-    margin: 0.5rem 0 0; border-top: 1px solid var(--border); padding-top: 0.65rem;
-  }
-  .setup-advanced > summary {
-    cursor: pointer; font-weight: 600; font-size: 0.9rem; color: var(--text-muted);
-    margin-bottom: 0.55rem;
-  }
-  .setup-advanced > summary:hover { color: var(--text); }
   .seg {
     display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
     overflow: hidden; background: var(--surface);

@@ -922,7 +922,7 @@ function wfStateIcon(state) {
 }
 function wfStateLabel(state) {
   return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Done',failed:'Failed',
-    'force-stopped':'Force-stopped',skipped:'Skipped',stalled:'Stalled'})[state] || state;
+    'force-stopped':'Force-stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
 }
 function wfUnmetNeedIds(session, node) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
@@ -973,7 +973,7 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'failed') lines.push('Failed');
   else if (state === 'force-stopped') lines.push('Force-stopped from the session browser');
   else if (state === 'skipped') lines.push('Skipped');
-  else if (state === 'stalled') lines.push('Stalled — job stopped updating');
+  else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
   if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
   return lines.join('\n');
 }
@@ -1005,17 +1005,19 @@ function wfLegendHtml(present) {
 }
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
+  const shown = (key) => key === 'stalled' ? 'abandoned' : key;
   for (const [n, label] of [[counts.done,'done'],[counts.running,'running'],[counts.waiting,'waiting'],
     [counts.ready,'ready'],[counts.failed,'failed'],[counts.force_stopped,'force-stopped'],
     [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
     const id = first && first[label];
+    const word = shown(label);
     if (id) {
       parts.push('<a class="wf-jump" href="' + '#task-' + encodeURIComponent(id) +
-        '" data-wf-status="' + label + '" title="Jump to first ' + label + ' task">' +
-        n + ' ' + label + '</a>');
+        '" data-wf-status="' + label + '" title="Jump to first ' + word + ' task">' +
+        n + ' ' + word + '</a>');
     } else {
-      parts.push(n + ' ' + label);
+      parts.push(n + ' ' + word);
     }
   }
   return parts.join(' · ');
@@ -1786,9 +1788,18 @@ function setupOverallBadge(overall, label) {
   let cls = 'cancelled';
   if (overall === 'needs_build') cls = 'failed';
   else if (overall === 'needs_login') cls = 'cancelled';
-  else if (overall === 'not_tested') cls = 'checking';
+  else if (overall === 'not_tested') cls = 'setup-ready';
   else if (overall === 'ready') cls = 'completed';
   return '<span class="chamfer session-status ' + cls + '"><span>' + esc(text) + '</span></span>';
+}
+function setupModelStatusHtml(status) {
+  if (!status || status === 'not_tested') return '';
+  const labels = {
+    passed: 'passed', failed: 'failed', testing: 'testing', queued: 'queued',
+    unavailable: 'unavailable', blocked: 'blocked', cancelled: 'cancelled',
+  };
+  const word = labels[status] || status;
+  return ' <span class="setup-model-status setup-model-status--' + esc(status) + '">' + esc(word) + '</span>';
 }
 function setupImageLayer(img) {
   if (!img) return '<span class="dim">—</span>';
@@ -1807,24 +1818,73 @@ function setupLoginLayer(login) {
   const tip = login.hint ? ' data-tip="' + esc(login.hint) + '"' : '';
   return '<span class="' + cls + '"' + tip + '>' + esc(login.label || login.status) + '</span>';
 }
-function setupModelsHtml(models) {
-  const list = models || [];
-  if (!list.length) return '<ul class="setup-models dim"><li>No curated models</li></ul>';
-  return '<ul class="setup-models">' + list.map(m =>
-    '<li><code>' + esc(m.id) + '</code> <span class="dim">' + esc(m.status || 'not_tested') + '</span></li>'
-  ).join('') + '</ul>';
+function setupModelsHtml(h) {
+  const harness = h.id;
+  const custom = (loadUiPrefs().setupCustomModels || {})[harness] || [];
+  const selected = (loadUiPrefs().setupSelectedModels || {})[harness];
+  const builtin = (h.models || []).map(m => ({
+    id: m.id,
+    kind: m.kind || 'builtin',
+    primary: !!(m.primary_smoke || m.kind === 'primary'),
+    status: m.status || 'not_tested',
+  }));
+  const seen = new Set(builtin.map(m => m.id));
+  custom.forEach(id => {
+    if (!seen.has(id)) {
+      builtin.push({ id, kind: 'custom', primary: false, status: 'not_tested' });
+      seen.add(id);
+    }
+  });
+  if (!builtin.length) return '<ul class="setup-models dim"><li>No curated models</li></ul>';
+  const rows = builtin.map(m => {
+    const checked = selected
+      ? selected.indexOf(m.id) >= 0
+      : m.primary;
+    const kind = m.kind === 'custom' ? ' · custom' : (m.primary ? ' · primary smoke' : ' · optional');
+    const remove = m.kind === 'custom'
+      ? ' <button type="button" class="setup-model-remove" data-setup-remove="' + esc(harness) +
+        '" data-model="' + esc(m.id) + '" title="Remove custom model">✕</button>'
+      : '';
+    return '<li><label class="setup-model-row">' +
+      '<input type="checkbox" class="setup-model-check" data-harness="' + esc(harness) +
+      '" data-model="' + esc(m.id) + '"' + (checked ? ' checked' : '') + '>' +
+      '<code>' + esc(m.id) + '</code>' +
+      '<span class="dim">' + esc(kind) + '</span>' +
+      setupModelStatusHtml(m.status) +
+      remove +
+      '</label></li>';
+  }).join('');
+  const hint = (h.overall === 'not_tested' || (h.action && h.action.kind === 'test'))
+    ? '<p class="setup-models-hint dim">Check the models above, then click <strong>Test selected</strong> below.</p>'
+    : '';
+  return '<div class="setup-models-block">' +
+    '<span class="setup-layer-label">Models</span>' +
+    hint +
+    '<ul class="setup-models">' + rows + '</ul>' +
+    '<div class="setup-add-model">' +
+    '<input class="input setup-add-input" type="text" data-harness="' + esc(harness) +
+    '" placeholder="Add model id…" autocomplete="off" spellcheck="false">' +
+    '<button type="button" class="chamfer btn btn--purple btn--sm" data-setup-add="' +
+    esc(harness) + '"><span>Add model</span></button>' +
+    '</div></div>';
 }
 function setupCardActions(h) {
   const a = h.action || {};
+  const bits = [];
   if (a.kind === 'build' || a.kind === 'update') {
-    return '<button type="button" class="chamfer btn btn--cyan btn--sm setup-build-btn" data-setup-build="' +
+    bits.push('<button type="button" class="chamfer btn btn--cyan btn--sm setup-build-btn" data-setup-build="' +
       esc(h.id) + '" data-uptodate="' + (a.kind === 'update' ? '1' : '0') + '"><span>' +
-      esc(a.label || 'Build image') + '</span></button>';
+      esc(a.label || 'Build image') + '</span></button>');
   }
   if (a.kind === 'login' && a.hint) {
-    return '<p class="setup-next dim">' + esc(a.hint) + '</p>';
+    bits.push('<p class="setup-next dim">' + esc(a.hint) + '</p>');
   }
-  return '';
+  if (a.kind === 'test' || a.kind === 'none' || !a.kind) {
+    bits.push('<button type="button" class="chamfer btn btn--green btn--sm" data-setup-test="' +
+      esc(h.id) + '" title="Run a real container probe for each checked model"><span>Test selected</span></button>');
+    bits.push('<span class="setup-next dim">May incur provider cost</span>');
+  }
+  return bits.join(' ');
 }
 function setupCardHtml(h) {
   return '<article class="setup-card" data-harness="' + esc(h.id) + '">' +
@@ -1836,7 +1896,7 @@ function setupCardHtml(h) {
     '<div><span class="setup-layer-label">Image</span> ' + setupImageLayer(h.image) + '</div>' +
     '<div><span class="setup-layer-label">Login</span> ' + setupLoginLayer(h.login) + '</div>' +
     '</div>' +
-    setupModelsHtml(h.models) +
+    setupModelsHtml(h) +
     '<div class="setup-card-actions">' + setupCardActions(h) + '</div>' +
     '</article>';
 }
@@ -1915,6 +1975,120 @@ function wireSetupBuildButtons(root) {
     });
   });
 }
+function setupModelIdOk(id) {
+  const s = (id || '').trim();
+  if (!s || s.length > 128) return false;
+  if (/[\x00-\x1f"`'$]/.test(s)) return false;
+  return true;
+}
+function persistSetupSelection(harness, model, checked) {
+  const prefs = loadUiPrefs();
+  const map = Object.assign({}, prefs.setupSelectedModels || {});
+  const cur = new Set(map[harness] || []);
+  if (checked) cur.add(model); else cur.delete(model);
+  map[harness] = Array.from(cur);
+  saveUiPrefs({ setupSelectedModels: map });
+}
+function addCustomSetupModel(harness, raw) {
+  if (!setupModelIdOk(raw)) {
+    showToast('Enter a valid model id (no quotes/backticks; max 128 chars)');
+    return;
+  }
+  const id = raw.trim();
+  const prefs = loadUiPrefs();
+  const map = Object.assign({}, prefs.setupCustomModels || {});
+  const list = (map[harness] || []).slice();
+  if (list.indexOf(id) < 0) list.push(id);
+  map[harness] = list;
+  const sel = Object.assign({}, prefs.setupSelectedModels || {});
+  const selected = new Set(sel[harness] || []);
+  selected.add(id);
+  sel[harness] = Array.from(selected);
+  saveUiPrefs({ setupCustomModels: map, setupSelectedModels: sel });
+  refreshSetup();
+}
+function removeCustomSetupModel(harness, id) {
+  const prefs = loadUiPrefs();
+  const map = Object.assign({}, prefs.setupCustomModels || {});
+  map[harness] = (map[harness] || []).filter(x => x !== id);
+  const sel = Object.assign({}, prefs.setupSelectedModels || {});
+  sel[harness] = (sel[harness] || []).filter(x => x !== id);
+  saveUiPrefs({ setupCustomModels: map, setupSelectedModels: sel });
+  refreshSetup();
+}
+function collectSetupTests(harnessFilter) {
+  const cards = document.getElementById('setup-cards');
+  if (!cards) return [];
+  const tests = [];
+  cards.querySelectorAll('.setup-card').forEach(card => {
+    const harness = card.getAttribute('data-harness');
+    if (harnessFilter && harness !== harnessFilter) return;
+    card.querySelectorAll('.setup-model-check:checked').forEach(cb => {
+      tests.push({ harness, model: cb.getAttribute('data-model') });
+    });
+  });
+  return tests;
+}
+function collectPrimarySetupTests() {
+  const cards = document.getElementById('setup-cards');
+  if (!cards) return [];
+  const tests = [];
+  (window.__SETUP_HARNESSES || []).forEach(h => {
+    if (h.overall === 'needs_build' || h.overall === 'needs_login') return;
+    const primary = (h.models || []).find(m => m.primary_smoke || m.kind === 'primary');
+    if (primary) tests.push({ harness: h.id, model: primary.id });
+  });
+  return tests;
+}
+function startSetupTests(tests, btn) {
+  if (!tests.length) {
+    showToast('Select at least one model to test');
+    return;
+  }
+  if (btn) btn.disabled = true;
+  const body = { tests };
+  if (IMAGES_RUNTIME) body.runtime = IMAGES_RUNTIME;
+  fetch('/api/v1/setup/tests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json().then(j => ({ ok: r.ok, status: r.status, j }))).then(({ ok, j }) => {
+    if (btn) btn.disabled = false;
+    if (!ok || !j.ok) {
+      showToast((j && j.error) || 'setup test failed to start');
+      return;
+    }
+    location.href = '/session/' + encodeURIComponent(j.session);
+  }).catch(e => {
+    if (btn) btn.disabled = false;
+    showToast(String(e));
+  });
+}
+function wireSetupModelControls(root) {
+  const scope = root || document;
+  scope.querySelectorAll('.setup-model-check').forEach(cb => {
+    cb.addEventListener('change', () => {
+      persistSetupSelection(cb.getAttribute('data-harness'), cb.getAttribute('data-model'), cb.checked);
+    });
+  });
+  scope.querySelectorAll('button[data-setup-add]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const harness = btn.getAttribute('data-setup-add');
+      const input = scope.querySelector('.setup-add-input[data-harness="' + harness + '"]');
+      addCustomSetupModel(harness, input ? input.value : '');
+    });
+  });
+  scope.querySelectorAll('button[data-setup-remove]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      removeCustomSetupModel(btn.getAttribute('data-setup-remove'), btn.getAttribute('data-model'));
+    });
+  });
+  scope.querySelectorAll('button[data-setup-test]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      startSetupTests(collectSetupTests(btn.getAttribute('data-setup-test')), btn);
+    });
+  });
+}
 function renderSetupSummary(data) {
   const el = document.getElementById('setup-summary');
   if (!el) return;
@@ -1922,7 +2096,7 @@ function renderSetupSummary(data) {
   const parts = [];
   if (s.needs_build) parts.push(s.needs_build + ' need' + (s.needs_build === 1 ? 's' : '') + ' build');
   if (s.needs_login) parts.push(s.needs_login + ' need' + (s.needs_login === 1 ? 's' : '') + ' login');
-  if (s.not_tested) parts.push(s.not_tested + ' not tested');
+  if (s.not_tested) parts.push(s.not_tested + ' ready to test');
   const agents = s.agents || (data.harnesses || []).length || 0;
   el.textContent = agents + ' agents' + (parts.length ? ' — ' + parts.join(' · ') : '');
   const checked = document.getElementById('setup-checked');
@@ -1966,8 +2140,10 @@ function renderSetup(data) {
     return;
   }
   if (cards) {
+    window.__SETUP_HARNESSES = data.harnesses || [];
     cards.innerHTML = (data.harnesses || []).map(setupCardHtml).join('');
     wireSetupBuildButtons(cards);
+    wireSetupModelControls(cards);
   }
   renderSetupSummary(data);
   renderRuntimeSelector(data);
@@ -2040,6 +2216,10 @@ function startImageBuildOne(name, upToDate) {
   document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
   document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
   document.getElementById('setup-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
+  document.getElementById('setup-test-all')?.addEventListener('click', (e) => {
+    e.preventDefault();
+    startSetupTests(collectPrimarySetupTests(), e.currentTarget);
+  });
 })();
 // ---- instant tooltips ----
 // One floating tip for every [data-tip] element, wired by delegation so it works for

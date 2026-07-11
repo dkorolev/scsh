@@ -247,8 +247,8 @@ pub enum Harness {
 }
 
 impl Harness {
-  /// Every harness, in `.scsh.yml` declaration order — one scsh image each.
-  pub const ALL: [Harness; 5] = [Harness::Opencode, Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor];
+  /// Every harness, in UI listing order (Setup tab, image tables, doctor preflight).
+  pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Opencode, Harness::Cursor];
 
   /// Parse a `harness:` value; `None` for an unknown harness.
   pub fn parse(s: &str) -> Option<Harness> {
@@ -276,7 +276,7 @@ impl Harness {
   /// Human-facing product name for the Setup tab and similar UI.
   pub fn display_name(self) -> &'static str {
     match self {
-      Harness::Opencode => "OpenCode",
+      Harness::Opencode => "Opencode",
       Harness::Claude => "Claude",
       Harness::Codex => "Codex",
       Harness::Grok => "Grok",

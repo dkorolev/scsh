@@ -69,7 +69,7 @@ impl WorkflowDisplayState {
       Self::Failed => "Failed",
       Self::ForceStopped => "Force-stopped",
       Self::Skipped => "Skipped",
-      Self::Stalled => "Stalled",
+      Self::Stalled => "Abandoned",
     }
   }
 }
@@ -237,12 +237,20 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
   }
 
   // --- Skill / step nodes ---
+  let def_needs = needs_from_harness_profile(session);
   if let Some(authored) = &session.workflow {
     for n in &authored.nodes {
       if !is_safe_graph_id(&n.id) {
         continue;
       }
       let mut needs = n.needs.clone();
+      if needs.is_empty() {
+        if let Some(map) = &def_needs {
+          if let Some(dn) = map.get(&n.id) {
+            needs = dn.clone();
+          }
+        }
+      }
       if let Some(h) = harness_for_step(session, &n.id) {
         if let Some(bid) = build_id_for.get(h) {
           if !needs.iter().any(|x| x == bid) {
@@ -279,14 +287,18 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
     }
     for (name, idx) in &by_name {
       seen.insert(name.clone());
-      let mut needs = Vec::new();
+      let mut needs = def_needs.as_ref().and_then(|m| m.get(name)).cloned().unwrap_or_default();
       if let Some(h) = session.procs.iter().find(|p| p.index == *idx).and_then(|p| p.harness.as_deref()) {
         if let Some(bid) = build_id_for.get(h) {
-          needs.push(bid.clone());
+          if !needs.iter().any(|x| x == bid) {
+            needs.push(bid.clone());
+          }
         }
       } else if let Some(sk) = session.skills.iter().find(|s| s.name == *name) {
         if let Some(bid) = build_id_for.get(&sk.harness) {
-          needs.push(bid.clone());
+          if !needs.iter().any(|x| x == bid) {
+            needs.push(bid.clone());
+          }
         }
       }
       nodes.push(WorkflowNodeMeta {
@@ -307,9 +319,11 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
       if !is_safe_graph_id(&sk.name) {
         continue;
       }
-      let mut needs = Vec::new();
+      let mut needs = def_needs.as_ref().and_then(|m| m.get(&sk.name)).cloned().unwrap_or_default();
       if let Some(bid) = build_id_for.get(&sk.harness) {
-        needs.push(bid.clone());
+        if !needs.iter().any(|x| x == bid) {
+          needs.push(bid.clone());
+        }
       }
       nodes.push(WorkflowNodeMeta {
         id: sk.name.clone(),
@@ -333,6 +347,29 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
 
 fn is_safe_graph_id(id: &str) -> bool {
   !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// Step `needs` from the session's harness definition — repairs legacy sessions that were
+/// persisted before dependency edges were stored on `session.workflow`.
+#[cfg(test)]
+pub(crate) fn needs_from_harness_profile_for_test(
+  session: &Session,
+) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+  needs_from_harness_profile(session)
+}
+
+fn needs_from_harness_profile(session: &Session) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+  if session.kind.as_deref() != Some("workflow") {
+    return None;
+  }
+  let profile = session.profile.as_deref()?;
+  let root = std::path::Path::new(&session.repo);
+  let discovery = crate::harness_def::discover(root);
+  let def = discovery.find(profile)?;
+  if !def.is_workflow() {
+    return None;
+  }
+  Some(def.steps.iter().map(|s| (s.id.clone(), s.needs.clone())).collect())
 }
 
 fn latest_skill_proc_index(session: &Session, skill_name: &str) -> Option<usize> {
@@ -898,6 +935,230 @@ mod tests {
     let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
     assert!(summarize.needs.contains(&"add".to_string()));
     assert!(summarize.needs.contains(&"multiply".to_string()));
+  }
+
+  #[test]
+  fn effective_meta_backfills_needs_from_profile_when_legacy_workflow_lost_edges() {
+    let session = Session {
+      id: "legacy".into(),
+      started_at: 1,
+      ended_at: Some(2),
+      profile: Some("arith".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![
+        ProcRecord {
+          index: 0,
+          label: "claude: add".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("add".into()),
+          harness: Some("claude".into()),
+          model: None,
+          started_at: Some(1),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("add".into()),
+          route: None,
+          result_path: None,
+        },
+        ProcRecord {
+          index: 1,
+          label: "codex: multiply".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("multiply".into()),
+          harness: Some("codex".into()),
+          model: None,
+          started_at: Some(1),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("multiply".into()),
+          route: None,
+          result_path: None,
+        },
+        ProcRecord {
+          index: 2,
+          label: "grok: summarize".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("summarize".into()),
+          harness: Some("grok".into()),
+          model: None,
+          started_at: Some(2),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("summarize".into()),
+          route: None,
+          result_path: None,
+        },
+      ],
+      last_seen_at: 1,
+      client_connected: false,
+      run_pid: None,
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "add".into(),
+            proc_index: Some(0),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+          WorkflowNodeMeta {
+            id: "multiply".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+          WorkflowNodeMeta {
+            id: "summarize".into(),
+            proc_index: Some(2),
+            order: 2,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+        ],
+      }),
+    };
+    let meta = effective_workflow_meta(&session).unwrap();
+    let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
+    assert_eq!(summarize.needs, vec!["add".to_string(), "multiply".to_string()]);
+  }
+
+  #[test]
+  fn effective_meta_backfills_needs_when_workflow_was_never_persisted() {
+    let session = Session {
+      id: "legacy-flat".into(),
+      started_at: 1,
+      ended_at: Some(2),
+      profile: Some("arith".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![
+        crate::daemon::model::SkillMeta { name: "add".into(), harness: "claude".into() },
+        crate::daemon::model::SkillMeta { name: "multiply".into(), harness: "codex".into() },
+        crate::daemon::model::SkillMeta { name: "summarize".into(), harness: "grok".into() },
+      ],
+      procs: vec![
+        ProcRecord {
+          index: 0,
+          label: "claude: add".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("add".into()),
+          harness: Some("claude".into()),
+          model: None,
+          started_at: Some(1),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("add".into()),
+          route: None,
+          result_path: None,
+        },
+        ProcRecord {
+          index: 1,
+          label: "codex: multiply".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("multiply".into()),
+          harness: Some("codex".into()),
+          model: None,
+          started_at: Some(1),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("multiply".into()),
+          route: None,
+          result_path: None,
+        },
+        ProcRecord {
+          index: 2,
+          label: "grok: summarize".into(),
+          kind: ProcKind::Skill,
+          status: ProcStatus::Ok,
+          skill_name: Some("summarize".into()),
+          harness: Some("grok".into()),
+          model: None,
+          started_at: Some(2),
+          note: None,
+          detail: None,
+          fail_reason: None,
+          elapsed: Some(1.0),
+          lines: vec![],
+          container_name: None,
+          cast_path: None,
+          diff_path: None,
+          skill_source: Some("summarize".into()),
+          route: None,
+          result_path: None,
+        },
+      ],
+      last_seen_at: 1,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+    };
+    let meta = effective_workflow_meta(&session).unwrap();
+    let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
+    assert_eq!(summarize.needs, vec!["add".to_string(), "multiply".to_string()]);
+  }
+
+  #[test]
+  fn needs_from_profile_resolves_builtin_arith_for_any_repo() {
+    let session = Session {
+      id: "x".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("arith".into()),
+      kind: Some("workflow".into()),
+      repo: "/Users/dima/.scsh/projects/test2".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![],
+      last_seen_at: 1,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+    };
+    let map = needs_from_harness_profile(&session).expect("arith builtin");
+    assert_eq!(map.get("summarize"), Some(&vec!["add".to_string(), "multiply".to_string()]));
   }
 
   #[test]

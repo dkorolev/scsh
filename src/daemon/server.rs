@@ -630,6 +630,10 @@ fn route(
     let (status, body, mutated) = images_build_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/setup/tests" {
+    let (status, body, mutated) = setup_tests_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   // The "open a repository" + "start a job" endpoints return custom bodies (validation result,
   // discovered definitions, the spawned session id), so they bypass the generic POST handler.
   if req.method == "POST" && req.path == "/api/v1/repos/open" {
@@ -1439,6 +1443,108 @@ fn harness_defs_response(body: &str) -> (u16, String) {
   };
   let discovery = crate::harness_def::discover(std::path::Path::new(&repo));
   (200, format!("{{\"defs\":[{}]}}", defs_json(&discovery.defs).join(",")))
+}
+
+/// `POST /api/v1/setup/tests` — body `{"runtime":"…","tests":[{"harness":"…","model":"…"}]}`.
+/// Writes a batch harness def under `~/.scsh/projects/setup-tests` and spawns `scsh run`
+/// (same credential forwarding / scrubbing as a normal job). Returns `{ok,session}`.
+fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let tests = match super::setup::parse_setup_tests(&obj) {
+    Ok(t) => t,
+    Err(e) => return (400, err_body(&e), false),
+  };
+  let runtime = field_str(&obj, "runtime").filter(|s| !s.trim().is_empty()).map(|s| s.trim().to_string());
+  if let Some(ref rt) = runtime {
+    let available = crate::runtime::available_runtimes();
+    if !available.contains(&rt.as_str()) {
+      return (400, err_body(&format!("runtime '{rt}' is not installed (available: {})", available.join(", "))), false);
+    }
+  }
+
+  let root = match super::setup::prepare_setup_batch(&tests) {
+    Ok(p) => p,
+    Err(e) => return (500, err_body(&e), false),
+  };
+  let repo = root.to_string_lossy().into_owned();
+  let def_name = super::setup::setup_batch_def_name().to_string();
+
+  let now = now_unix_secs();
+  let port = {
+    let store = lock_store(store);
+    if store.job_running_in(&repo, now) {
+      return (409, err_body("a setup test is already running — open that job or wait for it to finish"), false);
+    }
+    store.port
+  };
+
+  let discovery = crate::harness_def::discover(&root);
+  let Some(def) = discovery.find(&def_name) else {
+    return (500, err_body("setup-batch definition was not discovered after write"), false);
+  };
+  let planned = planned_skills(def, &def_name);
+
+  let exe = match super::client::scsh_executable() {
+    Ok(exe) => exe,
+    Err(e) => return (500, err_body(&format!("cannot locate the scsh binary to spawn: {e}")), false),
+  };
+  let branch = crate::current_branch(&root);
+  let session_id = crate::runtime::random_nonce_6();
+  let mut cmd = std::process::Command::new(exe);
+  cmd.arg("run").args(["--def", &def_name]);
+  cmd.current_dir(&root);
+  cmd.args(["--session", &session_id]);
+  cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.env("NO_COLOR", "1");
+  if let Some(rt) = runtime {
+    cmd.env("SCSH_RUNTIME", rt);
+  }
+  cmd.stdin(std::process::Stdio::null());
+  cmd.stdout(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::piped());
+  match cmd.spawn() {
+    Ok(mut child) => {
+      let run_pid = Some(child.id());
+      let store_reap = Arc::clone(store);
+      let sid = session_id.clone();
+      let stderr = child.stderr.take();
+      std::thread::spawn(move || {
+        let mut tail = String::new();
+        if let Some(mut e) = stderr {
+          let _ = e.read_to_string(&mut tail);
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        reconcile_finished_job(&store_reap, &sid, code, &tail);
+      });
+      let mut store = lock_store(store);
+      store.touch(now);
+      let workflow = crate::daemon::workflow::workflow_meta_from_def(def);
+      let kind = if def.is_workflow() { Some("workflow".into()) } else { None };
+      store.insert_session(
+        session_id.clone(),
+        Session {
+          id: session_id.clone(),
+          started_at: now,
+          ended_at: None,
+          profile: Some(def_name.clone()),
+          kind,
+          repo: repo.clone(),
+          branch,
+          skills: planned,
+          procs: Vec::new(),
+          last_seen_at: now,
+          client_connected: false,
+          run_pid,
+          workflow,
+        },
+      );
+      (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
+    }
+    Err(e) => (500, err_body(&format!("failed to spawn setup test: {e}")), false),
+  }
 }
 
 /// `POST /api/v1/jobs/start` — body `{"repo":"…","def":"…","params":{…}}`. Enforce one job per

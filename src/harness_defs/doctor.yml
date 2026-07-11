@@ -24,6 +24,6 @@ invocations:
   cursor-composer-fast:
     harness: cursor
     model: composer-2.5-fast
-  grok-build:
+  grok-composer-fast:
     harness: grok
-    model: grok-build
+    model: grok-composer-2.5-fast

@@ -244,6 +244,10 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
   assert!(html.contains("~/.scsh/projects/"), "the panel explains where projects live");
+  assert!(html.contains("start-controls"), "Run rows use start-controls for full-width layout");
+  assert!(html.contains("start-actions"), "Run action buttons are grouped for right alignment");
+  assert!(html.contains(".start-controls"), "start-controls CSS ships");
+  assert!(html.contains(".start-actions"), "start-actions CSS ships");
   let js = live_client_js();
   assert!(js.contains("/api/v1/projects/create"), "client js posts project creation");
   assert!(js.contains("function createProject"), "client js wires the button");
@@ -295,6 +299,10 @@ fn ui_review_fixes_hold() {
   assert!(html.contains("details.proc.ok { border-left-color: var(--green); }"));
   assert!(html.contains("details.proc.running { border-left-color: var(--orange); }"));
   assert!(html.contains("details.proc.running summary .label { color: var(--orange); }"));
+  assert!(html.contains(".wf-node.wf-running { border-left-color: var(--orange); }"), "graph running matches proc orange");
+  assert!(html.contains(".wf-node.wf-stalled { border-left-color: var(--purple); }"), "abandoned/stalled is purple");
+  assert!(html.contains(".wf-node.wf-force-stopped { border-left-color: var(--red); }"), "force-stopped shares fail red");
+  assert!(js.contains("stalled:'Abandoned'"), "legend label is Abandoned");
   {
     let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
     p.elapsed = Some(18.0);
@@ -428,16 +436,18 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(html.contains(">Setup</button>"), "nav shows Setup, not Containers");
   assert!(!html.contains(">Containers</button>"), "Containers nav label is gone");
   assert!(html.contains("id=\"tab-setup\""), "setup panel id");
-  assert!(html.contains("Agent setup"), "page heading");
+  assert!(html.contains("Harness setup"), "harness setup heading");
   assert!(html.contains("id=\"setup-cards\""), "harness cards container");
-  assert!(html.contains("Advanced image management"), "image table is under Advanced");
+  assert!(html.contains("Images setup"), "images setup island");
+  assert!(html.contains("card--accent-left-purple"), "images island uses purple accent");
+  assert!(!html.contains("Advanced image management"), "no advanced disclosure");
   // Advanced still has the image table controls.
   for id in ["images-body", "images-build-selected", "images-build-all", "images-rebuild-base", "images-force"] {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
   // First paint already lists every harness + known image (§13: no empty limbo).
   assert!(html.contains("checking…"), "skeleton starts in checking…");
-  for name in ["OpenCode", "Claude", "Codex", "Grok", "Cursor"] {
+  for name in ["Claude", "Codex", "Grok", "Opencode", "Cursor"] {
     assert!(html.contains(name), "harness card {name} on first paint");
   }
   assert!(html.contains("scsh-base:latest"), "base image row on first paint");
@@ -446,13 +456,23 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   }
   let js = live_client_js();
   assert!(js.contains("/api/v1/setup"), "client js should fetch the setup API");
+  assert!(js.contains("/api/v1/setup/tests"), "client js posts model probes");
   assert!(js.contains("/api/v1/images/build"), "client js should post builds");
   assert!(js.contains("function refreshSetup"), "setup refresh");
+  assert!(js.contains("function startSetupTests"), "setup test starter");
+  assert!(js.contains("setup-test-all"), "Test all defaults control");
+  assert!(js.contains("data-setup-test"), "per-card Test selected");
+  assert!(js.contains("setupCustomModels"), "custom models persist in ui prefs");
   assert!(js.contains("function markImagesChecking"), "refresh keeps rows visible while checking");
   assert!(js.contains("id === 'images'"), "images tab id remains a compatibility alias");
   assert!(!js.contains("loading…"), "must not replace the table with a blank loading row");
   assert!(js.contains("data-image-build"), "per-row build buttons are rendered");
   assert!(js.contains("data-setup-build"), "card Build/Update actions");
+  assert!(html.contains("id=\"setup-test-all\""), "Test all defaults on the toolbar");
+  assert!(js.contains("setup-models-hint"), "models section explains how to test");
+  assert!(js.contains("ready to test"), "summary uses ready-to-test wording");
+  assert!(js.contains("setupModelStatusHtml"), "model rows hide raw not_tested");
+  assert!(js.contains("setup-ready"), "ready-to-test badge styling");
   assert!(js.contains("function startImageBuildOne"), "per-row build buttons are wired");
   assert!(html.contains("image-action-cell"), "skeleton rows reserve the per-row action cell");
 }
@@ -1736,7 +1756,7 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(waiting.contains("waiting on add"), "meta line names the blocker");
   assert!(waiting.contains("margin-inline: auto"), "graph stage centers when it fits");
 
-  // Force-stopped is distinct from a natural failure (✕ orange vs ✗ red).
+  // Force-stopped is distinct from a natural failure (✕ vs ✗) but shares the fail/red accent.
   store.sessions.insert(
     "stop1".into(),
     Session {
