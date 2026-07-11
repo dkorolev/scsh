@@ -56,6 +56,10 @@ impl Client {
     super::paths::session_url(self.inner.port, &self.inner.session_id)
   }
 
+  pub fn session_id(&self) -> &str {
+    &self.inner.session_id
+  }
+
   pub fn register_session(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
   ) -> bool {
