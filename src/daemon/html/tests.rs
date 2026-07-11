@@ -261,7 +261,8 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
   assert!(html.contains("no dots/slashes"), "placeholder documents the name rules");
   assert!(html.contains(".toast"), "toast styles ship with the page");
   assert!(html.contains(r#"class="section-label">Definitions"#), "defs panel is labeled Definitions");
-  assert!(js.contains("panel.scrollIntoView"), "open/create scrolls Definitions into view");
+  assert!(js.contains("list.scrollIntoView"), "open/create scrolls the actionable definitions list into view");
+  assert!(html.contains("#defs-list { padding-top: 1.25rem; }"), "the first definition keeps a blank top inset");
 }
 
 /// Syntax-check the whole live client script under Node. Catches redeclared `const`/`let`,
@@ -1295,7 +1296,7 @@ fn dashboard_a11y_contracts_hold() {
   assert!(js.contains("'ArrowRight'"), "arrow keys walk the tablist");
   assert!(js.contains("x.tabIndex = on ? 0 : -1;"), "roving tabindex follows the active tab");
   // 3. Every scroll respects prefers-reduced-motion; none is hardcoded smooth.
-  assert!(js.contains("panel.scrollIntoView"), "open/create still scrolls Definitions into view");
+  assert!(js.contains("list.scrollIntoView"), "open/create still scrolls Definitions into view");
   assert!(!js.contains("behavior: 'smooth'"), "no hardcoded smooth scrolling");
   // 4. The cast page announces "copied" to screen readers, like the dashboard toast.
   let cast = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
@@ -1375,8 +1376,8 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   assert!(html.contains(r#"<script src="/assets/scsh-cast-player.js"></script>"#), "player js");
   let procs = session_procs_html(&html);
   assert!(procs.contains(r#"<div class="cast" data-cast-url="/cast/castab/2""#), "cast embed");
-  // Fullscreen lives in the player's own control bar now (⛶ + the f key, via
-  // fullscreenEl) — the page toolbar carries no fullscreen button of its own. Opening a
+  // Fullscreen lives in the player's own control bar now (⛶ + the f key) — the page
+  // toolbar carries no fullscreen button of its own. Opening a
   // section focuses its player, so space and f work with no click first.
   assert!(!procs.contains("data-cast-fs"), "no page-side fullscreen button");
   assert!(procs.contains("f fullscreen"), "the keys hint teaches f");
@@ -1888,8 +1889,8 @@ fn review_round_five_fixes_hold() {
       && shtml.contains("width: 100%; min-width: 0; max-width: 100%;"),
     "wide terminals must be budgeted to the visible player pane: {shtml}"
   );
-  assert!(shtml.contains("height: 100% !important"), "fullscreen fills the grid cell for a stable mount measure");
-  assert!(shtml.contains(".cast:fullscreen .beecast-player"), "fullscreen styles the player root");
+  assert!(!shtml.contains("fullscreenEl: box"), "fullscreen must contain only the player, not the scsh cast card");
+  assert!(!shtml.contains(".cast:fullscreen"), "the outer cast card is never the fullscreen element");
   assert!(
     shtml.contains("button.proc-kill") && shtml.contains("color: var(--red); background: var(--red); border: none;"),
     "Force stop must keep its red chamfered border despite button.btn specificity: {shtml}"

@@ -306,6 +306,9 @@ pub(crate) const PAGE_CSS: &str = r#"
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
     padding: 0.75rem 0.9rem; margin-bottom: 0.6rem;
   }
+  /* Auto-scroll lands on this box, not the preceding explanatory copy. Its padding is
+     deliberate blank breathing room above the first actionable definition control. */
+  #defs-list { padding-top: 1.25rem; }
   .def-agents { margin-top: 0.45rem; display: flex; gap: 0.4rem; flex-wrap: wrap; }
   #def-form { margin: 0.75rem 0 1.25rem; }
   .param-row {
@@ -747,26 +750,6 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 100%; min-width: 0; max-width: 100%;
   }
   .cast-placeholder { padding: 1.5rem 1rem; color: var(--text-muted); }
-  /* minmax(0,…): a plain 1fr track still floors at the content's min width, so an
-     unscaled wide terminal blew the cell past the viewport (player wider than the
-     screen, then a sideways jump on the chapters toggle). */
-  .cast:fullscreen {
-    display: grid; background: #000;
-    grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr);
-  }
-  .cast:fullscreen .cast-toolbar { grid-column: 1; }
-  .cast:fullscreen .cast-summary { display: none; }
-  /* !important: whatever height the pane carries inline, fullscreen must override it and
-     let the grid row size the player. Fill the cell so beecast's wrap-fullscreen mount
-     measure matches the visible area (avoids a late scale jump that clips 1×). */
-  .cast:fullscreen .cast-player {
-    grid-column: 1; grid-row: 2; min-height: 0; min-width: 0;
-    height: 100% !important; max-height: none !important;
-    display: flex; flex-direction: column;
-  }
-  .cast:fullscreen .beecast-player {
-    flex: 1 1 auto; min-height: 0; width: 100%; height: 100% !important;
-  }
   .cast .ap-player { width: 100%; height: 100%; }
 
   .permalink { margin-top: 1.5rem; font-size: 0.9rem; color: var(--text-muted); }

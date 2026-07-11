@@ -780,15 +780,14 @@ function createCastPlayer(box, startAt, autoplay) {
     // Chapters are player chrome (the ☰ panel + seek-bar ticks + [/] keys): markers are
     // ALL the wiring they need. scsh renders only the one-line summary above the player.
     const markers = chapters.map(c => [c.t, String(c.title || '')]);
-    // fullscreenEl: the player's ⛶ button and `f` key fullscreen the whole cast box, so
-    // scsh's chrome (the summary line, the toolbar) rides along.
+    // Beecast owns fullscreen. Its player root fills the display without carrying the
+    // surrounding scsh toolbar into a mode whose only purpose is watching the recording.
     const running = box.dataset.status === 'running';
     const opts = {
       fit: 'both',
       controls: running ? { live: true } : true,
       idleTimeLimit: 2,
       markers,
-      fullscreenEl: box,
       accessibility: 'snapshot',
       // Still-running: start declared-live (no play overlay) until the viewer seeks back.
       live: !!(box._live || running),
@@ -2622,12 +2621,14 @@ function handleRepoOpened(resp, note) {
   if (form) form.innerHTML = '';
   renderRepoJobs(liveSessions, Date.now() / 1000);
   renderInternalJobs(liveSessions, Date.now() / 1000);
-  // After the list is filled, scroll the Definitions section into view so Open / New project
-  // invites the next step (choose a definition) instead of leaving the viewport on the form.
-  if (panel) {
+  // After the list is filled, scroll its first actionable area into view so Open / New
+  // project invites the next step without pinning the control against the viewport edge.
+  // #defs-list owns a blank top inset; explanatory copy above it need not stay visible.
+  const list = document.getElementById('defs-list');
+  if (list) {
     requestAnimationFrame(() => {
       const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      panel.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+      list.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
     });
   }
 }

@@ -3287,7 +3287,7 @@ mod tests {
     assert_eq!(page.matches("Player.prototype.append").count(), 1, "exactly one player bundle");
     assert_eq!(page.matches("\"cast\":").count(), 2, "one inline recording per exportable cast");
     assert!(page.contains("BeeCastPlayer.create"), "the boot script mounts the first-party player");
-    assert!(page.contains("fullscreenEl: box"), "fullscreen wraps the cast box, like live");
+    assert!(!page.contains("fullscreenEl: box"), "fullscreen contains only the player, like live");
     assert!(!page.contains("@license"), "no third-party attribution anywhere in the assembled page");
     // Every proc section is the live page's details.proc row, open by default.
     assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible row per proc");

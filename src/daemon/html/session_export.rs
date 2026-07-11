@@ -10,7 +10,7 @@
 //! per-cast page copies). What the live page does over HTTP the export inlines: the cast
 //! text, the sidecar summary, and the chapter markers ride in a single JSON block, and a
 //! small boot script mounts the players with the exact options the live page uses
-//! (`fit: 'both'`, idle compression, chapter markers, `fullscreenEl` = the cast box,
+//! (`fit: 'both'`, idle compression, chapter markers, player-owned fullscreen,
 //! focus-on-open). Live-only machinery — WebSocket, Live toggle, reload, downloads,
 //! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
 //! commits-diff pages (when present) ride as sandboxed
@@ -122,7 +122,7 @@ CASTS.forEach((c) => {{
   if (!mount) return;
   // Chapters (c.markers) are player chrome: the ☰ panel, the seek-bar ticks, [/] keys.
   box._player = BeeCastPlayer.create({{ data: c.cast }}, mount, {{
-    fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers, fullscreenEl: box,
+    fit: 'both', controls: true, idleTimeLimit: 2, markers: c.markers,
     accessibility: 'snapshot',
   }});
 }});
