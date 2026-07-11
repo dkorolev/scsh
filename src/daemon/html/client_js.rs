@@ -822,7 +822,6 @@ function createCastPlayer(box, startAt, autoplay) {
     // (play/pause) and f (fullscreen) work immediately. Never steal focus from something
     // the user is actually in — only take it from the body or from this box's own
     // (just-disposed) previous player.
-    const det = box.closest('details');
     const active = document.activeElement;
     if ((!det || det.open) && (!active || active === document.body || box.contains(active))) focusCastPlayer(box);
     if (box._live || running) setCastLive(box, true);

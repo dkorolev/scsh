@@ -265,6 +265,22 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
 }
 
 #[test]
+fn create_cast_player_does_not_redeclare_det() {
+  // Two `const det` in the same Promise callback is a SyntaxError that kills the whole
+  // inline script — the session browser then does nothing.
+  let js = live_client_js();
+  let start = js.find("function createCastPlayer").expect("createCastPlayer");
+  let body = &js[start..];
+  let end = body.find("\nfunction focusCastPlayer").expect("focusCastPlayer follows");
+  let fn_body = &body[..end];
+  assert_eq!(
+    fn_body.matches("const det").count(),
+    1,
+    "createCastPlayer must declare det once (got: {fn_body})"
+  );
+}
+
+#[test]
 fn running_cast_preview_starts_near_the_end() {
   let js = live_client_js();
   // A still-running proc's player opens in DECLARED-LIVE mode: parked at the growing edge,
