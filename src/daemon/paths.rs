@@ -101,7 +101,7 @@ pub fn read_persisted_mode(port: u16) -> Option<super::model::DaemonMode> {
 /// Write the mode marker (best-effort) so `read_persisted_mode` can report it cross-process.
 pub fn write_mode_marker(port: u16, mode: super::model::DaemonMode) {
   let _ = std::fs::create_dir_all(daemon_dir());
-  let _ = std::fs::write(mode_file(port), mode.as_str());
+  let _ = crate::atomic_write(&mode_file(port), mode.as_str().as_bytes());
 }
 
 /// Send a POSIX signal to `pid` (no-op on non-Unix).

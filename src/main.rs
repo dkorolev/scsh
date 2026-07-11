@@ -317,7 +317,7 @@ fn export_one_cast(cast_path: &Path, output: Option<&str>) -> Result<ExportSumma
     "stdout".to_string()
   } else {
     let out_path = output.map(std::path::PathBuf::from).unwrap_or_else(|| export::default_output_path(cast_path));
-    std::fs::write(&out_path, &page).map_err(|e| {
+    atomic_write(&out_path, page.as_bytes()).map_err(|e| {
       (
         format!("cannot write {}: {e}", out_path.display()),
         "pick a writable output path with -o <file> (or fix the directory permissions)".to_string(),
@@ -5640,7 +5640,8 @@ fn write_one(dest: &Path, body: &[u8], shown: &str, overwrite: bool, c: &mut Ins
   }
 }
 
-/// Write a file, creating its parent dir. Reports and returns false on error.
+/// Write a file atomically (see [`atomic_write`]), creating its parent dir. Reports and
+/// returns false on error.
 fn write_file(dest: &Path, body: &[u8]) -> bool {
   if let Some(parent) = dest.parent() {
     if let Err(e) = std::fs::create_dir_all(parent) {
@@ -5648,7 +5649,7 @@ fn write_file(dest: &Path, body: &[u8]) -> bool {
       return false;
     }
   }
-  match std::fs::write(dest, body) {
+  match atomic_write(dest, body) {
     Ok(()) => true,
     Err(e) => {
       hint(&format!("could not write {}: {e}", dest.display()));
@@ -5784,7 +5785,7 @@ fn ensure_tmp_gitignored(root: &std::path::Path) -> Result<bool, String> {
       content.push('\n');
     }
     content.push_str("# scsh uses the system temp dir for build scratch; never track a local /tmp.\n/tmp\n");
-    std::fs::write(&path, content).map_err(|e| format!("could not write {}: {e}", path.display()))?;
+    atomic_write(&path, content.as_bytes()).map_err(|e| format!("could not write {}: {e}", path.display()))?;
     true
   };
   std::fs::create_dir_all(root.join("tmp")).map_err(|e| format!("could not create {}/tmp: {e}", root.display()))?;
@@ -5794,6 +5795,34 @@ fn ensure_tmp_gitignored(root: &std::path::Path) -> Result<bool, String> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Write `bytes` to `path` atomically: the data first lands in a sibling temporary file
+/// in the same directory (a sibling keeps the final rename on one filesystem), is synced
+/// to disk, and only then renamed over the destination. A failed or interrupted write
+/// therefore leaves the previous complete file in place instead of a truncated one, and
+/// the temporary file is removed on failure. Every durable artifact — the user's
+/// `.gitignore` and `.scsh.yml`, cast sidecars and exports, daemon state files — routes
+/// through here rather than a plain truncate-write.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+  let mut tmp_name = path.as_os_str().to_owned();
+  tmp_name.push(format!(".tmp.{}", std::process::id()));
+  let tmp = PathBuf::from(tmp_name);
+  let written = (|| {
+    use std::io::Write;
+    let mut file = std::fs::File::create(&tmp)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    // Keep the destination's permissions (say, a user's own .gitignore) across the rename.
+    if let Ok(meta) = std::fs::metadata(path) {
+      std::fs::set_permissions(&tmp, meta.permissions())?;
+    }
+    std::fs::rename(&tmp, path)
+  })();
+  if written.is_err() {
+    let _ = std::fs::remove_file(&tmp);
+  }
+  written
+}
 
 fn git_root() -> Result<PathBuf, String> {
   let out = Command::new("git")
@@ -6502,6 +6531,29 @@ mod tests {
     );
     assert_eq!(parent_session_from_cast_path("/tmp/orphan.cast"), None);
     assert_eq!(parent_session_from_cast_path("/sessions/"), None);
+  }
+
+  #[test]
+  fn atomic_write_lands_whole_and_failure_keeps_the_previous_file() {
+    let base = std::env::temp_dir().join(format!("scsh-atomicwrite-{}", runtime::random_nonce_6()));
+    std::fs::create_dir_all(&base).unwrap();
+    let path = base.join("state.txt");
+
+    atomic_write(&path, b"first").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"first");
+    atomic_write(&path, b"second").unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+    // No `.tmp.<pid>` sibling survives a successful write.
+    assert_eq!(std::fs::read_dir(&base).unwrap().count(), 1);
+
+    // Simulate a write that cannot complete: a directory squats on the temp path, so the
+    // temp file cannot be created — the previous complete file must remain untouched.
+    let tmp = base.join(format!("state.txt.tmp.{}", std::process::id()));
+    std::fs::create_dir_all(&tmp).unwrap();
+    assert!(atomic_write(&path, b"third").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), b"second");
+
+    std::fs::remove_dir_all(&base).unwrap();
   }
 
   #[test]

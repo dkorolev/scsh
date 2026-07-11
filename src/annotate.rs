@@ -244,7 +244,7 @@ where
     return None;
   }
   let sidecar = crate::daemon::chapters_sidecar_path(&cast_path.to_string_lossy())?;
-  std::fs::write(&sidecar, annotation.to_sidecar_json()).ok()?;
+  crate::atomic_write(&sidecar, annotation.to_sidecar_json().as_bytes()).ok()?;
   Some(sidecar)
 }
 

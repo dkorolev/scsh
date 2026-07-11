@@ -113,7 +113,7 @@ impl Server {
     let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(true)?;
     let pid_path = pid_file(self.port);
-    std::fs::write(&pid_path, std::process::id().to_string())?;
+    crate::atomic_write(&pid_path, std::process::id().to_string().as_bytes())?;
 
     let mut last_ws_tick = Instant::now();
     // Per-proc incremental cast probes (parse offsets cached across ticks) — see `castprobe`.

@@ -43,7 +43,7 @@ impl PruneQueue {
   pub fn save(&self, port: u16) {
     let path = prune_file(port);
     let _ = std::fs::create_dir_all(path.parent().unwrap_or(Path::new("/tmp")));
-    let _ = std::fs::write(&path, save_queue(self));
+    let _ = crate::atomic_write(&path, save_queue(self).as_bytes());
   }
 
   /// Enqueue a backup delete. Idempotent per `run_dir`. Returns false when skipped (`SCSH_KEEP_RUNS`).
