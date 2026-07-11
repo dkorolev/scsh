@@ -50,6 +50,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
   let edges_svg = render_edges(&meta, &by_id, &start, &finish);
+  let loop_islands = loop_islands_html(&layout);
 
   let mut nodes_html = String::new();
   nodes_html.push_str(&bookend_html(&start, true));
@@ -88,9 +89,11 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 <h2 class="workflow-title">Job graph</h2>
 <p class="workflow-summary dim">{summary}</p>
 {legend}
+<div class="workflow-zoom" aria-label="Graph zoom"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button></div>
 </div>
 <div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
+{loop_islands}
 <svg class="workflow-edges" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.1} {h:.1}" aria-hidden="true">
 <defs>
 <marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">
@@ -109,8 +112,35 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     w = width,
     h = height,
     edges = edges_svg,
+    loop_islands = loop_islands,
     nodes = nodes_html,
   )
+}
+
+fn loop_islands_html(layout: &[LaidOut]) -> String {
+  let mut groups: std::collections::BTreeMap<&str, Vec<&LaidOut>> = std::collections::BTreeMap::new();
+  for pos in layout {
+    let Some((base, iteration)) = pos.id.rsplit_once("__repeat_") else { continue };
+    if iteration.parse::<usize>().is_ok() {
+      groups.entry(base).or_default().push(pos);
+    }
+  }
+  let mut html = String::new();
+  for (base, items) in groups {
+    let pad = 14.0;
+    let label_h = 22.0;
+    let left = items.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - pad;
+    let top = items.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - pad - label_h;
+    let right = items.iter().map(|p| p.x + p.w).fold(0.0_f64, f64::max) + pad;
+    let bottom = items.iter().map(|p| p.y + p.h).fold(0.0_f64, f64::max) + pad;
+    html.push_str(&format!(
+      r#"<div class="wf-loop-island" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span>repeat · {name}</span></div>"#,
+      width = right - left,
+      height = bottom - top,
+      name = esc(base),
+    ));
+  }
+  html
 }
 
 /// One dependency edge after port assignment (distinct exit/entry y when a node fans in/out).
@@ -400,8 +430,18 @@ fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut
 fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Vec<LaidOut>, LaidOut, LaidOut) {
   let mut layout = layout_nodes(session, meta, now);
   let shift = BOOKEND_W + GAP_X;
+  let loop_top = if meta
+    .nodes
+    .iter()
+    .any(|n| n.id.rsplit_once("__repeat_").is_some_and(|(_, iteration)| iteration.parse::<usize>().is_ok()))
+  {
+    36.0
+  } else {
+    0.0
+  };
   for n in &mut layout {
     n.x += shift;
+    n.y += loop_top;
   }
   let stage_h = layout.iter().map(|n| n.y + n.h).fold(PAD + NODE_H, f64::max) + PAD;
   let bookend_y = ((stage_h - BOOKEND_H) / 2.0).max(PAD);
@@ -548,6 +588,8 @@ fn node_display_title(id: &str) -> String {
     "base".into()
   } else if let Some(h) = id.strip_prefix("build_") {
     h.to_string()
+  } else if let Some((base, iteration)) = id.rsplit_once("__repeat_") {
+    format!("{base} · iteration {iteration}")
   } else {
     id.to_string()
   }

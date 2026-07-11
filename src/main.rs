@@ -1507,10 +1507,10 @@ fn extract_step_outputs(
 /// (prompt + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step
 /// result file under the session scratch dir.
 fn step_invocation(
-  step: &harness_def::Step, session_dir_rel: &str, inputs: Vec<(String, String)>,
+  step: &harness_def::Step, run_id: &str, session_dir_rel: &str, inputs: Vec<(String, String)>,
 ) -> ResolvedInvocation {
   ResolvedInvocation {
-    name: step.id.clone(),
+    name: run_id.to_string(),
     skill_source: step.id.clone(),
     harness: step.agent.harness,
     model: step.agent.model.clone(),
@@ -1523,7 +1523,7 @@ fn step_invocation(
       .collect(),
     profile: None,
     commits: step.commits,
-    result: format!("{session_dir_rel}/{}.json", step.id),
+    result: format!("{session_dir_rel}/{run_id}.json"),
     terminal: config::Terminal::default(),
     delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
@@ -1660,13 +1660,15 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   let total_steps = def.steps.len();
   let mut step_procs: HashMap<String, ui::screen::Proc> = HashMap::new();
   for (i, s) in def.steps.iter().enumerate() {
+    if s.repeat.is_some() {
+      continue; // repeat iterations appear only when they actually start
+    }
     let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
     let p = ui.proc(label.clone(), false);
     let mut note = format!("step {}/{total_steps}", i + 1);
     if !s.needs.is_empty() {
       note.push_str(&format!(" · needs {}", s.needs.join(", ")));
     }
-    p.note(&note);
     if let Some(c) = &daemon_client {
       c.proc_add(
         p.index(),
@@ -1680,6 +1682,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         None,
       );
     }
+    p.note(&note);
     step_procs.insert(s.id.clone(), p);
   }
   // Annotate procs (added after the run) continue past the last declared step/build index.
@@ -1688,6 +1691,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
 
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
   let mut state: HashMap<String, StepState> = HashMap::new();
+  let mut repeat_done: HashMap<String, usize> = HashMap::new();
   let mut failure: Option<String> = None;
   while state.len() < def.steps.len() && failure.is_none() {
     let ready: Vec<&harness_def::Step> = def
@@ -1724,13 +1728,37 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     // Resolve inputs and pair each runnable step with its pre-declared proc row.
     let mut invs: Vec<ResolvedInvocation> = Vec::new();
     let mut procs: Vec<ui::screen::Proc> = Vec::new();
+    let mut run_ids: Vec<String> = Vec::new();
     for s in &to_run {
       let mut inputs: Vec<(String, String)> = Vec::new();
       for b in &s.inputs {
         inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
       }
-      invs.push(step_invocation(s, &session_dir_rel, inputs));
-      procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
+      let iteration = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
+      let run_id = if s.repeat.is_some() { format!("{}__repeat_{iteration}", s.id) } else { s.id.clone() };
+      invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
+      if s.repeat.is_some() {
+        let label = format!("{}: {} · iteration {iteration}", s.agent.harness.as_str(), s.id);
+        let p = ui.proc(label.clone(), false);
+        if let Some(c) = &daemon_client {
+          c.proc_add(
+            p.index(),
+            &label,
+            daemon::ProcKind::Skill,
+            Some(&run_id),
+            Some(s.agent.harness.as_str()),
+            s.agent.model.as_deref(),
+            Some(&s.id),
+            None,
+            None,
+          );
+        }
+        p.note(&format!("repeat iteration {iteration}"));
+        procs.push(p);
+      } else {
+        procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
+      }
+      run_ids.push(run_id);
     }
 
     // Run the wave in parallel — independent steps proceed at once.
@@ -1765,15 +1793,20 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     // steps then rebase onto the caller and pack a ⇄ commits diff — before the next wave
     // clones, so later steps see earlier commits (the greet fake-PR chain depends on this).
     let mut by_id: HashMap<String, SkillRun> = results.into_iter().collect();
-    for s in &to_run {
-      let Some(run) = by_id.remove(&s.id) else { continue };
+    for (s, run_id) in to_run.iter().zip(&run_ids) {
+      let Some(run) = by_id.remove(run_id) else { continue };
       if !run.ok {
         failure = Some(format!("step '{}' failed ({})", s.id, run.fail_reason.as_deref().unwrap_or("unknown")));
         break;
       }
       match run.result_content.as_deref().map(|c| extract_step_outputs(c, &s.outputs)) {
         Some(Ok(outputs)) => {
-          state.insert(s.id.clone(), StepState { skipped: false, outputs });
+          let completed = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
+          if s.repeat.is_some_and(|total| completed < total) {
+            repeat_done.insert(s.id.clone(), completed);
+          } else {
+            state.insert(s.id.clone(), StepState { skipped: false, outputs });
+          }
         }
         Some(Err(e)) => {
           failure = Some(format!("step '{}' produced an invalid result: {e}", s.id));
@@ -1786,7 +1819,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       }
       if s.commits {
         if let (Some(b), Some(clone)) = (base.as_deref(), run.clone_dir.as_ref()) {
-          let inv = invs.iter().find(|i| i.name == s.id).expect("invocation for step in this wave");
+          let inv = invs.iter().find(|i| i.name == *run_id).expect("invocation for step in this wave");
           match integrate_commits(root, clone, b, &s.id, &stamp) {
             Ok(None) => {}
             Ok(Some(Integration::Applied { count, range })) => {
@@ -7299,8 +7332,9 @@ Subject: [PATCH] add: 2 + 3 = 5
       needs: vec!["add".into()],
       artifacts: vec!["summary.txt".into()],
       commits: false,
+      repeat: None,
     };
-    let inv = step_invocation(&step, "tmp/scsh/abcdef", Vec::new());
+    let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new());
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
     assert_eq!(inv.result, "tmp/scsh/abcdef/summarize.json");
     assert_eq!(inv.artifacts, vec!["tmp/scsh/abcdef/summary.txt".to_string()]);

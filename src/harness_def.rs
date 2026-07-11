@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 12] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 13] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -32,6 +32,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 12] {
     ("arith", include_str!("harness_defs/arith.yml")),
     ("greet", include_str!("harness_defs/greet.yml")),
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
+    ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
     ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
@@ -279,6 +280,9 @@ pub struct Step {
   /// branch (and packed with packdiff when available) — same contract as a skill's
   /// `commits: true`.
   pub commits: bool,
+  /// Run this step a fixed number of times, sequentially. Each iteration is a distinct
+  /// workflow run and commit boundary; the graph discovers iterations as they start.
+  pub repeat: Option<usize>,
 }
 
 /// A parsed, validated harness definition — either a flat one-shot task or a workflow of steps.
@@ -644,11 +648,11 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("duplicate key 'steps.{id}.{k}'"));
       }
     }
-    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits"];
+    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat"];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat)"
         ));
       }
     }
@@ -682,9 +686,23 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         false
       }
     };
+    let repeat = match fm.get("repeat") {
+      None => None,
+      Some(Node::Scalar(s)) => match s.trim().parse::<usize>() {
+        Ok(n) if n > 0 => Some(n),
+        _ => {
+          errors.push(format!("'steps.{id}.repeat' must be a positive integer"));
+          None
+        }
+      },
+      Some(_) => {
+        errors.push(format!("'steps.{id}.repeat' must be a positive integer"));
+        None
+      }
+    };
 
     if let (Some(agent), Some(prompt)) = (agent, prompt) {
-      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts, commits });
+      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts, commits, repeat });
     }
   }
 
@@ -1150,6 +1168,19 @@ mod tests {
     assert_eq!(def.steps[2].needs, vec!["implement".to_string()]);
     let body = def.steps[0].render_skill_body();
     assert!(body.contains("## Commits"), "commit-enabled steps get the commits contract: {body}");
+  }
+
+  #[test]
+  fn builtin_repeat_demo_declares_a_dynamic_three_iteration_commit_loop() {
+    let def = builtin("demo-loop-repeat");
+    assert_eq!(def.steps.len(), 2);
+    assert_eq!(def.steps[0].id, "initialize");
+    assert_eq!(def.steps[1].id, "increment");
+    assert_eq!(def.steps[1].repeat, Some(3));
+    assert_eq!(def.steps[1].needs, vec!["initialize".to_string()]);
+    assert!(def.steps.iter().all(|s| s.commits));
+    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Grok));
+    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("composer-2.5-fast")));
   }
 
   #[test]
