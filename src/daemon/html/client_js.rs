@@ -2501,24 +2501,6 @@ function showToast(message) {
   clearTimeout(showToast._timer);
   showToast._timer = setTimeout(() => { el.classList.remove('show'); }, 2800);
 }
-function suggestOpenExistingProject(name) {
-  const pathInput = document.getElementById('repo-path');
-  const openBtn = document.getElementById('repo-open');
-  const nameInput = document.getElementById('project-name');
-  if (pathInput) {
-    pathInput.value = name;
-    pathInput.focus();
-    pathInput.select();
-    pathInput.classList.add('flash-open');
-    setTimeout(() => pathInput.classList.remove('flash-open'), 1200);
-  }
-  if (openBtn) {
-    openBtn.classList.add('flash-open');
-    setTimeout(() => openBtn.classList.remove('flash-open'), 1200);
-  }
-  if (nameInput) nameInput.value = '';
-  showToast('This project already exists, just open it.');
-}
 function createProject() {
   const input = document.getElementById('project-name');
   const note = document.getElementById('repo-note');
@@ -2535,11 +2517,7 @@ function createProject() {
     body: JSON.stringify({ name: name }),
   }).then(async r => {
     const resp = await r.json();
-    if (r.status === 409 || resp.exists) {
-      suggestOpenExistingProject(resp.name || name);
-      if (note) note.textContent = '';
-      return;
-    }
+    // Create-or-open: existing names return 200 with created:false (same shape as open).
     handleRepoOpened(resp, note);
     if (resp.ok) {
       const pathInput = document.getElementById('repo-path');

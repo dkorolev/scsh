@@ -1333,7 +1333,8 @@ fn open_validated_repo(abs: &str, store: &Arc<Mutex<Store>>, created: bool) -> (
 /// `$SCSH_HOME/projects/<name>`: a new git repository whose FIRST commit gitignores `/tmp`
 /// (plus the physical `tmp/` dir), i.e. born runnable — so tests and demos start from the
 /// web UI with no terminal at all. The reply is the same shape as `repos/open` (the project
-/// is opened immediately), with `"created":true`. An existing name is a 409: open it instead.
+/// is opened immediately), with `"created":true`. An existing name is opened in place
+/// (`"created":false`, HTTP 200) — create-or-open, not a conflict.
 fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
@@ -1359,16 +1360,9 @@ fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, Stri
   }
   let path = projects.join(&name);
   if path.exists() {
-    // Client copies `name` into the Open box and toasts — do not create a second project.
-    return (
-      409,
-      format!(
-        "{{\"ok\":false,\"exists\":true,\"name\":{},\"error\":{}}}",
-        quote(&name),
-        quote(&format!("project '{name}' already exists — open it instead")),
-      ),
-      false,
-    );
+    // Already there — open it (idempotent create). No 409: the browser treats non-2xx as
+    // console noise even when the app handled the conflict.
+    return open_validated_repo(&path.to_string_lossy(), store, false);
   }
   if let Err(e) = scaffold_project(&path) {
     let _ = std::fs::remove_dir_all(&path); // leave nothing half-made; a retry starts clean
@@ -2652,11 +2646,11 @@ mod tests {
     assert_eq!(status2, 200, "got: {body2}");
     assert!(body2.contains(r#""runnable":true"#) && body2.contains("demo-1"), "got: {body2}");
 
-    // Same name again → 409 with exists:true so the UI can copy the name into Open.
+    // Same name again → open the existing project (idempotent; HTTP 200, created:false).
     let (status3, body3, _) = projects_create_response(r#"{"name":"demo-1"}"#, &store);
-    assert_eq!(status3, 409, "got: {body3}");
-    assert!(body3.contains("already exists") && body3.contains(r#""exists":true"#), "got: {body3}");
-    assert!(body3.contains(r#""name":"demo-1""#), "got: {body3}");
+    assert_eq!(status3, 200, "got: {body3}");
+    assert!(body3.contains(r#""ok":true"#) && body3.contains(r#""created":false"#), "got: {body3}");
+    assert!(body3.contains("demo-1") && body3.contains(r#""runnable":true"#), "got: {body3}");
 
     // Hostile names are rejected before any filesystem work (no dots, no slashes).
     for bad in [

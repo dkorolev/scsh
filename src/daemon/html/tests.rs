@@ -256,9 +256,8 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
   assert!(js.contains("/api/v1/projects/create"), "client js posts project creation");
   assert!(js.contains("function createProject"), "client js wires the button");
   assert!(js.contains("function handleRepoOpened"), "open and create share the response path");
-  assert!(js.contains("function showToast"), "existing-project feedback is a toast");
-  assert!(js.contains("suggestOpenExistingProject"), "existing name is copied into Open");
-  assert!(js.contains("This project already exists, just open it."), "toast copy");
+  assert!(js.contains("function showToast"), "invalid-name feedback is a toast");
+  assert!(!js.contains("suggestOpenExistingProject"), "existing names open via 200 create-or-open, not a toast");
   assert!(js.contains("projectNameOk"), "client rejects dots/slashes before POST");
   assert!(html.contains("no dots/slashes"), "placeholder documents the name rules");
   assert!(html.contains(".toast"), "toast styles ship with the page");
