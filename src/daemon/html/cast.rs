@@ -106,10 +106,15 @@ const LIVE = {live_js};
 let player = null;
 let MARKERS = [];
 // A live recording opens in declared-live mode (parked at the growing edge, green pinned
-// bar) unless a #t= deep link chose a position. ● Live lives in the player toolbar.
+// bar) unless a #t=/?t= deep link chose a position. ● Live lives in the player toolbar.
+// '#t=' is the primary form (what the copy-link button writes); beecast-generated offline
+// pages deep-link with '?t=', so the query form is accepted as a fallback — the same
+// seconds / mm:ss shapes, handed to the same player seek path.
 function hashStart() {{
   const m = location.hash.match(/^#t=([0-9:.]+)$/);
-  return m ? m[1] : null;
+  if (m) return m[1];
+  const q = new URLSearchParams(location.search).get('t');
+  return q && /^[0-9:.]+$/.test(q) ? q : null;
 }}
 // Available duration + event count of the fetched asciicast text (complete lines only).
 // scsh records asciicast v3 (intervals → sum); a legacy v2 header (absolute times) takes max.

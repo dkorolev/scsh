@@ -480,7 +480,8 @@ fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, 
   if !exports.iter().any(|e| matches!(e, html::CastExport::Cast { .. })) {
     return (404, "no exportable recordings in this job — retry once a skill's recording has output".into(), None);
   }
-  let page = html::session_export_page(&session, &exports);
+  // The snapshot freezes lifecycle, duration, and workflow-node states at this instant.
+  let page = html::session_export_page(&session, &exports, now_unix_secs());
   (200, page, Some(format!("attachment; filename=\"scsh-job-{id}.html\"")))
 }
 
