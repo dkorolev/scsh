@@ -5558,8 +5558,9 @@ fn print_skill_usage() {
   println!("\nThe demo .scsh.yml runs `add` on two routes by default (opencode+GPT, claude+Sonnet),");
   println!("plus `subtract` (C - D) — a second commit-enabled step, so one run brings in two");
   println!("commits from two different steps. `multiply` (X * Y) lives in the `multiply` profile");
-  println!("because it REQUIRES X and Y. `demo-pr` is the minimal fake-PR skill (feature note +");
-  println!("PR-DESCRIPTION.md) on claude / codex / grok / cursor. scsh resolves the env you");
+  println!("because it REQUIRES X and Y. `demo-pr` is the multi-agent fake-PR skill; the built-in");
+  println!("`smoke-pr-claude` / `smoke-pr-codex` / `smoke-pr-grok` / `smoke-pr-cursor` defs smoke one");
+  println!("harness at a time (feature note + PR-DESCRIPTION.md). scsh resolves the env you");
   println!(
     "forward (or refuses the skill). Examples — successes ({}) and the intended refusal ({}):",
     ok_mark(),
@@ -5571,6 +5572,7 @@ fn print_skill_usage() {
   example("X=6 Y=7 scsh run --profile multiply", "also runs multiply -> 6 * 7 = 42", true);
   example("scsh run --profile multiply", "multiply REFUSED — X is required by ${X}", false);
   example("scsh run demo-pr-claude-sonnet", "fake PR on claude (⇄ commits diff + Description)", true);
+  example("scsh run --def smoke-pr-claude", "builtin smoke fake-PR on Claude only", true);
   println!();
   let (var, def, req) = (env_syntax("${VAR}"), env_syntax("${VAR:-default}"), env_syntax("${VAR:?msg}"));
   println!("The env syntax: {var} requires VAR, {def} injects a default, {req}");
@@ -5578,7 +5580,13 @@ fn print_skill_usage() {
   println!("When a skill finishes, scsh prints the message from its JSON result file (e.g.");
   println!("\"6 * 7 = 42\"), not just the file path. Preview the resolved env without containers:");
   println!("  {}      (shows every skill and the profile that runs it).", bold("scsh list"));
-  println!("Or from any clean repo (no scaffold): {}.", bold("scsh run --def demo-pr"));
+  println!(
+    "Or from any clean repo (no scaffold): {} / {} / {} / {}.",
+    bold("scsh run --def smoke-pr-claude"),
+    bold("smoke-pr-codex"),
+    bold("smoke-pr-grok"),
+    bold("smoke-pr-cursor")
+  );
 }
 
 /// An env-syntax token (e.g. `${VAR}`), in cyan to set it apart from the prose.
