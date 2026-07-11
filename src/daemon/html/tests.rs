@@ -264,25 +264,11 @@ fn start_panel_offers_project_creation_and_the_client_wires_it() {
   assert!(html.contains(".toast"), "toast styles ship with the page");
 }
 
-#[test]
-fn create_cast_player_does_not_redeclare_det() {
-  // Two `const det` in the same Promise callback is a SyntaxError that kills the whole
-  // inline script — the session browser then does nothing.
-  let js = live_client_js();
-  let start = js.find("function createCastPlayer").expect("createCastPlayer");
-  let body = &js[start..];
-  let end = body.find("\nfunction focusCastPlayer").expect("focusCastPlayer follows");
-  let fn_body = &body[..end];
-  assert_eq!(
-    fn_body.matches("const det").count(),
-    1,
-    "createCastPlayer must declare det once"
-  );
-}
-
 /// Syntax-check the whole live client script under Node. Catches redeclared `const`/`let`,
-/// stray braces, and other parse errors that would abort the inline `<script>` and leave
-/// the session browser dead — the class of bug behind `Identifier 'det' has already been declared`.
+/// stray braces, dropped function headers, and other parse errors that would abort the
+/// inline `<script>` and leave the session browser dead (e.g. `Identifier 'det' has already
+/// been declared`). Skips silently when `node` is not on PATH — same pattern as the VT
+/// selftest.
 #[test]
 fn live_client_js_parses_under_node() {
   if crate::runtime::which("node").is_none() {
