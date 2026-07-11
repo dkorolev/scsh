@@ -1691,10 +1691,12 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(html.contains(r#"data-workflow-step="summarize""#));
   assert!(html.contains(r#"id="task-add""#));
   assert!(html.contains("href=\"#task-summarize\""));
-  // Exactly two fan-in edges into summarize (paths in the graph SVG — not the embedded client JS).
+  // Two fan-in edges into summarize plus the terminals: start → add, start → multiply,
+  // summarize → finish (paths in the graph SVG — not the embedded client JS).
   let graph = html.split(r#"id="workflow-graph""#).nth(1).expect("graph card");
   let graph = graph.split("</svg>").next().expect("svg");
-  assert_eq!(graph.matches("marker-end=\"url(#wf-arrow)\"").count(), 2);
+  assert_eq!(graph.matches("marker-end=\"url(#wf-arrow)\"").count(), 5);
+  assert_eq!(graph.matches(r#"class="wf-edge wf-edge-term""#).count(), 3, "start fans out to 2 roots, 1 leaf finishes");
   assert!(html.contains(r#"class="wf-arrowhead""#), "open chevron arrowheads, not filled triangles");
   // Fan-in ports land at distinct y on summarize (not a single shared tip).
   let mut end_ys = Vec::new();
@@ -1779,6 +1781,7 @@ fn workflow_graph_renders_builtin_shapes() {
   );
   assert!(fruits.contains("data-tip="), "nodes carry instant tooltips");
   assert!(fruits.contains("Ready — dependencies finished; not started yet"), "ready tip explains why the node is idle");
+  // 2 dependency edges + start → categorize + both sorts → finish.
   assert_eq!(
     fruits
       .split(r#"id="workflow-graph""#)
@@ -1789,7 +1792,7 @@ fn workflow_graph_renders_builtin_shapes() {
       .unwrap()
       .matches("marker-end=\"url(#wf-arrow)\"")
       .count(),
-    2
+    5
   );
   assert!(fruits.contains(r#"data-workflow-step="categorize""#));
 
@@ -1848,6 +1851,7 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(!review.contains("Conditional task"), "no cryptic Conditional task label");
   assert!(!review.contains('◇'), "no diamond glyph");
   assert!(review.contains(r#"wf-skipped"#));
+  // 1 dependency edge + start → probe_credentials + review → finish.
   assert_eq!(
     review
       .split(r#"id="workflow-graph""#)
@@ -1858,7 +1862,7 @@ fn workflow_graph_renders_builtin_shapes() {
       .unwrap()
       .matches("marker-end=\"url(#wf-arrow)\"")
       .count(),
-    1
+    3
   );
 
   // Waiting tip names the blocker (WEB-UI §4 disclosure; not a bare "1 waiting on").
@@ -1989,4 +1993,94 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("history.pushState"), "task clicks push history");
   assert!(js.contains("pendingWorkflowStep"), "pre-registration pending selection");
   assert!(js.contains("Task details are not available yet"), "pending status copy");
+}
+
+#[test]
+fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
+  use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+  // A job with a single run reads start → run → finish: exactly two arrows.
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "solo1".into(),
+    Session {
+      id: "solo1".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("solo".into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![ProcRecord {
+        index: 0,
+        kind: ProcKind::Skill,
+        label: "claude: add".into(),
+        status: ProcStatus::Ok,
+        note: None,
+        detail: None,
+        fail_reason: None,
+        container_name: None,
+        cast_path: None,
+        diff_path: None,
+        skill_source: Some("add".into()),
+        route: None,
+        result_path: None,
+        harness: Some("claude".into()),
+        skill_name: Some("add".into()),
+        model: None,
+        started_at: Some(1),
+        elapsed: Some(1.0),
+        lines: vec![],
+      }],
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      workflow: Some(WorkflowMeta {
+        nodes: vec![WorkflowNodeMeta {
+          id: "add".into(),
+          proc_index: Some(0),
+          order: 0,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        }],
+      }),
+      parent_session: None,
+    },
+  );
+  let html = session_page(&store, "solo1").expect("page");
+  let graph = html.split(r#"id="workflow-graph""#).nth(1).expect("graph card");
+  let svg = graph.split("</svg>").next().expect("svg");
+
+  // Starting line and finish flag are present, decorative, and announced to AT.
+  assert!(
+    graph.contains(r#"class="wf-terminal wf-term-start" role="img" aria-label="start""#),
+    "start terminal markup"
+  );
+  assert!(
+    graph.contains(r#"class="wf-terminal wf-term-finish" role="img" aria-label="finish""#),
+    "finish terminal markup"
+  );
+  // Terminals are spans, not links — they must never read (or click) as runs.
+  assert!(!graph.contains(r#"wf-terminal wf-term-start" href"#), "start is not a link");
+  assert!(!graph.contains(r#"wf-terminal wf-term-finish" href"#), "finish is not a link");
+  assert!(!graph.contains(r#"wf-terminal wf-term-start" tabindex"#), "start never steals focus");
+
+  // Exactly two arrows for a single-run job: start → add, add → finish. Both are terminal edges.
+  assert_eq!(svg.matches("marker-end=\"url(#wf-arrow)\"").count(), 2, "start → run → finish is two arrows");
+  assert_eq!(svg.matches(r#"class="wf-edge wf-edge-term""#).count(), 2, "both arrows are terminal edges");
+  assert_eq!(svg.matches(r#"class="wf-edge" "#).count(), 0, "no dependency edges in a one-run job");
+
+  // Styles ship with the page: not-interactive bookends, checkered finish disc.
+  assert!(html.contains(".wf-terminal"), "terminal styles shipped");
+  assert!(html.contains("repeating-conic-gradient"), "checkered finish flag");
+  assert!(html.contains(".wf-term-start::after"), "start dot inside the ring");
+
+  // Client-side rebuild draws the same terminals so live updates stay consistent.
+  let js = live_client_js();
+  assert!(js.contains("function wfTerminals"), "client JS re-render draws terminals");
+  assert!(js.contains("wf-term-start"), "client start terminal class");
+  assert!(js.contains("wf-term-finish"), "client finish terminal class");
+  assert!(js.contains("wf-edge wf-edge-term"), "client terminal edge class");
+  assert!(js.contains("aria-label=\"' + label"), "client terminals carry aria-labels");
 }
