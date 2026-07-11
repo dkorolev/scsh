@@ -110,15 +110,25 @@ pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab)
     };
   }
   let active = |want: IndexTab| if tab == want { " active" } else { "" };
+  // ARIA tab pattern (server side): tablist/tab/tabpanel roles plus a roving tabindex,
+  // so the markup is honest before the client script re-asserts the same state on
+  // activation. New attributes stay clear of the `class= data-tab=` pair — tests and
+  // the live renderer match on that exact adjacency.
+  let selected = |want: IndexTab| if tab == want { "true" } else { "false" };
+  let tabindex = |want: IndexTab| if tab == want { "0" } else { "-1" };
   let body = format!(
-    "<nav class=\"tabs\">\
-<button class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
-<button class=\"tab{jobs_a}\" data-tab=\"jobs\">Jobs</button>\
-<button class=\"tab{proj_a}\" data-tab=\"projects\">Projects</button>\
-<button class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
+    "<nav class=\"tabs\" role=\"tablist\">\
+<button id=\"tabbtn-run\" role=\"tab\" aria-selected=\"{run_s}\" aria-controls=\"tab-run\" \
+tabindex=\"{run_i}\" class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
+<button id=\"tabbtn-jobs\" role=\"tab\" aria-selected=\"{jobs_s}\" aria-controls=\"tab-jobs\" \
+tabindex=\"{jobs_i}\" class=\"tab{jobs_a}\" data-tab=\"jobs\">Jobs</button>\
+<button id=\"tabbtn-projects\" role=\"tab\" aria-selected=\"{proj_s}\" aria-controls=\"tab-projects\" \
+tabindex=\"{proj_i}\" class=\"tab{proj_a}\" data-tab=\"projects\">Projects</button>\
+<button id=\"tabbtn-setup\" role=\"tab\" aria-selected=\"{setup_s}\" aria-controls=\"tab-setup\" \
+tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
-<section class=\"tab-panel{run_p}\" id=\"tab-run\">\n{start}</section>\n\
-<section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\">\n\
+<section class=\"tab-panel{run_p}\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">\n{start}</section>\n\
+<section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\" role=\"tabpanel\" aria-labelledby=\"tabbtn-jobs\">\n\
 <div class=\"card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
@@ -127,12 +137,20 @@ pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab)
 <tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
 </div>\n\
 </section>\n\
-<section class=\"tab-panel{proj_p}\" id=\"tab-projects\">\n{dirs}</section>\n\
-<section class=\"tab-panel{setup_p}\" id=\"tab-setup\">\n{images}</section>\n",
+<section class=\"tab-panel{proj_p}\" id=\"tab-projects\" role=\"tabpanel\" aria-labelledby=\"tabbtn-projects\">\n{dirs}</section>\n\
+<section class=\"tab-panel{setup_p}\" id=\"tab-setup\" role=\"tabpanel\" aria-labelledby=\"tabbtn-setup\">\n{images}</section>\n",
     run_a = active(IndexTab::Run),
     jobs_a = active(IndexTab::Jobs),
     proj_a = active(IndexTab::Projects),
     setup_a = active(IndexTab::Setup),
+    run_s = selected(IndexTab::Run),
+    jobs_s = selected(IndexTab::Jobs),
+    proj_s = selected(IndexTab::Projects),
+    setup_s = selected(IndexTab::Setup),
+    run_i = tabindex(IndexTab::Run),
+    jobs_i = tabindex(IndexTab::Jobs),
+    proj_i = tabindex(IndexTab::Projects),
+    setup_i = tabindex(IndexTab::Setup),
     run_p = active(IndexTab::Run),
     jobs_p = active(IndexTab::Jobs),
     proj_p = active(IndexTab::Projects),

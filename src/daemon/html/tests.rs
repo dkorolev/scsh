@@ -548,11 +548,14 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
     assert!(html.contains(&format!("data-tab=\"{tab}\"")), "index page should have the {tab} tab");
     assert!(html.contains(&format!("id=\"{panel}\"")), "index page should have panel #{panel}");
   }
-  let nav = html.find("<nav class=\"tabs\">").expect("tabs nav");
+  let nav = html.find("<nav class=\"tabs\" role=\"tablist\">").expect("tabs nav");
   let run_btn = html[nav..].find("data-tab=\"run\">Run</button>").expect("Run tab");
   let jobs_btn = html[nav..].find("data-tab=\"jobs\">Jobs</button>").expect("Jobs tab");
   assert!(run_btn < jobs_btn, "Run should be leftmost");
-  assert!(html.contains("<section class=\"tab-panel active\" id=\"tab-run\">"), "Run panel active by default");
+  assert!(
+    html.contains("<section class=\"tab-panel active\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">"),
+    "Run panel active by default"
+  );
   assert!(html.contains("class=\"tab active\" data-tab=\"run\">Run</button>"), "Run tab active by default");
   let js = live_client_js();
   assert!(js.contains("saved || 'run'"), "client default tab is Run");
@@ -1024,6 +1027,47 @@ fn client_js_wires_force_stop() {
   assert!(js.contains("scsh-dialog"), "dialog markup class ships");
   assert!(!js.contains("confirm("), "no browser confirm() for Force stop");
   assert!(!js.contains("alert("), "Force stop errors use toast, not alert()");
+}
+
+/// Accessibility hardening: confirm-dialog focus management, the full ARIA tab pattern,
+/// live-region copy feedback, reduced-motion-gated scrolling and micro-transitions, and
+/// breadcrumb truncation on narrow viewports.
+#[test]
+fn dashboard_a11y_contracts_hold() {
+  let js = live_client_js();
+  // 1. The confirm dialog remembers the previously focused element, restores it on
+  //    close, and traps Tab inside the panel while it is open.
+  assert!(js.contains("const prevFocus = document.activeElement;"), "dialog records the opener's focus");
+  assert!(js.contains("prevFocus.focus()"), "dialog restores focus on close");
+  assert!(js.contains("ev.key === 'Tab'"), "dialog traps Tab inside the modal");
+  // 2. Tabs carry the complete ARIA pattern: a tablist container, labelled tabpanels,
+  //    arrow-key navigation, and a roving tabindex.
+  let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
+  assert!(html.contains(r#"<nav class="tabs" role="tablist">"#), "the tabs nav is a tablist");
+  assert_eq!(html.matches(r#"role="tabpanel""#).count(), 4, "every panel is a tabpanel");
+  assert!(html.contains(r#"aria-labelledby="tabbtn-run""#), "panels are labelled by their tabs");
+  assert!(html.contains(r#"aria-selected="true""#), "the active tab is selected server-side");
+  assert!(js.contains("'ArrowRight'"), "arrow keys walk the tablist");
+  assert!(js.contains("x.tabIndex = on ? 0 : -1;"), "roving tabindex follows the active tab");
+  // 3. Every scroll respects prefers-reduced-motion; none is hardcoded smooth.
+  assert!(js.contains("panel.scrollIntoView"), "open/create still scrolls Definitions into view");
+  assert!(!js.contains("behavior: 'smooth'"), "no hardcoded smooth scrolling");
+  // 4. The cast page announces "copied" to screen readers, like the dashboard toast.
+  let cast = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
+  assert!(cast.contains(r#"<span id="copied" role="status">"#), "copy feedback is a live region");
+  // 5. Long breadcrumbs truncate inside the fixed-height sticky status bar instead of
+  //    overflowing phone-width viewports.
+  assert!(
+    html.contains("min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;"),
+    "crumbs truncate with an ellipsis"
+  );
+  // 6. Decorative micro-transitions (buttons, chips, the toast) sit behind the same
+  //    reduced-motion gate as the workflow pulse.
+  let gate = html.find("@media (prefers-reduced-motion: no-preference)").expect("reduced-motion gate ships");
+  for rule in [".btn, button.btn { transition:", ".hchip { transition:", ".toast { transition:"] {
+    assert_eq!(html.matches(rule).count(), 1, "{rule} appears exactly once");
+    assert!(html.find(rule).unwrap() > gate, "{rule} is gated on reduced motion");
+  }
 }
 
 #[test]

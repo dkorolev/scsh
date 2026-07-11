@@ -111,14 +111,29 @@ function scshConfirm(opts) {
     panel.appendChild(p);
     panel.appendChild(actions);
     backdrop.appendChild(panel);
+    // The dialog steals focus onto OK below, so remember where the user was and put
+    // them back on close — otherwise keyboard focus is dumped at <body> and a screen
+    // reader loses its place in the page.
+    const prevFocus = document.activeElement;
     const finish = (ok) => {
       document.removeEventListener('keydown', onKey, true);
       backdrop.remove();
+      if (prevFocus && document.contains(prevFocus) && typeof prevFocus.focus === 'function') prevFocus.focus();
       resolve(ok);
     };
     const onKey = (ev) => {
       if (ev.key === 'Escape') { ev.preventDefault(); finish(false); }
       else if (ev.key === 'Enter' && document.activeElement === okBtn) { ev.preventDefault(); finish(true); }
+      else if (ev.key === 'Tab') {
+        // Trap Tab inside the modal: aria-modal promises assistive tech that the page
+        // behind is inert, so Tab must cycle Cancel ⇄ OK instead of wandering out.
+        const focusables = panel.querySelectorAll('button:not(:disabled)');
+        if (!focusables.length) return;
+        const first = focusables[0], last = focusables[focusables.length - 1];
+        if (!panel.contains(document.activeElement)) { ev.preventDefault(); first.focus(); }
+        else if (ev.shiftKey && document.activeElement === first) { ev.preventDefault(); last.focus(); }
+        else if (!ev.shiftKey && document.activeElement === last) { ev.preventDefault(); first.focus(); }
+      }
     };
     backdrop.addEventListener('click', (ev) => { if (ev.target === backdrop) finish(false); });
     cancelBtn.addEventListener('click', () => finish(false));
@@ -2413,6 +2428,9 @@ const DEFS_BY_NAME = {};  // name -> definition
       const on = x === active;
       x.classList.toggle('active', on);
       x.setAttribute('aria-selected', on ? 'true' : 'false');
+      // Roving tabindex (ARIA tabs pattern): Tab reaches only the active tab; the
+      // arrows walk between tabs, so inactive ones leave the page's tab order.
+      x.tabIndex = on ? 0 : -1;
     });
     document.querySelectorAll('.tab-panel').forEach(p => p.classList.toggle('active', p.id === 'tab-' + id));
     if (id === 'setup' && typeof refreshSetup === 'function') refreshSetup();
@@ -2430,9 +2448,20 @@ const DEFS_BY_NAME = {};  // name -> definition
     }
     if (typeof SESSION_ID !== 'string' || !SESSION_ID) saveUiPrefs({ tab: id });
   }
+  const tabList = Array.from(tabs);
   tabs.forEach(t => {
     t.setAttribute('role', 'tab');
     t.addEventListener('click', () => activate(t.dataset.tab, 'push'));
+    // ArrowLeft/ArrowRight move between tabs (wrapping), and activation follows
+    // focus — the standard keyboard contract for an ARIA tablist.
+    t.addEventListener('keydown', (e) => {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      e.preventDefault();
+      const step = e.key === 'ArrowRight' ? 1 : tabList.length - 1;
+      const next = tabList[(tabList.indexOf(t) + step) % tabList.length];
+      activate(next.dataset.tab, 'push');
+      next.focus();
+    });
   });
   window.addEventListener('popstate', () => {
     activate(tabFromLocation() || 'run', 'sync');
@@ -2561,7 +2590,8 @@ function handleRepoOpened(resp, note) {
   // invites the next step (choose a definition) instead of leaving the viewport on the form.
   if (panel) {
     requestAnimationFrame(() => {
-      panel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      panel.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
     });
   }
 }
@@ -2620,7 +2650,8 @@ function selectDef(name) {
   });
   // The form renders below the definitions list — bring it to the user instead of making
   // them hunt for what their click produced.
-  form.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  form.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
 }
 function collectParams(def) {
   const out = {};

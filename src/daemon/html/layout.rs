@@ -108,10 +108,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     min-width: 96px; padding: 8px 22px;
     font-size: 0.9rem; font-weight: 500; font-family: inherit;
     color: var(--text); border: none; cursor: pointer;
-    transition: transform 0.1s;
     text-decoration: none;
   }
-  .btn::before { transition: background 0.2s; }
   .btn:not(:disabled):not(.btn--disabled):hover::before { background: var(--btn-fill) !important; }
   .btn:not(:disabled):not(.btn--disabled):active { transform: scale(0.97); }
   .btn:not(:disabled):not(.btn--disabled):active::before { filter: brightness(0.85); }
@@ -225,7 +223,13 @@ pub(crate) const PAGE_CSS: &str = r#"
     background: var(--surface);
     border: none; border-bottom: 1px solid var(--border); border-radius: 0;
   }
-  .daemon-status .crumbs { font-weight: 700; font-size: 1rem; line-height: 1.5; }
+  /* The bar is a fixed-height single row, so long breadcrumb paths must truncate with
+     an ellipsis rather than push the status dot off a phone-width viewport (min-width: 0
+     lets the flex child actually shrink below its content size). */
+  .daemon-status .crumbs {
+    font-weight: 700; font-size: 1rem; line-height: 1.5;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
   .crumbs a { color: inherit; text-decoration: none; }
   .crumbs a:hover { color: var(--cyan); }
   .crumb-sep { color: var(--text-muted); margin: 0 0.4rem; font-weight: 400; }
@@ -389,6 +393,13 @@ pub(crate) const PAGE_CSS: &str = r#"
       0%, 100% { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35); }
       50% { box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.55); }
     }
+    /* Decorative micro-motion lives behind the same gate: button press/hover, chip
+       pop, and the toast slide keep their end states but stop animating when the
+       user asked the OS for reduced motion. */
+    .btn, button.btn { transition: transform 0.1s; }
+    .btn::before { transition: background 0.2s; }
+    .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
+    .toast { transition: opacity 0.22s ease, transform 0.22s ease; }
   }
   .wf-node.wf-done { border-left-color: var(--green); }
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
@@ -603,7 +614,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .hchip--grok { --hchip-bg: #d4a72c; }
   .hchip--cursor { --hchip-bg: #a371f7; }
   .hchip--done { opacity: 0.35; }
-  .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
   .hchip:hover { transform: scale(1.3); opacity: 1; }
   .ui-tip {
     position: fixed; z-index: 100; pointer-events: none;
@@ -660,7 +670,6 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.92rem; line-height: 1.35; text-align: center;
     box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
     opacity: 0; pointer-events: none;
-    transition: opacity 0.22s ease, transform 0.22s ease;
   }
   .toast.show {
     opacity: 1; transform: translateX(-50%) translateY(0);

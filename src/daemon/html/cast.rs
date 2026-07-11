@@ -92,7 +92,7 @@ header code {{
 <div class="controls">
 <a href="{cast_url}?dl=1" download>⬇ download .cast</a>
 <a id="dl-html" href="{cast_url}/export.html" download hidden>⬇ download .html</a>
-<button id="copy-t">🔗 copy link at current time</button><span id="copied">copied</span>
+<button id="copy-t">🔗 copy link at current time</button><span id="copied" role="status">copied</span>
 <span class="dim">deep link: append <code>#t=90</code> or <code>#t=1:30</code> to this URL</span>
 </div>
 <div id="summary" class="dim"></div>
