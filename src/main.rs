@@ -148,6 +148,9 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
   } else {
     None
   };
+  // Annotation can be visually quiet while Codex thinks. Keep the daemon's 30-second
+  // stale-session detector informed independently of terminal output.
+  let heartbeat = daemon_session.as_ref().map(|c| c.start_heartbeat(Duration::from_secs(5)));
   let mut sidecars: Vec<(String, String)> = Vec::new(); // (cast, sidecar)
   let mut next_idx = 0usize;
   for path in paths {
@@ -222,7 +225,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
           c.proc_finish(
             idx,
             daemon::ProcStatus::Fail,
-            Some("annotate_failed"),
+            Some(err.failure_reason()),
             Some(&err.to_string()),
             started.elapsed().as_secs_f64(),
           );
@@ -233,6 +236,9 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
         }
       }
     }
+  }
+  if let Some(flag) = heartbeat {
+    flag.store(false, std::sync::atomic::Ordering::Relaxed);
   }
   if let Some(c) = daemon_session {
     c.finish_session();
@@ -470,7 +476,7 @@ fn annotate_run_casts(
             Err(err) => client.proc_finish(
               idx,
               daemon::ProcStatus::Fail,
-              Some("annotate_failed"),
+              Some(err.failure_reason()),
               Some(&err.to_string()),
               elapsed,
             ),

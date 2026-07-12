@@ -60,6 +60,21 @@ impl Client {
     &self.inner.session_id
   }
 
+  /// Keep a long quiet operation live in the daemon. Dropping the returned flag is not
+  /// sufficient; set it to false before finishing the session.
+  pub fn start_heartbeat(&self, every: std::time::Duration) -> Arc<std::sync::atomic::AtomicBool> {
+    let active = Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let flag = Arc::clone(&active);
+    let client = Client { inner: Arc::clone(&self.inner) };
+    thread::spawn(move || {
+      while flag.load(std::sync::atomic::Ordering::Relaxed) {
+        client.ping();
+        thread::sleep(every);
+      }
+    });
+    active
+  }
+
   pub fn register_session(
     &self, repo: &str, branch: &str, profile: Option<&str>, kind: &str, skills: &[(&str, &str)],
   ) -> bool {

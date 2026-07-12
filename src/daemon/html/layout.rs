@@ -363,13 +363,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-selected { box-shadow: 0 0 0 2px var(--cyan); }
   /* Center when the graph fits; when it overflows, auto margins collapse and scroll works. */
   .workflow-stage { position: relative; min-height: 4rem; margin-inline: auto; }
-  .workflow-zoom { margin-left: auto; display: inline-flex; gap: 0.25rem; }
+  .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
   .workflow-zoom button {
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
     background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
   }
   .workflow-zoom button:hover { color: var(--text); border-color: #3a4558; }
   .workflow-zoom button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .workflow-zoom [data-wf-zoom-reset] { width: 4.6rem; }
+  .workflow-zoom [data-wf-zoom-fit] { width: 3rem; }
   .wf-loop-island {
     position: absolute; z-index: 0; box-sizing: border-box; pointer-events: none;
     border: 1px solid rgba(139, 148, 158, 0.42); border-radius: 9px;
@@ -435,6 +437,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   .wf-node.wf-build { border-left-color: var(--cyan); }
   .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
+  /* Selection is a blue balloon with a matching blue ribbon; status remains legible inside. */
+  .wf-node.wf-selected { border-left-color: var(--cyan) !important; }
   /* Start / Finish bookends — small icon cards (play / checkered flag), not task cards. */
   .wf-bookend {
     position: absolute; box-sizing: border-box;

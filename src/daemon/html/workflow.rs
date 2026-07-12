@@ -89,7 +89,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 <h2 class="workflow-title">Job graph</h2>
 <p class="workflow-summary dim">{summary}</p>
 {legend}
-<div class="workflow-zoom" aria-label="Graph zoom"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button></div>
+<div class="workflow-zoom" aria-label="Graph zoom"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" data-wf-zoom-fit>Fit</button></div>
 </div>
 <div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
@@ -426,7 +426,8 @@ fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut
   out
 }
 
-/// Real nodes shifted right of Start; Finish after the rightmost column. Vertically centered.
+/// Real nodes shifted right of Start; Finish after the rightmost column. Each bookend aligns
+/// with the average center of the root/sink rows, making a linear workflow strictly horizontal.
 fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Vec<LaidOut>, LaidOut, LaidOut) {
   let mut layout = layout_nodes(session, meta, now);
   let shift = BOOKEND_W + GAP_X;
@@ -443,12 +444,20 @@ fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Ve
     n.x += shift;
     n.y += loop_top;
   }
-  let stage_h = layout.iter().map(|n| n.y + n.h).fold(PAD + NODE_H, f64::max) + PAD;
-  let bookend_y = ((stage_h - BOOKEND_H) / 2.0).max(PAD);
-  let start = LaidOut { id: START_ID.into(), x: PAD, y: bookend_y, order: 0, w: BOOKEND_W, h: BOOKEND_H };
+  let average_center = |ids: &[String]| {
+    let rows: Vec<&LaidOut> = layout.iter().filter(|n| ids.iter().any(|id| id == &n.id)).collect();
+    if rows.is_empty() {
+      PAD + NODE_H / 2.0
+    } else {
+      rows.iter().map(|n| n.y + n.h / 2.0).sum::<f64>() / rows.len() as f64
+    }
+  };
+  let start_y = (average_center(&graph_roots(meta)) - BOOKEND_H / 2.0).max(PAD);
+  let finish_y = (average_center(&graph_sinks(meta)) - BOOKEND_H / 2.0).max(PAD);
+  let start = LaidOut { id: START_ID.into(), x: PAD, y: start_y, order: 0, w: BOOKEND_W, h: BOOKEND_H };
   let finish_x = layout.iter().map(|n| n.x + n.w).fold(PAD + BOOKEND_W, f64::max) + GAP_X;
   let finish =
-    LaidOut { id: FINISH_ID.into(), x: finish_x, y: bookend_y, order: usize::MAX, w: BOOKEND_W, h: BOOKEND_H };
+    LaidOut { id: FINISH_ID.into(), x: finish_x, y: finish_y, order: usize::MAX, w: BOOKEND_W, h: BOOKEND_H };
   (layout, start, finish)
 }
 

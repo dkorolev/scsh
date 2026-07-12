@@ -1111,6 +1111,7 @@ const WF_BOOKEND_W = 48, WF_BOOKEND_H = 48;
 const WF_START_ID = '__start', WF_FINISH_ID = '__finish';
 let pendingWorkflowStep = null;
 let wfHistorySilent = false;
+let workflowZoom = 1;
 function wfNodeRanks(nodes) {
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const ranks = Object.create(null);
@@ -1162,11 +1163,16 @@ function wfLayoutWithBookends(session, nodes, nowUnix) {
   const shift = WF_BOOKEND_W + WF_GAP_X;
   const loopTop = nodes.some(n => /__repeat_\d+$/.test(n.id)) ? 36 : 0;
   layout.forEach(n => { n.x += shift; n.y += loopTop; });
-  const stageH = Math.max(WF_PAD + WF_NODE_H, ...layout.map(n => n.y + n.h)) + WF_PAD;
-  const bookendY = Math.max(WF_PAD, (stageH - WF_BOOKEND_H) / 2);
-  const start = { id: WF_START_ID, x: WF_PAD, y: bookendY, order: 0, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
+  const rootIds = wfGraphRoots(nodes), sinkIds = wfGraphSinks(nodes);
+  const centerY = ids => {
+    const rows = layout.filter(n => ids.includes(n.id));
+    return rows.length ? rows.reduce((sum, n) => sum + n.y + n.h / 2, 0) / rows.length : WF_PAD + WF_NODE_H / 2;
+  };
+  const startY = Math.max(WF_PAD, centerY(rootIds) - WF_BOOKEND_H / 2);
+  const finishY = Math.max(WF_PAD, centerY(sinkIds) - WF_BOOKEND_H / 2);
+  const start = { id: WF_START_ID, x: WF_PAD, y: startY, order: 0, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
   const finishX = Math.max(WF_PAD + WF_BOOKEND_W, ...layout.map(n => n.x + n.w)) + WF_GAP_X;
-  const finish = { id: WF_FINISH_ID, x: finishX, y: bookendY, order: 1e9, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
+  const finish = { id: WF_FINISH_ID, x: finishX, y: finishY, order: 1e9, w: WF_BOOKEND_W, h: WF_BOOKEND_H };
   return { layout, start, finish };
 }
 function wfGraphRoots(nodes) {
@@ -1263,7 +1269,8 @@ function annotationForProc(session, proc) {
       if (ann.kind !== 'annotate' || !ann.annotate_target) continue;
       const targetName = String(ann.annotate_target).split('/').pop();
       if (ann.annotate_target !== proc.cast_path && targetName !== sourceName) continue;
-      const status = ann.status === 'running' || ann.status === 'waiting' ? 'running'
+      const jobIsLive = sessionLifecycle(candidate, Date.now() / 1000).class === 'running';
+      const status = (ann.status === 'running' || ann.status === 'waiting') && jobIsLive ? 'running'
         : (ann.status === 'ok' ? 'ok' : 'fail');
       return { jobId, proc: ann.index, status };
     }
@@ -1337,7 +1344,8 @@ function wfBuildGraphHtml(session, nowUnix) {
     wfLegendHtml(present) + '<div class="workflow-zoom" aria-label="Graph zoom">' +
     '<button type="button" data-wf-zoom-out aria-label="Zoom out">−</button>' +
     '<button type="button" data-wf-zoom-reset>100%</button>' +
-    '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button></div></div>' +
+    '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button>' +
+    '<button type="button" data-wf-zoom-fit>Fit</button></div></div>' +
     '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
     wfLoopIslandsHtml(layout) +
@@ -1359,6 +1367,7 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
     const st = wfDisplayState(session, n, nowUnix);
     return n.id + '\t' + wfStatusStackRank(st);
   }).slice().sort().join('\0');
+  let preserved = null;
   if (root) {
     const domIds = Array.from(root.querySelectorAll('[data-workflow-step]'))
       .map(el => {
@@ -1367,6 +1376,12 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
         return id + '\t' + wfStatusStackRank(st);
       }).filter(Boolean).sort().join('\0');
     if (domIds === liveIds) return root;
+    const oldScroller = root.querySelector('.workflow-scroll');
+    preserved = {
+      left: oldScroller ? oldScroller.scrollLeft : 0,
+      top: oldScroller ? oldScroller.scrollTop : 0,
+      pageTop: root.getBoundingClientRect().top
+    };
     root.remove();
     root = null;
   }
@@ -1382,6 +1397,14 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
   if (root) {
     delete root.dataset.bound;
     initWorkflowGraph();
+    if (preserved) {
+      const newScroller = root.querySelector('.workflow-scroll');
+      if (newScroller) {
+        newScroller.scrollLeft = preserved.left;
+        newScroller.scrollTop = preserved.top;
+      }
+      window.scrollBy(0, root.getBoundingClientRect().top - preserved.pageTop);
+    }
   }
   return root;
 }
@@ -1586,19 +1609,26 @@ function initWorkflowGraph() {
   }
   const stage = root.querySelector('.workflow-stage');
   const reset = root.querySelector('[data-wf-zoom-reset]');
-  let zoom = 1;
   const applyZoom = next => {
-    zoom = Math.max(0.5, Math.min(2, next));
-    if (stage) stage.style.zoom = String(zoom);
-    if (reset) reset.textContent = Math.round(zoom * 100) + '%';
+    workflowZoom = Math.max(0.5, Math.min(2, next));
+    if (stage) stage.style.zoom = String(workflowZoom);
+    if (reset) reset.textContent = Math.round(workflowZoom * 100) + '%';
   };
-  root.querySelector('[data-wf-zoom-out]')?.addEventListener('click', () => applyZoom(zoom - 0.1));
-  root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(zoom + 0.1));
+  const fit = () => {
+    if (!stage || !scroller) return;
+    const naturalWidth = parseFloat(stage.style.width) || stage.scrollWidth;
+    applyZoom((scroller.clientWidth - 16) / naturalWidth);
+    scroller.scrollLeft = 0;
+  };
+  applyZoom(workflowZoom);
+  root.querySelector('[data-wf-zoom-out]')?.addEventListener('click', () => applyZoom(workflowZoom - 0.1));
+  root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(workflowZoom + 0.1));
   reset?.addEventListener('click', () => applyZoom(1));
+  root.querySelector('[data-wf-zoom-fit]')?.addEventListener('click', fit);
   scroller?.addEventListener('wheel', ev => {
     if (!ev.ctrlKey && !ev.metaKey) return;
     ev.preventDefault();
-    applyZoom(zoom + (ev.deltaY < 0 ? 0.1 : -0.1));
+    applyZoom(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1));
   }, { passive: false });
   root.addEventListener('click', (ev) => {
     const jump = ev.target.closest('a.wf-jump');

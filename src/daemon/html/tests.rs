@@ -1551,6 +1551,10 @@ fn annotation_control_links_to_the_job_and_persists_its_state() {
   assert!(js.contains("#proc-' + Number(meta.annotation_proc"), "the link targets the annotating run");
   assert!(js.contains("annotation-link--' + status"), "running/ok/fail each retain a status class");
   assert!(js.contains("annotation-dots"), "running annotation gets animated dots");
+  assert!(
+    js.contains("sessionLifecycle(candidate, Date.now() / 1000).class === 'running'"),
+    "a cancelled annotation job cannot retain animated running state"
+  );
   assert!(js.contains("CHAPTERS_WAIT_SECS"), "the poll window is still bounded");
   assert!(js.contains("renderAnnotationLink(box, meta)"), "a late-registering job links up mid-poll");
 }
@@ -2342,6 +2346,11 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(flat_html.contains("wf-finish-flag"), "checkered finish flag");
   assert!(flat_html.contains("scrollbar-width: none"), "graph remains scrollable without visible scrollbar chrome");
   assert!(flat_html.contains(".workflow-scroll::-webkit-scrollbar"), "WebKit scrollbar chrome is hidden too");
+  assert!(flat_html.contains("data-wf-zoom-fit>Fit</button>"), "server-rendered graph includes Fit");
+  assert!(
+    flat_html.contains(".wf-node.wf-selected { border-left-color: var(--cyan) !important; }"),
+    "selected node ribbon overrides every status color"
+  );
   assert!(!flat_html.contains("wf-start-line"), "dashed race-line start glyph is gone");
   assert!(!flat_html.contains("wf-bookend-label"), "bookends are icon-only");
   let edge_count = flat_html.matches(r#"class="wf-edge""#).count();
@@ -2370,7 +2379,10 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("function wfLayoutWithBookends"), "live graph mirrors Start/Finish");
   assert!(js.contains("function wfLoopIslandsHtml"), "dynamic repeat iterations share a loop island");
   assert!(js.contains("data-wf-zoom-in"), "graph has explicit zoom controls");
+  assert!(js.contains("data-wf-zoom-fit"), "graph has a Fit control");
   assert!(js.contains("stage.style.zoom"), "zoom changes the graph without changing its topology");
+  assert!(js.contains("let workflowZoom = 1"), "zoom survives dynamic graph remounts");
+  assert!(js.contains("window.scrollBy"), "dynamic expansion preserves the page viewport");
   assert!(js.contains("function wfNodeTip"), "useful node tooltips");
   assert!(js.contains("function wfSummaryHtml"), "status counters are jump links");
   assert!(js.contains("a.wf-jump"), "summary jump click wiring");
