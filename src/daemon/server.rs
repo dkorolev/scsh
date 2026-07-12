@@ -88,6 +88,7 @@ impl Server {
     // skills do not sit as "Ready" until the heartbeat stale window trips.
     for session in store.sessions.values_mut() {
       if session.ended_at.is_some() {
+        settle_loaded_incomplete_procs(session);
         continue;
       }
       let dead = match session.run_pid {
@@ -97,6 +98,7 @@ impl Server {
       if dead {
         session.ended_at = Some(session.last_seen_at.max(session.started_at));
         session.run_pid = None;
+        settle_loaded_incomplete_procs(session);
       }
     }
     Server {
@@ -285,6 +287,32 @@ impl Server {
     let mut queue = self.prune.lock().unwrap_or_else(|e| e.into_inner());
     let _ = queue.tick(now);
     queue.save(self.port);
+  }
+}
+
+/// Persisted sessions must never claim work is still running after the owning process or
+/// session ended. Annotation is bounded by its watchdog, so an orphaned annotation row is
+/// represented as a terminal timeout; other proc kinds retain the generic incomplete-session
+/// reason used by normal deregistration.
+fn settle_loaded_incomplete_procs(session: &mut Session) {
+  let ended = session.ended_at.unwrap_or(session.last_seen_at);
+  for proc in &mut session.procs {
+    if !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
+      continue;
+    }
+    proc.status = ProcStatus::Fail;
+    if proc.kind == ProcKind::Annotate {
+      proc.fail_reason = Some(crate::failure::reason::ANNOTATION_TIMED_OUT.into());
+      proc.detail = Some("annotation timed out before reporting completion".into());
+    } else {
+      proc.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
+      if proc.detail.is_none() {
+        proc.detail = Some("session ended before this proc reported finish".into());
+      }
+    }
+    if proc.elapsed.is_none() {
+      proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
+    }
   }
 }
 
@@ -575,6 +603,7 @@ fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String
 fn annotation_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<(String, usize, &'static str)> {
   let file_name = std::path::Path::new(cast_path).file_name();
   let store = lock_store(store);
+  let now = now_unix_secs();
   for (id, session) in store.sessions.iter() {
     for proc in &session.procs {
       if proc.kind != ProcKind::Annotate {
@@ -585,7 +614,12 @@ fn annotation_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<(St
       };
       if target == cast_path || (file_name.is_some() && std::path::Path::new(target).file_name() == file_name) {
         let status = match proc.status {
-          ProcStatus::Waiting | ProcStatus::Running => "running",
+          ProcStatus::Waiting | ProcStatus::Running
+            if session.lifecycle_status(now) == crate::daemon::model::SessionLifecycle::Running =>
+          {
+            "running"
+          }
+          ProcStatus::Waiting | ProcStatus::Running => "fail",
           ProcStatus::Ok => "ok",
           ProcStatus::Fail | ProcStatus::Skipped => "fail",
         };
@@ -3193,6 +3227,7 @@ mod tests {
 
   #[test]
   fn chapters_response_names_the_live_summarizing_job_while_the_sidecar_is_pending() {
+    let now = now_unix_secs();
     let dir = std::env::temp_dir().join(format!("scsh-chap-job-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let cast = dir.join("add-20260711-114749-utc-ufakca.cast");
@@ -3213,7 +3248,7 @@ mod tests {
       "annjob".into(),
       Session {
         id: "annjob".into(),
-        started_at: 61,
+        started_at: now,
         ended_at: None,
         profile: Some("annotate".into()),
         kind: Some("annotate".into()),
@@ -3221,7 +3256,7 @@ mod tests {
         branch: String::new(),
         skills: Vec::new(),
         procs: vec![annotate],
-        last_seen_at: 61,
+        last_seen_at: now,
         client_connected: true,
         run_pid: None,
         workflow: None,
@@ -3238,6 +3273,12 @@ mod tests {
       Some("casts/add-20260711-114749-utc-ufakca.cast".into());
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
+    // A job that ended with a non-terminal proc is cancelled. The stale proc must not keep
+    // animated "annotating..." UI alive forever in the source player or workflow graph.
+    store.lock().unwrap().sessions.get_mut("annjob").unwrap().ended_at = Some(now + 1);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "fail" }"#);
+    store.lock().unwrap().sessions.get_mut("annjob").unwrap().ended_at = None;
     // Finished state remains linked instead of disappearing.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].status = ProcStatus::Ok;
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
@@ -3479,7 +3520,19 @@ mod tests {
       let s = store.sessions.get("deadpid").expect("reloaded");
       assert!(s.ended_at.is_some(), "dead run_pid must end the session on reload");
       assert!(s.run_pid.is_none(), "run_pid cleared after orphan end");
-      assert_eq!(s.lifecycle_status(now_unix_secs()), SessionLifecycle::Cancelled);
+      assert_eq!(s.lifecycle_status(now_unix_secs()), SessionLifecycle::Failed);
+      assert_eq!(s.procs[0].status, ProcStatus::Fail, "a dead owner cannot leave a running/waiting proc behind");
+      let mut annotation = s.clone();
+      annotation.procs[0].kind = ProcKind::Annotate;
+      annotation.procs[0].status = ProcStatus::Running;
+      annotation.procs[0].fail_reason = None;
+      settle_loaded_incomplete_procs(&mut annotation);
+      assert_eq!(annotation.procs[0].status, ProcStatus::Fail);
+      assert_eq!(
+        annotation.procs[0].fail_reason.as_deref(),
+        Some(crate::failure::reason::ANNOTATION_TIMED_OUT),
+        "orphaned annotations persist a terminal timeout, never stale running"
+      );
     }
     drop(server2);
     let _ = std::fs::remove_file(&db_path);

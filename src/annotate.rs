@@ -47,6 +47,8 @@ pub enum AnnotateError {
   EmptyTranscript,
   /// Codex produced no reply (spawn/exit failure, or a timeout even after a retry).
   ModelFailed(String),
+  /// Codex exceeded the annotation wall-clock cap on both attempts.
+  ModelTimedOut(String),
   /// The model reply did not contain a valid annotation object.
   UnparseableReply,
   /// The reply parsed, but every chapter was invalid (or none were given).
@@ -61,6 +63,7 @@ impl std::fmt::Display for AnnotateError {
       AnnotateError::UnreadableCast(e) => write!(f, "cannot read the cast file ({e})"),
       AnnotateError::EmptyTranscript => write!(f, "the recording has no visible output to annotate"),
       AnnotateError::ModelFailed(detail) => write!(f, "{detail}"),
+      AnnotateError::ModelTimedOut(detail) => write!(f, "{detail}"),
       AnnotateError::UnparseableReply => write!(f, "the model reply was not a valid annotation JSON object"),
       AnnotateError::NoValidChapters => write!(f, "the model reply contained no valid chapters"),
       AnnotateError::WriteFailed(e) => write!(f, "cannot write the chapters sidecar ({e})"),
@@ -69,12 +72,21 @@ impl std::fmt::Display for AnnotateError {
 }
 
 impl AnnotateError {
+  pub fn failure_reason(&self) -> &'static str {
+    match self {
+      Self::ModelTimedOut(_) => crate::failure::reason::ANNOTATION_TIMED_OUT,
+      _ => "annotate_failed",
+    }
+  }
+
   /// The `→ how to fix` line paired with the `✗` reason in human-facing CLI output.
   pub fn hint(&self) -> &'static str {
     match self {
       AnnotateError::UnreadableCast(_) => "check the path and permissions, then re-run `scsh annotate-cast <cast>`",
       AnnotateError::EmptyTranscript => "record a session that produces visible output; an empty cast has no chapters",
-      AnnotateError::ModelFailed(_) => "check `codex` login and network, then re-run `scsh annotate-cast <cast>`",
+      AnnotateError::ModelFailed(_) | AnnotateError::ModelTimedOut(_) => {
+        "check `codex` login and network, then re-run `scsh annotate-cast <cast>`"
+      }
       AnnotateError::UnparseableReply | AnnotateError::NoValidChapters => {
         "re-run `scsh annotate-cast <cast>`; if it persists, try another model via SCSH_ANNOTATE_MODEL"
       }
@@ -385,7 +397,7 @@ where
     Err(RunFailure::TimedOut) => match run(model, &prompt) {
       Ok(reply) => reply,
       Err(RunFailure::TimedOut) => {
-        return Err(AnnotateError::ModelFailed(format!(
+        return Err(AnnotateError::ModelTimedOut(format!(
           "Codex hit the {}s timeout twice (retried once after the first kill)",
           ANNOTATE_TIMEOUT.as_secs()
         )));
@@ -493,12 +505,7 @@ pub fn run_codex_recorded(model: &str, prompt: &str, cast_out: &Path) -> Option<
   // that shell is insufficient: tmux is a server and its Codex child outlives it.
   let session = format!("scsh-ann-{}", crate::runtime::random_nonce_6());
   // Shell-quote the full prompt so embedded " / ' survive.
-  let agent = format!(
-    "codex exec --skip-git-repo-check --ephemeral --dangerously-bypass-approvals-and-sandbox \
---model {} --output-last-message annotation.json {}",
-    crate::runtime::shell_quote(model),
-    crate::runtime::shell_quote(prompt),
-  );
+  let agent = recorded_agent_command(model, prompt);
   let script = format!(
     r#"set -eu
 cd {dir}
@@ -552,6 +559,22 @@ tmux kill-session -t "$session" 2>/dev/null || true
     return None;
   }
   reply
+}
+
+fn recorded_agent_command(model: &str, prompt: &str) -> String {
+  let codex = format!(
+    "codex exec --skip-git-repo-check --ephemeral --dangerously-bypass-approvals-and-sandbox \
+--model {} --output-last-message annotation.json {}",
+    crate::runtime::shell_quote(model),
+    crate::runtime::shell_quote(prompt),
+  );
+  // Codex can think quietly for a while. Keep both the recording and a human observer
+  // visibly alive without touching the model's stdin or final-response file.
+  let heartbeat = format!(
+    r#"{codex} & child=$!; while kill -0 "$child" 2>/dev/null; do printf 'scsh: annotation in progress\n'; sleep 10; done; wait "$child""#
+  );
+  let agent = format!("sh -c {}", crate::runtime::shell_quote(&heartbeat));
+  agent
 }
 
 /// Wait for `child`, capturing its stdout, but kill it and report [`RunFailure::TimedOut`]
@@ -760,6 +783,14 @@ mod tests {
   }
 
   #[test]
+  fn recorded_annotation_emits_a_quiet_work_heartbeat() {
+    let command = recorded_agent_command("gpt-5.4-mini", "summarize");
+    assert!(command.contains("scsh: annotation in progress"), "{command}");
+    assert!(command.contains("sleep 10"), "heartbeat stays well inside the daemon's 30s stale window: {command}");
+    assert!(command.contains("wait \"$child\""), "heartbeat wrapper preserves the Codex exit status: {command}");
+  }
+
+  #[test]
   fn annotate_cast_with_reports_distinct_failure_reasons() {
     let dir = std::env::temp_dir().join(format!("scsh-annotate-test-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -809,7 +840,8 @@ mod tests {
     };
     let err = annotate_cast_with(&cast, "m", dead).unwrap_err();
     assert_eq!(dead_calls, 2);
-    assert!(matches!(&err, AnnotateError::ModelFailed(d) if d.contains("retried once")), "got: {err}");
+    assert!(matches!(&err, AnnotateError::ModelTimedOut(d) if d.contains("retried once")), "got: {err}");
+    assert_eq!(err.failure_reason(), crate::failure::reason::ANNOTATION_TIMED_OUT);
     // A plain (non-timeout) failure is NOT retried.
     let mut plain_calls = 0;
     let plain = |_m: &str, _p: &str| {
