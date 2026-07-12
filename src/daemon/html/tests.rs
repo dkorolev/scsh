@@ -2378,6 +2378,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("function wfBuildGraphHtml"), "late graph creation without reload");
   assert!(js.contains("function wfLayoutWithBookends"), "live graph mirrors Start/Finish");
   assert!(js.contains("function wfLoopIslandsHtml"), "dynamic repeat iterations share a loop island");
+  assert!(js.contains("__(repeat|while)_"), "repeat and do-while iterations share the loop id scheme");
+  assert!(js.contains("'do-while'"), "do-while islands are labeled as do-while, not repeat");
   assert!(js.contains("data-wf-zoom-in"), "graph has explicit zoom controls");
   assert!(js.contains("data-wf-zoom-fit"), "graph has a Fit control");
   assert!(js.contains("stage.style.zoom"), "zoom changes the graph without changing its topology");

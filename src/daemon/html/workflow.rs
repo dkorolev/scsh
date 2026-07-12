@@ -118,15 +118,13 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 }
 
 fn loop_islands_html(layout: &[LaidOut]) -> String {
-  let mut groups: std::collections::BTreeMap<&str, Vec<&LaidOut>> = std::collections::BTreeMap::new();
+  let mut groups: std::collections::BTreeMap<(&str, &str), Vec<&LaidOut>> = std::collections::BTreeMap::new();
   for pos in layout {
-    let Some((base, iteration)) = pos.id.rsplit_once("__repeat_") else { continue };
-    if iteration.parse::<usize>().is_ok() {
-      groups.entry(base).or_default().push(pos);
-    }
+    let Some((base, suffix, _)) = crate::daemon::workflow::parse_loop_iteration_id(&pos.id) else { continue };
+    groups.entry((base, if suffix == "__while" { "do-while" } else { "repeat" })).or_default().push(pos);
   }
   let mut html = String::new();
-  for (base, items) in groups {
+  for ((base, kind), items) in groups {
     let pad = 14.0;
     let label_h = 22.0;
     let left = items.iter().map(|p| p.x).fold(f64::INFINITY, f64::min) - pad;
@@ -134,7 +132,7 @@ fn loop_islands_html(layout: &[LaidOut]) -> String {
     let right = items.iter().map(|p| p.x + p.w).fold(0.0_f64, f64::max) + pad;
     let bottom = items.iter().map(|p| p.y + p.h).fold(0.0_f64, f64::max) + pad;
     html.push_str(&format!(
-      r#"<div class="wf-loop-island" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span>repeat · {name}</span></div>"#,
+      r#"<div class="wf-loop-island" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span>{kind} · {name}</span></div>"#,
       width = right - left,
       height = bottom - top,
       name = esc(base),
@@ -431,11 +429,7 @@ fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut
 fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Vec<LaidOut>, LaidOut, LaidOut) {
   let mut layout = layout_nodes(session, meta, now);
   let shift = BOOKEND_W + GAP_X;
-  let loop_top = if meta
-    .nodes
-    .iter()
-    .any(|n| n.id.rsplit_once("__repeat_").is_some_and(|(_, iteration)| iteration.parse::<usize>().is_ok()))
-  {
+  let loop_top = if meta.nodes.iter().any(|n| crate::daemon::workflow::parse_loop_iteration_id(&n.id).is_some()) {
     36.0
   } else {
     0.0
@@ -597,7 +591,7 @@ fn node_display_title(id: &str) -> String {
     "base".into()
   } else if let Some(h) = id.strip_prefix("build_") {
     h.to_string()
-  } else if let Some((base, iteration)) = id.rsplit_once("__repeat_") {
+  } else if let Some((base, _, iteration)) = crate::daemon::workflow::parse_loop_iteration_id(id) {
     format!("{base} · iteration {iteration}")
   } else {
     id.to_string()

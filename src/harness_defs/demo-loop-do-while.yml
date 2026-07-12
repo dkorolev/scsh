@@ -1,0 +1,33 @@
+# Built-in conditional-loop demo: the body runs at least once, then its own output decides
+# whether the loop takes another lap — the graph learns each iteration only when it starts.
+description: "Create do-while.txt at zero, then increment and commit it until the number reaches three."
+steps:
+  initialize:
+    agent:
+      harness: grok
+      model: composer-2.5-fast
+    prompt: |
+      Create `do-while.txt` at the repository root with exactly `0` followed by one newline.
+      Commit only that file with the message `demo-loop-do-while: initialize number`. Put `0`
+      in the `number` result field. Do nothing else.
+    output:
+      number:
+        type: int
+    commits: true
+  increment:
+    needs: initialize
+    do-while:
+      increment.number:
+        lt: 3
+    agent:
+      harness: grok
+      model: composer-2.5-fast
+    prompt: |
+      Read the single integer in `do-while.txt`, increment it by exactly one, and overwrite the
+      file with the new integer followed by one newline. Commit only that file with the message
+      `demo-loop-do-while: increment number`. Put the new integer in the `number` result field.
+      Do nothing else.
+    output:
+      number:
+        type: int
+    commits: true

@@ -1010,8 +1010,8 @@ function wfUnmetNeeds(session, node) {
 function wfNodeTitle(id) {
   if (id === 'build_base') return 'base';
   if (id.indexOf('build_') === 0) return id.slice(6);
-  const repeated = id.match(/^(.*)__repeat_(\d+)$/);
-  if (repeated) return repeated[1] + ' · iteration ' + repeated[2];
+  const looped = id.match(/^(.*)__(?:repeat|while)_(\d+)$/);
+  if (looped) return looped[1] + ' · iteration ' + looped[2];
   return id;
 }
 function wfBlockerLine(session, id, nowUnix) {
@@ -1161,7 +1161,7 @@ function wfLayoutNodes(session, nodes, nowUnix) {
 function wfLayoutWithBookends(session, nodes, nowUnix) {
   const layout = wfLayoutNodes(session, nodes, nowUnix);
   const shift = WF_BOOKEND_W + WF_GAP_X;
-  const loopTop = nodes.some(n => /__repeat_\d+$/.test(n.id)) ? 36 : 0;
+  const loopTop = nodes.some(n => /__(?:repeat|while)_\d+$/.test(n.id)) ? 36 : 0;
   layout.forEach(n => { n.x += shift; n.y += loopTop; });
   const rootIds = wfGraphRoots(nodes), sinkIds = wfGraphSinks(nodes);
   const centerY = ids => {
@@ -1246,10 +1246,12 @@ function wfBookendHtml(pos, isStart) {
 function wfLoopIslandsHtml(layout) {
   const groups = Object.create(null);
   layout.forEach(pos => {
-    const match = pos.id.match(/^(.*)__repeat_(\d+)$/);
-    if (match) (groups[match[1]] || (groups[match[1]] = [])).push(pos);
+    const match = pos.id.match(/^(.*)__(repeat|while)_(\d+)$/);
+    if (!match) return;
+    const key = (match[2] === 'while' ? 'do-while' : 'repeat') + ' · ' + match[1];
+    (groups[key] || (groups[key] = [])).push(pos);
   });
-  return Object.entries(groups).map(([id, items]) => {
+  return Object.entries(groups).map(([label, items]) => {
     const pad = 14, labelH = 22;
     const left = Math.min(...items.map(p => p.x)) - pad;
     const top = Math.min(...items.map(p => p.y)) - pad - labelH;
@@ -1257,7 +1259,7 @@ function wfLoopIslandsHtml(layout) {
     const bottom = Math.max(...items.map(p => p.y + (p.h || WF_NODE_H))) + pad;
     return '<div class="wf-loop-island" style="left:' + left.toFixed(1) + 'px;top:' + top.toFixed(1) +
       'px;width:' + (right - left).toFixed(1) + 'px;height:' + (bottom - top).toFixed(1) +
-      'px"><span>repeat · ' + esc(id) + '</span></div>';
+      'px"><span>' + esc(label) + '</span></div>';
   }).join('');
 }
 function annotationForProc(session, proc) {

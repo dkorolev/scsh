@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 13] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 14] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -33,6 +33,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 13] {
     ("greet", include_str!("harness_defs/greet.yml")),
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
     ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
+    ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
     ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
@@ -283,7 +284,18 @@ pub struct Step {
   /// Run this step a fixed number of times, sequentially. Each iteration is a distinct
   /// workflow run and commit boundary; the graph discovers iterations as they start.
   pub repeat: Option<usize>,
+  /// Run this step at least once, then again while every condition holds (AND), evaluated
+  /// against the just-finished iteration's outputs — a condition may reference the step's OWN
+  /// output fields, unlike `when:`. Mutually exclusive with `repeat`; iterations are capped at
+  /// [`DO_WHILE_MAX_ITERATIONS`] so a condition that never flips fails the workflow instead of
+  /// burning agent runs forever.
+  pub do_while: Option<When>,
 }
+
+/// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
+/// that never flips must fail the workflow rather than loop indefinitely. Far above any loop
+/// a definition should author; not a tuning knob.
+pub const DO_WHILE_MAX_ITERATIONS: usize = 25;
 
 /// A parsed, validated harness definition — either a flat one-shot task or a workflow of steps.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -335,6 +347,33 @@ impl HarnessDef {
 }
 
 impl Step {
+  /// Whether this step is a loop (`repeat` or `do-while`) — its iterations run sequentially as
+  /// distinct workflow runs, discovered by the graph only as they start.
+  pub fn is_loop(&self) -> bool {
+    self.repeat.is_some() || self.do_while.is_some()
+  }
+
+  /// The run id of one loop iteration — `<id>__repeat_<n>` / `<id>__while_<n>` (the graph
+  /// parses this shape back into "step · iteration n") — or the plain step id when not a loop.
+  pub fn iteration_run_id(&self, iteration: usize) -> String {
+    if self.repeat.is_some() {
+      format!("{}__repeat_{iteration}", self.id)
+    } else if self.do_while.is_some() {
+      format!("{}__while_{iteration}", self.id)
+    } else {
+      self.id.clone()
+    }
+  }
+
+  /// The human word for this step's loop kind ("repeat" / "do-while"), for labels and notes.
+  pub fn loop_kind(&self) -> &'static str {
+    if self.repeat.is_some() {
+      "repeat"
+    } else {
+      "do-while"
+    }
+  }
+
   /// The full prompt scsh sends to the harness for this step: the author's `prompt` plus the
   /// scsh-generated I/O contract — which env vars carry the inputs, and the exact JSON shape to
   /// write to `$SCSH_RESULT`. The author writes intent; scsh guarantees the machine contract.
@@ -648,11 +687,12 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("duplicate key 'steps.{id}.{k}'"));
       }
     }
-    const SK: &[&str] = &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat"];
+    const SK: &[&str] =
+      &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat", "do-while"];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat, do-while)"
         ));
       }
     }
@@ -661,7 +701,8 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     let prompt = required_scalar(fm.get("prompt").copied(), &format!("steps.{id}.prompt"), errors);
     let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
     let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
-    let when = validate_step_when(id, fm.get("when").copied(), errors);
+    let when = validate_step_cond_block(id, "when", fm.get("when").copied(), errors);
+    let do_while = validate_step_cond_block(id, "do-while", fm.get("do-while").copied(), errors);
     let needs = parse_needs(fm.get("needs").copied());
     let artifacts = parse_needs(fm.get("artifacts").copied());
     for a in &artifacts {
@@ -700,9 +741,24 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         None
       }
     };
+    if repeat.is_some() && do_while.is_some() {
+      errors.push(format!("step '{id}' cannot have both 'repeat' and 'do-while'"));
+    }
 
     if let (Some(agent), Some(prompt)) = (agent, prompt) {
-      steps.push(Step { id: id.to_string(), agent, prompt, inputs, outputs, when, needs, artifacts, commits, repeat });
+      steps.push(Step {
+        id: id.to_string(),
+        agent,
+        prompt,
+        inputs,
+        outputs,
+        when,
+        needs,
+        artifacts,
+        commits,
+        repeat,
+        do_while,
+      });
     }
   }
 
@@ -829,20 +885,20 @@ fn validate_step_outputs(id: &str, node: Option<&Node>, errors: &mut Vec<String>
   out
 }
 
-/// Validate a step's `when:` block map into a list of AND-ed conditions.
-fn validate_step_when(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Option<When> {
+/// Validate a step's condition block map (`when:` or `do-while:`) into AND-ed conditions.
+fn validate_step_cond_block(id: &str, key_name: &str, node: Option<&Node>, errors: &mut Vec<String>) -> Option<When> {
   let entries = match node {
     None => return None,
     Some(Node::Map(m)) if !m.is_empty() => m,
     _ => {
-      errors.push(format!("'steps.{id}.when' must be a non-empty mapping of condition entries"));
+      errors.push(format!("'steps.{id}.{key_name}' must be a non-empty mapping of condition entries"));
       return None;
     }
   };
   let mut conds = Vec::new();
   for (key, node) in entries {
     let Some(reference) = Ref::parse(key.trim()) else {
-      errors.push(format!("'steps.{id}.when': '{}' is not a params.X or stepid.field reference", key.trim()));
+      errors.push(format!("'steps.{id}.{key_name}': '{}' is not a params.X or stepid.field reference", key.trim()));
       continue;
     };
     let (op, values) = match node {
@@ -852,7 +908,7 @@ fn validate_step_when(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -
       Node::Map(m) if m.len() == 1 => {
         let (opk, opv) = &m[0];
         let Some(op) = CondOp::parse(opk.trim()) else {
-          errors.push(format!("'steps.{id}.when.{}': unknown operator '{}'", key.trim(), opk.trim()));
+          errors.push(format!("'steps.{id}.{key_name}.{}': unknown operator '{}'", key.trim(), opk.trim()));
           continue;
         };
         match opv {
@@ -861,13 +917,13 @@ fn validate_step_when(id: &str, node: Option<&Node>, errors: &mut Vec<String>) -
           }
           Node::Scalar(s) => (op, vec![s.trim().to_string()]),
           Node::Map(_) => {
-            errors.push(format!("'steps.{id}.when.{}.{}' must be a value", key.trim(), opk.trim()));
+            errors.push(format!("'steps.{id}.{key_name}.{}.{}' must be a value", key.trim(), opk.trim()));
             continue;
           }
         }
       }
       Node::Map(_) => {
-        errors.push(format!("'steps.{id}.when.{}' must be a value or a single operator mapping", key.trim()));
+        errors.push(format!("'steps.{id}.{key_name}.{}' must be a value or a single operator mapping", key.trim()));
         continue;
       }
     };
@@ -935,6 +991,21 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
     }
     for c in s.when.iter().flatten() {
       check_ref(&c.reference, "when", errors);
+    }
+    for c in s.do_while.iter().flatten() {
+      // A do-while condition is evaluated after each iteration, so — unlike `when:` — it may
+      // reference the step's OWN output fields (that is the common case: loop on your result).
+      match &c.reference {
+        Ref::StepField { step, field } if step == &s.id => {
+          if !s.outputs.iter().any(|o| &o.name == field) {
+            errors.push(format!(
+              "step '{}' do-while references {step}.{field}, which is not declared in its own output",
+              s.id
+            ));
+          }
+        }
+        other => check_ref(other, "do-while", errors),
+      }
     }
   }
 
@@ -1181,6 +1252,53 @@ mod tests {
     assert!(def.steps.iter().all(|s| s.commits));
     assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Grok));
     assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("composer-2.5-fast")));
+  }
+
+  #[test]
+  fn builtin_do_while_demo_declares_a_conditional_commit_loop() {
+    let def = builtin("demo-loop-do-while");
+    assert_eq!(def.steps.len(), 2);
+    assert_eq!(def.steps[0].id, "initialize");
+    let increment = &def.steps[1];
+    assert_eq!(increment.id, "increment");
+    assert_eq!(increment.needs, vec!["initialize".to_string()]);
+    assert_eq!(increment.repeat, None);
+    // The loop keeps going while its own freshly-produced number is below three.
+    let cond = increment.do_while.as_ref().expect("increment loops on its own output");
+    assert_eq!(cond.len(), 1);
+    assert_eq!(cond[0].reference, Ref::StepField { step: "increment".into(), field: "number".into() });
+    assert_eq!(cond[0].op, CondOp::Lt);
+    assert_eq!(cond[0].values, vec!["3".to_string()]);
+    assert!(def.steps.iter().all(|s| s.commits));
+    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Grok));
+  }
+
+  #[test]
+  fn workflow_rejects_repeat_combined_with_do_while() {
+    let src = wf("    needs: a\n    repeat: 2\n    do-while:\n      b.y:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let err = validate("t", &src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("cannot have both 'repeat' and 'do-while'")), "{err:?}");
+  }
+
+  #[test]
+  fn do_while_may_reference_own_outputs_but_not_undeclared_ones() {
+    // Self-reference to a declared output is the canonical do-while shape — no `needs` required.
+    let ok = wf("    needs: a\n    do-while:\n      b.y:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let def = validate("t", &ok, DefSource::Repo).unwrap_or_else(|e| panic!("{}", e.join("; ")));
+    let cond = def.steps.iter().find(|s| s.id == "b").unwrap().do_while.as_ref().unwrap();
+    assert_eq!(cond[0].reference, Ref::StepField { step: "b".into(), field: "y".into() });
+
+    let bad = wf("    needs: a\n    do-while:\n      b.missing:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let err = validate("t", &bad, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("b.missing") && e.contains("its own output")), "{err:?}");
+  }
+
+  #[test]
+  fn do_while_referencing_another_step_still_requires_needs() {
+    // A non-self reference in do-while follows the same rule as when: the step must need it.
+    let src = wf("    do-while:\n      a.kind: code\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let err = validate("t", &src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("does not 'needs: a'")), "{err:?}");
   }
 
   #[test]

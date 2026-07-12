@@ -1666,8 +1666,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   let total_steps = def.steps.len();
   let mut step_procs: HashMap<String, ui::screen::Proc> = HashMap::new();
   for (i, s) in def.steps.iter().enumerate() {
-    if s.repeat.is_some() {
-      continue; // repeat iterations appear only when they actually start
+    if s.is_loop() {
+      continue; // loop iterations appear only when they actually start
     }
     let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
     let p = ui.proc(label.clone(), false);
@@ -1741,9 +1741,9 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
       }
       let iteration = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
-      let run_id = if s.repeat.is_some() { format!("{}__repeat_{iteration}", s.id) } else { s.id.clone() };
+      let run_id = s.iteration_run_id(iteration);
       invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
-      if s.repeat.is_some() {
+      if s.is_loop() {
         let label = format!("{}: {} · iteration {iteration}", s.agent.harness.as_str(), s.id);
         let p = ui.proc(label.clone(), false);
         if let Some(c) = &daemon_client {
@@ -1759,7 +1759,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
             None,
           );
         }
-        p.note(&format!("repeat iteration {iteration}"));
+        p.note(&format!("{} iteration {iteration}", s.loop_kind()));
         procs.push(p);
       } else {
         procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
@@ -1808,7 +1808,28 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       match run.result_content.as_deref().map(|c| extract_step_outputs(c, &s.outputs)) {
         Some(Ok(outputs)) => {
           let completed = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
-          if s.repeat.is_some_and(|total| completed < total) {
+          let again = if let Some(total) = s.repeat {
+            completed < total
+          } else if let Some(cond) = &s.do_while {
+            // The condition sees the just-finished iteration: the step's own output fields
+            // resolve from these outputs; params and upstream steps resolve as usual.
+            let holds = harness_def::when_holds(cond, &|r| match r {
+              harness_def::Ref::StepField { step, field } if step == &s.id => outputs.get(field).cloned(),
+              other => resolve_ref(other, def, &state),
+            });
+            if holds && completed >= harness_def::DO_WHILE_MAX_ITERATIONS {
+              failure = Some(format!(
+                "step '{}' hit the do-while backstop ({} iterations) with its condition still true",
+                s.id,
+                harness_def::DO_WHILE_MAX_ITERATIONS
+              ));
+              break;
+            }
+            holds
+          } else {
+            false
+          };
+          if again {
             repeat_done.insert(s.id.clone(), completed);
           } else {
             state.insert(s.id.clone(), StepState { skipped: false, outputs });
@@ -7339,6 +7360,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       artifacts: vec!["summary.txt".into()],
       commits: false,
       repeat: None,
+      do_while: None,
     };
     let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new());
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
