@@ -3,8 +3,8 @@ description: "Create number.txt at zero, then increment and commit it three time
 steps:
   initialize:
     agent:
-      harness: grok
-      model: composer-2.5-fast
+      harness: codex
+      model: gpt-5.5
     prompt: |
       Create `number.txt` at the repository root with exactly `0` followed by one newline.
       Commit only that file with the message `demo-loop-repeat: initialize number`. Put `0` in
@@ -17,8 +17,8 @@ steps:
     needs: initialize
     repeat: 3
     agent:
-      harness: grok
-      model: composer-2.5-fast
+      harness: codex
+      model: gpt-5.5
     prompt: |
       Read the single integer in `number.txt`, increment it by exactly one, and overwrite the
       file with the new integer followed by one newline. Commit only that file with the message
