@@ -124,6 +124,13 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
   if !annotate::host_can_annotate() {
     return annotate_error(as_json, 1, "Codex not available (need the `codex` CLI and a Codex login)");
   }
+  // An explicit retry is the user's override of an earlier browser cancellation. Automatic
+  // children set SCSH_AUTO_ANNOTATE and continue to honor the durable suppression marker.
+  if std::env::var_os("SCSH_AUTO_ANNOTATE").is_none() {
+    for path in paths {
+      let _ = std::fs::remove_file(annotate::suppression_marker(Path::new(path)));
+    }
+  }
   let model = annotate_model();
   let parent = paths.iter().find_map(|p| parent_session_from_cast_path(p));
   let daemon_session = if daemon::Client::daemon_alive() {
@@ -401,7 +408,11 @@ fn annotate_run_casts(
     .into_iter()
     .filter(|c| {
       daemon::chapters_sidecar_path(&c.to_string_lossy())
-        .map(|s| annotate::sidecar_is_stale(c, &s) && !annotation_marker(c).exists())
+        .map(|s| {
+          annotate::sidecar_is_stale(c, &s)
+            && !annotation_marker(c).exists()
+            && !annotate::automatic_annotation_suppressed(c)
+        })
         .unwrap_or(false)
     })
     .collect();
@@ -527,7 +538,7 @@ fn annotation_marker(cast: &Path) -> PathBuf {
 /// the end-of-job catch-up sweep from duplicating live work; the child shell removes it on
 /// every exit, while a successful child leaves the chapters sidecar that makes catch-up a no-op.
 fn spawn_cast_annotation(cast: &Path) {
-  if !annotate::host_can_annotate() {
+  if !annotate::host_can_annotate() || annotate::automatic_annotation_suppressed(cast) {
     return;
   }
   let Some(sidecar) = daemon::chapters_sidecar_path(&cast.to_string_lossy()) else {
@@ -545,7 +556,7 @@ fn spawn_cast_annotation(cast: &Path) {
     return;
   };
   let script = format!(
-    "trap 'rm -f {marker}' EXIT; {exe} annotate-cast {cast} --json >/dev/null 2>&1",
+    "trap 'rm -f {marker}' EXIT; SCSH_AUTO_ANNOTATE=1 {exe} annotate-cast {cast} --json >/dev/null 2>&1",
     marker = runtime::shell_quote(&marker.to_string_lossy()),
     exe = runtime::shell_quote(&exe.to_string_lossy()),
     cast = runtime::shell_quote(&cast.to_string_lossy()),
@@ -3733,9 +3744,6 @@ fn run_one_skill(
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
   }
-  if let Some(durable) = durable_cast.as_deref() {
-    spawn_cast_annotation(Path::new(durable));
-  }
   if let Some(p) = &claude_auth {
     let _ = std::fs::remove_dir_all(p);
   }
@@ -3752,7 +3760,11 @@ fn run_one_skill(
     scrub_cursor_credentials(&run_dir);
   }
   match result {
-    Ok((true, _, _)) => {}
+    Ok((true, _, _)) => {
+      if let Some(durable) = durable_cast.as_deref() {
+        spawn_cast_annotation(Path::new(durable));
+      }
+    }
     Ok((false, ui::screen::Killed::Timeout, _)) => {
       // Timed out: the client was killed; stop the container too (best effort).
       ui::signals::stop_container(&rt.name, &name);

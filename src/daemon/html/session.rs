@@ -279,14 +279,21 @@ fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRec
 /// A small per-proc "Force stop" button. Only rendered while that proc still runs on a
 /// live session — finished/zombie steps omit it (no grayed-out stub).
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
-  use crate::daemon::model::{ProcStatus, SessionLifecycle};
+  use crate::daemon::model::{ProcKind, ProcStatus, SessionLifecycle};
   let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
   let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
   if !(live_session && live_proc) {
     return String::new();
   }
   format!(
-    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm proc-kill\" data-proc-stop=\"{index}\" data-session=\"{id}\" title=\"Force-stop this container only — the rest of the job continues\"><span>Force stop</span></button>",
+    "<button type=\"button\" class=\"chamfer btn btn--red btn--sm proc-kill\" data-proc-stop=\"{index}\" data-proc-kind=\"{}\" data-session=\"{id}\" title=\"{}\"><span>{}</span></button>",
+    proc.kind.as_str(),
+    if proc.kind == ProcKind::Annotate {
+      "Stop this annotation — the recording remains unchanged"
+    } else {
+      "Force-stop this container only — the rest of the job continues"
+    },
+    if proc.kind == ProcKind::Annotate { "Stop annotation" } else { "Force stop" },
     index = proc.index,
     id = esc(&session.id),
   )

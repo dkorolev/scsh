@@ -1094,7 +1094,10 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
       let path = field_str(&obj, "path").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
-        p.cast_path = if path.is_empty() { None } else { Some(path) };
+        p.cast_path = if path.is_empty() { None } else { Some(path.clone()) };
+        if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) && !path.is_empty() {
+          crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
+        }
         true
       } else {
         false
@@ -1162,6 +1165,10 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let fail_reason = field_str(&obj, "fail_reason");
       let elapsed = field_num(&obj, "elapsed");
       if let Some(p) = store.proc_mut(&session, proc_index) {
+        // A late client finish must not resurrect a proc the browser already stopped.
+        if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) {
+          return true;
+        }
         p.status = status;
         p.detail = detail;
         p.fail_reason = fail_reason;
@@ -1908,7 +1915,7 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   };
   let now = now_unix_secs();
   let runtime = crate::runtime::detect_runtime().map(|r| r.name);
-  let (run_pid, containers, already_ended) = {
+  let (run_pid, containers, suppressed, already_ended) = {
     let mut store = lock_store(store);
     let Some(s) = store.sessions.get_mut(&session_id) else {
       return (404, err_body("session not found"), false);
@@ -1917,6 +1924,16 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
       return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
     }
     let containers: Vec<String> = s.procs.iter().filter_map(|p| p.container_name.clone()).collect();
+    let suppressed: Vec<String> = s
+      .procs
+      .iter()
+      .filter(|p| p.status == ProcStatus::Running || p.status == ProcStatus::Waiting)
+      .filter_map(|p| match p.kind {
+        ProcKind::Skill => p.cast_path.clone(),
+        ProcKind::Annotate => p.annotate_target.clone(),
+        ProcKind::Build => None,
+      })
+      .collect();
     let run_pid = s.run_pid;
     s.ended_at = Some(now);
     s.client_connected = false;
@@ -1932,9 +1949,12 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
         p.container_name = None;
       }
     }
-    (run_pid, containers, false)
+    (run_pid, containers, suppressed, false)
   };
   let _ = already_ended;
+  for path in suppressed {
+    crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
+  }
   // Tear down outside the store lock: container stop sleeps up to ~1s each.
   if let Some(rt) = runtime.as_deref() {
     for name in &containers {
@@ -1953,9 +1973,9 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   (200, "{\"ok\":true}".into(), true)
 }
 
-/// `POST /api/v1/proc/stop` — body `{"session":"…","proc":<index>}`. Kill ONE container: stop
-/// just that proc's container and mark it failed with `force_stopped`; the session (and its
-/// other procs) keeps running. Idempotent on a proc that already finished
+/// `POST /api/v1/proc/stop` — body `{"session":"…","proc":<index>}`. Stop one live proc:
+/// kill its container, or signal the host annotation process while suppressing its sidecar.
+/// The session and its other procs keep running. Idempotent on a proc that already finished
 /// (`{ok:true,already_ended:true}`).
 fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
@@ -1970,11 +1990,12 @@ fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bo
     return (400, err_body("give a proc index"), false);
   };
   let runtime = crate::runtime::detect_runtime().map(|r| r.name);
-  let (container, label) = {
+  let (container, label, annotation_pid, suppress) = {
     let mut store = lock_store(store);
     let Some(s) = store.sessions.get_mut(&session_id) else {
       return (404, err_body("session not found"), false);
     };
+    let run_pid = s.run_pid;
     let Some(p) = s.procs.iter_mut().find(|p| p.index == index) else {
       return (404, err_body("proc not found"), false);
     };
@@ -1982,18 +2003,34 @@ fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bo
       return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
     }
     let container = p.container_name.take();
+    let annotation_pid = (p.kind == ProcKind::Annotate).then_some(run_pid).flatten();
+    let suppress = match p.kind {
+      ProcKind::Skill => p.cast_path.clone(),
+      ProcKind::Annotate => p.annotate_target.clone(),
+      ProcKind::Build => None,
+    };
     p.status = ProcStatus::Fail;
     p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
     if p.detail.is_none() {
-      p.detail = Some("container killed from the session browser".into());
+      p.detail = Some(if p.kind == ProcKind::Annotate {
+        "annotation stopped from the session browser; the recording is unchanged".into()
+      } else {
+        "container killed from the session browser".into()
+      });
     }
     let label = p.label.clone();
     s.last_seen_at = now_unix_secs();
-    (container, label)
+    (container, label, annotation_pid, suppress)
   };
+  if let Some(path) = suppress {
+    crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
+  }
   // Tear down outside the store lock: container stop sleeps up to ~1s.
   if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
     crate::ui::signals::stop_container(rt, name);
+  }
+  if let Some(pid) = annotation_pid {
+    signal_run_pid(pid);
   }
   crate::failure::log_session_proc(
     &session_id,
@@ -2741,6 +2778,70 @@ mod tests {
     // Unknown proc index → 404.
     let (status3, _, _) = proc_stop_response(r#"{"session":"kill01","proc":9}"#, &store);
     assert_eq!(status3, 404);
+  }
+
+  #[test]
+  fn proc_stop_cancels_annotation_without_touching_its_recording() {
+    let dir = std::env::temp_dir().join(format!("scsh-stop-annotation-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("source.cast");
+    std::fs::write(&cast, "recording").unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    {
+      let mut guard = store.lock().unwrap();
+      guard.insert_session(
+        "annstp".into(),
+        Session {
+          id: "annstp".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: Some("annotate".into()),
+          kind: Some("annotate".into()),
+          repo: INTERNAL_REPO.into(),
+          branch: String::new(),
+          skills: Vec::new(),
+          procs: vec![ProcRecord {
+            index: 0,
+            label: "annotate · source".into(),
+            kind: ProcKind::Annotate,
+            status: ProcStatus::Running,
+            skill_name: None,
+            harness: Some("codex".into()),
+            model: None,
+            started_at: Some(50),
+            note: None,
+            detail: None,
+            fail_reason: None,
+            elapsed: None,
+            lines: Vec::new(),
+            container_name: None,
+            cast_path: None,
+            diff_path: None,
+            skill_source: None,
+            route: None,
+            result_path: None,
+            annotate_target: Some(cast.to_string_lossy().into_owned()),
+          }],
+          last_seen_at: 50,
+          client_connected: true,
+          run_pid: None,
+          workflow: None,
+          parent_session: None,
+        },
+      );
+    }
+    let (status, body, mutated) = proc_stop_response(r#"{"session":"annstp","proc":0}"#, &store);
+    assert_eq!(status, 200, "body: {body}");
+    assert!(mutated);
+    let guard = store.lock().unwrap();
+    let proc = &guard.sessions["annstp"].procs[0];
+    assert_eq!(proc.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
+    assert!(proc.detail.as_deref().is_some_and(|d| d.contains("recording is unchanged")));
+    drop(guard);
+    assert_eq!(std::fs::read_to_string(&cast).unwrap(), "recording");
+    assert!(crate::annotate::automatic_annotation_suppressed(&cast));
+    assert!(!dir.join("source.chapters.json").exists());
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

@@ -1528,9 +1528,9 @@ fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
     let procs = session_procs_html(&html);
     assert!(procs.contains("annotate · add-20260711-114749-utc-ufakca"), "row renders: {procs}");
     if status == ProcStatus::Running {
-      assert!(procs.contains("Force stop"), "per-proc Force stop while live");
+      assert!(procs.contains("Stop annotation"), "annotation has its own stop action while live");
     } else {
-      assert!(!procs.contains("Force stop"), "no Force stop on a settled row ({status:?})");
+      assert!(!procs.contains("Stop annotation"), "no stop action on a settled row ({status:?})");
     }
     assert!(!procs.contains("autoscroll-ctl"), "no auto-scroll control on a slim row ({status:?}): {procs}");
     assert!(!procs.contains(r#"<div class="output">"#), "no output box on a slim row ({status:?}): {procs}");

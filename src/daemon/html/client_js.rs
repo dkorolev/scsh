@@ -574,9 +574,12 @@ function updateProcFields(det, p, nowUnix) {
     btn.type = 'button';
     btn.className = 'chamfer btn btn--red btn--sm proc-kill';
     btn.setAttribute('data-proc-stop', String(p.index));
+    btn.setAttribute('data-proc-kind', p.kind || 'skill');
     btn.setAttribute('data-session', SESSION_ID);
-    btn.title = 'Force-stop this container only — the rest of the job continues';
-    btn.innerHTML = '<span>Force stop</span>';
+    btn.title = p.kind === 'annotate'
+      ? 'Stop this annotation — the recording remains unchanged'
+      : 'Force-stop this container only — the rest of the job continues';
+    btn.innerHTML = '<span>' + (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span>';
     actions.appendChild(btn);
     btn.addEventListener('click', () => killProc(btn));
   }
@@ -966,8 +969,10 @@ function procHtml(p, isOpen, nowUnix) {
     : '';
   const kill = live
     ? '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
-      esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) +
-      '" title="Force-stop this container only — the rest of the job continues"><span>Force stop</span></button>'
+      esc(String(p.index)) + '" data-proc-kind="' + esc(p.kind || 'skill') + '" data-session="' + esc(SESSION_ID) +
+      '" title="' + (p.kind === 'annotate' ? 'Stop this annotation — the recording remains unchanged' :
+        'Force-stop this container only — the rest of the job continues') + '"><span>' +
+      (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span></button>'
     : '';
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
@@ -1941,11 +1946,13 @@ function initSessionStop() {
 async function killProc(btn) {
   const session = btn.getAttribute('data-session');
   const proc = parseInt(btn.getAttribute('data-proc-stop'), 10);
+  const annotate = btn.getAttribute('data-proc-kind') === 'annotate';
   if (!session || Number.isNaN(proc)) return;
   const ok = await scshConfirm({
-    title: 'Force stop this container?',
-    body: 'Only this run stops; the rest of the job continues.',
-    confirmLabel: 'Force stop',
+    title: annotate ? 'Stop this annotation?' : 'Force stop this container?',
+    body: annotate ? 'The recording remains unchanged and no annotation will be added.' :
+      'Only this run stops; the rest of the job continues.',
+    confirmLabel: annotate ? 'Stop annotation' : 'Force stop',
     danger: true,
   });
   if (!ok) return;
@@ -1960,14 +1967,14 @@ async function killProc(btn) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
-      setBtnLabel(btn, 'Force stop');
+      setBtnLabel(btn, annotate ? 'Stop annotation' : 'Force stop');
       showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
     btn.remove();
   } catch (e) {
     btn.disabled = false;
-    setBtnLabel(btn, 'Force stop');
+    setBtnLabel(btn, annotate ? 'Stop annotation' : 'Force stop');
     showToast(String(e));
   }
 }

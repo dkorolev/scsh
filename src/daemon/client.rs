@@ -224,7 +224,11 @@ impl Client {
       proc_index,
       quote(path)
     );
-    self.post("/api/v1/proc/cast", &body);
+    // Synchronous so a browser force-stop can suppress annotation on the durable cast
+    // before the run reaches its end-of-job annotation sweep.
+    if !self.post_sync_after_flush("/api/v1/proc/cast", &body) {
+      log_post_failure("/api/v1/proc/cast", Some(proc_index));
+    }
   }
 
   /// Tell the daemon where the packed commits-diff page for this step lives on the host

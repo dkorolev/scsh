@@ -41,6 +41,8 @@ const MAX_TEXT_BYTES: usize = 4096;
 /// [`AnnotateError::hint`] gives the paired `→` fix.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AnnotateError {
+  /// The browser stopped this annotation; the source cast stays untouched.
+  Cancelled,
   /// The cast file could not be read from disk.
   UnreadableCast(String),
   /// The recording rendered to an empty transcript — nothing visible to annotate.
@@ -60,6 +62,7 @@ pub enum AnnotateError {
 impl std::fmt::Display for AnnotateError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
+      AnnotateError::Cancelled => write!(f, "annotation was stopped; the recording is unchanged"),
       AnnotateError::UnreadableCast(e) => write!(f, "cannot read the cast file ({e})"),
       AnnotateError::EmptyTranscript => write!(f, "the recording has no visible output to annotate"),
       AnnotateError::ModelFailed(detail) => write!(f, "{detail}"),
@@ -74,6 +77,7 @@ impl std::fmt::Display for AnnotateError {
 impl AnnotateError {
   pub fn failure_reason(&self) -> &'static str {
     match self {
+      Self::Cancelled => crate::failure::reason::FORCE_STOPPED,
       Self::ModelTimedOut(_) => crate::failure::reason::ANNOTATION_TIMED_OUT,
       _ => "annotate_failed",
     }
@@ -82,6 +86,7 @@ impl AnnotateError {
   /// The `→ how to fix` line paired with the `✗` reason in human-facing CLI output.
   pub fn hint(&self) -> &'static str {
     match self {
+      AnnotateError::Cancelled => "run `scsh annotate-cast <cast>` again if you want annotations later",
       AnnotateError::UnreadableCast(_) => "check the path and permissions, then re-run `scsh annotate-cast <cast>`",
       AnnotateError::EmptyTranscript => "record a session that produces visible output; an empty cast has no chapters",
       AnnotateError::ModelFailed(_) | AnnotateError::ModelTimedOut(_) => {
@@ -372,6 +377,21 @@ pub fn sidecar_is_stale(cast: &Path, sidecar: &Path) -> bool {
   }
 }
 
+/// Durable opt-out left beside a recording whose run or annotation was force-stopped.
+pub fn suppression_marker(cast: &Path) -> std::path::PathBuf {
+  let mut marker = cast.as_os_str().to_os_string();
+  marker.push(".annotation-suppressed");
+  std::path::PathBuf::from(marker)
+}
+
+pub fn suppress_automatic_annotation(cast: &Path) {
+  let _ = std::fs::OpenOptions::new().write(true).create(true).truncate(false).open(suppression_marker(cast));
+}
+
+pub fn automatic_annotation_suppressed(cast: &Path) -> bool {
+  suppression_marker(cast).exists()
+}
+
 /// Annotate one cast file: render → Codex → validated sidecar written next
 /// to the cast. Returns the sidecar path on success, or the reason nothing was written —
 /// annotation stays best-effort (callers never fail a run over it), but the reason feeds
@@ -411,6 +431,9 @@ where
   if annotation.chapters.is_empty() {
     return Err(AnnotateError::NoValidChapters);
   }
+  if automatic_annotation_suppressed(cast_path) {
+    return Err(AnnotateError::Cancelled);
+  }
   let sidecar = crate::daemon::chapters_sidecar_path(&cast_path.to_string_lossy())
     .ok_or_else(|| AnnotateError::WriteFailed("not a .cast path, cannot derive the sidecar name".into()))?;
   crate::atomic_write(&sidecar, annotation.to_sidecar_json().as_bytes())
@@ -441,6 +464,9 @@ pub fn annotate_cast(
   };
   if let Some(reply) = recorded_reply {
     if let Some(annotation) = parse_annotation(&reply).filter(|a| !a.chapters.is_empty()) {
+      if automatic_annotation_suppressed(cast_path) {
+        return Err(AnnotateError::Cancelled);
+      }
       let sidecar = crate::daemon::chapters_sidecar_path(&cast_path.to_string_lossy())
         .ok_or_else(|| AnnotateError::WriteFailed("not a .cast path, cannot derive the sidecar name".into()))?;
       crate::atomic_write(&sidecar, annotation.to_sidecar_json().as_bytes())
@@ -769,6 +795,25 @@ mod tests {
     let written = std::fs::read_to_string(&side).unwrap();
     assert!(written.contains("\"summary\": \"Did work.\""), "got: {written}");
     assert!(written.contains("\"title\": \"Start\""), "got: {written}");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn stopped_annotation_never_writes_a_sidecar() {
+    let dir = std::env::temp_dir().join(format!("scsh-annotate-stop-test-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("rec.cast");
+    std::fs::write(&cast, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n[0.1, \"o\", \"working\\r\\n\"]\n")
+      .unwrap();
+    let target = cast.clone();
+    let reply = move |_m: &str, _p: &str| {
+      suppress_automatic_annotation(&target);
+      Ok("{\"summary\":\"Did work.\",\"chapters\":[{\"t\":0,\"title\":\"Start\"}]}".to_string())
+    };
+    assert_eq!(annotate_cast_with(&cast, "m", reply), Err(AnnotateError::Cancelled));
+    assert!(automatic_annotation_suppressed(&cast));
+    assert!(!dir.join("rec.chapters.json").exists(), "cancellation leaves the recording without annotations");
+    assert!(cast.is_file(), "the source recording is untouched");
     let _ = std::fs::remove_dir_all(&dir);
   }
 
