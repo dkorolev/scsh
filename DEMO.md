@@ -44,7 +44,7 @@ command -v scsh >/dev/null && echo "scsh: on PATH" || echo "scsh: build it (carg
   && echo "container runtime: ok" || echo "container runtime: none — real runs will be skipped"
 command -v packdiff >/dev/null 2>&1 \
   && echo "packdiff: ok — commit-enabled steps get browsable diffs on the job page" \
-  || echo "packdiff: not found (optional) — install with \`cargo install packdiff --version 0.4.1 --locked\` to see per-step commit diffs"
+  || echo "packdiff: not found (optional) — install with \`cargo install packdiff --version 0.4.2 --locked\` to see per-step commit diffs"
 
 DEMO_ROUTES_AVAILABLE=0
 DEMO_ROUTE_GPT=N/A
@@ -176,7 +176,7 @@ cat subtract_log.txt
 git status --porcelain
 ```
 
-**With `packdiff` installed** (step 1, 0.4.1), each integration also prints a `commits diff packed — …` line, and the job page (the `session recordings & live board` link `scsh run` printed) shows a **⇄ commits diff** chip on each committing step's row — click it to browse that step's commits as a self-contained **document-first** review page (Description → Commits → Files changed → Diff; Unified / Side-by-side). On **add**'s page, the `PR-DESCRIPTION.md` the skill committed (authored as the scsh bot — packdiff's notes-author convention) is lifted out of the diff and rendered as the commentable **Description** section on top, like the pull request this branch would become; **subtract**'s page shows a plain diff with its commit listed.
+**With `packdiff` installed** (step 1, 0.4.2), each integration also prints a `commits diff packed — …` line, and the job page (the `session recordings & live board` link `scsh run` printed) shows a **⇄ commits diff** chip on each committing step's row — click it to browse that step's commits as a self-contained **document-first** review page (Description → Commits → Files changed → Diff; Unified / Side-by-side). On **add**'s page, the `PR-DESCRIPTION.md` the skill committed (authored as the scsh bot — packdiff's notes-author convention) is lifted out of the diff and rendered as the commentable **Description** section on top, like the pull request this branch would become; **subtract**'s page shows a plain diff with its commit listed.
 
 If a route was **N/A** in step 1, expect `scsh run` to skip it — not fail the whole run.
 

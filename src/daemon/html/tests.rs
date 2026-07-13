@@ -875,7 +875,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
   assert!(
     html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
-    "packdiff 0.4.1 needs scripts + same-origin for WASM/localStorage: {html}"
+    "packdiff 0.4.2 needs scripts + same-origin for WASM/localStorage: {html}"
   );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
