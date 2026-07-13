@@ -164,14 +164,111 @@ impl Drop for LiveUi {
   }
 }
 
-/// Screen-activity watchdog for [`Proc::run_watched`]: the growing file whose size is the
-/// heartbeat (for a skill run, the bind-mounted asciinema cast — every TUI redraw grows it),
-/// and how long it may stay frozen before the child is killed as inactive.
+/// Screen-activity watchdog for [`Proc::run_watched`]: the growing file whose CONTENT is the
+/// heartbeat (for a skill run, the bind-mounted asciinema cast), and how long it may go
+/// without anything new before the child is killed as inactive.
+///
+/// Raw growth is not liveness: a wedged agent's TUI spinner redraws forever, so the cast keeps
+/// growing while nothing happens underneath (observed live: a 30-minute grok hang whose cast
+/// grew the whole time). Activity therefore counts only when the file gains a line whose
+/// normalized content is NOVEL — the asciicast event timestamp is stripped and digits are
+/// erased, so a spinner cycling a fixed frame set (even with a ticking elapsed-seconds
+/// counter) stops registering once every frame has been seen, while genuine agent output
+/// keeps producing never-seen lines.
 pub struct ActivityWatch {
-  /// Polled (`~100ms`) for size changes; a file that never appears counts as never active.
+  /// Polled (`~100ms`) for new content; a file that never appears counts as never active.
   pub file: std::path::PathBuf,
-  /// Silence budget: kill the child when `file` has not grown for this long.
+  /// Silence budget: kill the child when `file` has shown nothing novel for this long.
   pub limit: Duration,
+}
+
+/// Bounded memory of normalized cast-line hashes already seen, plus the read cursor into the
+/// watched file. Backs one [`ActivityWatch`] evaluation loop.
+struct NoveltyWatch {
+  file: std::path::PathBuf,
+  /// Byte offset of the next unread byte (reset when the file shrinks or vanishes).
+  offset: u64,
+  /// Trailing bytes of an incomplete final line, kept until its newline arrives.
+  carry: Vec<u8>,
+  seen: std::collections::HashSet<u64>,
+  /// Insertion order for FIFO eviction, so `seen` stays bounded on long runs.
+  order: std::collections::VecDeque<u64>,
+}
+
+/// Spinner cycles are tiny; this only needs to exceed the largest realistic set of distinct
+/// idle frames. Evicting truly old frames errs toward counting them as novel again — the
+/// safe direction (it can only delay a kill, never cause a false one).
+const NOVELTY_MEMORY: usize = 4096;
+/// Per-poll read cap so one poll never stalls the supervision loop on a runaway file.
+const NOVELTY_READ_CAP: u64 = 1 << 20;
+
+impl NoveltyWatch {
+  fn new(file: &std::path::Path) -> Self {
+    NoveltyWatch {
+      file: file.to_path_buf(),
+      offset: 0,
+      carry: Vec::new(),
+      seen: std::collections::HashSet::new(),
+      order: std::collections::VecDeque::new(),
+    }
+  }
+
+  /// Hash one raw cast line with its volatile parts erased: the leading `[<time>,` of an
+  /// asciicast event is dropped (every frame has a fresh timestamp) and ASCII digits are
+  /// skipped (elapsed-seconds counters and percent readouts tick without meaning progress).
+  fn normalized_hash(line: &[u8]) -> u64 {
+    use std::hash::Hasher;
+    let start =
+      if line.first() == Some(&b'[') { line.iter().position(|b| *b == b',').map(|i| i + 1).unwrap_or(0) } else { 0 };
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    for b in &line[start..] {
+      if !b.is_ascii_digit() {
+        h.write_u8(*b);
+      }
+    }
+    h.finish()
+  }
+
+  /// Read whatever the file gained since the last poll; `true` when any complete new line
+  /// hashes to something not seen before (= genuine screen novelty).
+  fn poll(&mut self) -> bool {
+    use std::io::{Read, Seek};
+    let Ok(meta) = std::fs::metadata(&self.file) else { return false };
+    if meta.len() < self.offset {
+      // Truncated or replaced (a re-recorded cast): start over; fresh content counts anew.
+      self.offset = 0;
+      self.carry.clear();
+    }
+    if meta.len() == self.offset {
+      return false;
+    }
+    let Ok(mut f) = std::fs::File::open(&self.file) else { return false };
+    if f.seek(std::io::SeekFrom::Start(self.offset)).is_err() {
+      return false;
+    }
+    let mut chunk = Vec::new();
+    let Ok(read) = f.take(NOVELTY_READ_CAP).read_to_end(&mut chunk) else { return false };
+    self.offset += read as u64;
+    let mut novel = false;
+    for byte in chunk {
+      if byte == b'\n' {
+        let hash = Self::normalized_hash(&self.carry);
+        self.carry.clear();
+        if self.seen.insert(hash) {
+          novel = true;
+          self.order.push_back(hash);
+          if self.order.len() > NOVELTY_MEMORY {
+            if let Some(old) = self.order.pop_front() {
+              self.seen.remove(&old);
+            }
+          }
+        }
+      } else {
+        self.carry.push(byte);
+      }
+    }
+    novel
+  }
 }
 
 /// Why an [`ActivityWatch`]ed child was killed, if it was.
@@ -308,9 +405,9 @@ impl Proc {
     let status = if timeout.is_none() && watch.is_none() {
       child.wait()?
     } else {
-      // The activity clock starts now: a watched file that never appears (or never grows)
-      // still trips the watchdog once the limit elapses.
-      let mut last_seen_len: Option<u64> = watch.and_then(|w| std::fs::metadata(&w.file).ok()).map(|m| m.len());
+      // The activity clock starts now: a watched file that never appears (or never shows a
+      // novel line) still trips the watchdog once the limit elapses.
+      let mut novelty = watch.map(|w| NoveltyWatch::new(&w.file));
       let mut last_activity = std::time::Instant::now();
       loop {
         if let Some(s) = child.try_wait()? {
@@ -324,9 +421,7 @@ impl Proc {
           }
         }
         if let Some(w) = watch {
-          let len = std::fs::metadata(&w.file).ok().map(|m| m.len());
-          if len != last_seen_len {
-            last_seen_len = len;
+          if novelty.as_mut().is_some_and(NoveltyWatch::poll) {
             last_activity = std::time::Instant::now();
           }
           if last_activity.elapsed() >= w.limit {
@@ -799,12 +894,52 @@ mod tests {
     p.start();
     let file = std::env::temp_dir().join(format!("scsh-watch-grow-{}", std::process::id()));
     let _ = std::fs::remove_file(&file);
-    // The child grows the watched file every 100ms — well inside the 600ms budget — then exits 0.
-    let script = format!("for i in 1 2 3 4 5 6 7 8; do echo x >> {}; sleep 0.1; done", file.display());
+    // The child appends a NOVEL line every 100ms — well inside the 600ms budget — then exits 0.
+    // (Letters, not a counter: digits are normalized away, so `line 1`/`line 2` would count
+    // as the same frame — that is the spinner-thrash case the watchdog now kills.)
+    let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
     let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600) };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch)).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::No);
     assert!(ok, "an active child must not be killed by the watchdog");
+  }
+
+  #[test]
+  fn proc_run_watched_kills_a_spinner_that_repeats_the_same_frames() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("spinner", false);
+    p.start();
+    let file = std::env::temp_dir().join(format!("scsh-watch-spin-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    // The file GROWS constantly, but every event is the same frame up to its timestamp and a
+    // ticking seconds counter — a wedged TUI's spinner. The old size-based watchdog never
+    // fired on this (observed live: a 30-minute grok hang with a growing cast).
+    let script = format!(
+      r#"i=0; while true; do echo "[$i.5, \"o\", \"thinking ${{i}}s\"]" >> {}; i=$((i+1)); sleep 0.05; done"#,
+      file.display()
+    );
+    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(500) };
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch)).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(killed, Killed::Inactive, "repeating frames are not activity");
+    assert!(!ok);
+  }
+
+  #[test]
+  fn novelty_normalization_erases_timestamps_and_digits_only() {
+    // Same asciicast frame at different times / tick counts → one hash (a spinner).
+    let a = NoveltyWatch::normalized_hash(br#"[1.02, "o", "thinking 3s"]"#);
+    let b = NoveltyWatch::normalized_hash(br#"[87.9, "o", "thinking 41s"]"#);
+    assert_eq!(a, b);
+    // Genuinely different content → different hashes (streamed tokens are progress).
+    let c = NoveltyWatch::normalized_hash(br#"[88.0, "o", "wrote do-while.txt"]"#);
+    assert_ne!(a, c);
+    // Non-event lines (the asciicast header) hash on their full digit-stripped content.
+    let h1 = NoveltyWatch::normalized_hash(br#"{"version": 2, "width": 200}"#);
+    let h2 = NoveltyWatch::normalized_hash(br#"{"version": 2, "width": 100}"#);
+    let h3 = NoveltyWatch::normalized_hash(br#"{"version": 2, "height": 50}"#);
+    assert_eq!(h1, h2, "digits are erased everywhere");
+    assert_ne!(h1, h3);
   }
 }

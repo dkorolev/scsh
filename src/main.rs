@@ -3719,9 +3719,10 @@ fn run_one_skill(
   let repo_mount = if git_transport { runtime::RepoMountMode::TmpOnly } else { runtime::RepoMountMode::Full };
   let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd, repo_mount);
   let timeout = skill.timeout.map(Duration::from_secs);
-  // Screen-inactivity watchdog: the bind-mounted cast grows on every TUI redraw, so a frozen
-  // cast means a stuck harness (hung login, exhausted quota, dead TUI) — kill it rather than
-  // waiting out the full wall-clock timeout.
+  // Screen-inactivity watchdog: the bind-mounted cast is the heartbeat, counting only NOVEL
+  // frames (timestamps stripped, digits erased) — so both a frozen TUI and a wedged one
+  // hiding behind a looping spinner (hung login, exhausted quota, gateway retry loop) are
+  // killed rather than waiting out the full wall-clock timeout.
   let inactivity_secs = config::effective_inactivity_timeout(skill.harness, skill.inactivity_timeout);
   let watch = ui::screen::ActivityWatch {
     file: run_dir.join(runtime::RUN_CAST_REL),
@@ -3779,7 +3780,7 @@ fn run_one_skill(
       // but its own reason so stats can tell a stuck harness from a slow one.
       ui::signals::stop_container(&rt.name, &name);
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
-      let why = format!("no screen activity for {inactivity_secs}s (inactivity_timeout)");
+      let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir);
@@ -6531,7 +6532,7 @@ fn print_help_config() {
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
-      inactivity_timeout: 120  # optional; seconds the recorded screen may stay frozen
+      inactivity_timeout: 120  # optional; seconds the recorded screen may show nothing new
                           #       before the run is killed as stuck. Default 120, or 600
                           #       for grok (silent Build TUI thinking). Per-route override
                           #       under invocations: is allowed too.

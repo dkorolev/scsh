@@ -31,14 +31,17 @@ pub struct Terminal {
 pub const DEFAULT_TERMINAL_COLS: u16 = 200;
 pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 
-/// Default seconds of screen inactivity (the recorded cast not growing) before a running
-/// skill is killed as stuck — used for every harness except Grok (see
+/// Default seconds of screen inactivity (the recorded cast gaining no NOVEL frame — pure
+/// spinner repaints do not count, see `ui::screen::ActivityWatch`) before a running skill is
+/// killed as stuck — used for every harness except Grok (see
 /// [`Harness::default_inactivity_timeout_secs`]). Override with `inactivity_timeout:` on a
 /// skill or an `invocations:` route in `.scsh.yml`.
 pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 120;
 
-/// Grok's Build TUI can think for long stretches without redrawing the cast; a 120s
-/// inactivity kill burns the one transient retry on every code-review fleet run.
+/// Grok's Build TUI can think for long stretches without producing anything new on screen; a
+/// 120s inactivity kill burns the one transient retry on every code-review fleet run. (Its
+/// wedged states — an endlessly looping spinner — are still caught at this limit, because
+/// repeated frames no longer count as activity.)
 pub const GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 600;
 
 /// Resolve the inactivity watchdog limit: YAML override (route or skill) wins, else the
