@@ -1465,6 +1465,17 @@ fn resolve_ref(
   }
 }
 
+/// Resolve one step INPUT: current state first, then the previous do-while iteration's saved
+/// outputs — the loop-carried channel validate_step_graph admits, so a body step can consume
+/// what the loop's final step produced last round without any committed file. Empty when
+/// neither has the value (notably: every loop-carried input on the first iteration).
+fn resolve_input(
+  reference: &harness_def::Ref, def: &harness_def::HarnessDef, state: &std::collections::HashMap<String, StepState>,
+  loop_prev: &std::collections::HashMap<String, StepState>,
+) -> String {
+  resolve_ref(reference, def, state).or_else(|| resolve_ref(reference, def, loop_prev)).unwrap_or_default()
+}
+
 /// Parse a step's result JSON into `field -> scalar-as-string` (non-scalar values are dropped;
 /// the schema check reports any that are then missing).
 fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String, String>, String> {
@@ -1731,6 +1742,10 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   // Walk the DAG: a step is decidable once every step it needs has a state (run or skipped).
   let mut state: HashMap<String, StepState> = HashMap::new();
   let mut repeat_done: HashMap<String, usize> = HashMap::new();
+  // Previous do-while iteration's outputs, keyed by the loop's final step — the loop-carried
+  // channel `resolve_input` falls back to, so a body step can read what the deciding step
+  // produced LAST round (review feedback, accumulated notes) without committing any file.
+  let mut loop_prev: HashMap<String, StepState> = HashMap::new();
   let mut failure: Option<String> = None;
   while state.len() < def.steps.len() && failure.is_none() {
     let ready: Vec<&harness_def::Step> = def
@@ -1771,7 +1786,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     for s in &to_run {
       let mut inputs: Vec<(String, String)> = Vec::new();
       for b in &s.inputs {
-        inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
+        inputs.push((b.name.clone(), resolve_input(&b.source, def, &state, &loop_prev)));
       }
       let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
       let iteration = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
@@ -1875,6 +1890,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           };
           if again {
             repeat_done.insert(loop_key.to_string(), completed);
+            // The final step's outputs become the NEXT iteration's loop-carried values.
+            loop_prev.insert(s.id.clone(), StepState { skipped: false, outputs });
             if let Some(body) = do_while_bodies.get(loop_key) {
               for id in body {
                 state.remove(id);
@@ -7458,6 +7475,29 @@ Subject: [PATCH] add: 2 + 3 = 5
     // Side files are not journaled in the cache, so artifact steps must always run live.
     let caller = repo("artifacts-nocache");
     assert!(cache_key(&caller, &inv, &[]).is_none(), "artifact steps must bypass the cache");
+  }
+
+  #[test]
+  fn resolve_input_falls_back_to_the_previous_loop_iteration() {
+    // The loop-carried channel: a do-while body step reads the loop end's PREVIOUS-iteration
+    // output. Empty on round one, populated once the loop repeats, and current state wins once
+    // the step has a value THIS round. Exercised live by the demo-fantastic-loop builtin.
+    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-fantastic-loop").unwrap();
+    let def = harness_def::validate("demo-fantastic-loop", src, harness_def::DefSource::Builtin).unwrap();
+    let feedback = harness_def::Ref::StepField { step: "decide".into(), field: "feedback".into() };
+    let mut state = std::collections::HashMap::new();
+    let mut loop_prev = std::collections::HashMap::new();
+    assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "", "round one: no feedback yet");
+    loop_prev.insert(
+      "decide".to_string(),
+      StepState { skipped: false, outputs: [("feedback".to_string(), "add tests".to_string())].into() },
+    );
+    assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "add tests", "round two reads the saved round");
+    state.insert(
+      "decide".to_string(),
+      StepState { skipped: false, outputs: [("feedback".to_string(), "current".to_string())].into() },
+    );
+    assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "current", "live state beats the carried value");
   }
 
   #[test]

@@ -1,0 +1,188 @@
+# Built-in review-loop demo: prepare a PR description, then loop an agent-driven do-while whose
+# body is fix → five parallel reviewer personas → decide. Review feedback travels as the decide
+# step's `feedback` output, which the NEXT round's fix step receives as a loop-carried input —
+# review comments NEVER appear in the repository's git history. Only real work is committed:
+# the PR description, the fixes, and any deliberate-style notes. The bar: every grade excellent
+# or good, with at least as many excellent as good (excellent=5, good=4 ⇒ mean ≥ 4.5).
+description: "Prepare a PR description, then loop: five reviewers grade the code and a coding agent fixes or documents until every grade is excellent or good with at least as many excellent."
+steps:
+  prepare:
+    agent:
+      harness: claude
+      model: opus
+    prompt: |
+      Read this repository's code and its git history. Write `PR-DESCRIPTION.md` at the
+      repository root describing the change set as if opening a pull request: the big picture
+      first (what this code enables), then notable details. Commit only that file with the
+      message `fantastic-loop: prepare PR description`. Put a one-line summary in the `summary`
+      result field.
+    output:
+      summary:
+        type: string
+    commits: true
+  fix:
+    needs: prepare
+    inputs:
+      FEEDBACK: decide.feedback
+    agent:
+      harness: claude
+      model: opus
+    prompt: |
+      You are the coding agent in a review loop. The `FEEDBACK` environment variable carries the
+      previous review round's full report. If it is empty, this is the first round: change
+      nothing, commit nothing, and set the `actions` result field to `no feedback yet`.
+      Otherwise address EVERY comment in it: either change the code accordingly, or — when you
+      judge a comment purely stylistic and the current code deliberate — append a short entry to
+      `STYLE-NOTES.md` at the repository root documenting that decision and why the style stays.
+      Never contradict earlier `STYLE-NOTES.md` entries or earlier fixes. Never write the
+      feedback itself to any file. Commit your changes with the message
+      `fantastic-loop: address review feedback`. Summarize what you did in the `actions` result
+      field.
+    output:
+      actions:
+        type: string
+    commits: true
+  review_correctness:
+    needs: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    prompt: |
+      You are the correctness reviewer in a five-reviewer panel. Review the code in this
+      repository through that lens only: bugs, edge cases, error handling. Respect
+      `STYLE-NOTES.md`: a decision documented there is deliberate — do not penalize it. Treat
+      `PR-DESCRIPTION.md` as context only; grade the CODE. Grade fairly for the repository's
+      modest scope: `excellent` means you would approve with praise, `good` means approve with
+      nits, `average` or `poor` mean real work is needed. Put the grade in the `grade` result
+      field and your most important, concrete, actionable comments (at most three, fewer is
+      better, one plain-text string) in `comments`. Do not change any files or make commits.
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string
+    commits: false
+  review_conventions:
+    needs: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    prompt: |
+      You are the conventions reviewer in a five-reviewer panel. Review the code in this
+      repository through that lens only: naming, structure, formatting, idiomatic consistency.
+      Respect `STYLE-NOTES.md`: a decision documented there is deliberate — do not penalize it.
+      Treat `PR-DESCRIPTION.md` as context only; grade the CODE. Grade fairly for the
+      repository's modest scope: `excellent` means you would approve with praise, `good` means
+      approve with nits, `average` or `poor` mean real work is needed. Put the grade in the
+      `grade` result field and your most important, concrete, actionable comments (at most
+      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
+      make commits.
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string
+    commits: false
+  review_simplicity:
+    needs: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    prompt: |
+      You are the simplicity reviewer in a five-reviewer panel. Review the code in this
+      repository through that lens only: needless complexity, dead weight, whether every element
+      earns its place. Respect `STYLE-NOTES.md`: a decision documented there is deliberate — do
+      not penalize it. Treat `PR-DESCRIPTION.md` as context only; grade the CODE. Grade fairly
+      for the repository's modest scope: `excellent` means you would approve with praise, `good`
+      means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
+      the `grade` result field and your most important, concrete, actionable comments (at most
+      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
+      make commits.
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string
+    commits: false
+  review_testing:
+    needs: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    prompt: |
+      You are the testing reviewer in a five-reviewer panel. Review the code in this repository
+      through that lens only: is the behavior covered by runnable, meaningful tests, and do they
+      pass. Respect `STYLE-NOTES.md`: a decision documented there is deliberate — do not
+      penalize it. Treat `PR-DESCRIPTION.md` as context only; grade the CODE. Grade fairly for
+      the repository's modest scope: `excellent` means you would approve with praise, `good`
+      means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
+      the `grade` result field and your most important, concrete, actionable comments (at most
+      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
+      make commits.
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string
+    commits: false
+  review_docs:
+    needs: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    prompt: |
+      You are the documentation reviewer in a five-reviewer panel. Review the code in this
+      repository through that lens only: readability for a newcomer — comments, docstrings, and
+      README accuracy. Respect `STYLE-NOTES.md`: a decision documented there is deliberate — do
+      not penalize it. Treat `PR-DESCRIPTION.md` as context only; grade the CODE. Grade fairly
+      for the repository's modest scope: `excellent` means you would approve with praise, `good`
+      means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
+      the `grade` result field and your most important, concrete, actionable comments (at most
+      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
+      make commits.
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string
+    commits: false
+  decide:
+    needs: review_correctness, review_conventions, review_simplicity, review_testing, review_docs
+    do-while: fix
+    agent:
+      harness: codex
+      model: gpt-5.5
+    inputs:
+      GRADE_CORRECTNESS: review_correctness.grade
+      COMMENTS_CORRECTNESS: review_correctness.comments
+      GRADE_CONVENTIONS: review_conventions.grade
+      COMMENTS_CONVENTIONS: review_conventions.comments
+      GRADE_SIMPLICITY: review_simplicity.grade
+      COMMENTS_SIMPLICITY: review_simplicity.comments
+      GRADE_TESTING: review_testing.grade
+      COMMENTS_TESTING: review_testing.comments
+      GRADE_DOCS: review_docs.grade
+      COMMENTS_DOCS: review_docs.comments
+    prompt: |
+      You are the scorekeeper of a review loop. The five reviewer grades and comments are in the
+      GRADE_* and COMMENTS_* environment variables. Scores: excellent=5, good=4, average=3,
+      poor=2. The bar is met when EVERY grade is excellent or good AND there are at least as
+      many excellent as good (equivalently, the mean score is at least 4.5). Do not change any
+      files or make commits. Put `met` or `not met` in the `verdict` result field. Put the full
+      round report in the `feedback` result field as one plain-text string: first the line
+      `Round verdict: met` or `Round verdict: not met`, then each reviewer's grade and comments
+      verbatim, one labeled section per reviewer. Set `SCSH_DO_WHILE_REPEAT` to true when the
+      bar is NOT met (another round is needed), false when it is met.
+    output:
+      SCSH_DO_WHILE_REPEAT:
+        type: bool
+      verdict:
+        type: string
+      feedback:
+        type: string
+    commits: false

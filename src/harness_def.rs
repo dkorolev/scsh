@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 14] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 15] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -34,6 +34,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 14] {
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
     ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
+    ("demo-fantastic-loop", include_str!("harness_defs/demo-fantastic-loop.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
     ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
@@ -962,7 +963,10 @@ fn parse_needs(node: Option<&Node>) -> Vec<String> {
 
 /// Cross-step checks: `needs` names defined steps; the graph is acyclic; every `inputs`/`when`
 /// reference resolves to a declared param or an upstream step's declared output field, and any
-/// referenced step is listed in `needs` (so the ordering that makes the value available is explicit).
+/// referenced step is listed in `needs` (so the ordering that makes the value available is
+/// explicit). One deliberate exception: a step inside a do-while body may take an INPUT from the
+/// body's final step — a loop-carried reference, resolving to the PREVIOUS iteration's value
+/// (empty on the first iteration) — with no `needs`, since that back-edge is what the loop is.
 fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String>) {
   use std::collections::BTreeSet;
   let ids: BTreeSet<&str> = steps.iter().map(|s| s.id.as_str()).collect();
@@ -978,14 +982,22 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         errors.push(format!("step '{}' cannot need itself", s.id));
       }
     }
-    let check_ref = |reference: &Ref, ctx: &str, errors: &mut Vec<String>| match reference {
+    // A reference from inside a do-while body to the body's final step: legal as an input
+    // (previous iteration's value), so the loop's data channel needs no committed files.
+    let loop_carried = |reference: &Ref| -> bool {
+      let Ref::StepField { step, .. } = reference else { return false };
+      steps
+        .iter()
+        .any(|end| &end.id == step && end.do_while.is_some() && do_while_body(steps, end).contains(&s.id.as_str()))
+    };
+    let check_ref = |reference: &Ref, ctx: &str, needs_edge: bool, errors: &mut Vec<String>| match reference {
       Ref::Param(n) => {
         if !param_names.contains(n.as_str()) {
           errors.push(format!("step '{}' {ctx} references params.{n}, which is not a declared param", s.id));
         }
       }
       Ref::StepField { step, field } => {
-        if !s.needs.iter().any(|n| n == step) {
+        if needs_edge && !s.needs.iter().any(|n| n == step) {
           errors.push(format!("step '{}' {ctx} references {step}.{field} but does not 'needs: {step}'", s.id));
         }
         match output_of(step) {
@@ -1001,10 +1013,10 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
       }
     };
     for b in &s.inputs {
-      check_ref(&b.source, &format!("input '{}'", b.name), errors);
+      check_ref(&b.source, &format!("input '{}'", b.name), !loop_carried(&b.source), errors);
     }
     for c in s.when.iter().flatten() {
-      check_ref(&c.reference, "when", errors);
+      check_ref(&c.reference, "when", true, errors);
     }
     if let Some(start) = &s.do_while {
       if !ids.contains(start.as_str()) {
@@ -1304,6 +1316,64 @@ mod tests {
   }
 
   #[test]
+  fn builtin_fantastic_loop_demo_wires_a_review_panel_do_while() {
+    let def = builtin("demo-fantastic-loop");
+    assert_eq!(def.steps.len(), 8);
+
+    // prepare (once, outside the loop) and fix (the loop body's first step) code on claude opus.
+    let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
+    let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
+    assert!(prepare.needs.is_empty() && prepare.commits);
+    assert_eq!(fix.needs, vec!["prepare".to_string()]);
+    assert!(fix.commits);
+    for coder in [prepare, fix] {
+      assert_eq!(coder.agent.harness, crate::config::Harness::Claude);
+      assert_eq!(coder.agent.model.as_deref(), Some("opus"));
+    }
+    // The loop-carried input: fix reads the PREVIOUS round's decide.feedback (empty on round
+    // one) with no `needs: decide` — the back-edge that keeps review comments out of git.
+    assert_eq!(fix.inputs.len(), 1);
+    assert_eq!(fix.inputs[0].name, "FEEDBACK");
+    assert_eq!(fix.inputs[0].source, Ref::StepField { step: "decide".into(), field: "feedback".into() });
+
+    // The panel: five read-only reviewer personas, all codex gpt-5.5, each grading on the same
+    // enum and each gated on the fix step so every round reviews freshly fixed code.
+    let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
+    assert_eq!(reviewers.len(), 5);
+    for r in &reviewers {
+      assert_eq!(r.needs, vec!["fix".to_string()]);
+      assert!(!r.commits, "reviewers are read-only");
+      assert_eq!(r.agent.harness, crate::config::Harness::Codex);
+      assert_eq!(r.agent.model.as_deref(), Some("gpt-5.5"));
+      let grade = r.outputs.iter().find(|o| o.name == "grade").expect("every reviewer grades");
+      assert_eq!(grade.ty, ParamType::Enum);
+      assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
+      assert!(r.outputs.iter().any(|o| o.name == "comments"));
+    }
+
+    // decide closes the loop: it consumes all ten grade/comment fields, emits the round report
+    // as its `feedback` OUTPUT (never a committed file), and SCSH_DO_WHILE_REPEAT re-runs the body.
+    let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
+    assert_eq!(decide.do_while.as_deref(), Some("fix"));
+    assert!(!decide.commits, "review comments must never enter the repository's git history");
+    assert!(decide.outputs.iter().any(|o| o.name == "feedback"));
+    assert_eq!(decide.inputs.len(), 10);
+    assert_eq!(
+      do_while_body(&def.steps, decide),
+      [
+        "fix",
+        "review_correctness",
+        "review_conventions",
+        "review_simplicity",
+        "review_testing",
+        "review_docs",
+        "decide"
+      ]
+    );
+    assert!(decide.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
+  }
+
+  #[test]
   fn workflow_rejects_repeat_combined_with_do_while() {
     let src = wf("    needs: a\n    repeat: 2\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
@@ -1326,6 +1396,35 @@ mod tests {
     let src = wf("    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
     assert!(err.iter().any(|e| e.contains("not an ancestor")), "{err:?}");
+  }
+
+  /// A do-while body where the START step consumes the END step's output — the loop-carried
+  /// channel (previous iteration's value; empty on round one) — plus a step outside the body.
+  fn loop_carried_wf(a_input: &str, c_input: &str) -> String {
+    format!(
+      "description: \"x\"\nsteps:\n  a:\n    inputs:\n      PREV: {a_input}\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      kind:\n        type: string\n  b:\n    needs: a\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int\n  c:\n    inputs:\n      PREV: {c_input}\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      z:\n        type: string\n"
+    )
+  }
+
+  #[test]
+  fn loop_carried_input_from_the_do_while_end_needs_no_edge() {
+    // `a` (the body's first step) reads `b.y` (the body's final step) with no `needs: b` —
+    // that back-edge IS the loop, so it validates; `c` reads a param to stay neutral.
+    let src = loop_carried_wf("b.y", "params.P")
+      .replace("steps:", "params:\n  P:\n    type: string\n    default: \"\"\nsteps:");
+    let def = validate("t", &src, DefSource::Repo).unwrap_or_else(|e| panic!("{}", e.join("; ")));
+    let a = def.steps.iter().find(|s| s.id == "a").unwrap();
+    assert_eq!(a.inputs[0].source, Ref::StepField { step: "b".into(), field: "y".into() });
+    assert!(a.needs.is_empty(), "the loop-carried reference adds no needs edge (that would be a cycle)");
+  }
+
+  #[test]
+  fn loop_carried_input_still_requires_a_declared_output_field() {
+    let src = loop_carried_wf("b.missing", "b.y");
+    let err = validate("t", &src, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("b.missing") && e.contains("does not declare")), "{err:?}");
+    // And a step OUTSIDE the do-while body gets no back-edge exemption: `c` must needs: b.
+    assert!(err.iter().any(|e| e.contains("step 'c'") && e.contains("does not 'needs: b'")), "{err:?}");
   }
 
   #[test]
