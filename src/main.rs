@@ -1509,6 +1509,18 @@ fn extract_step_outputs(
   Ok(out)
 }
 
+fn extract_do_while_repeat(content: &str) -> Result<bool, String> {
+  let value = json::parse(content).map_err(|e| format!("result is not valid JSON: {e}"))?;
+  let json::Value::Object(obj) = value else {
+    return Err("result is not a JSON object".into());
+  };
+  match obj.iter().find(|(key, _)| key == "SCSH_DO_WHILE_REPEAT").map(|(_, value)| value) {
+    Some(json::Value::Bool(value)) => Ok(*value),
+    Some(_) => Err("'SCSH_DO_WHILE_REPEAT' must be a boolean".into()),
+    None => Err("result is missing the 'SCSH_DO_WHILE_REPEAT' field".into()),
+  }
+}
+
 /// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body
 /// (prompt + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step
 /// result file under the session scratch dir.
@@ -1658,7 +1670,17 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   // we refresh it so the next wave's clone sees those commits and its own packdiff range is
   // only what *that* step added (same contract as the flat `build_and_run` path).
   let mut base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let original_base = base.clone();
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
+  let mut do_while_end_for: HashMap<String, String> = HashMap::new();
+  let mut do_while_bodies: HashMap<String, Vec<String>> = HashMap::new();
+  for end in def.steps.iter().filter(|s| s.do_while.is_some()) {
+    let body: Vec<String> = harness_def::do_while_body(&def.steps, end).into_iter().map(str::to_string).collect();
+    for id in &body {
+      do_while_end_for.insert(id.clone(), end.id.clone());
+    }
+    do_while_bodies.insert(end.id.clone(), body);
+  }
 
   // Declare EVERY step as a proc row up front, in definition order — the board and the
   // session browser show the whole job's shape (step k/n, what it needs) from the first
@@ -1666,7 +1688,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   let total_steps = def.steps.len();
   let mut step_procs: HashMap<String, ui::screen::Proc> = HashMap::new();
   for (i, s) in def.steps.iter().enumerate() {
-    if s.is_loop() {
+    if s.is_loop() || do_while_end_for.contains_key(&s.id) {
       continue; // loop iterations appear only when they actually start
     }
     let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
@@ -1740,10 +1762,15 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       for b in &s.inputs {
         inputs.push((b.name.clone(), resolve_ref(&b.source, def, &state).unwrap_or_default()));
       }
-      let iteration = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
-      let run_id = s.iteration_run_id(iteration);
+      let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
+      let iteration = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
+      let run_id = if let Some(end) = do_while_end_for.get(&s.id) {
+        format!("{}__while_{}_{iteration}", s.id, end)
+      } else {
+        s.iteration_run_id(iteration)
+      };
       invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
-      if s.is_loop() {
+      if s.is_loop() || do_while_end_for.contains_key(&s.id) {
         let label = format!("{}: {} · iteration {iteration}", s.agent.harness.as_str(), s.id);
         let p = ui.proc(label.clone(), false);
         if let Some(c) = &daemon_client {
@@ -1759,7 +1786,10 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
             None,
           );
         }
-        p.note(&format!("{} iteration {iteration}", s.loop_kind()));
+        p.note(&format!(
+          "{} iteration {iteration}",
+          if do_while_end_for.contains_key(&s.id) { "do-while" } else { s.loop_kind() }
+        ));
         procs.push(p);
       } else {
         procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
@@ -1807,16 +1837,19 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       }
       match run.result_content.as_deref().map(|c| extract_step_outputs(c, &s.outputs)) {
         Some(Ok(outputs)) => {
-          let completed = repeat_done.get(&s.id).copied().unwrap_or(0) + 1;
+          let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
+          let completed = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
           let again = if let Some(total) = s.repeat {
             completed < total
-          } else if let Some(cond) = &s.do_while {
-            // The condition sees the just-finished iteration: the step's own output fields
-            // resolve from these outputs; params and upstream steps resolve as usual.
-            let holds = harness_def::when_holds(cond, &|r| match r {
-              harness_def::Ref::StepField { step, field } if step == &s.id => outputs.get(field).cloned(),
-              other => resolve_ref(other, def, &state),
-            });
+          } else if s.do_while.is_some() {
+            let holds = match run.result_content.as_deref().map(extract_do_while_repeat) {
+              Some(Ok(value)) => value,
+              Some(Err(e)) => {
+                failure = Some(format!("step '{}' produced an invalid result: {e}", s.id));
+                break;
+              }
+              None => false,
+            };
             if holds && completed >= harness_def::DO_WHILE_MAX_ITERATIONS {
               failure = Some(format!(
                 "step '{}' hit the do-while backstop ({} iterations) with its condition still true",
@@ -1830,7 +1863,12 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
             false
           };
           if again {
-            repeat_done.insert(s.id.clone(), completed);
+            repeat_done.insert(loop_key.to_string(), completed);
+            if let Some(body) = do_while_bodies.get(loop_key) {
+              for id in body {
+                state.remove(id);
+              }
+            }
           } else {
             state.insert(s.id.clone(), StepState { skipped: false, outputs });
           }
@@ -1883,6 +1921,9 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   if let Some(msg) = failure {
     fail(&msg);
     return 1;
+  }
+  if let (Some(from), Some(to)) = (original_base.as_deref(), git_capture(root, &["rev-parse", "HEAD"])) {
+    pack_job_diff(root, &session_id, from, to.trim());
   }
   let ran = state.values().filter(|s| !s.skipped).count();
   let skipped = state.values().filter(|s| s.skipped).count();
@@ -3336,6 +3377,9 @@ fn build_and_run(
         Err(e) => warn(&format!("{}: could not bring in commits — {e}", skill.name)),
       }
     }
+    if let Some(head) = git_capture(root, &["rev-parse", "HEAD"]) {
+      pack_job_diff(root, &session_id, base, head.trim());
+    }
   }
 
   // 5. Tidy up. A successful skill's clone has served its purpose — the result was
@@ -4631,6 +4675,29 @@ fn pack_step_diff(
       );
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
+  }
+}
+
+fn pack_job_diff(root: &Path, session_id: &str, from: &str, to: &str) {
+  if from == to {
+    return;
+  }
+  let dir = runtime::session_diffs_dir(session_id);
+  if std::fs::create_dir_all(&dir).is_err() {
+    return;
+  }
+  let out = dir.join("job.html");
+  let title = format!("scsh job {session_id} · all commits");
+  let result = Command::new("packdiff")
+    .arg(format!("{from}..{to}"))
+    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title, "--json"])
+    .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
+    .stdin(Stdio::null())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::null())
+    .output();
+  if result.is_ok_and(|output| output.status.success() && out.is_file()) {
+    ok(&format!("whole-job commits diff packed — {}", out.display()));
   }
 }
 
@@ -6714,6 +6781,13 @@ fn print_help_cache() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn do_while_repeat_marker_is_a_required_json_boolean() {
+    assert_eq!(extract_do_while_repeat(r#"{"SCSH_DO_WHILE_REPEAT":true}"#), Ok(true));
+    assert!(extract_do_while_repeat(r#"{"SCSH_DO_WHILE_REPEAT":"true"}"#).unwrap_err().contains("must be a boolean"));
+    assert!(extract_do_while_repeat(r#"{}"#).unwrap_err().contains("missing"));
+  }
   use std::ffi::OsString;
 
   #[test]

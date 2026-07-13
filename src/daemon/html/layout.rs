@@ -346,7 +346,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
-    overflow: auto; max-width: 100%; padding-bottom: 0.25rem;
+    overflow: auto; max-width: 100%; height: 48rem; padding-bottom: 0.75rem;
+    overscroll-behavior: contain; touch-action: pan-x pan-y;
     scrollbar-width: none;
     border-radius: 6px; /* same as the enclosing .card island */
     /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
@@ -360,9 +361,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .workflow-scroll::-webkit-scrollbar { display: none; }
   .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  .wf-node.wf-selected { box-shadow: 0 0 0 2px var(--cyan); }
   /* Center when the graph fits; when it overflows, auto margins collapse and scroll works. */
-  .workflow-stage { position: relative; min-height: 4rem; margin-inline: auto; }
+  .workflow-stage { position: relative; min-height: 16rem; margin-inline: auto; }
   .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
   .workflow-zoom button {
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
@@ -397,7 +397,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node:hover { border-color: #3a4558; background: var(--surface); }
   .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .wf-node.wf-flash { box-shadow: 0 0 0 2px var(--cyan); }
-  details.proc.wf-dest-flash { box-shadow: 0 0 0 2px var(--cyan); transition: box-shadow 0.2s ease; }
   .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -437,8 +436,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   .wf-node.wf-build { border-left-color: var(--cyan); }
   .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
-  /* Selection is a blue balloon with a matching blue ribbon; status remains legible inside. */
-  .wf-node.wf-selected { border-left-color: var(--cyan) !important; }
   /* Start / Finish bookends — small icon cards (play / checkered flag), not task cards. */
   .wf-bookend {
     position: absolute; box-sizing: border-box;
@@ -864,7 +861,8 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
     display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
   }
   .session-actions #session-stop,
-  .session-actions .session-export {
+  .session-actions .session-export,
+  .session-actions .job-diff {
     min-width: 10.5rem; /* Incomplete job / Job snapshot / Force stop share a stable width */
     box-sizing: border-box;
     height: 1.85rem;

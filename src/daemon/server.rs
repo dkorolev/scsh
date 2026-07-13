@@ -445,6 +445,24 @@ fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
 /// inline in a new tab; `dl=1` turns it into a download attachment.
 fn diff_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
   let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
+  if let Some(session_id) = path.strip_prefix("/diff/").and_then(|rest| rest.strip_suffix("/all")) {
+    if session_id.is_empty() || session_id.contains('/') {
+      return (404, "not found".into(), None);
+    }
+    let known = lock_store(store).sessions.contains_key(session_id);
+    if !known {
+      return (404, "not found".into(), None);
+    }
+    let path = crate::runtime::session_diffs_dir(session_id).join("job.html");
+    let Ok(body) = std::fs::read_to_string(path) else {
+      return (404, "whole-job commits diff is not available".into(), None);
+    };
+    let disposition = query
+      .split('&')
+      .any(|kv| kv == "dl=1")
+      .then(|| format!("attachment; filename=\"scsh-job-{session_id}-diff.html\""));
+    return (200, body, disposition);
+  }
   let Some((session_id, proc_index)) = parse_cast_route(path.strip_prefix("/diff/").unwrap_or("")) else {
     return (404, "not found".into(), None);
   };

@@ -284,12 +284,10 @@ pub struct Step {
   /// Run this step a fixed number of times, sequentially. Each iteration is a distinct
   /// workflow run and commit boundary; the graph discovers iterations as they start.
   pub repeat: Option<usize>,
-  /// Run this step at least once, then again while every condition holds (AND), evaluated
-  /// against the just-finished iteration's outputs — a condition may reference the step's OWN
-  /// output fields, unlike `when:`. Mutually exclusive with `repeat`; iterations are capped at
-  /// [`DO_WHILE_MAX_ITERATIONS`] so a condition that never flips fails the workflow instead of
-  /// burning agent runs forever.
-  pub do_while: Option<When>,
+  /// Mark this as the final step of a do-while body and name that body's first step. The final
+  /// step's result JSON decides whether to repeat via the fixed top-level boolean
+  /// `SCSH_DO_WHILE_REPEAT`; scsh deliberately has no built-in comparison language.
+  pub do_while: Option<String>,
 }
 
 /// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
@@ -359,7 +357,7 @@ impl Step {
     if self.repeat.is_some() {
       format!("{}__repeat_{iteration}", self.id)
     } else if self.do_while.is_some() {
-      format!("{}__while_{iteration}", self.id)
+      format!("{}__while_{}_{iteration}", self.id, self.id)
     } else {
       self.id.clone()
     }
@@ -397,6 +395,9 @@ impl Step {
         other => other.as_str().to_string(),
       };
       s.push_str(&format!("- `{}` ({ty})\n", o.name));
+    }
+    if self.do_while.is_some() && !self.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT") {
+      s.push_str("- `SCSH_DO_WHILE_REPEAT` (boolean; `true` requests another loop iteration, `false` ends the loop)\n");
     }
     s.push_str("\nDo not write anything else to that file.\n");
     if !self.artifacts.is_empty() {
@@ -702,7 +703,20 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
     let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
     let when = validate_step_cond_block(id, "when", fm.get("when").copied(), errors);
-    let do_while = validate_step_cond_block(id, "do-while", fm.get("do-while").copied(), errors);
+    let do_while = match fm.get("do-while") {
+      None => None,
+      Some(Node::Scalar(s)) if !s.trim().is_empty() => Some(s.trim().to_string()),
+      Some(Node::Scalar(_)) => {
+        errors.push(format!("'steps.{id}.do-while' must name the first step of the loop body"));
+        None
+      }
+      Some(_) => {
+        errors.push(format!(
+          "'steps.{id}.do-while' must be a step name, not a comparator block; the final step must return SCSH_DO_WHILE_REPEAT"
+        ));
+        None
+      }
+    };
     let needs = parse_needs(fm.get("needs").copied());
     let artifacts = parse_needs(fm.get("artifacts").copied());
     for a in &artifacts {
@@ -992,19 +1006,11 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
     for c in s.when.iter().flatten() {
       check_ref(&c.reference, "when", errors);
     }
-    for c in s.do_while.iter().flatten() {
-      // A do-while condition is evaluated after each iteration, so — unlike `when:` — it may
-      // reference the step's OWN output fields (that is the common case: loop on your result).
-      match &c.reference {
-        Ref::StepField { step, field } if step == &s.id => {
-          if !s.outputs.iter().any(|o| &o.name == field) {
-            errors.push(format!(
-              "step '{}' do-while references {step}.{field}, which is not declared in its own output",
-              s.id
-            ));
-          }
-        }
-        other => check_ref(other, "do-while", errors),
+    if let Some(start) = &s.do_while {
+      if !ids.contains(start.as_str()) {
+        errors.push(format!("step '{}' do-while starts at '{start}', which is not a defined step", s.id));
+      } else if start != &s.id && !depends_transitively(steps, &s.id, start) {
+        errors.push(format!("step '{}' do-while start '{start}' is not an ancestor of the final step", s.id));
       }
     }
   }
@@ -1012,6 +1018,30 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
   if let Some(cycle) = first_cycle(steps) {
     errors.push(format!("steps form a cycle via 'needs': {}", cycle.join(" → ")));
   }
+}
+
+fn depends_transitively(steps: &[Step], step: &str, ancestor: &str) -> bool {
+  fn visit(steps: &[Step], step: &str, ancestor: &str, seen: &mut std::collections::BTreeSet<String>) -> bool {
+    if !seen.insert(step.to_string()) {
+      return false;
+    }
+    let Some(current) = steps.iter().find(|s| s.id == step) else { return false };
+    current.needs.iter().any(|need| need == ancestor || visit(steps, need, ancestor, seen))
+  }
+  visit(steps, step, ancestor, &mut std::collections::BTreeSet::new())
+}
+
+/// The ordered ids in a do-while body, from its named first step through its final step.
+pub fn do_while_body<'a>(steps: &'a [Step], end: &Step) -> Vec<&'a str> {
+  let Some(start) = end.do_while.as_deref() else { return Vec::new() };
+  steps
+    .iter()
+    .filter(|candidate| {
+      (candidate.id == start || depends_transitively(steps, &candidate.id, start))
+        && (candidate.id == end.id || depends_transitively(steps, &end.id, &candidate.id))
+    })
+    .map(|s| s.id.as_str())
+    .collect()
 }
 
 /// Return a cycle in the `needs` graph (as a list of step ids) if one exists, via DFS.
@@ -1257,48 +1287,43 @@ mod tests {
   #[test]
   fn builtin_do_while_demo_declares_a_conditional_commit_loop() {
     let def = builtin("demo-loop-do-while");
-    assert_eq!(def.steps.len(), 2);
+    assert_eq!(def.steps.len(), 3);
     assert_eq!(def.steps[0].id, "initialize");
     let increment = &def.steps[1];
     assert_eq!(increment.id, "increment");
     assert_eq!(increment.needs, vec!["initialize".to_string()]);
     assert_eq!(increment.repeat, None);
-    // The loop keeps going while its own freshly-produced number is below three.
-    let cond = increment.do_while.as_ref().expect("increment loops on its own output");
-    assert_eq!(cond.len(), 1);
-    assert_eq!(cond[0].reference, Ref::StepField { step: "increment".into(), field: "number".into() });
-    assert_eq!(cond[0].op, CondOp::Lt);
-    assert_eq!(cond[0].values, vec!["3".to_string()]);
-    assert!(def.steps.iter().all(|s| s.commits));
-    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Grok));
+    let compare = &def.steps[2];
+    assert_eq!(compare.do_while.as_deref(), Some("increment"));
+    assert_eq!(do_while_body(&def.steps, compare), ["increment", "compare"]);
+    assert!(compare.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
+    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
+    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.5")));
   }
 
   #[test]
   fn workflow_rejects_repeat_combined_with_do_while() {
-    let src = wf("    needs: a\n    repeat: 2\n    do-while:\n      b.y:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let src = wf("    needs: a\n    repeat: 2\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
     assert!(err.iter().any(|e| e.contains("cannot have both 'repeat' and 'do-while'")), "{err:?}");
   }
 
   #[test]
-  fn do_while_may_reference_own_outputs_but_not_undeclared_ones() {
-    // Self-reference to a declared output is the canonical do-while shape — no `needs` required.
-    let ok = wf("    needs: a\n    do-while:\n      b.y:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+  fn do_while_names_an_ancestor_and_rejects_comparator_blocks() {
+    let ok = wf("    needs: a\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let def = validate("t", &ok, DefSource::Repo).unwrap_or_else(|e| panic!("{}", e.join("; ")));
-    let cond = def.steps.iter().find(|s| s.id == "b").unwrap().do_while.as_ref().unwrap();
-    assert_eq!(cond[0].reference, Ref::StepField { step: "b".into(), field: "y".into() });
+    assert_eq!(def.steps.iter().find(|s| s.id == "b").unwrap().do_while.as_deref(), Some("a"));
 
-    let bad = wf("    needs: a\n    do-while:\n      b.missing:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let bad = wf("    needs: a\n    do-while:\n      b.y:\n        lt: 3\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &bad, DefSource::Repo).unwrap_err();
-    assert!(err.iter().any(|e| e.contains("b.missing") && e.contains("its own output")), "{err:?}");
+    assert!(err.iter().any(|e| e.contains("not a comparator block")), "{err:?}");
   }
 
   #[test]
-  fn do_while_referencing_another_step_still_requires_needs() {
-    // A non-self reference in do-while follows the same rule as when: the step must need it.
-    let src = wf("    do-while:\n      a.kind: code\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+  fn do_while_start_must_be_an_ancestor() {
+    let src = wf("    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
-    assert!(err.iter().any(|e| e.contains("does not 'needs: a'")), "{err:?}");
+    assert!(err.iter().any(|e| e.contains("not an ancestor")), "{err:?}");
   }
 
   #[test]

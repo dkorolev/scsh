@@ -591,11 +591,16 @@ function updateProcFields(det, p, nowUnix) {
   // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
   // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
   if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
-    const actions = det.querySelector('.proc-actions');
-    if (actions) {
-      actions.insertAdjacentHTML('afterbegin', procDiffBtnHtml(p));
-      wireProcDiff(actions.querySelector('a[data-proc-diff]'));
+    let actions = det.querySelector('.proc-actions');
+    if (!actions) {
+      actions = document.createElement('div');
+      actions.className = 'proc-actions';
+      const summary = det.querySelector('summary');
+      if (summary) det.insertBefore(actions, summary);
+      else det.prepend(actions);
     }
+    actions.insertAdjacentHTML('afterbegin', procDiffBtnHtml(p));
+    wireProcDiff(actions.querySelector('a[data-proc-diff]'));
   }
   const detailEl = det.querySelector('.detail');
   if (detailEl) detailEl.textContent = p.detail || '';
@@ -1525,21 +1530,6 @@ function setWorkflowPendingStatus(msg) {
   }
   el.textContent = msg;
 }
-function markWorkflowNodeSelected(stepId) {
-  document.querySelectorAll('.wf-node.wf-selected').forEach(n => n.classList.remove('wf-selected'));
-  const a = document.querySelector('.wf-node[data-workflow-step="' + CSS.escape(stepId) + '"]');
-  if (a) {
-    a.classList.add('wf-selected');
-    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const scroller = a.closest('.workflow-scroll');
-    if (scroller) {
-      const ar = a.getBoundingClientRect(), sr = scroller.getBoundingClientRect();
-      if (ar.left < sr.left || ar.right > sr.right) {
-        a.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', inline: 'nearest', block: 'nearest' });
-      }
-    }
-  }
-}
 function activateProcPanel(det, hash, pushHistory) {
   if (!det) return false;
   det.open = true;
@@ -1549,8 +1539,6 @@ function activateProcPanel(det, hash, pushHistory) {
   if (summary) {
     try { summary.focus({ preventScroll: true }); } catch (_) { try { summary.focus(); } catch (_) {} }
   }
-  det.classList.add('wf-dest-flash');
-  setTimeout(() => det.classList.remove('wf-dest-flash'), 1200);
   if (hash) {
     const cur = location.hash || '';
     if (pushHistory && cur !== hash) {
@@ -1569,7 +1557,6 @@ function activateWorkflowTask(stepId, opts) {
   const hash = '#task-' + encodeURIComponent(stepId);
   const det = document.getElementById('task-' + stepId) ||
     document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
-  markWorkflowNodeSelected(stepId);
   if (det) {
     pendingWorkflowStep = null;
     setWorkflowPendingStatus('');
@@ -1591,10 +1578,7 @@ function activateWorkflowTask(stepId, opts) {
 }
 function syncWorkflowTaskFromLocation() {
   const m = /^#task-(.+)$/.exec(location.hash || '');
-  if (!m) {
-    document.querySelectorAll('.wf-node.wf-selected').forEach(n => n.classList.remove('wf-selected'));
-    return;
-  }
+  if (!m) return;
   let step;
   try { step = decodeURIComponent(m[1]); } catch (_) { return; }
   activateWorkflowTask(step, { fromHistory: true, pushHistory: false });
@@ -1611,9 +1595,11 @@ function initWorkflowGraph() {
   }
   const stage = root.querySelector('.workflow-stage');
   const reset = root.querySelector('[data-wf-zoom-reset]');
+  const baseViewportHeight = scroller ? (parseFloat(getComputedStyle(scroller).height) || 768) : 768;
   const applyZoom = next => {
     workflowZoom = Math.max(0.5, Math.min(2, next));
     if (stage) stage.style.zoom = String(workflowZoom);
+    if (scroller) scroller.style.height = Math.round(baseViewportHeight * workflowZoom) + 'px';
     if (reset) reset.textContent = Math.round(workflowZoom * 100) + '%';
   };
   const fit = () => {
@@ -1628,9 +1614,14 @@ function initWorkflowGraph() {
   reset?.addEventListener('click', () => applyZoom(1));
   root.querySelector('[data-wf-zoom-fit]')?.addEventListener('click', fit);
   scroller?.addEventListener('wheel', ev => {
-    if (!ev.ctrlKey && !ev.metaKey) return;
     ev.preventDefault();
-    applyZoom(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1));
+    ev.stopPropagation();
+    if (ev.ctrlKey || ev.metaKey) {
+      applyZoom(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1));
+      return;
+    }
+    scroller.scrollLeft += ev.deltaX;
+    scroller.scrollTop += ev.deltaY;
   }, { passive: false });
   root.addEventListener('click', (ev) => {
     const jump = ev.target.closest('a.wf-jump');
@@ -1862,6 +1853,14 @@ function syncSessionStopButton(session) {
     else if (pending > 0) label = 'Chapters pending ⬇';
     if (exportBtn.tagName === 'SPAN') exportBtn.textContent = label;
     else setBtnLabel(exportBtn, label);
+  }
+  const actions = document.querySelector('.session-actions');
+  const hasDiff = !!(session.procs || []).find(p => p.diff_path);
+  let diff = document.querySelector('a[data-job-diff]');
+  if (hasDiff && !diff && actions) {
+    actions.insertAdjacentHTML('afterbegin', '<a class="chamfer btn btn--purple btn--sm job-diff" data-job-diff href="/diff/' + encodeURIComponent(session.id || SESSION_ID) + '/all" title="Browse the entire end-to-end commits diff"><span>⇄ all commits</span></a>');
+  } else if (!hasDiff && diff) {
+    diff.remove();
   }
 }
 function chaptersPendingCount(session) {

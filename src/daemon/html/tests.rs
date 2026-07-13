@@ -712,6 +712,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
     },
   );
   let html = session_page(&store, "difjob").expect("session page");
+  assert!(html.contains(r#"href="/diff/difjob/all""#), "the top run island links the end-to-end diff");
   let procs = session_procs_html(&html);
   // The step whose commits were packed links its review page; the other has no chip.
   assert!(procs.contains(r#"href="/diff/difjob/0""#), "packed step links its diff: {procs}");
@@ -1324,6 +1325,8 @@ fn client_js_mirrors_the_commits_diff_chip() {
   assert!(js.contains("function procDiffBtnHtml"), "client js builds the diff chip");
   assert!(js.contains("p.diff_path"), "client js keys the chip on the proc's diff_path");
   assert!(js.contains("⇄ commits diff"), "the live chip carries the same label");
+  assert!(js.contains("data-job-diff"), "the live run island gains the whole-job diff button");
+  assert!(js.contains("actions = document.createElement('div')"), "a closed slim row gains its action island live");
   assert!(js.contains("initProcDiffs"), "chips present at page render are wired too");
 }
 
@@ -2347,10 +2350,7 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(flat_html.contains("scrollbar-width: none"), "graph remains scrollable without visible scrollbar chrome");
   assert!(flat_html.contains(".workflow-scroll::-webkit-scrollbar"), "WebKit scrollbar chrome is hidden too");
   assert!(flat_html.contains("data-wf-zoom-fit>Fit</button>"), "server-rendered graph includes Fit");
-  assert!(
-    flat_html.contains(".wf-node.wf-selected { border-left-color: var(--cyan) !important; }"),
-    "selected node ribbon overrides every status color"
-  );
+  assert!(!flat_html.contains("wf-selected"), "task links do not leave a persistent graph-side selection state");
   assert!(!flat_html.contains("wf-start-line"), "dashed race-line start glyph is gone");
   assert!(!flat_html.contains("wf-bookend-label"), "bookends are icon-only");
   let edge_count = flat_html.matches(r#"class="wf-edge""#).count();

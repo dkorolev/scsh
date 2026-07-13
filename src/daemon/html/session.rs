@@ -115,11 +115,20 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let fleets = fleet_sections_html(session);
   let lede = session_lede_html(session, lifecycle);
   let chapters_pending = chapters_pending_html(pending);
+  let job_diff_btn = if session.procs.iter().any(|proc| proc.diff_path.is_some()) {
+    format!(
+      "<a class=\"chamfer btn btn--purple btn--sm job-diff\" data-job-diff href=\"/diff/{}/all\" title=\"Browse the entire end-to-end commits diff\"><span>⇄ all commits</span></a>",
+      esc(&session.id)
+    )
+  } else {
+    String::new()
+  };
   let body = format!(
-    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{export_btn}{stop_btn}</div>\
+    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{job_diff_btn}{export_btn}{stop_btn}</div>\
 {session_meta}\n{chapters_pending}</div>\n\
 {workflow}{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     export_btn = export_btn,
+    job_diff_btn = job_diff_btn,
     stop_btn = stop_btn,
     session_meta = session_meta,
     chapters_pending = chapters_pending,

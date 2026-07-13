@@ -79,22 +79,31 @@ pub fn workflow_meta_from_def(def: &HarnessDef) -> Option<WorkflowMeta> {
   if !def.is_workflow() {
     return None;
   }
+  let mut do_while_end_for = std::collections::BTreeMap::new();
+  for end in def.steps.iter().filter(|s| s.do_while.is_some()) {
+    for id in crate::harness_def::do_while_body(&def.steps, end) {
+      do_while_end_for.insert(id, end.id.as_str());
+    }
+  }
+  let template_id = |id: &str| {
+    if let Some(end) = do_while_end_for.get(id) {
+      format!("{id}__while_{end}")
+    } else if def.steps.iter().find(|s| s.id == id).is_some_and(|s| s.repeat.is_some()) {
+      format!("{id}__repeat")
+    } else {
+      id.to_string()
+    }
+  };
   let meta = WorkflowMeta {
     nodes: def
       .steps
       .iter()
       .enumerate()
       .map(|(order, s)| WorkflowNodeMeta {
-        id: if s.repeat.is_some() {
-          format!("{}__repeat", s.id)
-        } else if s.do_while.is_some() {
-          format!("{}__while", s.id)
-        } else {
-          s.id.clone()
-        },
+        id: template_id(&s.id),
         proc_index: None,
         order,
-        needs: s.needs.clone(),
+        needs: s.needs.iter().map(|need| template_id(need)).collect(),
         conditional: s.when.is_some(),
         when_summary: None, // never persist gate literals (REMAINS-TO-DO §3)
       })
@@ -184,18 +193,31 @@ fn find_cycle(meta: &WorkflowMeta) -> Option<String> {
 /// The dynamic-loop node-id suffixes, shared with the orchestrator's
 /// [`crate::harness_def::Step::iteration_run_id`]: `<step>__repeat` / `<step>__while` is the
 /// authored template node, and iterations arrive as `<step>__repeat_<n>` / `<step>__while_<n>`.
-pub const LOOP_SUFFIXES: [&str; 2] = ["__repeat", "__while"];
+fn loop_template_suffix(id: &str) -> Option<&str> {
+  if id.ends_with("__repeat") {
+    Some("__repeat")
+  } else if let Some(marker) = id.find("__while_") {
+    (marker + "__while_".len() < id.len() && parse_loop_iteration_id(id).is_none()).then_some(&id[marker..])
+  } else {
+    None
+  }
+}
 
 /// Split a dynamic loop-iteration id like `increment__while_2` into `(base, suffix, iteration)`
 /// — here `("increment", "__while", 2)`. `None` for ordinary step ids.
 pub fn parse_loop_iteration_id(id: &str) -> Option<(&str, &str, usize)> {
-  for suffix in LOOP_SUFFIXES {
-    let marker = format!("{suffix}_");
-    if let Some((base, n)) = id.rsplit_once(marker.as_str()) {
-      if let Ok(iteration) = n.parse::<usize>() {
-        return Some((base, suffix, iteration));
-      }
+  if let Some((base, n)) = id.rsplit_once("__repeat_") {
+    if let Ok(iteration) = n.parse::<usize>() {
+      return Some((base, "__repeat", iteration));
     }
+  }
+  let marker = id.find("__while_")?;
+  let (without_iteration, n) = id.rsplit_once('_')?;
+  if without_iteration.len() <= marker + "__while_".len() {
+    return None;
+  }
+  if let Ok(iteration) = n.parse::<usize>() {
+    return Some((&id[..marker], &id[marker..without_iteration.len()], iteration));
   }
   None
 }
@@ -215,8 +237,17 @@ pub fn bind_workflow_proc(meta: &mut WorkflowMeta, step_id: &str, proc_index: us
     }
     let template_id = format!("{base}{suffix}");
     let Some(template) = meta.nodes.iter().find(|n| n.id == template_id).cloned() else { return };
-    let previous = format!("{base}{suffix}_{}", iteration - 1);
-    let needs = if iteration == 1 { template.needs } else { vec![previous] };
+    let mut needs: Vec<String> = template
+      .needs
+      .iter()
+      .map(|need| if need.ends_with(suffix) { format!("{need}_{iteration}") } else { need.clone() })
+      .collect();
+    if suffix.starts_with("__while_") && iteration > 1 && !template.needs.iter().any(|need| need.ends_with(suffix)) {
+      let end = suffix.trim_start_matches("__while_");
+      needs.push(format!("{end}{suffix}_{}", iteration - 1));
+    } else if suffix == "__repeat" && iteration > 1 {
+      needs = vec![format!("{base}{suffix}_{}", iteration - 1)];
+    }
     meta.nodes.push(WorkflowNodeMeta {
       id: step_id.to_string(),
       proc_index: Some(proc_index),
@@ -286,34 +317,45 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
       if !is_safe_graph_id(&n.id) {
         continue;
       }
-      // A loop template (repeat / do-while) is orchestration metadata, not a task. Iteration
-      // nodes are appended to the authored graph by `bind_workflow_proc` only as they start.
-      if LOOP_SUFFIXES.iter().any(|suffix| n.id.ends_with(suffix)) {
-        continue;
+      // Preview a declared loop as its known first iteration before the proc starts. Once
+      // bind_workflow_proc appends the real iteration-1 node, the template disappears and
+      // that bound node takes its place; later iterations remain genuinely dynamic.
+      let mut visible = n.clone();
+      if loop_template_suffix(&n.id).is_some() {
+        let first_id = format!("{}_1", n.id);
+        if authored.nodes.iter().any(|candidate| candidate.id == first_id) {
+          continue;
+        }
+        visible.id = first_id;
       }
-      let mut needs = n.needs.clone();
+      let mut needs: Vec<String> = visible
+        .needs
+        .iter()
+        .map(|need| if loop_template_suffix(need).is_some() { format!("{need}_1") } else { need.clone() })
+        .collect();
       if needs.is_empty() {
         if let Some(map) = &def_needs {
-          if let Some(dn) = map.get(&n.id) {
+          if let Some(dn) = map.get(&visible.id) {
             needs = dn.clone();
           }
         }
       }
-      if let Some(h) = harness_for_step(session, &n.id) {
+      let harness_step = parse_loop_iteration_id(&visible.id).map(|(base, _, _)| base).unwrap_or(&visible.id);
+      if let Some(h) = harness_for_step(session, harness_step) {
         if let Some(bid) = build_id_for.get(h) {
           if !needs.iter().any(|x| x == bid) {
             needs.push(bid.clone());
           }
         }
       }
-      let proc_index = latest_skill_proc_index(session, &n.id).or(n.proc_index);
+      let proc_index = latest_skill_proc_index(session, &visible.id).or(visible.proc_index);
       nodes.push(WorkflowNodeMeta {
-        id: n.id.clone(),
+        id: visible.id,
         proc_index,
-        order: order + n.order,
+        order: order + visible.order,
         needs,
-        conditional: n.conditional,
-        when_summary: n.when_summary.clone(),
+        conditional: visible.conditional,
+        when_summary: visible.when_summary,
       });
     }
   } else {
@@ -1363,6 +1405,25 @@ mod tests {
     }
   }
 
+  fn session_with_workflow(workflow: WorkflowMeta) -> Session {
+    Session {
+      id: "loopui".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: Some("demo-loop".into()),
+      kind: Some("workflow".into()),
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at: 1,
+      client_connected: true,
+      run_pid: None,
+      workflow: Some(workflow),
+      parent_session: None,
+    }
+  }
+
   #[test]
   fn validator_rejects_every_malformed_class() {
     assert!(validate_workflow_meta(&WorkflowMeta { nodes: vec![] }).is_err(), "empty");
@@ -1416,11 +1477,15 @@ mod tests {
   }
 
   #[test]
-  fn repeat_nodes_are_appended_only_as_iterations_start() {
+  fn repeat_previews_iteration_one_then_appends_later_iterations() {
     let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-loop-repeat").unwrap();
     let def = crate::harness_def::validate("demo-loop-repeat", src, crate::harness_def::DefSource::Builtin).unwrap();
     let mut meta = workflow_meta_from_def(&def).unwrap();
     assert_eq!(meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["initialize", "increment__repeat"]);
+    let session = session_with_workflow(meta.clone());
+    let visible = effective_workflow_meta(&session).unwrap();
+    assert!(visible.nodes.iter().any(|n| n.id == "increment__repeat_1" && n.proc_index.is_none()));
+    assert!(!visible.nodes.iter().any(|n| n.id == "increment__repeat"));
     bind_workflow_proc(&mut meta, "increment__repeat_1", 10, ProcKind::Skill);
     bind_workflow_proc(&mut meta, "increment__repeat_2", 11, ProcKind::Skill);
     let first = meta.nodes.iter().find(|n| n.id == "increment__repeat_1").unwrap();
@@ -1433,26 +1498,35 @@ mod tests {
   }
 
   #[test]
-  fn do_while_nodes_are_appended_only_as_iterations_start() {
+  fn do_while_previews_iteration_one_then_appends_later_iterations() {
     let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-loop-do-while").unwrap();
     let def = crate::harness_def::validate("demo-loop-do-while", src, crate::harness_def::DefSource::Builtin).unwrap();
     let mut meta = workflow_meta_from_def(&def).unwrap();
-    assert_eq!(meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["initialize", "increment__while"]);
-    bind_workflow_proc(&mut meta, "increment__while_1", 10, ProcKind::Skill);
-    bind_workflow_proc(&mut meta, "increment__while_2", 11, ProcKind::Skill);
-    let first = meta.nodes.iter().find(|n| n.id == "increment__while_1").unwrap();
-    let second = meta.nodes.iter().find(|n| n.id == "increment__while_2").unwrap();
+    assert_eq!(
+      meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
+      ["initialize", "increment__while_compare", "compare__while_compare"]
+    );
+    let session = session_with_workflow(meta.clone());
+    let visible = effective_workflow_meta(&session).unwrap();
+    assert!(visible.nodes.iter().any(|n| n.id == "increment__while_compare_1" && n.proc_index.is_none()));
+    assert!(visible.nodes.iter().any(|n| n.id == "compare__while_compare_1" && n.proc_index.is_none()));
+    assert!(!visible.nodes.iter().any(|n| n.id == "increment__while_compare"));
+    bind_workflow_proc(&mut meta, "increment__while_compare_1", 10, ProcKind::Skill);
+    bind_workflow_proc(&mut meta, "compare__while_compare_1", 11, ProcKind::Skill);
+    bind_workflow_proc(&mut meta, "increment__while_compare_2", 12, ProcKind::Skill);
+    let first = meta.nodes.iter().find(|n| n.id == "increment__while_compare_1").unwrap();
+    let second = meta.nodes.iter().find(|n| n.id == "increment__while_compare_2").unwrap();
     assert_eq!(first.needs, ["initialize"]);
-    assert_eq!(second.needs, ["increment__while_1"]);
+    assert_eq!(second.needs, ["initialize", "compare__while_compare_1"]);
     assert_eq!(first.proc_index, Some(10));
-    assert_eq!(second.proc_index, Some(11));
+    assert_eq!(second.proc_index, Some(12));
     assert!(validate_workflow_meta(&meta).is_ok());
   }
 
   #[test]
   fn loop_iteration_ids_parse_for_both_loop_kinds() {
     assert_eq!(parse_loop_iteration_id("increment__repeat_3"), Some(("increment", "__repeat", 3)));
-    assert_eq!(parse_loop_iteration_id("increment__while_1"), Some(("increment", "__while", 1)));
+    assert_eq!(parse_loop_iteration_id("increment__while_compare_1"), Some(("increment", "__while_compare", 1)));
     assert_eq!(parse_loop_iteration_id("increment"), None);
     assert_eq!(parse_loop_iteration_id("increment__while_x"), None);
   }

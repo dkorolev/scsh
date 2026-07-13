@@ -1,11 +1,11 @@
 # Built-in conditional-loop demo: the body runs at least once, then its own output decides
 # whether the loop takes another lap — the graph learns each iteration only when it starts.
-description: "Create do-while.txt at zero, then increment and commit it until the number reaches three."
+description: "Create do-while.txt at zero, then use agent steps to increment and decide whether to repeat."
 steps:
   initialize:
     agent:
-      harness: grok
-      model: composer-2.5-fast
+      harness: codex
+      model: gpt-5.5
     prompt: |
       Create `do-while.txt` at the repository root with exactly `0` followed by one newline.
       Commit only that file with the message `demo-loop-do-while: initialize number`. Put `0`
@@ -16,12 +16,9 @@ steps:
     commits: true
   increment:
     needs: initialize
-    do-while:
-      increment.number:
-        lt: 3
     agent:
-      harness: grok
-      model: composer-2.5-fast
+      harness: codex
+      model: gpt-5.5
     prompt: |
       Read the single integer in `do-while.txt`, increment it by exactly one, and overwrite the
       file with the new integer followed by one newline. Commit only that file with the message
@@ -31,3 +28,19 @@ steps:
       number:
         type: int
     commits: true
+  compare:
+    needs: increment
+    do-while: increment
+    agent:
+      harness: codex
+      model: gpt-5.5
+    inputs:
+      NUMBER: increment.number
+    prompt: |
+      Decide whether another loop iteration is required. Request another iteration when NUMBER
+      is less than 3. Do not change files or make commits. Put the decision only in the required
+      `SCSH_DO_WHILE_REPEAT` top-level boolean result field. Do nothing else.
+    output:
+      SCSH_DO_WHILE_REPEAT:
+        type: bool
+    commits: false
