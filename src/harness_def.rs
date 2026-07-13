@@ -1280,8 +1280,9 @@ mod tests {
     assert_eq!(def.steps[1].repeat, Some(3));
     assert_eq!(def.steps[1].needs, vec!["initialize".to_string()]);
     assert!(def.steps.iter().all(|s| s.commits));
-    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Grok));
-    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("composer-2.5-fast")));
+    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
+    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.5")));
+    assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
   }
 
   #[test]
@@ -1299,6 +1300,7 @@ mod tests {
     assert!(compare.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
     assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
     assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.5")));
+    assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
   }
 
   #[test]
