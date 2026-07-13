@@ -32,6 +32,19 @@ Agents working in this repo must also:
   `cargo test` at **~30 seconds** unless you're running the full integration suite (then
   a few minutes is fine, but still bounded).
 
+### Exact Beecast and Packdiff versions
+
+The first-party Beecast crates and Packdiff integration are always tied to exact releases:
+
+- Pin `beecast-player` and `beecast-page` in `Cargo.toml` with Cargo's exact `=X.Y.Z`
+  requirement, keep both on the same release, and commit the matching `Cargo.lock`.
+- Spell every Packdiff installation command as
+  `cargo install packdiff --version X.Y.Z --locked`. Do not use an unversioned install,
+  a compatibility range, or “latest” in code, tests, or documentation.
+- Treat an upgrade as one repository-wide change: verify the published releases, then
+  update the manifest, lockfile, runtime hints, tests, and all documentation references
+  together. A search for either product's old version must return no stale references.
+
 ---
 
 ## The `tmp/` rule
