@@ -18,6 +18,7 @@ pub enum Status {
   Queued,
   Running,
   Ok,
+  Graceful,
   Fail,
   /// Decided but never run — a workflow step whose gate was false or whose dependency skipped.
   Skipped,
@@ -56,6 +57,7 @@ pub enum Sty {
   Bold,
   Cyan,
   Green,
+  Orange,
   Red,
 }
 
@@ -302,6 +304,7 @@ fn glyph(status: Status, frame: u64) -> Seg {
     Status::Queued => Seg::new("·", Sty::Dim),
     Status::Running => Seg::new(FRAMES[(frame as usize) % FRAMES.len()], Sty::Cyan),
     Status::Ok => Seg::new("✓", Sty::Green),
+    Status::Graceful => Seg::new("!", Sty::Orange),
     Status::Fail => Seg::new("✗", Sty::Red),
     Status::Skipped => Seg::new("⊘", Sty::Dim),
   }
@@ -325,11 +328,15 @@ fn header_row_framed(i: usize, p: &Proc, frame: u64) -> Row {
   ];
   // Trailing note while running, or the final detail once done (red if it failed).
   let tail = match p.status {
-    Status::Ok | Status::Fail | Status::Skipped => p.detail.as_deref(),
+    Status::Ok | Status::Graceful | Status::Fail | Status::Skipped => p.detail.as_deref(),
     _ => p.note.as_deref(),
   };
   if let Some(t) = tail.filter(|t| !t.is_empty()) {
-    let sty = if p.status == Status::Fail { Sty::Red } else { Sty::Dim };
+    let sty = match p.status {
+      Status::Fail => Sty::Red,
+      Status::Graceful => Sty::Orange,
+      _ => Sty::Dim,
+    };
     segs.push(Seg::new("  ", Sty::Plain));
     segs.push(Seg::new(t.to_string(), sty));
   }

@@ -596,7 +596,7 @@ fn harness_chips_html(session: &Session) -> String {
       continue;
     };
     let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
-    let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped);
+    let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Graceful | ProcStatus::Fail | ProcStatus::Skipped);
     let skill = p.skill_name.as_deref().unwrap_or(&p.label);
     let base = format!("{h} · {skill}");
     let (tip, running_attr) = match p.status {
@@ -606,6 +606,7 @@ fn harness_chips_html(session: &Session) -> String {
       },
       ProcStatus::Waiting => (format!("{base}\nwaiting"), String::new()),
       ProcStatus::Ok => (format!("{base}\ndone"), String::new()),
+      ProcStatus::Graceful => (format!("{base}\ngraceful shutdown"), String::new()),
       ProcStatus::Fail => (format!("{base}\nfailed"), String::new()),
       ProcStatus::Skipped => (format!("{base}\nskipped"), String::new()),
     };

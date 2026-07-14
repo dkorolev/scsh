@@ -1,7 +1,7 @@
 //! Session detail page with per-proc output panels.
 
 use super::escape::esc;
-use super::fleet::fleet_sections_html;
+use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
 use super::proc::{
   cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html, summary_stats_html,
@@ -15,6 +15,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let port = store.port;
   let now = now_unix_secs();
   let mut procs_html = String::new();
+  let mut fleet_sections = fleet_sections_by_anchor(session);
   for proc in &session.procs {
     let detail = proc.detail.as_deref().unwrap_or("");
     let elapsed = elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref());
@@ -86,6 +87,9 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       },
       body_html = body_html
     ));
+    if let Some(fleets) = fleet_sections.remove(&proc.index) {
+      procs_html.push_str(&fleets);
+    }
   }
   let id = esc(&session.id);
   let session_meta = session_meta_html(session, now);
@@ -112,7 +116,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     String::new()
   };
   let workflow = workflow_graph_html(session, now);
-  let fleets = fleet_sections_html(session);
   let lede = session_lede_html(session, lifecycle);
   let chapters_pending = chapters_pending_html(pending);
   let job_diff_btn = if session.procs.iter().any(|proc| proc.diff_path.is_some()) {
@@ -126,14 +129,13 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let body = format!(
     "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{job_diff_btn}{export_btn}{stop_btn}</div>\
 {session_meta}\n{chapters_pending}</div>\n\
-{workflow}{fleets}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
+{workflow}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     export_btn = export_btn,
     job_diff_btn = job_diff_btn,
     stop_btn = stop_btn,
     session_meta = session_meta,
     chapters_pending = chapters_pending,
     workflow = workflow,
-    fleets = fleets,
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))

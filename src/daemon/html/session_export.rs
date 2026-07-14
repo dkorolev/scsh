@@ -15,11 +15,11 @@
 //! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
 //! commits-diff pages (when present) ride as sandboxed
 //! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
-//! engine and localStorage work — packdiff 0.4.3 document-first review) so the snapshot
+//! engine and localStorage work — packdiff 0.4.4 document-first review) so the snapshot
 //! stays a single file.
 
 use super::escape::esc;
-use super::fleet::fleet_sections_html;
+use super::fleet::fleet_sections_by_anchor;
 use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{elapsed_phrase, proc_meta_html};
@@ -69,11 +69,14 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   // are server-rendered markup styled by the shared stylesheet, so the export embeds them
   // as-is — the static state at export time, no live-update wiring.
   let workflow = workflow_graph_html(session, now);
-  let fleets = fleet_sections_html(session);
+  let mut fleet_sections = fleet_sections_by_anchor(session);
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
   for (proc, export) in session.procs.iter().zip(exports) {
     sections.push_str(&proc_section(session, proc, export));
+    if let Some(fleets) = fleet_sections.remove(&proc.index) {
+      sections.push_str(&fleets);
+    }
     if let CastExport::Cast { ndjson, summary, chapters, .. } = export {
       let markers: Vec<String> = chapters.iter().map(|(t, title)| format!("[{t}, {}]", quote(title))).collect();
       data_entries.push(format!(
@@ -112,7 +115,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
-{workflow}{fleets}<div class="procs">
+{workflow}<div class="procs">
 {sections}</div>
 </main>
 <script>{player_js}</script>
@@ -147,7 +150,6 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     ended = esc(&ended),
     duration = esc(&duration),
     workflow = workflow,
-    fleets = fleets,
     branch = esc(&session.branch),
     repo = esc(&session.repo),
   )

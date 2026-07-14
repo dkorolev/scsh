@@ -158,7 +158,7 @@ function harnessChipsHtml(session) {
   let out = '';
   (session.procs || []).forEach((p) => {
     if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
-    const done = (p.status === 'ok' || p.status === 'fail' || p.status === 'skipped');
+    const done = (p.status === 'ok' || p.status === 'graceful' || p.status === 'fail' || p.status === 'skipped');
     const skill = p.skill_name || p.label || '';
     const base = p.harness + ' · ' + skill;
     let tip = base, runningAttr = '';
@@ -166,6 +166,7 @@ function harnessChipsHtml(session) {
     else if (p.status === 'running') tip = base + '\nrunning';
     else if (p.status === 'waiting') tip = base + '\nwaiting';
     else if (p.status === 'ok') tip = base + '\ndone';
+    else if (p.status === 'graceful') tip = base + '\ngraceful shutdown';
     else if (p.status === 'fail') tip = base + '\nfailed';
     else tip = base + '\nskipped';
     out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" data-tip="' +
@@ -251,6 +252,7 @@ function elapsedPhrase(status, elapsed, failReason) {
   if (status === 'waiting') return clock ? 'waiting · ' + clock : 'waiting';
   if (status === 'running') return clock ? 'running for ' + clock : 'running';
   if (status === 'ok') return clock ? 'done in ' + clock : 'done';
+  if (status === 'graceful') return clock ? 'graceful shutdown in ' + clock : 'graceful shutdown';
   if (status === 'skipped') return 'skipped';
   if (status === 'fail') {
     if (failReason === 'force_stopped') return clock ? 'force-stopped after ' + clock : 'force-stopped';
@@ -464,6 +466,10 @@ function procMetaHtml(p) {
   }
   if (p.kind === 'skill') {
     let skillName = p.skill_name;
+    if (skillName && p.skill_source && /^[A-Za-z0-9_]+-(?:repeat|while-[A-Za-z0-9_]+)-\d+$/.test(skillName)) {
+      // Keep generated loop ids in anchors and graph wiring, but show the authored action name.
+      skillName = p.skill_source;
+    }
     let harness = p.harness;
     if (!skillName || !harness) {
       const m = String(p.label || '').match(/^([^:]+):\s*(.+)$/);
@@ -633,7 +639,7 @@ function updateProcFields(det, p, nowUnix) {
     // one; keep the viewer's position and leave live mode (player remounts without live).
     const wasRunning = castEl.dataset.status === 'running' || castEl.dataset.status === 'waiting';
     castEl.dataset.status = p.status;
-    if (wasRunning && (p.status === 'ok' || p.status === 'fail')) {
+    if (wasRunning && (p.status === 'ok' || p.status === 'graceful' || p.status === 'fail')) {
       castEl.dataset.ended = String(Math.round(Date.now() / 1000));
       if (castEl._live) setCastLive(castEl, false);
       createCastPlayer(castEl, castEl._player ? castEl._player.getCurrentTime() : null);
@@ -967,6 +973,7 @@ function procHtml(p, isOpen, nowUnix) {
       '/' + p.index + '/export.html" data-cast-export download hidden title="Offline HTML snapshot of this run"><span>' +
       snapLabel + '</span></a>'
     : '';
+  const diff = p.diff_path ? procDiffBtnHtml(p) : '';
   const kill = live
     ? '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
       esc(String(p.index)) + '" data-proc-kind="' + esc(p.kind || 'skill') + '" data-session="' + esc(SESSION_ID) +
@@ -976,7 +983,7 @@ function procHtml(p, isOpen, nowUnix) {
     : '';
   const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
-    ((snap || kill) ? '<div class="proc-actions">' + snap + kill + '</div>' : '') +
+    ((diff || snap || kill) ? '<div class="proc-actions">' + diff + snap + kill + '</div>' : '') +
     '<summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
@@ -996,17 +1003,28 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'○',ready:'○',running:'◉',done:'✓',failed:'✗','force-stopped':'✕',skipped:'⊘',stalled:'!'})[state] || '○';
+  return ({waiting:'○',ready:'○',running:'◉',done:'✓',graceful:'!',failed:'✗','force-stopped':'✕',skipped:'⊘',stalled:'!'})[state] || '○';
 }
 function wfStateLabel(state) {
-  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Done',failed:'Failed',
+  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
     'force-stopped':'Force-stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
+}
+function wfJobOutcome(session, nowUnix) {
+  const life = sessionLifecycle(session, nowUnix);
+  const text = ({running:'Job running',completed:'Job succeeded',failed:'Job failed',
+    cancelled:'Job cancelled',terminated:'Job terminated abruptly'})[life.class] || ('Job ' + life.label);
+  return { className: life.class, text };
+}
+function wfJobOutcomeHtml(session, nowUnix) {
+  const outcome = wfJobOutcome(session, nowUnix);
+  return '<span class="workflow-outcome workflow-outcome--' + outcome.className +
+    '" data-workflow-outcome>' + outcome.text + '</span>';
 }
 function wfUnmetNeedIds(session, node) {
   const nodes = (session.workflow && session.workflow.nodes) || [];
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const procs = session.procs || [];
-  const terminal = s => s === 'ok' || s === 'fail' || s === 'skipped';
+  const terminal = s => s === 'ok' || s === 'graceful' || s === 'fail' || s === 'skipped';
   return (node.needs || []).filter(need => {
     const n = byId[need];
     if (!n || n.proc_index == null) return true;
@@ -1049,7 +1067,8 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'ready') lines.push('Ready — dependencies finished; not started yet');
   else if (state === 'running') {
     lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
-  }   else if (state === 'done') lines.push('Done');
+  }   else if (state === 'done') lines.push('Succeeded');
+  else if (state === 'graceful') lines.push('Graceful shutdown — valid result and inner exit 0');
   else if (state === 'failed') lines.push('Failed');
   else if (state === 'force-stopped') lines.push('Force-stopped from the session browser');
   else if (state === 'skipped') lines.push('Skipped');
@@ -1066,6 +1085,7 @@ function wfDisplayState(session, node, nowUnix) {
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
   if (!p) return live ? 'waiting' : 'stalled';
   if (p.status === 'ok') return 'done';
+  if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
     return p.fail_reason === 'force_stopped' ? 'force-stopped' : 'failed';
   }
@@ -1078,7 +1098,7 @@ function wfDisplayState(session, node, nowUnix) {
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','done','failed','force-stopped','stalled','waiting','ready','skipped'];
+  const order = ['running','done','graceful','failed','force-stopped','stalled','waiting','ready','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
@@ -1087,8 +1107,9 @@ function wfLegendHtml(present) {
 }
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
-  const shown = (key) => key === 'stalled' ? 'abandoned' : key;
-  for (const [n, label] of [[counts.done,'done'],[counts.running,'running'],[counts.waiting,'waiting'],
+  const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
+    (key === 'graceful' ? 'graceful shutdown' : key));
+  for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.waiting,'waiting'],
     [counts.ready,'ready'],[counts.failed,'failed'],[counts.force_stopped,'force-stopped'],
     [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
@@ -1122,6 +1143,7 @@ const WF_START_ID = '__start', WF_FINISH_ID = '__finish';
 let pendingWorkflowStep = null;
 let wfHistorySilent = false;
 let workflowZoom = 1;
+let workflowExpanded = false;
 function wfNodeRanks(nodes) {
   const byId = Object.fromEntries(nodes.map(n => [n.id, n]));
   const ranks = Object.create(null);
@@ -1316,7 +1338,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
   const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
@@ -1324,6 +1346,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     const state = wfDisplayState(session, node, nowUnix);
     present[state] = true;
     if (state === 'done') counts.done++;
+    else if (state === 'graceful') counts.graceful++;
     else if (state === 'running') counts.running++;
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'ready') counts.ready++;
@@ -1362,14 +1385,17 @@ function wfBuildGraphHtml(session, nowUnix) {
       esc(title) + gate + '</span>' + wfAnnotationHtml(session, p) +
       '<span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
   }).join('') + wfBookendHtml(finish, false);
-  return '<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>' +
+  return '<div class="card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
+    wfJobOutcomeHtml(session, nowUnix) +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
-    wfLegendHtml(present) + '<div class="workflow-zoom" aria-label="Graph zoom">' +
+    wfLegendHtml(present) + '<div class="workflow-zoom" aria-label="Graph view controls">' +
     '<button type="button" data-wf-zoom-out aria-label="Zoom out">−</button>' +
     '<button type="button" data-wf-zoom-reset>100%</button>' +
     '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button>' +
-    '<button type="button" data-wf-zoom-fit>Fit</button></div></div>' +
+    '<button type="button" data-wf-zoom-fit>Fit</button>' +
+    '<button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button>' +
+    '</div></div>' +
     '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
     wfLoopIslandsHtml(layout) +
@@ -1385,6 +1411,8 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
   let root = document.querySelector('[data-workflow-graph]');
   if (!nodes.length) {
     if (root) root.remove();
+    workflowExpanded = false;
+    document.body.classList.remove('wf-modal-open');
     return null;
   }
   const liveIds = nodes.map(n => {
@@ -1437,18 +1465,21 @@ function updateWorkflowGraph(session, nowUnix) {
   if (!nodes.length) {
     const gone = document.querySelector('[data-workflow-graph]');
     if (gone) gone.remove();
+    workflowExpanded = false;
+    document.body.classList.remove('wf-modal-open');
     return;
   }
   const root = ensureWorkflowGraphMounted(session, nowUnix);
   if (!root) return;
   const present = Object.create(null);
-  const counts = { done: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
     const state = wfDisplayState(session, node, nowUnix);
     present[state] = true;
     if (state === 'done') counts.done++;
+    else if (state === 'graceful') counts.graceful++;
     else if (state === 'running') counts.running++;
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'ready') counts.ready++;
@@ -1488,7 +1519,7 @@ function updateWorkflowGraph(session, nowUnix) {
       else if (p && p.harness) bits.push(p.harness);
       if (p && p.model) bits.push(p.model);
       const elapsed = p ? procElapsed(p, nowUnix) : null;
-      if (elapsed != null && (state === 'running' || state === 'done' || state === 'failed' ||
+      if (elapsed != null && (state === 'running' || state === 'done' || state === 'graceful' || state === 'failed' ||
           state === 'force-stopped' || state === 'stalled')) {
         bits.push(formatElapsedClock(elapsed));
       }
@@ -1502,6 +1533,17 @@ function updateWorkflowGraph(session, nowUnix) {
   });
   const head = root.querySelector('.workflow-head');
   if (head) {
+    const outcome = wfJobOutcome(session, nowUnix);
+    let outcomeEl = head.querySelector('[data-workflow-outcome]');
+    if (!outcomeEl) {
+      const title = head.querySelector('.workflow-title');
+      if (title) title.insertAdjacentHTML('afterend', wfJobOutcomeHtml(session, nowUnix));
+      outcomeEl = head.querySelector('[data-workflow-outcome]');
+    }
+    if (outcomeEl) {
+      outcomeEl.className = 'workflow-outcome workflow-outcome--' + outcome.className;
+      outcomeEl.textContent = outcome.text;
+    }
     const summary = head.querySelector('.workflow-summary');
     if (summary) summary.innerHTML = wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix));
     const next = wfLegendHtml(present);
@@ -1616,6 +1658,27 @@ function initWorkflowGraph() {
   }
   const stage = root.querySelector('.workflow-stage');
   const reset = root.querySelector('[data-wf-zoom-reset]');
+  const expand = root.querySelector('[data-wf-expand]');
+  const applyExpanded = (expanded, focusButton) => {
+    workflowExpanded = expanded;
+    root.classList.toggle('wf-expanded', expanded);
+    document.body.classList.toggle('wf-modal-open', expanded);
+    if (expanded) {
+      root.setAttribute('role', 'dialog');
+      root.setAttribute('aria-modal', 'true');
+      root.setAttribute('aria-label', 'Job graph, large view');
+    } else {
+      root.removeAttribute('role');
+      root.removeAttribute('aria-modal');
+      root.removeAttribute('aria-label');
+    }
+    if (expand) {
+      expand.textContent = expanded ? 'Close' : 'Full screen';
+      expand.setAttribute('aria-label', expanded ? 'Close large graph view' : 'Open graph in large view');
+      expand.setAttribute('aria-pressed', expanded ? 'true' : 'false');
+      if (focusButton) expand.focus({ preventScroll: true });
+    }
+  };
   const applyZoom = next => {
     workflowZoom = Math.max(0.5, Math.min(2, next));
     // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
@@ -1634,6 +1697,46 @@ function initWorkflowGraph() {
   root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(workflowZoom + 0.1));
   reset?.addEventListener('click', () => applyZoom(1));
   root.querySelector('[data-wf-zoom-fit]')?.addEventListener('click', fit);
+  expand?.addEventListener('click', () => applyExpanded(!workflowExpanded, false));
+  applyExpanded(workflowExpanded, false);
+  if (!window.__scshWfExpandBound) {
+    window.__scshWfExpandBound = true;
+    document.addEventListener('keydown', ev => {
+      if (!workflowExpanded) return;
+      const current = document.querySelector('[data-workflow-graph]');
+      if (ev.key === 'Tab' && current) {
+        const focusable = Array.from(current.querySelectorAll('a[href],button,[tabindex]:not([tabindex="-1"])'))
+          .filter(el => !el.disabled && el.getClientRects().length > 0);
+        if (focusable.length) {
+          const first = focusable[0], last = focusable[focusable.length - 1];
+          if (ev.shiftKey && document.activeElement === first) {
+            ev.preventDefault();
+            last.focus();
+          } else if (!ev.shiftKey && document.activeElement === last) {
+            ev.preventDefault();
+            first.focus();
+          }
+        }
+        return;
+      }
+      if (ev.key !== 'Escape') return;
+      const button = current && current.querySelector('[data-wf-expand]');
+      workflowExpanded = false;
+      document.body.classList.remove('wf-modal-open');
+      if (current) {
+        current.classList.remove('wf-expanded');
+        current.removeAttribute('role');
+        current.removeAttribute('aria-modal');
+        current.removeAttribute('aria-label');
+      }
+      if (button) {
+        button.textContent = 'Full screen';
+        button.setAttribute('aria-label', 'Open graph in large view');
+        button.setAttribute('aria-pressed', 'false');
+        button.focus({ preventScroll: true });
+      }
+    });
+  }
   scroller?.addEventListener('wheel', ev => {
     ev.preventDefault();
     ev.stopPropagation();
@@ -1653,6 +1756,7 @@ function initWorkflowGraph() {
       ev.preventDefault();
       let step;
       try { step = decodeURIComponent(m[1]); } catch (_) { return; }
+      if (workflowExpanded) applyExpanded(false, false);
       activateWorkflowTask(step, { pushHistory: true });
       return;
     }
@@ -1661,6 +1765,7 @@ function initWorkflowGraph() {
     const step = a.getAttribute('data-workflow-step');
     if (!step) return;
     ev.preventDefault();
+    if (workflowExpanded) applyExpanded(false, false);
     activateWorkflowTask(step, { pushHistory: true });
   });
   if (!window.__scshWfHistoryBound) {
@@ -1734,6 +1839,7 @@ function renderSession(session, nowUnix) {
       wrap.innerHTML = procHtml(p, false, nowUnix);
       det = wrap.firstElementChild;
       root.appendChild(det);
+      initProcDiffs(det);
       setupOutputScroll(det.querySelector('.output'));
       if (procIsLive(p.status)) scrollOutputToBottom(det.querySelector('.output'));
     } else {
@@ -3016,6 +3122,40 @@ function renderInternalJobs(sessions, nowUnix) {
     renderRepoJobs(liveSessions, Date.now() / 1000);
     renderInternalJobs(liveSessions, Date.now() / 1000);
   }).catch(() => {});
+})();
+
+// Keep copied job URLs anchored to the section currently being read, like Packdiff's
+// scroll-addressable pages. replaceState avoids turning ordinary scrolling into Back-button
+// history. The candidate list is rebuilt on each frame because workflow runs add proc rows live.
+(function initJobScrollAddress() {
+  if (!SESSION_ID) return;
+  let queued = false;
+  function syncHashToScroll() {
+    queued = false;
+    const marker = Math.min(window.innerHeight * 0.3, 260);
+    const candidates = [];
+    const graph = document.getElementById('workflow-graph');
+    if (graph) candidates.push({ el: graph, hash: '#workflow-graph' });
+    document.querySelectorAll('details.proc[data-index]').forEach(det => {
+      const step = det.getAttribute('data-workflow-step');
+      const hash = step
+        ? '#task-' + encodeURIComponent(step)
+        : '#proc-' + encodeURIComponent(det.getAttribute('data-index'));
+      candidates.push({ el: det, hash: hash });
+    });
+    let current = null;
+    candidates.forEach(candidate => {
+      const rect = candidate.el.getBoundingClientRect();
+      if (rect.top <= marker && rect.bottom > 0) current = candidate.hash;
+    });
+    if (!current || location.hash === current) return;
+    history.replaceState(history.state, '', location.pathname + location.search + current);
+  }
+  window.addEventListener('scroll', () => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(syncHashToScroll);
+  }, { passive: true });
 })();
 "#
 }

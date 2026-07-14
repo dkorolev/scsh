@@ -8,32 +8,47 @@ use super::proc::status_glyph;
 use crate::daemon::model::Session;
 use crate::fleet::{fleet_groups, FleetGroup, FleetRoute};
 
-/// Render comparison tables for every multi-route `skill_source` in the session.
-/// Empty when the job has no fleets (every skill ran a single route).
-pub(crate) fn fleet_sections_html(session: &Session) -> String {
+/// Render each comparison table after the last proc it summarizes. A completed comparison
+/// should read as a recap of the work immediately above it, not as a block of future knowledge
+/// collected at the top of the page.
+pub(crate) fn fleet_sections_by_anchor(session: &Session) -> std::collections::BTreeMap<usize, String> {
   let groups = fleet_groups(&session.procs);
-  if groups.is_empty() {
-    return String::new();
+  let mut anchored = std::collections::BTreeMap::new();
+  for group in &groups {
+    let Some(anchor) = group.routes.iter().map(|route| route.proc_index).max() else { continue };
+    let out = anchored.entry(anchor).or_insert_with(|| String::from("<div class=\"fleets\">\n"));
+    out.push_str(&fleet_group_html(group));
   }
-  let mut out = String::from("<div class=\"fleets\">\n");
-  for g in &groups {
-    out.push_str(&fleet_group_html(g));
+  for out in anchored.values_mut() {
+    out.push_str("</div>\n");
   }
-  out.push_str("</div>\n");
-  out
+  anchored
 }
 
 fn fleet_group_html(g: &FleetGroup) -> String {
+  let cycle_iterations = g.routes.iter().all(|route| {
+    crate::daemon::workflow::parse_loop_iteration_id(&route.route).is_some_and(|(base, _, _)| base == g.skill_source)
+  });
+  let (count_label, column_label) =
+    if cycle_iterations { ("cycle iterations", "Cycle iteration") } else { ("routes", "Route") };
+  let summary = if cycle_iterations {
+    g.summary
+      .replace("all routes agree", "all cycle iterations agree")
+      .replace("across routes", "across cycle iterations")
+      .replace(&format!("{} routes", g.routes.len()), &format!("{} cycle iterations", g.routes.len()))
+  } else {
+    g.summary.clone()
+  };
   let mut rows = String::new();
   for r in &g.routes {
     rows.push_str(&fleet_row_html(r));
   }
   format!(
     r#"<section class="fleet" data-skill-source="{src}">
-<h3 class="fleet-title"><code>{src}</code> <span class="dim">· {n} routes</span></h3>
+<h3 class="fleet-title"><code>{src}</code> <span class="dim">· {n} {count_label}</span></h3>
 <p class="fleet-summary dim">{summary}</p>
 <table class="fleet-compare">
-<thead><tr><th>Route</th><th>Status</th><th>Duration</th><th>Result</th><th></th></tr></thead>
+<thead><tr><th>{column_label}</th><th>Status</th><th>Duration</th><th>Result</th><th></th></tr></thead>
 <tbody>
 {rows}</tbody>
 </table>
@@ -41,7 +56,9 @@ fn fleet_group_html(g: &FleetGroup) -> String {
 "#,
     src = esc(&g.skill_source),
     n = g.routes.len(),
-    summary = esc(&g.summary),
+    count_label = count_label,
+    column_label = column_label,
+    summary = esc(&summary),
     rows = rows,
   )
 }
@@ -74,10 +91,16 @@ fn fleet_row_html(r: &FleetRoute) -> String {
 }
 
 fn fleet_result_cell(r: &FleetRoute) -> String {
-  let mut parts = Vec::new();
   if let Some(g) = &r.grade {
-    parts.push(format!("<span class=\"fleet-grade\">grade {}</span>", esc(g)));
+    let n = r.comments_count.unwrap_or(0);
+    return format!(
+      "<span class=\"fleet-grade\">Grade: {}, {} comment{}.</span>",
+      esc(g),
+      n,
+      if n == 1 { "" } else { "s" }
+    );
   }
+  let mut parts = Vec::new();
   if let Some(n) = r.issues_found {
     parts.push(format!("<span class=\"fleet-issues\">{n} issue{}</span>", if n == 1 { "" } else { "s" }));
   }

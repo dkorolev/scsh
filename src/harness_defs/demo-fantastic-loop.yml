@@ -1,12 +1,38 @@
-# Built-in review-loop demo: prepare a PR description, then loop an agent-driven do-while whose
-# body is fix → five parallel reviewer personas → decide. Review feedback travels as the decide
-# step's `feedback` output, which the NEXT round's fix step receives as a loop-carried input —
-# review comments NEVER appear in the repository's git history. Only real work is committed:
-# the PR description, the fixes, and any deliberate-style notes. The bar: every grade excellent
-# or good, with at least as many excellent as good (excellent=5, good=4 ⇒ mean ≥ 4.5).
-description: "Prepare a PR description, then loop: five reviewers grade the code and a coding agent fixes or documents until every grade is excellent or good with at least as many excellent."
+# Built-in review-loop demo: implement a meaningful change to a deliberately tiny word-counting
+# program, prepare its PR description, then loop an agent-driven do-while whose body is
+# declare_done_or_fix → five parallel reviewer personas → decide. Review feedback travels as the
+# decide step's `feedback` output, which the NEXT round's declare_done_or_fix step receives as a
+# loop-carried input — review comments NEVER
+# appear in the repository's git history. Only real work is committed: the feature, PR description,
+# fixes, and any deliberate-style notes. The bar: every grade excellent or good, with at least as
+# many excellent as good (excellent=5, good=4 ⇒ mean ≥ 4.5).
+description: "Extend a tiny word-counting program, prepare its PR description, then loop five focused reviewers and a coding agent until the change meets the approval bar."
 steps:
+  implement:
+    agent:
+      harness: claude
+      model: opus
+    prompt: |
+      This repository contains a deliberately small word-counting CLI. Implement this feature
+      request without adding third-party dependencies:
+
+      Generalize the program from counting individual words to counting adjacent word groups.
+      Add `--group-size N` (default 1) and `--limit N` (default 10). Word groups must never cross
+      an input line boundary. Normalize case, treat punctuation as separators while retaining
+      apostrophes inside words, and order results deterministically by descending count then
+      alphabetically. Reject non-positive option values with a clear CLI error. Preserve the
+      existing output format for the default options.
+
+      Rewrite the implementation as needed, update or add focused tests and user documentation,
+      run the tests, and commit the complete feature with the message
+      `fantastic-loop: add grouped word counts`. Put a one-line summary in the `summary` result
+      field.
+    output:
+      summary:
+        type: string
+    commits: true
   prepare:
+    needs: implement
     agent:
       harness: claude
       model: opus
@@ -20,7 +46,7 @@ steps:
       summary:
         type: string
     commits: true
-  fix:
+  declare_done_or_fix:
     needs: prepare
     inputs:
       FEEDBACK: decide.feedback
@@ -29,21 +55,24 @@ steps:
       model: opus
     prompt: |
       You are the coding agent in a review loop. The `FEEDBACK` environment variable carries the
-      previous review round's full report. If it is empty, this is the first round: change
-      nothing, commit nothing, and set the `actions` result field to `no feedback yet`.
+      previous review round's full report. If it is empty, this is the first round: declare the
+      implementation ready for its initial review, change nothing, commit nothing, and set the
+      `actions` result field to `Ready for initial review.`
       Otherwise address EVERY comment in it: either change the code accordingly, or — when you
       judge a comment purely stylistic and the current code deliberate — append a short entry to
       `STYLE-NOTES.md` at the repository root documenting that decision and why the style stays.
       Never contradict earlier `STYLE-NOTES.md` entries or earlier fixes. Never write the
       feedback itself to any file. Commit your changes with the message
-      `fantastic-loop: address review feedback`. Summarize what you did in the `actions` result
-      field.
+      `fantastic-loop: address review feedback`. Write `actions` as several short paragraphs,
+      separated by blank lines: one paragraph for each reviewer lens whose feedback you acted
+      on, one paragraph for any deliberate STYLE-NOTES decision, and a final paragraph for test
+      results and the commit. Do not collapse distinct review areas into one long paragraph.
     output:
       actions:
         type: string
     commits: true
   review_correctness:
-    needs: fix
+    needs: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5
@@ -55,16 +84,19 @@ steps:
       modest scope: `excellent` means you would approve with praise, `good` means approve with
       nits, `average` or `poor` mean real work is needed. Put the grade in the `grade` result
       field and your most important, concrete, actionable comments (at most three, fewer is
-      better, one plain-text string) in `comments`. Do not change any files or make commits.
+      better, one plain-text string with one comment per paragraph) in `comments`. Put the exact
+      number of comment paragraphs in `comment_count`. Do not change any files or make commits.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
         type: string
+      comment_count:
+        type: int
     commits: false
   review_conventions:
-    needs: fix
+    needs: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5
@@ -76,17 +108,20 @@ steps:
       repository's modest scope: `excellent` means you would approve with praise, `good` means
       approve with nits, `average` or `poor` mean real work is needed. Put the grade in the
       `grade` result field and your most important, concrete, actionable comments (at most
-      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
-      make commits.
+      three, fewer is better, one plain-text string with one comment per paragraph) in
+      `comments`. Put the exact number of comment paragraphs in `comment_count`. Do not change
+      any files or make commits.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
         type: string
+      comment_count:
+        type: int
     commits: false
   review_simplicity:
-    needs: fix
+    needs: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5
@@ -98,17 +133,20 @@ steps:
       for the repository's modest scope: `excellent` means you would approve with praise, `good`
       means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
       the `grade` result field and your most important, concrete, actionable comments (at most
-      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
-      make commits.
+      three, fewer is better, one plain-text string with one comment per paragraph) in
+      `comments`. Put the exact number of comment paragraphs in `comment_count`. Do not change
+      any files or make commits.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
         type: string
+      comment_count:
+        type: int
     commits: false
   review_testing:
-    needs: fix
+    needs: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5
@@ -120,17 +158,20 @@ steps:
       the repository's modest scope: `excellent` means you would approve with praise, `good`
       means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
       the `grade` result field and your most important, concrete, actionable comments (at most
-      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
-      make commits.
+      three, fewer is better, one plain-text string with one comment per paragraph) in
+      `comments`. Put the exact number of comment paragraphs in `comment_count`. Do not change
+      any files or make commits.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
         type: string
+      comment_count:
+        type: int
     commits: false
   review_docs:
-    needs: fix
+    needs: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5
@@ -142,18 +183,21 @@ steps:
       for the repository's modest scope: `excellent` means you would approve with praise, `good`
       means approve with nits, `average` or `poor` mean real work is needed. Put the grade in
       the `grade` result field and your most important, concrete, actionable comments (at most
-      three, fewer is better, one plain-text string) in `comments`. Do not change any files or
-      make commits.
+      three, fewer is better, one plain-text string with one comment per paragraph) in
+      `comments`. Put the exact number of comment paragraphs in `comment_count`. Do not change
+      any files or make commits.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
         type: string
+      comment_count:
+        type: int
     commits: false
   decide:
     needs: review_correctness, review_conventions, review_simplicity, review_testing, review_docs
-    do-while: fix
+    do-while: declare_done_or_fix
     agent:
       harness: codex
       model: gpt-5.5

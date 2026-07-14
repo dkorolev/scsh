@@ -447,6 +447,12 @@ impl Proc {
     self.finish(Status::Ok, detail, None);
   }
 
+  /// Finish orange: the harness result and inner exit status are good, but the container
+  /// framework lost its outer shell response while shutting down.
+  pub fn finish_graceful(&self, detail: Option<&str>) {
+    self.finish(Status::Graceful, detail, None);
+  }
+
   /// Finish as never-run: a workflow step decided out of the run (gate false, or a needed
   /// step was skipped). Renders ⊘ with the reason, on the board and in the session browser.
   pub fn finish_skipped(&self, why: &str) {
@@ -483,6 +489,7 @@ impl Proc {
     if let Some(s) = &self.sink {
       let ps = match status {
         Status::Ok => crate::daemon::ProcStatus::Ok,
+        Status::Graceful => crate::daemon::ProcStatus::Graceful,
         Status::Fail => crate::daemon::ProcStatus::Fail,
         Status::Running => crate::daemon::ProcStatus::Running,
         Status::Queued => crate::daemon::ProcStatus::Waiting,
@@ -721,6 +728,7 @@ fn sty(s: Sty) -> Style {
     Sty::Bold => Style::new().bold(),
     Sty::Cyan => Style::new().cyan(),
     Sty::Green => Style::new().green().bold(),
+    Sty::Orange => Style::new().yellow().bold(),
     Sty::Red => Style::new().red().bold(),
   }
 }
@@ -744,6 +752,7 @@ fn summary_line(label: &str, status: Status, elapsed: f64, detail: Option<&str>)
   }
   let (glyph, ok) = match status {
     Status::Fail => (style("✗").red().bold(), false),
+    Status::Graceful => (style("!").yellow().bold(), true),
     _ => (style("✓").green().bold(), true),
   };
   let mut line = format!("{glyph} {}  {}", style(label).bold(), style(format_elapsed(elapsed)).dim());

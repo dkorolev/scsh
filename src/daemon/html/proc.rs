@@ -55,6 +55,7 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
     ProcStatus::Waiting => "○",
     ProcStatus::Running => "◉",
     ProcStatus::Ok => "✓",
+    ProcStatus::Graceful => "!",
     ProcStatus::Fail => "✗",
     ProcStatus::Skipped => "⊘",
   }
@@ -76,6 +77,10 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
     ProcStatus::Ok => match clock {
       Some(c) => format!("done in {c}"),
       None => "done".into(),
+    },
+    ProcStatus::Graceful => match clock {
+      Some(c) => format!("graceful shutdown in {c}"),
+      None => "graceful shutdown".into(),
     },
     ProcStatus::Fail => {
       let prefix = match fail_reason {
@@ -153,6 +158,13 @@ pub(crate) fn proc_meta_html(proc: &ProcRecord) -> String {
     }
     ProcKind::Skill => {
       let mut skill_name = proc.skill_name.clone();
+      if skill_name.as_deref().is_some_and(|name| crate::daemon::workflow::parse_loop_iteration_id(name).is_some()) {
+        // The generated `<step>-while-<end>-<n>` id is useful for orchestration and deep
+        // links, but it is not the run's human-facing name. The authored source step is.
+        if let Some(source) = &proc.skill_source {
+          skill_name = Some(source.clone());
+        }
+      }
       let mut harness = proc.harness.clone();
       if skill_name.is_none() || harness.is_none() {
         if let Some((h, n)) = proc.label.split_once(':') {

@@ -1319,30 +1319,35 @@ mod tests {
   #[test]
   fn builtin_fantastic_loop_demo_wires_a_review_panel_do_while() {
     let def = builtin("demo-fantastic-loop");
-    assert_eq!(def.steps.len(), 8);
+    assert_eq!(def.steps.len(), 9);
 
-    // prepare (once, outside the loop) and fix (the loop body's first step) code on claude opus.
+    // The feature and PR preparation happen once outside the loop; declare_done_or_fix is the
+    // loop body's first step. All three code-writing steps use claude opus.
+    let implement = def.steps.iter().find(|s| s.id == "implement").unwrap();
     let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
-    let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
-    assert!(prepare.needs.is_empty() && prepare.commits);
-    assert_eq!(fix.needs, vec!["prepare".to_string()]);
-    assert!(fix.commits);
-    for coder in [prepare, fix] {
+    let declare = def.steps.iter().find(|s| s.id == "declare_done_or_fix").unwrap();
+    assert!(implement.needs.is_empty() && implement.commits);
+    assert_eq!(prepare.needs, vec!["implement".to_string()]);
+    assert!(prepare.commits);
+    assert_eq!(declare.needs, vec!["prepare".to_string()]);
+    assert!(declare.commits);
+    for coder in [implement, prepare, declare] {
       assert_eq!(coder.agent.harness, crate::config::Harness::Claude);
       assert_eq!(coder.agent.model.as_deref(), Some("opus"));
     }
-    // The loop-carried input: fix reads the PREVIOUS round's decide.feedback (empty on round
-    // one) with no `needs: decide` — the back-edge that keeps review comments out of git.
-    assert_eq!(fix.inputs.len(), 1);
-    assert_eq!(fix.inputs[0].name, "FEEDBACK");
-    assert_eq!(fix.inputs[0].source, Ref::StepField { step: "decide".into(), field: "feedback".into() });
+    // The loop-carried input: declare_done_or_fix reads the PREVIOUS round's decide.feedback
+    // (empty on round one) with no `needs: decide` — the back-edge that keeps review comments
+    // out of git.
+    assert_eq!(declare.inputs.len(), 1);
+    assert_eq!(declare.inputs[0].name, "FEEDBACK");
+    assert_eq!(declare.inputs[0].source, Ref::StepField { step: "decide".into(), field: "feedback".into() });
 
     // The panel: five read-only reviewer personas, all codex gpt-5.5, each grading on the same
-    // enum and each gated on the fix step so every round reviews freshly fixed code.
+    // enum and each gated on declare_done_or_fix so every round reviews freshly revised code.
     let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
     assert_eq!(reviewers.len(), 5);
     for r in &reviewers {
-      assert_eq!(r.needs, vec!["fix".to_string()]);
+      assert_eq!(r.needs, vec!["declare_done_or_fix".to_string()]);
       assert!(!r.commits, "reviewers are read-only");
       assert_eq!(r.agent.harness, crate::config::Harness::Codex);
       assert_eq!(r.agent.model.as_deref(), Some("gpt-5.5"));
@@ -1350,19 +1355,20 @@ mod tests {
       assert_eq!(grade.ty, ParamType::Enum);
       assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
       assert!(r.outputs.iter().any(|o| o.name == "comments"));
+      assert!(r.outputs.iter().any(|o| o.name == "comment_count"));
     }
 
     // decide closes the loop: it consumes all ten grade/comment fields, emits the round report
     // as its `feedback` OUTPUT (never a committed file), and SCSH_DO_WHILE_REPEAT re-runs the body.
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
-    assert_eq!(decide.do_while.as_deref(), Some("fix"));
+    assert_eq!(decide.do_while.as_deref(), Some("declare_done_or_fix"));
     assert!(!decide.commits, "review comments must never enter the repository's git history");
     assert!(decide.outputs.iter().any(|o| o.name == "feedback"));
     assert_eq!(decide.inputs.len(), 10);
     assert_eq!(
       do_while_body(&def.steps, decide),
       [
-        "fix",
+        "declare_done_or_fix",
         "review_correctness",
         "review_conventions",
         "review_simplicity",

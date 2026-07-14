@@ -3,7 +3,7 @@
 use super::escape::esc;
 use super::format::format_elapsed_clock;
 use super::proc::proc_elapsed_secs;
-use crate::daemon::model::{ProcRecord, Session};
+use crate::daemon::model::{ProcRecord, Session, SessionLifecycle};
 use crate::daemon::workflow::{
   display_state, effective_workflow_meta, node_ranks, unmet_need_ids, validate_workflow_meta, WorkflowDisplayState,
   WorkflowMeta, WorkflowNodeMeta,
@@ -84,12 +84,13 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
   nodes_html.push_str(&bookend_html(&finish, false));
 
   format!(
-    r#"<div class="card card--accent-left-cyan workflow-card" id="workflow-graph" data-workflow-graph>
+    r#"<div class="card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>
 <div class="workflow-head">
 <h2 class="workflow-title">Job graph</h2>
+{outcome}
 <p class="workflow-summary dim">{summary}</p>
 {legend}
-<div class="workflow-zoom" aria-label="Graph zoom"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" data-wf-zoom-fit>Fit</button></div>
+<div class="workflow-zoom" aria-label="Graph view controls"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" data-wf-zoom-fit>Fit</button><button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
 </div>
 <div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
@@ -108,12 +109,30 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 </div>
 "#,
     summary = counts.summary_html(meta.nodes.len(), &first_of),
+    outcome = job_outcome_html(session.lifecycle_status(now)),
     legend = legend_html(&present),
     w = width,
     h = height,
     edges = edges_svg,
     loop_islands = loop_islands,
     nodes = nodes_html,
+  )
+}
+
+/// The graph-level verdict is deliberately separate from its per-task legend. Without this,
+/// a mixed graph read as the contradictory pair "Done, Failed" instead of one failed job with
+/// some successful tasks.
+fn job_outcome_html(lifecycle: SessionLifecycle) -> String {
+  let text = match lifecycle {
+    SessionLifecycle::Running => "Job running",
+    SessionLifecycle::Completed => "Job succeeded",
+    SessionLifecycle::Failed => "Job failed",
+    SessionLifecycle::Cancelled => "Job cancelled",
+    SessionLifecycle::Terminated => "Job terminated abruptly",
+  };
+  format!(
+    r#"<span class="workflow-outcome workflow-outcome--{class}" data-workflow-outcome>{text}</span>"#,
+    class = lifecycle.css_class(),
   )
 }
 
@@ -307,6 +326,7 @@ fn edge_path(e: &EdgeGeom) -> String {
 #[derive(Default)]
 struct StatusCounts {
   done: usize,
+  graceful: usize,
   running: usize,
   waiting: usize,
   ready: usize,
@@ -320,6 +340,7 @@ impl StatusCounts {
   fn tally(&mut self, state: WorkflowDisplayState) {
     match state {
       WorkflowDisplayState::Done => self.done += 1,
+      WorkflowDisplayState::Graceful => self.graceful += 1,
       WorkflowDisplayState::Running => self.running += 1,
       WorkflowDisplayState::Waiting => self.waiting += 1,
       WorkflowDisplayState::Ready => self.ready += 1,
@@ -336,6 +357,7 @@ impl StatusCounts {
     let mut parts = vec![format!("{total} {}", if total == 1 { "task" } else { "tasks" })];
     for (n, state) in [
       (self.done, WorkflowDisplayState::Done),
+      (self.graceful, WorkflowDisplayState::Graceful),
       (self.running, WorkflowDisplayState::Running),
       (self.waiting, WorkflowDisplayState::Waiting),
       (self.ready, WorkflowDisplayState::Ready),
@@ -371,6 +393,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
   const ORDER: &[WorkflowDisplayState] = &[
     WorkflowDisplayState::Running,
     WorkflowDisplayState::Done,
+    WorkflowDisplayState::Graceful,
     WorkflowDisplayState::Failed,
     WorkflowDisplayState::ForceStopped,
     WorkflowDisplayState::Stalled,
@@ -499,13 +522,14 @@ fn bookend_html(pos: &LaidOut, is_start: bool) -> String {
 fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
   match state {
     WorkflowDisplayState::Done => 0,
-    WorkflowDisplayState::Failed => 1,
-    WorkflowDisplayState::ForceStopped => 2,
-    WorkflowDisplayState::Skipped => 3,
-    WorkflowDisplayState::Running => 4,
-    WorkflowDisplayState::Stalled => 5,
-    WorkflowDisplayState::Ready => 6,
-    WorkflowDisplayState::Waiting => 7,
+    WorkflowDisplayState::Graceful => 1,
+    WorkflowDisplayState::Failed => 2,
+    WorkflowDisplayState::ForceStopped => 3,
+    WorkflowDisplayState::Skipped => 4,
+    WorkflowDisplayState::Running => 5,
+    WorkflowDisplayState::Stalled => 6,
+    WorkflowDisplayState::Ready => 7,
+    WorkflowDisplayState::Waiting => 8,
   }
 }
 
@@ -536,6 +560,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
       state,
       WorkflowDisplayState::Running
         | WorkflowDisplayState::Done
+        | WorkflowDisplayState::Graceful
         | WorkflowDisplayState::Failed
         | WorkflowDisplayState::ForceStopped
         | WorkflowDisplayState::Stalled
@@ -634,7 +659,8 @@ fn node_tip(
         lines.push("Running".into());
       }
     }
-    WorkflowDisplayState::Done => lines.push("Done".into()),
+    WorkflowDisplayState::Done => lines.push("Succeeded".into()),
+    WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result and inner exit 0".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
     WorkflowDisplayState::ForceStopped => lines.push("Force-stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
@@ -663,6 +689,7 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
         WorkflowDisplayState::Ready => "ready",
         WorkflowDisplayState::Stalled => "stalled",
         WorkflowDisplayState::Done => "done",
+        WorkflowDisplayState::Graceful => "graceful",
         WorkflowDisplayState::Failed => "failed",
         WorkflowDisplayState::ForceStopped => "force-stopped",
         WorkflowDisplayState::Skipped => "skipped",
@@ -687,6 +714,7 @@ fn state_icon(state: WorkflowDisplayState) -> &'static str {
     WorkflowDisplayState::Waiting | WorkflowDisplayState::Ready => "○",
     WorkflowDisplayState::Running => "◉",
     WorkflowDisplayState::Done => "✓",
+    WorkflowDisplayState::Graceful => "!",
     WorkflowDisplayState::Failed => "✗",
     WorkflowDisplayState::ForceStopped => "✕",
     WorkflowDisplayState::Skipped => "⊘",

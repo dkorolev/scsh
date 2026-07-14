@@ -638,7 +638,7 @@ fn annotation_for_cast(store: &Arc<Mutex<Store>>, cast_path: &str) -> Option<(St
             "running"
           }
           ProcStatus::Waiting | ProcStatus::Running => "fail",
-          ProcStatus::Ok => "ok",
+          ProcStatus::Ok | ProcStatus::Graceful => "ok",
           ProcStatus::Fail | ProcStatus::Skipped => "fail",
         };
         return Some((id.clone(), proc.index, status));
