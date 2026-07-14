@@ -300,6 +300,15 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
     if !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
       continue;
     }
+    if proc.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+      proc.status = ProcStatus::Fail;
+      proc.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+      proc.detail = Some("stopped from the session browser".into());
+      if proc.elapsed.is_none() {
+        proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
+      }
+      continue;
+    }
     proc.status = ProcStatus::Fail;
     if proc.kind == ProcKind::Annotate {
       proc.fail_reason = Some(crate::failure::reason::ANNOTATION_TIMED_OUT.into());
@@ -371,7 +380,7 @@ fn handle_connection(
     write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
     return Ok((false, None));
   }
-  let (status, body, content_type, mutated) = route(&req, store, prune);
+  let (status, body, content_type, mutated) = route(&req, store, prune, ws_dirty);
   write_response(&mut stream, status, &body, content_type)?;
   let session_id = if mutated { mutated_session_id(&req) } else { None };
   Ok((mutated, session_id))
@@ -745,7 +754,7 @@ fn parse_content_length(header_bytes: &[u8]) -> usize {
 }
 
 fn route(
-  req: &HttpRequest, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>,
+  req: &HttpRequest, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_dirty: &AtomicBool,
 ) -> (u16, String, &'static str, bool) {
   // The images-build endpoint returns a custom body (the spawned session id), so it does not
   // go through the generic `{"ok":…}` POST handler.
@@ -780,11 +789,13 @@ fn route(
     return (status, body, "application/json", mutated);
   }
   if req.method == "POST" && req.path == "/api/v1/proc/stop" {
-    let (status, body, mutated) = proc_stop_response(&req.body, store);
+    let (status, body, mutated) =
+      proc_stop_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
     return (status, body, "application/json", mutated);
   }
   if req.method == "POST" && req.path == "/api/v1/harness/stop" {
-    let (status, body, mutated) = harness_stop_response(&req.body, store);
+    let (status, body, mutated) =
+      harness_stop_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
     return (status, body, "application/json", mutated);
   }
   if req.method == "POST" && req.path == "/api/v1/repos/pick" {
@@ -983,6 +994,12 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
             s.run_pid = None;
             for p in &mut s.procs {
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
+                if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+                  p.status = ProcStatus::Fail;
+                  p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+                  p.detail = Some("stopped from the session browser".into());
+                  continue;
+                }
                 p.status = ProcStatus::Fail;
                 p.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
                 if p.detail.is_none() {
@@ -1165,8 +1182,11 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let fail_reason = field_str(&obj, "fail_reason");
       let elapsed = field_num(&obj, "elapsed");
       if let Some(p) = store.proc_mut(&session, proc_index) {
-        // A late client finish must not resurrect a proc the browser already stopped.
-        if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) {
+        // A late client finish must not overwrite an accepted or completed browser stop.
+        if matches!(
+          p.fail_reason.as_deref(),
+          Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::FORCE_STOPPED)
+        ) {
           return true;
         }
         p.status = status;
@@ -1944,7 +1964,7 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
         p.status = ProcStatus::Fail;
         p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
         if p.detail.is_none() {
-          p.detail = Some("force-stopped from the session browser".into());
+          p.detail = Some("stopped from the session browser".into());
         }
         p.container_name = None;
       }
@@ -1968,7 +1988,7 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     &session_id,
     crate::failure::reason::FORCE_STOPPED,
     "(session)",
-    "force-stopped from the session browser",
+    "stopped from the session browser",
   );
   (200, "{\"ok\":true}".into(), true)
 }
@@ -1977,7 +1997,12 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
 /// kill its container, or signal the host annotation process while suppressing its sidecar.
 /// The session and its other procs keep running. Idempotent on a proc that already finished
 /// (`{ok:true,already_ended:true}`).
+#[cfg(test)]
 fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  proc_stop_response_notifying(body, store, || {})
+}
+
+fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, notify: F) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
     _ => return (400, err_body("expected a JSON object"), false),
@@ -2009,19 +2034,18 @@ fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bo
       ProcKind::Annotate => p.annotate_target.clone(),
       ProcKind::Build => None,
     };
-    p.status = ProcStatus::Fail;
-    p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
-    if p.detail.is_none() {
-      p.detail = Some(if p.kind == ProcKind::Annotate {
-        "annotation stopped from the session browser; the recording is unchanged".into()
-      } else {
-        "container killed from the session browser".into()
-      });
-    }
+    p.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+    p.detail = Some(if p.kind == ProcKind::Annotate {
+      "stopping annotation; the recording will remain unchanged".into()
+    } else {
+      "terminating container from the session browser".into()
+    });
     let label = p.label.clone();
     s.last_seen_at = now_unix_secs();
     (container, label, annotation_pid, suppress)
   };
+  // Publish the accepted request before teardown, which may take a second or more.
+  notify();
   if let Some(path) = suppress {
     crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
   }
@@ -2032,20 +2056,46 @@ fn proc_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bo
   if let Some(pid) = annotation_pid {
     signal_run_pid(pid);
   }
-  crate::failure::log_session_proc(
-    &session_id,
-    crate::failure::reason::FORCE_STOPPED,
-    &label,
-    "container killed from the session browser",
-  );
+  let finalized = {
+    let mut store = lock_store(store);
+    let Some(p) = store.proc_mut(&session_id, index) else {
+      return (404, err_body("proc disappeared during stop"), true);
+    };
+    if p.fail_reason.as_deref() != Some(crate::failure::reason::STOP_REQUESTED) {
+      false
+    } else {
+      p.status = ProcStatus::Fail;
+      p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+      p.detail = Some(if p.kind == ProcKind::Annotate {
+        "annotation stopped from the session browser; the recording is unchanged".into()
+      } else {
+        "container stopped from the session browser".into()
+      });
+      true
+    }
+  };
+  notify();
+  if finalized {
+    crate::failure::log_session_proc(
+      &session_id,
+      crate::failure::reason::FORCE_STOPPED,
+      &label,
+      "container stopped from the session browser",
+    );
+  }
   (200, "{\"ok\":true}".into(), true)
 }
 
 /// `POST /api/v1/harness/stop` — body `{"harness":"grok"}`. Stop EVERY still-running skill
 /// container of one harness across all live sessions (the "grok is out of quota" button) and
-/// mark each proc failed with `force_stopped`. Sessions keep running for their other harnesses.
+/// expose each proc as `stop_requested` while teardown runs, then settle it as stopped.
 /// Returns `{ok:true,stopped:<n>}` (`0` when nothing of that harness was running).
+#[cfg(test)]
 fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  harness_stop_response_notifying(body, store, || {})
+}
+
+fn harness_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, notify: F) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
     _ => return (400, err_body("expected a JSON object"), false),
@@ -2058,7 +2108,7 @@ fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   let now = now_unix_secs();
   // (session, proc label, container) for every victim — teardown and logging happen
   // outside the store lock (container stop sleeps up to ~1s each).
-  let mut stopped: Vec<(String, String, Option<String>)> = Vec::new();
+  let mut stopped: Vec<(String, usize, String, Option<String>)> = Vec::new();
   {
     let mut store = lock_store(store);
     for (sid, s) in store.sessions.iter_mut() {
@@ -2074,12 +2124,9 @@ fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
         if !live || p.kind != ProcKind::Skill || p.harness.as_deref() != Some(harness.as_str()) {
           continue;
         }
-        stopped.push((sid.clone(), p.label.clone(), p.container_name.take()));
-        p.status = ProcStatus::Fail;
-        p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
-        if p.detail.is_none() {
-          p.detail = Some(format!("all {harness} containers stopped from the session browser"));
-        }
+        stopped.push((sid.clone(), p.index, p.label.clone(), p.container_name.take()));
+        p.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+        p.detail = Some(format!("terminating all {harness} containers from the session browser"));
         touched = true;
       }
       if touched {
@@ -2087,20 +2134,35 @@ fn harness_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
       }
     }
   }
-  if let Some(rt) = runtime.as_deref() {
-    for (_, _, container) in &stopped {
-      if let Some(name) = container.as_deref() {
-        crate::ui::signals::stop_container(rt, name);
-      }
-    }
+  if !stopped.is_empty() {
+    // Let every open job page render orange Terminating before teardown begins.
+    notify();
   }
-  for (sid, label, _) in &stopped {
-    crate::failure::log_session_proc(
-      sid,
-      crate::failure::reason::FORCE_STOPPED,
-      label,
-      &format!("all {harness} containers stopped from the session browser"),
-    );
+  for (sid, index, label, container) in &stopped {
+    if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
+      crate::ui::signals::stop_container(rt, name);
+    }
+    let finalized = {
+      let mut store = lock_store(store);
+      let Some(p) = store.proc_mut(sid, *index) else { continue };
+      if p.fail_reason.as_deref() != Some(crate::failure::reason::STOP_REQUESTED) {
+        false
+      } else {
+        p.status = ProcStatus::Fail;
+        p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
+        p.detail = Some(format!("all {harness} containers stopped from the session browser"));
+        true
+      }
+    };
+    notify();
+    if finalized {
+      crate::failure::log_session_proc(
+        sid,
+        crate::failure::reason::FORCE_STOPPED,
+        label,
+        &format!("all {harness} containers stopped from the session browser"),
+      );
+    }
   }
   let n = stopped.len();
   (200, format!("{{\"ok\":true,\"stopped\":{n}}}"), n > 0)
@@ -2770,6 +2832,19 @@ mod tests {
       assert_eq!(session.procs[1].status, ProcStatus::Fail);
       assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
     }
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    assert!(handle_api_post(
+      "/api/v1/proc/finish",
+      r#"{"session":"kill01","proc":1,"status":"ok","fail_reason":null,"detail":"late success","elapsed":2}"#,
+      &store,
+      &prune,
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let stopped = &guard.sessions.get("kill01").unwrap().procs[1];
+      assert_eq!(stopped.status, ProcStatus::Fail, "a late harness finish cannot resurrect a stopped task");
+      assert_eq!(stopped.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_STOPPED));
+    }
     // Idempotent on a proc that already finished.
     let (status2, body2, mutated2) = proc_stop_response(r#"{"session":"kill01","proc":1}"#, &store);
     assert_eq!(status2, 200);
@@ -2946,10 +3021,35 @@ mod tests {
       // last seen ages ago. It must be invisible to a harness-wide stop.
       s.insert_session("hs99".into(), session("hs99", vec![proc(0, "grok")], 50));
     }
-    let (status, body, mutated) = harness_stop_response(r#"{"harness":"grok"}"#, &store);
+    let snapshots = Mutex::new(Vec::new());
+    let (status, body, mutated) = harness_stop_response_notifying(r#"{"harness":"grok"}"#, &store, || {
+      let guard = store.lock().unwrap();
+      let states = ["hs01", "hs02"]
+        .iter()
+        .map(|id| {
+          let p = &guard.sessions.get(*id).unwrap().procs[0];
+          (p.status, p.fail_reason.clone())
+        })
+        .collect::<Vec<_>>();
+      snapshots.lock().unwrap().push(states);
+    });
     assert_eq!(status, 200, "got: {body}");
     assert!(mutated);
     assert!(body.contains(r#""stopped":2"#), "got: {body}");
+    let snapshots = snapshots.into_inner().unwrap();
+    assert!(
+      snapshots[0].iter().all(|(status, reason)| *status == ProcStatus::Running
+        && reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED)),
+      "the first published state must be terminating: {:?}",
+      snapshots[0]
+    );
+    assert!(
+      snapshots.last().unwrap().iter().all(|(status, reason)| {
+        *status == ProcStatus::Fail && reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED)
+      }),
+      "the final published state must be stopped: {:?}",
+      snapshots.last()
+    );
     {
       let guard = store.lock().unwrap();
       let s1 = guard.sessions.get("hs01").unwrap();

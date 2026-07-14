@@ -90,9 +90,10 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 <h2 class="workflow-title">Job graph</h2>
 {outcome}
 <p class="workflow-summary dim">{summary}</p>
-{legend}
 <div class="workflow-zoom" aria-label="Graph view controls"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" data-wf-zoom-fit>Fit</button><button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
 </div>
+<div class="workflow-visual">
+{legend}
 <div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
 {loop_islands}
@@ -108,9 +109,10 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 </div>
 </div>
 </div>
+</div>
 "#,
     summary = counts.summary_html(meta.nodes.len(), &first_of),
-    outcome = job_outcome_html(lifecycle),
+    outcome = job_outcome_html(session, lifecycle),
     legend = legend_html(&present),
     w = width,
     h = height,
@@ -123,18 +125,37 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 /// The graph-level verdict is deliberately separate from its per-task legend. Without this,
 /// a mixed graph read as the contradictory pair "Done, Failed" instead of one failed job with
 /// some successful tasks.
-fn job_outcome_html(lifecycle: SessionLifecycle) -> String {
-  let text = match lifecycle {
-    SessionLifecycle::Running => "Job running",
-    SessionLifecycle::Completed => "Job succeeded",
-    SessionLifecycle::Failed => "Job failed",
-    SessionLifecycle::Cancelled => "Job cancelled",
-    SessionLifecycle::Terminated => "Job terminated abruptly",
+fn job_outcome_html(session: &Session, lifecycle: SessionLifecycle) -> String {
+  let finalizing = lifecycle == SessionLifecycle::Running && skill_procs_are_terminal(session);
+  let text = if finalizing {
+    "Finalizing recordings"
+  } else {
+    match lifecycle {
+      SessionLifecycle::Running => "Job running",
+      SessionLifecycle::Completed => "Job succeeded",
+      SessionLifecycle::Failed => "Job failed",
+      SessionLifecycle::Cancelled => "Job cancelled",
+      SessionLifecycle::Terminated => "Job terminated abruptly",
+    }
   };
   format!(
     r#"<span class="workflow-outcome workflow-outcome--{class}" data-workflow-outcome>{text}</span>"#,
     class = lifecycle.css_class(),
   )
+}
+
+fn skill_procs_are_terminal(session: &Session) -> bool {
+  let mut skills = session.procs.iter().filter(|proc| proc.kind == crate::daemon::model::ProcKind::Skill).peekable();
+  skills.peek().is_some()
+    && skills.all(|proc| {
+      matches!(
+        proc.status,
+        crate::daemon::model::ProcStatus::Ok
+          | crate::daemon::model::ProcStatus::Graceful
+          | crate::daemon::model::ProcStatus::Fail
+          | crate::daemon::model::ProcStatus::Skipped
+      )
+    })
 }
 
 fn loop_islands_html(layout: &[LaidOut], plans: &[WorkflowLoopPlan], lifecycle: SessionLifecycle) -> String {
@@ -369,7 +390,9 @@ fn port_y(node_y: f64, node_h: f64, index: usize, count: usize) -> f64 {
   node_y + margin + usable * (index as f64) / ((count - 1) as f64)
 }
 
-/// Same-row edges are a straight horizontal; otherwise a cubic with horizontal tangents.
+/// Same-row edges are straight. Cross-row edges have explicit horizontal runways at both
+/// cards, with a smooth S-curve between them, so every arrow meets a vertical card edge
+/// at a crisp right angle instead of appearing to spear it diagonally.
 fn edge_path(e: &EdgeGeom) -> String {
   // Stop a hair short of the node so the open chevron sits in the gutter, not under the border.
   let x2 = e.x2 - 1.5;
@@ -381,11 +404,15 @@ fn edge_path(e: &EdgeGeom) -> String {
       x2 = x2,
     );
   }
-  let dx = (e.x2 - e.x1).max(24.0);
-  let c1x = e.x1 + dx * 0.42;
-  let c2x = e.x2 - dx * 0.42;
+  let gap = (x2 - e.x1).max(1.0);
+  let runway = (gap * 0.24).clamp(12.0, 20.0);
+  let curve_start = e.x1 + runway;
+  let curve_end = x2 - runway;
+  let curve_dx = (curve_end - curve_start).max(1.0);
+  let c1x = curve_start + curve_dx * 0.42;
+  let c2x = curve_end - curve_dx * 0.42;
   format!(
-    r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
+    r#"<path class="wf-edge" d="M{x1:.1},{y1:.1} L{curve_start:.1},{y1:.1} C{c1x:.1},{y1:.1} {c2x:.1},{y2:.1} {curve_end:.1},{y2:.1} L{x2:.1},{y2:.1}" marker-end="url(#wf-arrow)" />"#,
     x1 = e.x1,
     y1 = e.y1,
     y2 = e.y2,
@@ -397,10 +424,11 @@ struct StatusCounts {
   done: usize,
   graceful: usize,
   running: usize,
+  terminating: usize,
   waiting: usize,
   ready: usize,
   failed: usize,
-  force_stopped: usize,
+  stopped: usize,
   stalled: usize,
   skipped: usize,
 }
@@ -411,10 +439,11 @@ impl StatusCounts {
       WorkflowDisplayState::Done => self.done += 1,
       WorkflowDisplayState::Graceful => self.graceful += 1,
       WorkflowDisplayState::Running => self.running += 1,
+      WorkflowDisplayState::Terminating => self.terminating += 1,
       WorkflowDisplayState::Waiting => self.waiting += 1,
       WorkflowDisplayState::Ready => self.ready += 1,
       WorkflowDisplayState::Failed => self.failed += 1,
-      WorkflowDisplayState::ForceStopped => self.force_stopped += 1,
+      WorkflowDisplayState::ForceStopped => self.stopped += 1,
       WorkflowDisplayState::Stalled => self.stalled += 1,
       WorkflowDisplayState::Skipped => self.skipped += 1,
     }
@@ -428,10 +457,11 @@ impl StatusCounts {
       (self.done, WorkflowDisplayState::Done),
       (self.graceful, WorkflowDisplayState::Graceful),
       (self.running, WorkflowDisplayState::Running),
+      (self.terminating, WorkflowDisplayState::Terminating),
       (self.waiting, WorkflowDisplayState::Waiting),
       (self.ready, WorkflowDisplayState::Ready),
       (self.failed, WorkflowDisplayState::Failed),
-      (self.force_stopped, WorkflowDisplayState::ForceStopped),
+      (self.stopped, WorkflowDisplayState::ForceStopped),
       (self.stalled, WorkflowDisplayState::Stalled),
       (self.skipped, WorkflowDisplayState::Skipped),
     ] {
@@ -461,6 +491,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
   // Fixed order so the legend does not jump as states come and go.
   const ORDER: &[WorkflowDisplayState] = &[
     WorkflowDisplayState::Running,
+    WorkflowDisplayState::Terminating,
     WorkflowDisplayState::Done,
     WorkflowDisplayState::Graceful,
     WorkflowDisplayState::Failed,
@@ -595,10 +626,11 @@ fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
     WorkflowDisplayState::Failed => 2,
     WorkflowDisplayState::ForceStopped => 3,
     WorkflowDisplayState::Skipped => 4,
-    WorkflowDisplayState::Running => 5,
-    WorkflowDisplayState::Stalled => 6,
-    WorkflowDisplayState::Ready => 7,
-    WorkflowDisplayState::Waiting => 8,
+    WorkflowDisplayState::Terminating => 5,
+    WorkflowDisplayState::Running => 6,
+    WorkflowDisplayState::Stalled => 7,
+    WorkflowDisplayState::Ready => 8,
+    WorkflowDisplayState::Waiting => 9,
   }
 }
 
@@ -624,19 +656,17 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   if !model.is_empty() {
     meta_bits.push(esc(model));
   }
-  if let Some(ref e) = elapsed {
-    if matches!(
-      state,
-      WorkflowDisplayState::Running
-        | WorkflowDisplayState::Done
-        | WorkflowDisplayState::Graceful
-        | WorkflowDisplayState::Failed
-        | WorkflowDisplayState::ForceStopped
-        | WorkflowDisplayState::Stalled
-    ) {
-      meta_bits.push(esc(e));
-    }
-  }
+  let show_elapsed = matches!(
+    state,
+    WorkflowDisplayState::Running
+      | WorkflowDisplayState::Terminating
+      | WorkflowDisplayState::Done
+      | WorkflowDisplayState::Graceful
+      | WorkflowDisplayState::Failed
+      | WorkflowDisplayState::ForceStopped
+      | WorkflowDisplayState::Stalled
+  );
+  let state_elapsed = elapsed.filter(|_| show_elapsed).map(|e| format!(" · {}", esc(&e))).unwrap_or_default();
   if state == WorkflowDisplayState::Waiting && unmet > 0 {
     let names: Vec<String> = unmet_ids.iter().map(|id| node_display_title(id)).collect();
     if names.len() == 1 {
@@ -669,7 +699,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   };
   format!(
     r#"<a class="wf-node wf-{state}{build_class}" href="{href}" id="wf-node-{id}" data-workflow-step="{id}" data-wf-state="{state}"{proc_attr} style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" data-tip="{tip}"{tip_running} aria-label="{aria}">
-<span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span></span>
+<span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span><span class="wf-state-elapsed">{state_elapsed}</span></span>
 <span class="wf-id">{title_esc}{gate}</span>
 <span class="wf-meta dim">{meta}</span>
 </a>"#,
@@ -688,6 +718,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
     aria = esc(&aria),
     ico = state_icon(state),
     label = state.label(),
+    state_elapsed = state_elapsed,
     gate = gate,
     meta = meta_bits.join(" · "),
   )
@@ -728,10 +759,11 @@ fn node_tip(
         lines.push("Running".into());
       }
     }
+    WorkflowDisplayState::Terminating => lines.push("Terminating — stop requested".into()),
     WorkflowDisplayState::Done => lines.push("Succeeded".into()),
     WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result and inner exit 0".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
-    WorkflowDisplayState::ForceStopped => lines.push("Force-stopped from the session browser".into()),
+    WorkflowDisplayState::ForceStopped => lines.push("Stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
     WorkflowDisplayState::Stalled => lines.push("Abandoned — job stopped updating".into()),
   }
@@ -754,13 +786,14 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
       let st = display_state(session, meta, dep, now);
       let status = match st {
         WorkflowDisplayState::Running => "running",
+        WorkflowDisplayState::Terminating => "terminating",
         WorkflowDisplayState::Waiting => "waiting",
         WorkflowDisplayState::Ready => "ready",
         WorkflowDisplayState::Stalled => "stalled",
         WorkflowDisplayState::Done => "done",
         WorkflowDisplayState::Graceful => "graceful",
         WorkflowDisplayState::Failed => "failed",
-        WorkflowDisplayState::ForceStopped => "force-stopped",
+        WorkflowDisplayState::ForceStopped => "stopped",
         WorkflowDisplayState::Skipped => "skipped",
       };
       let mut bits = vec![kind.to_string(), status.to_string()];
@@ -781,7 +814,7 @@ fn node_proc_for_tip<'a>(
 fn state_icon(state: WorkflowDisplayState) -> &'static str {
   match state {
     WorkflowDisplayState::Waiting | WorkflowDisplayState::Ready => "○",
-    WorkflowDisplayState::Running => "◉",
+    WorkflowDisplayState::Running | WorkflowDisplayState::Terminating => "◉",
     WorkflowDisplayState::Done => "✓",
     WorkflowDisplayState::Graceful => "!",
     WorkflowDisplayState::Failed => "✗",

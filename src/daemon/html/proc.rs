@@ -66,6 +66,12 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
 pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reason: Option<&str>) -> String {
   let clock = elapsed.map(format_elapsed_clock);
   match status {
+    ProcStatus::Waiting | ProcStatus::Running if fail_reason == Some(crate::failure::reason::STOP_REQUESTED) => {
+      match clock {
+        Some(c) => format!("terminating · {c}"),
+        None => "terminating".into(),
+      }
+    }
     ProcStatus::Waiting => match clock {
       Some(c) => format!("waiting · {c}"),
       None => "waiting".into(),
@@ -84,7 +90,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
     },
     ProcStatus::Fail => {
       let prefix = match fail_reason {
-        Some(r) if r == crate::failure::reason::FORCE_STOPPED => "force-stopped after",
+        Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped after",
         Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled after",
         Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out after",
         _ => "failed in",
@@ -92,7 +98,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
       match clock {
         Some(c) => format!("{prefix} {c}"),
         None => match fail_reason {
-          Some(r) if r == crate::failure::reason::FORCE_STOPPED => "force-stopped".into(),
+          Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out".into(),
           _ => "failed".into(),
@@ -205,10 +211,11 @@ mod elapsed_phrase_tests {
     assert_eq!(elapsed_phrase(ProcStatus::Ok, Some(18.0), None), "done in 18s");
     assert_eq!(elapsed_phrase(ProcStatus::Running, Some(12.0), None), "running for 12s");
     assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(9.0), None), "failed in 9s");
-    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(45.0), Some(reason::FORCE_STOPPED)), "force-stopped after 45s");
-    assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::FORCE_STOPPED)), "force-stopped");
-    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(120.0), Some(reason::CONTAINER_INACTIVE)), "stalled after 120s");
-    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(60.0), Some(reason::CONTAINER_TIMEOUT)), "timed out after 60s");
+    assert_eq!(elapsed_phrase(ProcStatus::Running, Some(12.0), Some(reason::STOP_REQUESTED)), "terminating · 12s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(45.0), Some(reason::FORCE_STOPPED)), "stopped after 45s");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::FORCE_STOPPED)), "stopped");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(120.0), Some(reason::CONTAINER_INACTIVE)), "stalled after 2m");
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(60.0), Some(reason::CONTAINER_TIMEOUT)), "timed out after 1m");
     assert_eq!(elapsed_phrase(ProcStatus::Waiting, None, None), "waiting");
     assert_eq!(elapsed_phrase(ProcStatus::Skipped, None, None), "skipped");
   }

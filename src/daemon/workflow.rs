@@ -44,12 +44,13 @@ pub struct WorkflowNodeMeta {
   pub when_summary: Option<String>,
 }
 
-/// User-facing graph node state (includes derived `stalled` / `force-stopped`).
+/// User-facing graph node state (including derived terminating, stopped, and stalled states).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkflowDisplayState {
   Waiting,
   Ready,
   Running,
+  Terminating,
   Done,
   Graceful,
   Failed,
@@ -65,10 +66,11 @@ impl WorkflowDisplayState {
       Self::Waiting => "waiting",
       Self::Ready => "ready",
       Self::Running => "running",
+      Self::Terminating => "terminating",
       Self::Done => "done",
       Self::Graceful => "graceful",
       Self::Failed => "failed",
-      Self::ForceStopped => "force-stopped",
+      Self::ForceStopped => "stopped",
       Self::Skipped => "skipped",
       Self::Stalled => "stalled",
     }
@@ -79,10 +81,11 @@ impl WorkflowDisplayState {
       Self::Waiting => "Waiting",
       Self::Ready => "Ready",
       Self::Running => "Running",
+      Self::Terminating => "Terminating",
       Self::Done => "Succeeded",
       Self::Graceful => "Graceful shutdown",
       Self::Failed => "Failed",
-      Self::ForceStopped => "Force-stopped",
+      Self::ForceStopped => "Stopped",
       Self::Skipped => "Skipped",
       Self::Stalled => "Abandoned",
     }
@@ -198,7 +201,7 @@ pub fn validate_workflow_meta(meta: &WorkflowMeta) -> Result<(), String> {
   }
   let mut seen = std::collections::BTreeSet::new();
   for n in &meta.nodes {
-    if n.id.is_empty() || !n.id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if !is_safe_graph_id(&n.id) {
       return Err(format!("unsafe step id {:?}", n.id));
     }
     if !seen.insert(n.id.as_str()) {
@@ -517,7 +520,7 @@ pub fn effective_workflow_meta(session: &Session) -> Option<WorkflowMeta> {
 }
 
 fn is_safe_graph_id(id: &str) -> bool {
-  !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+  !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
 }
 
 /// Step `needs` from the session's harness definition — repairs legacy sessions that were
@@ -701,6 +704,9 @@ pub fn display_state(
       } else {
         WorkflowDisplayState::Stalled
       }
+    }
+    Some(p) if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) => {
+      WorkflowDisplayState::Terminating
     }
     Some(p) => match p.status {
       ProcStatus::Ok => WorkflowDisplayState::Done,
@@ -962,7 +968,7 @@ mod tests {
       branch: "main".into(),
       skills: vec![
         crate::daemon::model::SkillMeta { name: "demo-pr-claude-sonnet".into(), harness: "claude".into() },
-        crate::daemon::model::SkillMeta { name: "demo-pr-cursor-composer-fast".into(), harness: "cursor".into() },
+        crate::daemon::model::SkillMeta { name: "demo-pr-cursor-composer-2.5-fast".into(), harness: "cursor".into() },
       ],
       procs: vec![
         ProcRecord {
@@ -1055,10 +1061,10 @@ mod tests {
         },
         ProcRecord {
           index: 4,
-          label: "cursor: demo-pr-cursor-composer-fast".into(),
+          label: "cursor: demo-pr-cursor-composer-2.5-fast".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
-          skill_name: Some("demo-pr-cursor-composer-fast".into()),
+          skill_name: Some("demo-pr-cursor-composer-2.5-fast".into()),
           harness: Some("cursor".into()),
           model: Some("composer-2.5-fast".into()),
           started_at: None,
@@ -1088,6 +1094,7 @@ mod tests {
     assert!(ids.contains(&"build_claude"), "{ids:?}");
     assert!(ids.contains(&"build_cursor"), "{ids:?}");
     assert!(ids.contains(&"demo-pr-claude-sonnet"), "{ids:?}");
+    assert!(ids.contains(&"demo-pr-cursor-composer-2.5-fast"), "dotted model route omitted: {ids:?}");
     let claude_skill = meta.nodes.iter().find(|n| n.id == "demo-pr-claude-sonnet").unwrap();
     assert_eq!(claude_skill.needs, vec!["build_claude".to_string()]);
     let build_claude = meta.nodes.iter().find(|n| n.id == "build_claude").unwrap();

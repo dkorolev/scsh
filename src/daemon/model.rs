@@ -356,9 +356,11 @@ pub fn trim_sessions_to_cap(sessions: &mut std::collections::BTreeMap<String, Se
   }
 }
 
-/// Sessions sorted for the index page: running first, then by start time descending.
+/// Top-level sessions sorted for the index page: running first, then by start time descending.
+/// Follow-on annotation sessions stay addressable and live in the store, but belong to their
+/// `parent_session` and must never be promoted to peer jobs in a listing.
 pub fn sessions_for_index(sessions: &BTreeMap<String, Session>, now: u64) -> Vec<&Session> {
-  let mut list: Vec<&Session> = sessions.values().collect();
+  let mut list: Vec<&Session> = sessions.values().filter(|session| session.parent_session.is_none()).collect();
   list.sort_by(|a, b| {
     let a_live = a.lifecycle_status(now) == SessionLifecycle::Running;
     let b_live = b.lifecycle_status(now) == SessionLifecycle::Running;
@@ -623,6 +625,11 @@ mod tests {
     let mut sessions = BTreeMap::new();
     sessions.insert(done.id.clone(), done);
     sessions.insert(running.id.clone(), running);
+    let mut annotation = sessions["done"].clone();
+    annotation.id = "annotate".into();
+    annotation.started_at = 300;
+    annotation.parent_session = Some("done".into());
+    sessions.insert(annotation.id.clone(), annotation);
     let ordered = sessions_for_index(&sessions, 100);
     assert_eq!(ordered.len(), 2);
     assert_eq!(ordered[0].id, "run");

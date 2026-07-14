@@ -48,7 +48,29 @@ pub(crate) fn format_idle(secs: f64) -> String {
 }
 
 pub(crate) fn format_elapsed_clock(secs: f64) -> String {
-  format!("{}s", secs.floor() as u64)
+  let secs = secs.floor() as u64;
+  if secs >= 3600 {
+    let hours = secs / 3600;
+    let minutes = (secs % 3600) / 60;
+    let seconds = secs % 60;
+    if seconds > 0 {
+      format!("{hours}h{minutes:02}m{seconds:02}s")
+    } else if minutes > 0 {
+      format!("{hours}h{minutes:02}m")
+    } else {
+      format!("{hours}h")
+    }
+  } else if secs >= 60 {
+    let minutes = secs / 60;
+    let seconds = secs % 60;
+    if seconds > 0 {
+      format!("{minutes}m{seconds:02}s")
+    } else {
+      format!("{minutes}m")
+    }
+  } else {
+    format!("{secs}s")
+  }
 }
 
 pub(crate) fn line_count_label(n: usize) -> String {
@@ -88,5 +110,11 @@ mod tests {
     assert_eq!(format_idle(0.5), "");
     assert_eq!(format_idle(2.7), " · idle 2s");
     assert_eq!(format_elapsed_clock(12.9), "12s");
+    assert_eq!(format_elapsed_clock(120.0), "2m");
+    assert_eq!(format_elapsed_clock(121.0), "2m01s");
+    assert_eq!(format_elapsed_clock(198.9), "3m18s");
+    assert_eq!(format_elapsed_clock(3723.0), "1h02m03s");
+    assert_eq!(format_elapsed_clock(3720.0), "1h02m");
+    assert_eq!(format_elapsed_clock(3600.0), "1h");
   }
 }

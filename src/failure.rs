@@ -22,6 +22,8 @@ pub mod reason {
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
   pub const THREAD_PANICKED: &str = "skill_thread_panicked";
+  /// A browser stop request was accepted and container teardown is still in progress.
+  pub const STOP_REQUESTED: &str = "stop_requested";
   pub const SESSION_END_INCOMPLETE: &str = "session_end_before_proc_finish";
   pub const ANNOTATION_TIMED_OUT: &str = "annotation_timed_out";
   pub const FORCE_STOPPED: &str = "force_stopped";

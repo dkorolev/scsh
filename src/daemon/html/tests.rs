@@ -333,9 +333,10 @@ fn ui_review_fixes_hold() {
     "graph running matches proc orange"
   );
   assert!(html.contains(".wf-node.wf-stalled { border-left-color: var(--purple); }"), "abandoned/stalled is purple");
+  assert!(html.contains(".wf-node.wf-stopped { border-left-color: var(--red); }"), "stopped shares fail red");
   assert!(
-    html.contains(".wf-node.wf-force-stopped { border-left-color: var(--red); }"),
-    "force-stopped shares fail red"
+    html.contains(".wf-node.wf-terminating { border-left-color: var(--orange);"),
+    "terminating shares running orange"
   );
   assert!(js.contains("stalled:'Abandoned'"), "legend label is Abandoned");
   assert!(js.contains("done:'Succeeded'"), "successful graph tasks are called Succeeded, not Done");
@@ -412,6 +413,16 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   assert!(page.contains(r#"data-proc-stop="0""#), "live sessions offer per-proc kill");
   assert!(!page.contains(r#"data-proc-stop="0" disabled"#), "live kill is enabled: {page}");
   assert!(page.contains(r#"id="session-stop""#), "live job offers Force stop");
+
+  let proc = &mut live.sessions.get_mut("castab").unwrap().procs[0];
+  proc.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+  proc.detail = Some("terminating all claude containers from the session browser".into());
+  let html = super::index_page(&live);
+  assert!(html.contains("Terminating all claude (1)…"), "harness strip acknowledges teardown: {html}");
+  assert!(!html.contains(r#"data-harness-stop="claude""#), "a terminating harness cannot be stopped twice");
+  let page = session_page(&live, "castab").expect("terminating session renders");
+  assert!(page.contains(r#"class="proc terminating""#), "proc island turns orange while stopping: {page}");
+  assert!(!page.contains(r#"data-proc-stop="0""#), "a terminating proc cannot be stopped twice: {page}");
 }
 
 #[test]
@@ -1303,6 +1314,10 @@ fn client_js_wires_force_stop() {
   assert!(js.contains("scsh-dialog"), "dialog markup class ships");
   assert!(!js.contains("confirm("), "no browser confirm() for Force stop");
   assert!(!js.contains("alert("), "Force stop errors use toast, not alert()");
+  assert!(js.contains("Terminating all ' + harness"), "stop-all acknowledges the accepted request in its button");
+  assert!(js.contains("Stop requested for all ' + harness"), "stop-all immediately confirms through the live toast");
+  assert!(js.contains("Stopped ' + n + ' ' + harness + ' task"), "stop-all reports its final stopped count");
+  assert!(js.contains("p.fail_reason === 'stop_requested'"), "live tasks expose the terminating transition");
 }
 
 /// Accessibility hardening: confirm-dialog focus management, the full ARIA tab pattern,
@@ -1589,6 +1604,31 @@ fn annotation_control_links_to_the_job_and_persists_its_state() {
   );
   assert!(js.contains("CHAPTERS_WAIT_SECS"), "the poll window is still bounded");
   assert!(js.contains("renderAnnotationLink(box, meta)"), "a late-registering job links up mid-poll");
+}
+
+#[test]
+fn annotation_child_sessions_belong_to_the_parent_job_not_job_lists() {
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let mut annotation = store.sessions["castab"].clone();
+  annotation.id = "annjob".into();
+  annotation.profile = Some("annotate-cast".into());
+  annotation.parent_session = Some("castab".into());
+  annotation.procs[0].kind = ProcKind::Annotate;
+  annotation.procs[0].cast_path = None;
+  annotation.procs[0].annotate_target = Some("/tmp/x.cast".into());
+  store.sessions.insert(annotation.id.clone(), annotation);
+
+  let html = super::index_page(&store);
+  assert!(html.contains(r#"href="/job/castab""#), "parent remains a listed job");
+  assert!(!html.contains(r#"href="/job/annjob""#), "annotation child is absent from Jobs and Projects");
+
+  let js = live_client_js();
+  assert!(js.contains("if (!s || s.parent_session) return;"), "live Jobs updates omit annotation children");
+  assert!(js.contains("s.parent_session || !s.repo"), "live Projects updates omit annotation children");
+  assert!(
+    js.contains("jobId !== session.id && candidate.parent_session !== session.id"),
+    "the hidden child still supplies annotation state to its parent job"
+  );
 }
 
 #[test]
@@ -2057,6 +2097,7 @@ fn workflow_graph_renders_builtin_shapes() {
       parent_session: None,
     },
   );
+  store.sessions.get_mut("arith1").unwrap().procs[2].elapsed = Some(198.0);
   let html = session_page(&store, "arith1").expect("page");
   assert!(html.contains(r#"id="workflow-graph""#), "workflow card present");
   assert!(html.contains("3 tasks · "), "summary starts with task count");
@@ -2081,6 +2122,13 @@ fn workflow_graph_renders_builtin_shapes() {
   let graph = graph.split("</svg>").next().expect("svg");
   assert_eq!(graph.matches("marker-end=\"url(#wf-arrow)\"").count(), 5);
   assert!(html.contains(r#"class="wf-arrowhead""#), "open chevron arrowheads, not filled triangles");
+  let curved = graph
+    .split(r#"class="wf-edge" d=""#)
+    .filter_map(|part| part.split('"').next())
+    .find(|path| path.contains(" C"))
+    .expect("fan-in graph has a curved cross-row edge");
+  assert!(curved.starts_with('M') && curved.contains(" L") && curved.rsplit_once(" L").is_some(), "{curved}");
+  assert!(curved.split(" C").nth(1).unwrap_or("").contains(" L"), "arrow has a horizontal entry runway: {curved}");
   // Fan-in ports land at distinct y on summarize (not a single shared tip).
   let mut ends: Vec<(String, String)> = Vec::new();
   for part in graph.split(r#"class="wf-edge" d=""#) {
@@ -2117,6 +2165,27 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-failed""#));
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-stalled""#));
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-skipped""#));
+  assert!(
+    html.contains(r#"<span class="wf-state-label">Succeeded</span><span class="wf-state-elapsed"> · 3m18s</span>"#),
+    "duration sits beside status in compact clock form"
+  );
+  let graph_card = html.split(r#"id="workflow-graph""#).nth(1).unwrap();
+  let graph_head = graph_card.split(r#"<div class="workflow-visual">"#).next().unwrap();
+  let graph_visual = graph_card.split(r#"<div class="workflow-visual">"#).nth(1).unwrap();
+  assert!(!graph_head.contains("workflow-legend"), "task legend must not read as part of the job-level header");
+  assert!(
+    graph_visual.find("workflow-legend") < graph_visual.find("workflow-scroll"),
+    "legend overlays the visual before its scroll viewport"
+  );
+
+  {
+    let session = store.sessions.get_mut("arith1").unwrap();
+    session.ended_at = None;
+    session.client_connected = true;
+    session.last_seen_at = crate::daemon::paths::now_unix_secs();
+  }
+  let finalizing = session_page(&store, "arith1").expect("finalizing page");
+  assert!(finalizing.contains(">Finalizing recordings</span>"), "all tasks done while casts settle is explicit");
 
   // fruits fan-out — live session so Waiting→Ready (deps met) is not collapsed to Stalled
   let now = crate::daemon::paths::now_unix_secs();
@@ -2325,7 +2394,7 @@ fn workflow_graph_renders_builtin_shapes() {
         {
           let mut p = skill_proc(0, "cursor-build", "cursor", ProcStatus::Fail);
           p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
-          p.detail = Some("force-stopped from the session browser".into());
+          p.detail = Some("stopped from the session browser".into());
           p
         },
         {
@@ -2360,16 +2429,28 @@ fn workflow_graph_renders_builtin_shapes() {
       parent_session: None,
     },
   );
-  let stopped = session_page(&store, "stop1").expect("force-stopped page");
+  let stopped = session_page(&store, "stop1").expect("stopped page");
   let summary =
     stopped.split(r#"class="workflow-summary dim">"#).nth(1).and_then(|s| s.split("</p>").next()).unwrap_or("?");
-  assert!(stopped.contains(r#"wf-force-stopped"#), "force-stopped node class; summary={summary}");
-  assert!(stopped.contains("Force-stopped"), "force-stopped label; summary={summary}");
-  assert!(summary.contains("force-stopped"), "summary counts force-stopped separately: {summary}");
+  assert!(stopped.contains(r#"wf-stopped"#), "stopped node class; summary={summary}");
+  assert!(stopped.contains("Stopped"), "stopped label; summary={summary}");
+  assert!(summary.contains("stopped"), "summary counts stopped separately: {summary}");
   assert!(summary.contains("failed"), "natural failure stays failed: {summary}");
-  assert!(stopped.contains("wf-leg-force-stopped"), "legend lists force-stopped");
+  assert!(stopped.contains("wf-leg-stopped"), "legend lists stopped");
   assert!(stopped.contains(r#"workflow-outcome--failed"#), "mixed terminal states have one failed job verdict");
   assert!(stopped.contains(">Job failed</span>"), "overall failure is explicit above the task legend");
+
+  {
+    let session = store.sessions.get_mut("stop1").unwrap();
+    session.ended_at = None;
+    session.client_connected = true;
+    session.procs[0].status = ProcStatus::Running;
+    session.procs[0].fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
+    session.procs[0].detail = Some("terminating container from the session browser".into());
+  }
+  let terminating = session_page(&store, "stop1").expect("terminating page");
+  assert!(terminating.contains(r#"wf-terminating"#), "graph task turns orange while teardown runs");
+  assert!(terminating.contains("Terminating"), "graph task names the intermediate state");
 
   // Flat skill session (no authored DAG): still gets a job graph from its skill proc,
   // bookended Start → task → Finish so even a single-run job shows arrows.
