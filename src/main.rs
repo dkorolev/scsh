@@ -1799,7 +1799,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
       let iteration = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
       let run_id = if let Some(end) = do_while_end_for.get(&s.id) {
-        format!("{}__while_{}_{iteration}", s.id, end)
+        format!("{}-while-{}-{iteration}", s.id, end)
       } else {
         s.iteration_run_id(iteration)
       };

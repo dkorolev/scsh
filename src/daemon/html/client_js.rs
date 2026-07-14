@@ -1020,7 +1020,7 @@ function wfUnmetNeeds(session, node) {
 function wfNodeTitle(id) {
   if (id === 'build_base') return 'base';
   if (id.indexOf('build_') === 0) return id.slice(6);
-  const looped = id.match(/^(.*)__(?:repeat|while)_(\d+)$/);
+  const looped = id.match(/^([A-Za-z0-9_]+)-(?:repeat|while-[A-Za-z0-9_]+)-(\d+)$/);
   if (looped) return looped[1] + ' · iteration ' + looped[2];
   return id;
 }
@@ -1171,7 +1171,7 @@ function wfLayoutNodes(session, nodes, nowUnix) {
 function wfLayoutWithBookends(session, nodes, nowUnix) {
   const layout = wfLayoutNodes(session, nodes, nowUnix);
   const shift = WF_BOOKEND_W + WF_GAP_X;
-  const loopTop = nodes.some(n => /__(?:repeat|while)_\d+$/.test(n.id)) ? 36 : 0;
+  const loopTop = nodes.some(n => /^[A-Za-z0-9_]+-(?:repeat|while-[A-Za-z0-9_]+)-\d+$/.test(n.id)) ? 36 : 0;
   layout.forEach(n => { n.x += shift; n.y += loopTop; });
   const rootIds = wfGraphRoots(nodes), sinkIds = wfGraphSinks(nodes);
   const centerY = ids => {
@@ -1256,12 +1256,24 @@ function wfBookendHtml(pos, isStart) {
 function wfLoopIslandsHtml(layout) {
   const groups = Object.create(null);
   layout.forEach(pos => {
-    const match = pos.id.match(/^(.*)__(repeat|while)_(\d+)$/);
+    const match = pos.id.match(/^([A-Za-z0-9_]+)-(repeat|while-([A-Za-z0-9_]+))-(\d+)$/);
     if (!match) return;
-    const key = (match[2] === 'while' ? 'do-while' : 'repeat') + ' · ' + match[1];
+    // do-while islands group by the loop (its final step); repeat islands by the one step.
+    const key = match[3] ? 'while-' + match[3] : 'repeat-' + match[1];
     (groups[key] || (groups[key] = [])).push(pos);
   });
-  return Object.entries(groups).map(([label, items]) => {
+  return Object.entries(groups).map(([key, items]) => {
+    // Name a do-while island for its whole body — "first → final" — via the lowest-order
+    // member; a repeat (or single-step) island keeps the single step name.
+    let label;
+    if (key.indexOf('while-') === 0) {
+      const end = key.slice('while-'.length);
+      const first = items.slice().sort((a, b) => a.order - b.order)[0];
+      const firstBase = (first && (first.id.match(/^([A-Za-z0-9_]+)-while-/) || [])[1]) || end;
+      label = 'do-while · ' + (firstBase !== end ? firstBase + ' → ' + end : end);
+    } else {
+      label = 'repeat · ' + key.slice('repeat-'.length);
+    }
     const pad = 14, labelH = 22;
     const left = Math.min(...items.map(p => p.x)) - pad;
     const top = Math.min(...items.map(p => p.y)) - pad - labelH;
@@ -1389,10 +1401,11 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
       }).filter(Boolean).sort().join('\0');
     if (domIds === liveIds) return root;
     const oldScroller = root.querySelector('.workflow-scroll');
+    // The graph card has a fixed viewport, so a remount cannot reflow the page — preserve
+    // only the card's own scroll. The page viewport never moves on its own.
     preserved = {
       left: oldScroller ? oldScroller.scrollLeft : 0,
-      top: oldScroller ? oldScroller.scrollTop : 0,
-      pageTop: root.getBoundingClientRect().top
+      top: oldScroller ? oldScroller.scrollTop : 0
     };
     root.remove();
     root = null;
@@ -1415,7 +1428,6 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
         newScroller.scrollLeft = preserved.left;
         newScroller.scrollTop = preserved.top;
       }
-      window.scrollBy(0, root.getBoundingClientRect().top - preserved.pageTop);
     }
   }
   return root;
@@ -1512,7 +1524,9 @@ function updateWorkflowGraph(session, nowUnix) {
       const step = pendingWorkflowStep;
       pendingWorkflowStep = null;
       setWorkflowPendingStatus('');
-      activateProcPanel(det, null, false);
+      // Resolved by a DATA update, not a fresh click — open the panel but never move the
+      // viewport: the page scrolls only in direct response to human input.
+      activateProcPanel(det, null, false, false);
       markWorkflowNodeSelected(step);
     }
   }
@@ -1535,11 +1549,13 @@ function setWorkflowPendingStatus(msg) {
   }
   el.textContent = msg;
 }
-function activateProcPanel(det, hash, pushHistory) {
+function activateProcPanel(det, hash, pushHistory, scroll) {
   if (!det) return false;
   det.open = true;
-  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-  det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+  if (scroll !== false) {
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+  }
   const summary = det.querySelector('summary');
   if (summary) {
     try { summary.focus({ preventScroll: true }); } catch (_) { try { summary.focus(); } catch (_) {} }
@@ -1600,11 +1616,11 @@ function initWorkflowGraph() {
   }
   const stage = root.querySelector('.workflow-stage');
   const reset = root.querySelector('[data-wf-zoom-reset]');
-  const baseViewportHeight = scroller ? (parseFloat(getComputedStyle(scroller).height) || 768) : 768;
   const applyZoom = next => {
     workflowZoom = Math.max(0.5, Math.min(2, next));
+    // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
+    // so zooming (like graph growth) can never reflow the page around it.
     if (stage) stage.style.zoom = String(workflowZoom);
-    if (scroller) scroller.style.height = Math.round(baseViewportHeight * workflowZoom) + 'px';
     if (reset) reset.textContent = Math.round(workflowZoom * 100) + '%';
   };
   const fit = () => {
