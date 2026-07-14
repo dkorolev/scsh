@@ -6,7 +6,7 @@ use super::proc::proc_elapsed_secs;
 use crate::daemon::model::{ProcRecord, Session, SessionLifecycle};
 use crate::daemon::workflow::{
   display_state, effective_workflow_meta, node_ranks, unmet_need_ids, validate_workflow_meta, WorkflowDisplayState,
-  WorkflowMeta, WorkflowNodeMeta,
+  WorkflowLoopPlan, WorkflowMeta, WorkflowNodeMeta,
 };
 
 const NODE_W: f64 = 200.0;
@@ -49,8 +49,9 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
   let height = layout.iter().chain([&start, &finish]).map(|n| n.y + n.h).fold(0.0_f64, f64::max) + PAD;
   let by_id: std::collections::BTreeMap<&str, &LaidOut> = layout.iter().map(|n| (n.id.as_str(), n)).collect();
 
+  let lifecycle = session.lifecycle_status(now);
   let edges_svg = render_edges(&meta, &by_id, &start, &finish);
-  let loop_islands = loop_islands_html(&layout);
+  let loop_islands = loop_islands_html(&layout, &crate::daemon::workflow::workflow_loop_plans(session), lifecycle);
 
   let mut nodes_html = String::new();
   nodes_html.push_str(&bookend_html(&start, true));
@@ -109,7 +110,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 </div>
 "#,
     summary = counts.summary_html(meta.nodes.len(), &first_of),
-    outcome = job_outcome_html(session.lifecycle_status(now)),
+    outcome = job_outcome_html(lifecycle),
     legend = legend_html(&present),
     w = width,
     h = height,
@@ -136,7 +137,7 @@ fn job_outcome_html(lifecycle: SessionLifecycle) -> String {
   )
 }
 
-fn loop_islands_html(layout: &[LaidOut]) -> String {
+fn loop_islands_html(layout: &[LaidOut], plans: &[WorkflowLoopPlan], lifecycle: SessionLifecycle) -> String {
   let mut groups: std::collections::BTreeMap<(&str, &str), Vec<&LaidOut>> = std::collections::BTreeMap::new();
   for pos in layout {
     let Some((base, suffix, _)) = crate::daemon::workflow::parse_loop_iteration_id(&pos.id) else { continue };
@@ -163,14 +164,82 @@ fn loop_islands_html(layout: &[LaidOut]) -> String {
       .map(|(base, _, _)| base)
       .unwrap_or(end);
     let name = if kind == "do-while" && first != end { format!("{first} → {end}") } else { end.to_string() };
+    let shown = items
+      .iter()
+      .filter_map(|p| crate::daemon::workflow::parse_loop_iteration_id(&p.id).map(|(_, _, iteration)| iteration))
+      .max()
+      .unwrap_or(1);
+    let plan = plans.iter().find(|plan| plan.id == end);
+    let progress = loop_progress_text(plan, shown, lifecycle);
     html.push_str(&format!(
-      r#"<div class="wf-loop-island" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span>{kind} · {name}</span></div>"#,
+      r#"<div class="wf-loop-island" data-loop-id="{loop_id}" data-loop-shown="{shown}" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span class="wf-loop-title">{kind} · {name}</span><span class="wf-loop-progress">{progress}</span></div>"#,
       width = right - left,
       height = bottom - top,
+      loop_id = esc(end),
       name = esc(&name),
+      progress = esc(&progress),
     ));
   }
   html
+}
+
+fn loop_progress_text(plan: Option<&WorkflowLoopPlan>, shown: usize, lifecycle: SessionLifecycle) -> String {
+  let iterations = |n: usize| if n == 1 { "iteration" } else { "iterations" };
+  match plan {
+    Some(plan) if plan.exact => match plan.max_iterations {
+      Some(total) => {
+        let remaining = total.saturating_sub(shown);
+        if remaining == 0 {
+          format!("✓ all {total} {} shown", iterations(total))
+        } else {
+          format!("↻ {remaining} more {} planned", iterations(remaining))
+        }
+      }
+      None => "↻ more iterations planned".into(),
+    },
+    Some(plan) => match (plan.max_iterations, lifecycle) {
+      (Some(limit), _) if shown >= limit => format!("! safety limit reached after {shown} {}", iterations(shown)),
+      (Some(limit), SessionLifecycle::Completed) => {
+        let remaining = limit - shown;
+        format!("✓ stopped here · up to {remaining} more possible")
+      }
+      (Some(limit), SessionLifecycle::Running) => {
+        let remaining = limit - shown;
+        format!("↻ may continue · up to {remaining} more")
+      }
+      (Some(limit), _) => {
+        let remaining = limit - shown;
+        format!("↻ loop permits up to {remaining} more")
+      }
+      (None, SessionLifecycle::Running) => "↻ more iterations may follow".into(),
+      (None, _) => "↻ loop permits more iterations".into(),
+    },
+    None if lifecycle == SessionLifecycle::Completed => format!("✓ stopped after {shown} {}", iterations(shown)),
+    None if lifecycle == SessionLifecycle::Running => "↻ more iterations may follow".into(),
+    None => "↻ loop permits more iterations".into(),
+  }
+}
+
+#[cfg(test)]
+mod loop_progress_tests {
+  use super::loop_progress_text;
+  use crate::daemon::model::SessionLifecycle;
+  use crate::daemon::workflow::WorkflowLoopPlan;
+
+  #[test]
+  fn continuation_copy_distinguishes_exact_and_agent_decided_loops() {
+    let fixed = WorkflowLoopPlan { id: "increment".into(), max_iterations: Some(3), exact: true };
+    assert_eq!(loop_progress_text(Some(&fixed), 1, SessionLifecycle::Running), "↻ 2 more iterations planned");
+    assert_eq!(loop_progress_text(Some(&fixed), 3, SessionLifecycle::Running), "✓ all 3 iterations shown");
+
+    let decided = WorkflowLoopPlan { id: "decide".into(), max_iterations: Some(25), exact: false };
+    assert_eq!(loop_progress_text(Some(&decided), 1, SessionLifecycle::Running), "↻ may continue · up to 24 more");
+    assert_eq!(
+      loop_progress_text(Some(&decided), 1, SessionLifecycle::Completed),
+      "✓ stopped here · up to 24 more possible"
+    );
+    assert_eq!(loop_progress_text(Some(&decided), 1, SessionLifecycle::Failed), "↻ loop permits up to 24 more");
+  }
 }
 
 /// One dependency edge after port assignment (distinct exit/entry y when a node fans in/out).

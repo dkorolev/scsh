@@ -14,6 +14,18 @@ pub struct WorkflowMeta {
   pub nodes: Vec<WorkflowNodeMeta>,
 }
 
+/// Authored bounds for one dynamic loop, derived for presentation rather than stored in
+/// the DAG. Fixed repeats have an exact total; do-while loops expose only their safety cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowLoopPlan {
+  /// Repeat step id, or the final (deciding) step id of a do-while body.
+  pub id: String,
+  /// Exact declared count for `repeat`, or the maximum safety bound for `do-while`.
+  pub max_iterations: Option<usize>,
+  /// True for `repeat: N`; false for agent-decided `do-while`.
+  pub exact: bool,
+}
+
 /// One declared workflow step in the graph.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkflowNodeMeta {
@@ -114,6 +126,69 @@ pub fn workflow_meta_from_def(def: &HarnessDef) -> Option<WorkflowMeta> {
   };
   validate_workflow_meta(&meta).ok()?;
   Some(meta)
+}
+
+/// Loop bounds for the browser. Prefer the current authored definition so fixed repeats can
+/// show an exact remaining count; fall back to the persisted template ids for older/deleted
+/// projects, where a repeat's original count is no longer recoverable.
+pub fn workflow_loop_plans(session: &Session) -> Vec<WorkflowLoopPlan> {
+  if session.kind.as_deref() == Some("workflow") {
+    if let Some(profile) = session.profile.as_deref() {
+      let discovery = crate::harness_def::discover(std::path::Path::new(&session.repo));
+      if let Some(def) = discovery.find(profile).filter(|def| def.is_workflow()) {
+        let mut plans = Vec::new();
+        for step in &def.steps {
+          if let Some(total) = step.repeat {
+            plans.push(WorkflowLoopPlan { id: step.id.clone(), max_iterations: Some(total), exact: true });
+          }
+          if step.do_while.is_some() {
+            plans.push(WorkflowLoopPlan {
+              id: step.id.clone(),
+              max_iterations: Some(crate::harness_def::DO_WHILE_MAX_ITERATIONS),
+              exact: false,
+            });
+          }
+        }
+        if !plans.is_empty() {
+          return plans;
+        }
+      }
+    }
+  }
+
+  let mut plans: std::collections::BTreeMap<String, WorkflowLoopPlan> = std::collections::BTreeMap::new();
+  for node in session.workflow.as_ref().into_iter().flat_map(|meta| &meta.nodes) {
+    if let Some(base) = node.id.strip_suffix("-repeat") {
+      plans.entry(base.to_string()).or_insert_with(|| WorkflowLoopPlan {
+        id: base.to_string(),
+        max_iterations: None,
+        exact: true,
+      });
+    } else if let Some(suffix) = loop_template_suffix(&node.id).filter(|suffix| suffix.starts_with("-while-")) {
+      let end = suffix.trim_start_matches("-while-").to_string();
+      plans.entry(end.clone()).or_insert(WorkflowLoopPlan {
+        id: end,
+        max_iterations: Some(crate::harness_def::DO_WHILE_MAX_ITERATIONS),
+        exact: false,
+      });
+    }
+  }
+  plans.into_values().collect()
+}
+
+pub fn workflow_loop_plans_json(plans: &[WorkflowLoopPlan]) -> String {
+  let items: Vec<String> = plans
+    .iter()
+    .map(|plan| {
+      let max = plan.max_iterations.map(|n| n.to_string()).unwrap_or_else(|| "null".into());
+      format!(
+        "{{ \"id\": {}, \"max_iterations\": {max}, \"exact\": {} }}",
+        crate::json::quote(&plan.id),
+        if plan.exact { "true" } else { "false" }
+      )
+    })
+    .collect();
+  format!("[{}]", items.join(", "))
 }
 
 /// Validate topology. On failure the caller should omit the graph, not reject the session.
@@ -1491,7 +1566,12 @@ mod tests {
     let def = crate::harness_def::validate("demo-loop-repeat", src, crate::harness_def::DefSource::Builtin).unwrap();
     let mut meta = workflow_meta_from_def(&def).unwrap();
     assert_eq!(meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["initialize", "increment-repeat"]);
-    let session = session_with_workflow(meta.clone());
+    let mut session = session_with_workflow(meta.clone());
+    session.profile = Some("demo-loop-repeat".into());
+    assert_eq!(
+      workflow_loop_plans(&session),
+      [WorkflowLoopPlan { id: "increment".into(), max_iterations: Some(3), exact: true }]
+    );
     let visible = effective_workflow_meta(&session).unwrap();
     assert!(visible.nodes.iter().any(|n| n.id == "increment-repeat-1" && n.proc_index.is_none()));
     assert!(!visible.nodes.iter().any(|n| n.id == "increment-repeat"));
@@ -1515,7 +1595,16 @@ mod tests {
       meta.nodes.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(),
       ["initialize", "increment-while-compare", "compare-while-compare"]
     );
-    let session = session_with_workflow(meta.clone());
+    let mut session = session_with_workflow(meta.clone());
+    session.profile = Some("demo-loop-do-while".into());
+    assert_eq!(
+      workflow_loop_plans(&session),
+      [WorkflowLoopPlan {
+        id: "compare".into(),
+        max_iterations: Some(crate::harness_def::DO_WHILE_MAX_ITERATIONS),
+        exact: false,
+      }]
+    );
     let visible = effective_workflow_meta(&session).unwrap();
     assert!(visible.nodes.iter().any(|n| n.id == "increment-while-compare-1" && n.proc_index.is_none()));
     assert!(visible.nodes.iter().any(|n| n.id == "compare-while-compare-1" && n.proc_index.is_none()));

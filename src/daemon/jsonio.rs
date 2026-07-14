@@ -111,6 +111,16 @@ fn session_json(s: &Session, effective_workflow: bool) -> String {
       None => String::new(),
     }
   };
+  let workflow_loops = if effective_workflow {
+    let plans = super::workflow::workflow_loop_plans(s);
+    if plans.is_empty() {
+      String::new()
+    } else {
+      format!(", \"workflow_loops\": {}", super::workflow::workflow_loop_plans_json(&plans))
+    }
+  } else {
+    String::new()
+  };
   let parent_session = match &s.parent_session {
     Some(p) => format!(", \"parent_session\": {}", quote(p)),
     None => String::new(),
@@ -118,7 +128,7 @@ fn session_json(s: &Session, effective_workflow: bool) -> String {
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid}{workflow}{parent_session} }}",
+\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session} }}",
     quote(&s.id),
     s.started_at,
     profile,

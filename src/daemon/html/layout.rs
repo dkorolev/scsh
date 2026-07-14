@@ -398,9 +398,15 @@ pub(crate) const PAGE_CSS: &str = r#"
     border: 1px solid rgba(139, 148, 158, 0.42); border-radius: 9px;
     background: rgba(139, 148, 158, 0.07);
   }
-  .wf-loop-island > span {
+  .wf-loop-island > .wf-loop-title {
     position: absolute; top: 4px; left: 10px; color: var(--text-muted);
     font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em;
+  }
+  .wf-loop-island > .wf-loop-progress {
+    position: absolute; right: 10px; bottom: 7px; padding: 0.14rem 0.42rem;
+    color: var(--cyan); border: 1px dashed rgba(88,166,255,0.52); border-radius: 999px;
+    background: rgba(88,166,255,0.08); font-size: 0.68rem; font-weight: 600;
+    letter-spacing: 0.02em; white-space: nowrap;
   }
   .workflow-edges { position: absolute; inset: 0; color: #8b949e; pointer-events: none; }
   .wf-edge {

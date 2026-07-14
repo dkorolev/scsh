@@ -2419,6 +2419,10 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("function wfBuildGraphHtml"), "late graph creation without reload");
   assert!(js.contains("function wfLayoutWithBookends"), "live graph mirrors Start/Finish");
   assert!(js.contains("function wfLoopIslandsHtml"), "dynamic repeat iterations share a loop island");
+  assert!(js.contains("function wfLoopProgressText"), "loop islands explain whether more iterations can follow");
+  assert!(js.contains("session.workflow_loops"), "live loop copy reads authored iteration bounds");
+  assert!(js.contains("may continue · up to "), "agent-decided loops stay visibly open-ended while running");
+  assert!(js.contains("wf-loop-progress"), "loop continuation is a distinct visual element");
   assert!(js.contains("repeat|while-"), "repeat and do-while iterations share the dash loop id scheme");
   assert!(!js.contains("__repeat") && !js.contains("__while"), "the double-underscore id scheme is gone");
   assert!(js.contains("'do-while · '"), "do-while islands are labeled as do-while, not repeat");
@@ -2447,6 +2451,49 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("history.pushState"), "task clicks push history");
   assert!(js.contains("pendingWorkflowStep"), "pre-registration pending selection");
   assert!(js.contains("Task details are not available yet"), "pending status copy");
+}
+
+#[test]
+fn workflow_loop_island_advertises_future_iterations() {
+  use crate::daemon::workflow::workflow_meta_from_def;
+  use crate::harness_def::{builtin_defs, validate, DefSource};
+
+  let session_for = |profile: &str| {
+    let (_, src) = builtin_defs().into_iter().find(|(name, _)| *name == profile).expect("builtin loop");
+    let def = validate(profile, src, DefSource::Builtin).expect("valid builtin loop");
+    let now = crate::daemon::paths::now_unix_secs();
+    Session {
+      id: "loopmore".into(),
+      started_at: now.saturating_sub(5),
+      ended_at: None,
+      profile: Some(profile.into()),
+      kind: Some("workflow".into()),
+      repo: "/tmp/loop-more".into(),
+      branch: "main".into(),
+      skills: vec![],
+      procs: vec![],
+      last_seen_at: now,
+      client_connected: true,
+      run_pid: Some(1),
+      workflow: workflow_meta_from_def(&def),
+      parent_session: None,
+    }
+  };
+
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let do_while = session_for("demo-loop-do-while");
+  let api = crate::daemon::jsonio::session_json_api(&do_while);
+  assert!(api.contains(r#""workflow_loops": [{ "id": "compare", "max_iterations": 25, "exact": false }]"#));
+  store.sessions.insert("loopmore".into(), do_while);
+  let open_ended = session_page(&store, "loopmore").expect("do-while page");
+  assert!(open_ended.contains(r#"class="wf-loop-progress""#));
+  assert!(open_ended.contains("↻ may continue · up to 24 more"));
+
+  let mut fixed = session_for("demo-loop-repeat");
+  fixed.id = "fixedlp".into();
+  store.sessions.insert("fixedlp".into(), fixed);
+  let exact = session_page(&store, "fixedlp").expect("repeat page");
+  assert!(exact.contains("↻ 2 more iterations planned"));
 }
 
 #[test]

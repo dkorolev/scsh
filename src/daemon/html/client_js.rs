@@ -1275,8 +1275,30 @@ function wfBookendHtml(pos, isStart) {
     'px;top:' + pos.y.toFixed(1) + 'px;width:' + pos.w.toFixed(0) + 'px;min-height:' + WF_BOOKEND_H +
     'px" title="' + title + '" aria-hidden="true">' + glyph + '</div>';
 }
-function wfLoopIslandsHtml(layout) {
+function wfLoopProgressText(plan, shown, lifecycle) {
+  const iterations = n => n === 1 ? 'iteration' : 'iterations';
+  if (plan && plan.exact) {
+    if (plan.max_iterations == null) return '↻ more iterations planned';
+    const remaining = Math.max(0, plan.max_iterations - shown);
+    return remaining === 0
+      ? '✓ all ' + plan.max_iterations + ' ' + iterations(plan.max_iterations) + ' shown'
+      : '↻ ' + remaining + ' more ' + iterations(remaining) + ' planned';
+  }
+  if (plan && plan.max_iterations != null) {
+    if (shown >= plan.max_iterations) return '! safety limit reached after ' + shown + ' ' + iterations(shown);
+    const remaining = plan.max_iterations - shown;
+    if (lifecycle === 'completed') return '✓ stopped here · up to ' + remaining + ' more possible';
+    return lifecycle === 'running'
+      ? '↻ may continue · up to ' + remaining + ' more'
+      : '↻ loop permits up to ' + remaining + ' more';
+  }
+  if (lifecycle === 'completed') return '✓ stopped after ' + shown + ' ' + iterations(shown);
+  return lifecycle === 'running' ? '↻ more iterations may follow' : '↻ loop permits more iterations';
+}
+function wfLoopIslandsHtml(session, layout) {
   const groups = Object.create(null);
+  const plans = session.workflow_loops || [];
+  const lifecycle = sessionLifecycle(session, Date.now() / 1000).class;
   layout.forEach(pos => {
     const match = pos.id.match(/^([A-Za-z0-9_]+)-(repeat|while-([A-Za-z0-9_]+))-(\d+)$/);
     if (!match) return;
@@ -1287,23 +1309,29 @@ function wfLoopIslandsHtml(layout) {
   return Object.entries(groups).map(([key, items]) => {
     // Name a do-while island for its whole body — "first → final" — via the lowest-order
     // member; a repeat (or single-step) island keeps the single step name.
-    let label;
+    let label, loopId;
     if (key.indexOf('while-') === 0) {
       const end = key.slice('while-'.length);
+      loopId = end;
       const first = items.slice().sort((a, b) => a.order - b.order)[0];
       const firstBase = (first && (first.id.match(/^([A-Za-z0-9_]+)-while-/) || [])[1]) || end;
       label = 'do-while · ' + (firstBase !== end ? firstBase + ' → ' + end : end);
     } else {
-      label = 'repeat · ' + key.slice('repeat-'.length);
+      loopId = key.slice('repeat-'.length);
+      label = 'repeat · ' + loopId;
     }
-    const pad = 14, labelH = 22;
+    const shown = Math.max(...items.map(item => Number((item.id.match(/-(\d+)$/) || [])[1]) || 1));
+    const progress = wfLoopProgressText(plans.find(plan => plan.id === loopId), shown, lifecycle);
+    const pad = 14, bottomPad = 38, labelH = 22;
     const left = Math.min(...items.map(p => p.x)) - pad;
     const top = Math.min(...items.map(p => p.y)) - pad - labelH;
     const right = Math.max(...items.map(p => p.x + (p.w || WF_NODE_W))) + pad;
-    const bottom = Math.max(...items.map(p => p.y + (p.h || WF_NODE_H))) + pad;
-    return '<div class="wf-loop-island" style="left:' + left.toFixed(1) + 'px;top:' + top.toFixed(1) +
+    const bottom = Math.max(...items.map(p => p.y + (p.h || WF_NODE_H))) + bottomPad;
+    return '<div class="wf-loop-island" data-loop-id="' + esc(loopId) + '" data-loop-shown="' + shown +
+      '" style="left:' + left.toFixed(1) + 'px;top:' + top.toFixed(1) +
       'px;width:' + (right - left).toFixed(1) + 'px;height:' + (bottom - top).toFixed(1) +
-      'px"><span>' + esc(label) + '</span></div>';
+      'px"><span class="wf-loop-title">' + esc(label) + '</span><span class="wf-loop-progress">' +
+      esc(progress) + '</span></div>';
   }).join('');
 }
 function annotationForProc(session, proc) {
@@ -1398,7 +1426,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     '</div></div>' +
     '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
-    wfLoopIslandsHtml(layout) +
+    wfLoopIslandsHtml(session, layout) +
     '<svg class="workflow-edges" width="' + w.toFixed(0) + '" height="' + h.toFixed(0) +
     '" viewBox="0 0 ' + w.toFixed(1) + ' ' + h.toFixed(1) + '" aria-hidden="true"><defs>' +
     '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
@@ -1530,6 +1558,14 @@ function updateWorkflowGraph(session, nowUnix) {
       if (state === 'ready') bits.push('ready');
       meta.textContent = bits.join(' · ');
     }
+  });
+  const loopPlans = session.workflow_loops || [];
+  const lifecycle = sessionLifecycle(session, nowUnix).class;
+  root.querySelectorAll('.wf-loop-island[data-loop-id]').forEach(island => {
+    const id = island.getAttribute('data-loop-id');
+    const shown = Number(island.getAttribute('data-loop-shown')) || 1;
+    const progress = island.querySelector('.wf-loop-progress');
+    if (progress) progress.textContent = wfLoopProgressText(loopPlans.find(plan => plan.id === id), shown, lifecycle);
   });
   const head = root.querySelector('.workflow-head');
   if (head) {
