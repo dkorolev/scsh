@@ -641,6 +641,9 @@ enum HelpTopic {
   Config,
   Internals,
   Cache,
+  /// Harness definitions (`scsh help def`) — the `.harness/<name>.yml` format: flat tasks,
+  /// workflow steps, gates, and the repeat / do-while loops with loop-carried inputs.
+  Defs,
   /// The documented exit-code table (`scsh help exitcodes`).
   ExitCodes,
   /// Focused help for one command (`scsh help <command>`); the string is the canonical name.
@@ -801,6 +804,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             i += 1;
             HelpTopic::Cache
           }
+          Some("def") | Some("defs") | Some("definition") | Some("definitions") | Some("harness")
+          | Some(".harness") | Some("workflow") | Some("workflows") => {
+            i += 1;
+            HelpTopic::Defs
+          }
           Some("exitcodes") | Some("exit-codes") | Some("exit") => {
             i += 1;
             HelpTopic::ExitCodes
@@ -813,7 +821,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           // A non-flag token we don't recognize is a mistyped topic — say so helpfully.
           Some(other) if !other.starts_with('-') => {
             return Err(format!(
-              "unknown help topic '{other}' (commands: {}; topics: .scsh.yml, internals, cache, exitcodes)",
+              "unknown help topic '{other}' (commands: {}; topics: .scsh.yml, def, internals, cache, exitcodes)",
               COMMAND_NAMES.join(", ")
             ));
           }
@@ -6206,6 +6214,7 @@ fn print_help(topic: HelpTopic) {
     HelpTopic::Config => print_help_config(),
     HelpTopic::Internals => print_help_internals(),
     HelpTopic::Cache => print_help_cache(),
+    HelpTopic::Defs => print_help_defs(),
     HelpTopic::ExitCodes => print_help_exitcodes(),
     // `run` has a dedicated deep-dive page; every other command gets a focused block.
     HelpTopic::Command(name) if name == "run" => print_help_run(),
@@ -6413,6 +6422,7 @@ fn print_help_overview() {
   help_row("scsh help .scsh.yml", "The project config file: every field + env syntax.");
   help_row("scsh help internals", "How a run works: clone, containers, auth, live board.");
   help_row("scsh help cache", "How results are cached, and when a re-run is a hit.");
+  help_row("scsh help def", "Harness definitions: flat tasks, workflow steps, loops (repeat / do-while).");
   help_row("scsh help exitcodes", "The exit-code table (0 ok, 1 failure, 2 usage).");
   println!();
   println!("{}", h_head("Options:"));
@@ -6750,6 +6760,79 @@ fn print_help_internals() {
   16KB gRPC header limit.
 "#
   );
+  println!();
+}
+
+/// `scsh help def` — the harness-definition format: flat one-shot tasks, workflow DAGs, and
+/// the two loop forms (fixed `repeat`, agent-driven `do-while` with loop-carried inputs).
+fn print_help_defs() {
+  println!();
+  println!(
+    "{} {}",
+    h_head("Harness definitions"),
+    console::style("\u{2014} run one task or a workflow, no .scsh.yml needed").bold()
+  );
+  println!();
+  println!("{}", h_dim("  A definition is a YAML file describing a runnable job: `scsh run --def <name>`."));
+  println!(
+    "{}",
+    h_dim("  Discovery (later shadows earlier): built-ins  <  ~/.harness/<name>.yml  <  <repo>/.harness/<name>.yml.")
+  );
+  println!("{}", h_dim("  Params are declared under `params:` and supplied as environment variables at run time."));
+  println!();
+  println!("{}", h_head("Flat form — one task, many agents"));
+  print!(
+    r#"  description: "…"        one line, shown in listings
+  params:                  typed inputs (string/int/bool/enum), optional `default:`
+    A: {{ type: int, default: 2 }}
+  task: |                  the prompt; materialized into the run clone as .skills/<name>/SKILL.md
+  invocations:             the agent matrix — same schema as a .scsh.yml skill's invocations
+    c: {{ harness: claude, model: sonnet }}
+"#
+  );
+  println!();
+  println!("{}", h_head("Workflow form — a DAG of steps"));
+  print!(
+    r#"  steps:                   a block map; each step runs on its own agent, in its own clone
+    <id>:
+      agent:               harness: claude|codex|cursor|grok|opencode; optional model:, effort:
+      prompt: |            intent only — scsh appends the machine I/O contract
+      inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
+      output:              typed result fields the step must write to $SCSH_RESULT (JSON)
+        n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`)
+      needs: a, b          DAG edges — steps whose completion this step waits for
+      when:                gate — run only if every condition holds (else the step is skipped)
+        a.kind: code       scalar = equality; or one operator: eq/ne/lt/lte/gt/gte/in
+      artifacts: out.txt   extra files written next to $SCSH_RESULT, copied to the session dir
+      commits: true        bring the step's commits back onto the caller's branch (packdiff'd)
+"#
+  );
+  println!();
+  println!("{}", h_head("Loops"));
+  print!(
+    r#"  repeat: 3              run this one step N times, sequentially — each iteration is its
+                         own run and commit boundary; the job graph grows as iterations start.
+  do-while: <first-step>   on the loop body's FINAL step, naming the body's FIRST step. The body
+                         (everything between them, per `needs`) runs at least once, then repeats
+                         while the final step's result JSON sets the boolean
+                         `SCSH_DO_WHILE_REPEAT` to true. scsh has no comparison language here —
+                         an agent decides. A backstop caps runaway loops at 25 iterations.
+  Loop-carried inputs:   a body step may reference the FINAL step's output with no `needs:` edge
+                         — it receives the PREVIOUS iteration's value (empty on round one). This
+                         is the loop's data channel: feedback flows between rounds as typed
+                         outputs under gitignored tmp/, never as committed files.
+"#
+  );
+  println!();
+  println!(
+    "{}",
+    h_head("Executable examples (built in — read them with `scsh run --def <name>` or in src/harness_defs/)")
+  );
+  help_row("demo-loop-repeat", "Fixed loop: increment and commit number.txt three times.");
+  help_row("demo-loop-do-while", "Agent-driven loop: increment until a compare step says stop.");
+  help_row("demo-fantastic-loop", "Review loop: fix -> five reviewer personas -> decide, repeating until every");
+  help_cont("grade is excellent or good with at least as many excellent (mean >= 4.5); the");
+  help_cont("feedback rides the loop-carried channel, so review comments never enter git history.");
   println!();
 }
 

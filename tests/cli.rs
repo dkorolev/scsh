@@ -110,13 +110,30 @@ fn help_topics_are_separate_pages() {
     "got: {}",
     cache.out
   );
+  // `scsh help def` documents the harness-definition format: steps, gates, and both loop forms.
+  let defs = scsh(&d, &["help", "def"]);
+  assert_eq!(defs.code, 0, "got: {}", defs.out);
+  assert!(
+    defs.out.contains("steps:")
+      && defs.out.contains("repeat:")
+      && defs.out.contains("do-while:")
+      && defs.out.contains("SCSH_DO_WHILE_REPEAT")
+      && defs.out.contains("Loop-carried")
+      && defs.out.contains("demo-fantastic-loop"),
+    "got: {}",
+    defs.out
+  );
+  // The workflow alias lands on the same page.
+  let wf = scsh(&d, &["help", "workflows"]);
+  assert!(wf.out.contains("Harness definitions"), "got: {}", wf.out);
   // The overview points at all topics but does not carry their detail.
   let overview = scsh(&d, &["help"]);
   assert!(
     overview.out.contains("scsh help run")
       && overview.out.contains("scsh help .scsh.yml")
       && overview.out.contains("scsh help internals")
-      && overview.out.contains("scsh help cache"),
+      && overview.out.contains("scsh help cache")
+      && overview.out.contains("scsh help def"),
     "got: {}",
     overview.out
   );
