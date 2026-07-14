@@ -515,7 +515,10 @@ pub fn harness_command(
       }
       tui.push(' ');
       tui.push_str(&shell_quote(&prompt));
-      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
+      // `/quit` ends the codex TUI cleanly at its prompt; Ctrl-C first INTERRUPTS the
+      // conversation (the recording ended on a "conversation interrupted" banner). The
+      // recorder still falls back to killing the session if the slash command is ignored.
+      wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashQuit, TuiSubmit::Auto, result, term)
     }
     Harness::Grok => {
       // Full interactive TUI: grok's default IS the Build TUI, and a positional prompt seeds
@@ -569,7 +572,10 @@ pub fn harness_command(
 enum TuiQuit {
   /// Type `/exit` + Enter (Claude Code).
   SlashExit,
-  /// Ctrl-C twice, one second apart (codex, cursor-agent quit-confirm flows).
+  /// Type `/quit` + Enter (codex — a clean exit; Ctrl-C would first interrupt the
+  /// conversation and end the recording on an error banner).
+  SlashQuit,
+  /// Ctrl-C twice, one second apart (grok, cursor-agent, opencode quit-confirm flows).
   DoubleCtrlC,
 }
 
@@ -578,6 +584,7 @@ impl TuiQuit {
   fn as_arg(self) -> &'static str {
     match self {
       TuiQuit::SlashExit => "slash-exit",
+      TuiQuit::SlashQuit => "slash-quit",
       TuiQuit::DoubleCtrlC => "double-ctrl-c",
     }
   }
@@ -2370,7 +2377,7 @@ TAG
     assert!(df.contains(r#"for p in /proc/[0-9]*"#), "TERM trap must snapshot the process table");
     // tmux kill-session teardown (SIGHUP) must still write `.exit` — the trap exits so the
     // EXIT trap runs. Keeps "absent .exit = uncatchable SIGKILL" true for every harness,
-    // including codex whose double-ctrl-c quit is sometimes ignored.
+    // including any harness whose graceful quit is sometimes ignored.
     assert!(df.contains("exit 129' HUP"), "HUP trap must exit so .exit gets written");
   }
 
@@ -2645,7 +2652,7 @@ TAG
     assert!(cmd.contains("scsh: harness=codex"));
     // Interactive TUI (no `exec` subcommand) via scsh-tui-record. Folder-trust is seeded
     // host-side into the forwarded config.toml (not in the command), so no in-command seed.
-    assert!(cmd.contains("scsh-tui-record 200 50 double-ctrl-c none tmp/add_codex_result.json "), "got: {cmd}");
+    assert!(cmd.contains("scsh-tui-record 200 50 slash-quit none tmp/add_codex_result.json "), "got: {cmd}");
     assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"), "got: {cmd}");
     assert!(!cmd.contains("codex exec"), "got: {cmd}");
     assert!(cmd.contains(" -m gpt-5.5"));

@@ -171,6 +171,7 @@ fi
       sleep 4
       case "$quit" in
         slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
+        slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;
         double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
       esac
       i=0
@@ -180,6 +181,7 @@ fi
           log "watcher: quit ignored for 6s -> re-send $quit"
           case "$quit" in
             slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
+            slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;
             double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
           esac
         fi
