@@ -23,6 +23,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
     // "<harness> run…" note is only for rows still working. A bare artifact path is SYSTEM
     // info and renders as code, so the eye can tell it from an agent's prose answer.
+    let terminating = proc.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED);
     let finished = !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
     let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
     let note_html =
@@ -67,7 +68,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
 {body_html}
 </details>
 "#,
-      status_class = proc.status.as_str(),
+      status_class = if terminating { "terminating" } else { proc.status.as_str() },
       index = proc.index,
       task_attrs = proc_task_attrs(session, proc),
       label = esc(&proc.label),
@@ -283,7 +284,8 @@ fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRec
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::{ProcKind, ProcStatus, SessionLifecycle};
   let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
-  let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
+  let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting)
+    && proc.fail_reason.as_deref() != Some(crate::failure::reason::STOP_REQUESTED);
   if !(live_session && live_proc) {
     return String::new();
   }

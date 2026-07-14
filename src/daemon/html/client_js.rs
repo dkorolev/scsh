@@ -244,18 +244,33 @@ function setTextUnlessSelecting(el, text) {
 }
 function formatElapsedClock(elapsed) {
   if (elapsed == null) return '—';
-  return String(Math.floor(elapsed)) + 's';
+  const secs = Math.floor(elapsed);
+  const pad2 = n => String(n).padStart(2, '0');
+  if (secs >= 3600) {
+    const hours = Math.floor(secs / 3600), minutes = Math.floor((secs % 3600) / 60), seconds = secs % 60;
+    if (seconds > 0) return hours + 'h' + pad2(minutes) + 'm' + pad2(seconds) + 's';
+    if (minutes > 0) return hours + 'h' + pad2(minutes) + 'm';
+    return hours + 'h';
+  }
+  if (secs >= 60) {
+    const minutes = Math.floor(secs / 60), seconds = secs % 60;
+    return seconds > 0 ? minutes + 'm' + pad2(seconds) + 's' : minutes + 'm';
+  }
+  return secs + 's';
 }
 // Mirrors elapsed_phrase in proc.rs — status-aware text before the timer.
 function elapsedPhrase(status, elapsed, failReason) {
   const clock = elapsed == null ? null : formatElapsedClock(elapsed);
+  if ((status === 'running' || status === 'waiting') && failReason === 'stop_requested') {
+    return clock ? 'terminating · ' + clock : 'terminating';
+  }
   if (status === 'waiting') return clock ? 'waiting · ' + clock : 'waiting';
   if (status === 'running') return clock ? 'running for ' + clock : 'running';
   if (status === 'ok') return clock ? 'done in ' + clock : 'done';
   if (status === 'graceful') return clock ? 'graceful shutdown in ' + clock : 'graceful shutdown';
   if (status === 'skipped') return 'skipped';
   if (status === 'fail') {
-    if (failReason === 'force_stopped') return clock ? 'force-stopped after ' + clock : 'force-stopped';
+    if (failReason === 'force_stopped') return clock ? 'stopped after ' + clock : 'stopped';
     if (failReason === 'container_inactive') return clock ? 'stalled after ' + clock : 'stalled';
     if (failReason === 'container_timeout') return clock ? 'timed out after ' + clock : 'timed out';
     return clock ? 'failed in ' + clock : 'failed';
@@ -368,7 +383,7 @@ function renderIndex(sessions, nowUnix) {
   const filtered = {};
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
-    if (!s) return;
+    if (!s || s.parent_session) return;
     if (wantRepo && s.repo !== wantRepo) return;
     filtered[id] = s;
   });
@@ -546,7 +561,8 @@ function syncProcOutput(det, p) {
   }
 }
 function updateProcFields(det, p, nowUnix) {
-  det.className = 'proc ' + p.status;
+  const terminating = p.fail_reason === 'stop_requested';
+  det.className = 'proc ' + (terminating ? 'terminating' : p.status);
   const labelEl = det.querySelector('summary .label');
   if (labelEl) labelEl.textContent = p.label || '';
   const stat = det.querySelector('[data-proc-stat="' + CSS.escape(String(p.index)) + '"]');
@@ -565,7 +581,7 @@ function updateProcFields(det, p, nowUnix) {
   }
   // Per-proc Force stop: show only while the step is live; remove once it finishes.
   const killEl = det.querySelector('button[data-proc-stop]');
-  const live = p.status === 'running' || p.status === 'waiting';
+  const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
   if (killEl && !live) killEl.remove();
   else if (!killEl && live) {
     let actions = det.querySelector('.proc-actions');
@@ -966,7 +982,8 @@ function procHtml(p, isOpen, nowUnix) {
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
-  const live = p.status === 'running' || p.status === 'waiting';
+  const terminating = p.fail_reason === 'stop_requested';
+  const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
   const snapLabel = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
   const snap = hasCast(p)
     ? '<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/' + encodeURIComponent(SESSION_ID) +
@@ -981,7 +998,7 @@ function procHtml(p, isOpen, nowUnix) {
         'Force-stop this container only — the rest of the job continues') + '"><span>' +
       (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span></button>'
     : '';
-  const summaryOpen = '<details class="proc ' + esc(p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
+  const summaryOpen = '<details class="proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
     ((diff || snap || kill) ? '<div class="proc-actions">' + diff + snap + kill + '</div>' : '') +
     '<summary>' +
@@ -1003,16 +1020,20 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'○',ready:'○',running:'◉',done:'✓',graceful:'!',failed:'✗','force-stopped':'✕',skipped:'⊘',stalled:'!'})[state] || '○';
+  return ({waiting:'○',ready:'○',running:'◉',terminating:'◉',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '○';
 }
 function wfStateLabel(state) {
-  return ({waiting:'Waiting',ready:'Ready',running:'Running',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
-    'force-stopped':'Force-stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
+  return ({waiting:'Waiting',ready:'Ready',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
+    stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
 }
 function wfJobOutcome(session, nowUnix) {
   const life = sessionLifecycle(session, nowUnix);
-  const text = ({running:'Job running',completed:'Job succeeded',failed:'Job failed',
-    cancelled:'Job cancelled',terminated:'Job terminated abruptly'})[life.class] || ('Job ' + life.label);
+  const skills = (session.procs || []).filter(p => p.kind === 'skill');
+  const terminal = p => p.status === 'ok' || p.status === 'graceful' || p.status === 'fail' || p.status === 'skipped';
+  const finalizing = life.class === 'running' && skills.length > 0 && skills.every(terminal);
+  const text = finalizing ? 'Finalizing recordings' :
+    (({running:'Job running',completed:'Job succeeded',failed:'Job failed',
+      cancelled:'Job cancelled',terminated:'Job terminated abruptly'})[life.class] || ('Job ' + life.label));
   return { className: life.class, text };
 }
 function wfJobOutcomeHtml(session, nowUnix) {
@@ -1067,10 +1088,11 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'ready') lines.push('Ready — dependencies finished; not started yet');
   else if (state === 'running') {
     lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
-  }   else if (state === 'done') lines.push('Succeeded');
+  } else if (state === 'terminating') lines.push('Terminating — stop requested');
+  else if (state === 'done') lines.push('Succeeded');
   else if (state === 'graceful') lines.push('Graceful shutdown — valid result and inner exit 0');
   else if (state === 'failed') lines.push('Failed');
-  else if (state === 'force-stopped') lines.push('Force-stopped from the session browser');
+  else if (state === 'stopped') lines.push('Stopped from the session browser');
   else if (state === 'skipped') lines.push('Skipped');
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
   if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
@@ -1084,10 +1106,11 @@ function wfDisplayState(session, node, nowUnix) {
   const procs = session.procs || [];
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
   if (!p) return live ? 'waiting' : 'stalled';
+  if (p.fail_reason === 'stop_requested') return 'terminating';
   if (p.status === 'ok') return 'done';
   if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
-    return p.fail_reason === 'force_stopped' ? 'force-stopped' : 'failed';
+    return p.fail_reason === 'force_stopped' ? 'stopped' : 'failed';
   }
   if (p.status === 'skipped') return 'skipped';
   if (p.status === 'running') return live ? 'running' : 'stalled';
@@ -1098,7 +1121,7 @@ function wfDisplayState(session, node, nowUnix) {
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','done','graceful','failed','force-stopped','stalled','waiting','ready','skipped'];
+  const order = ['running','terminating','done','graceful','failed','stopped','stalled','waiting','ready','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
@@ -1109,8 +1132,8 @@ function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
     (key === 'graceful' ? 'graceful shutdown' : key));
-  for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.waiting,'waiting'],
-    [counts.ready,'ready'],[counts.failed,'failed'],[counts.force_stopped,'force-stopped'],
+  for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
+    [counts.ready,'ready'],[counts.failed,'failed'],[counts.stopped,'stopped'],
     [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
     const id = first && first[label];
@@ -1159,7 +1182,7 @@ function wfNodeRanks(nodes) {
   return nodes.map(n => rankOf(n.id));
 }
 function wfStatusStackRank(state) {
-  return ({done:0,failed:1,'force-stopped':2,skipped:3,running:4,stalled:5,ready:6,waiting:7})[state] ?? 9;
+  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,stalled:6,ready:7,waiting:8})[state] ?? 10;
 }
 function wfLayoutNodes(session, nodes, nowUnix) {
   const ranks = wfNodeRanks(nodes);
@@ -1257,11 +1280,16 @@ function wfEdgesSvg(nodes, layout, start, finish) {
       return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
         ' L' + x2.toFixed(1) + ',' + y1.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
     }
-    const dx = Math.max(24, x2 - x1);
-    const c1x = x1 + dx * 0.42, c2x = x2 - dx * 0.42;
+    const gap = Math.max(1, x2 - x1);
+    const runway = Math.max(12, Math.min(20, gap * 0.24));
+    const curveStart = x1 + runway, curveEnd = x2 - runway;
+    const curveDx = Math.max(1, curveEnd - curveStart);
+    const c1x = curveStart + curveDx * 0.42, c2x = curveEnd - curveDx * 0.42;
     return '<path class="wf-edge" d="M' + x1.toFixed(1) + ',' + y1.toFixed(1) +
+      ' L' + curveStart.toFixed(1) + ',' + y1.toFixed(1) +
       ' C' + c1x.toFixed(1) + ',' + y1.toFixed(1) + ' ' + c2x.toFixed(1) + ',' + y2.toFixed(1) +
-      ' ' + x2.toFixed(1) + ',' + y2.toFixed(1) + '" marker-end="url(#wf-arrow)" />';
+      ' ' + curveEnd.toFixed(1) + ',' + y2.toFixed(1) + ' L' + x2.toFixed(1) + ',' + y2.toFixed(1) +
+      '" marker-end="url(#wf-arrow)" />';
   }).join('');
 }
 function wfBookendHtml(pos, isStart) {
@@ -1366,7 +1394,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
   const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, ready: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
@@ -1376,10 +1404,11 @@ function wfBuildGraphHtml(session, nowUnix) {
     if (state === 'done') counts.done++;
     else if (state === 'graceful') counts.graceful++;
     else if (state === 'running') counts.running++;
+    else if (state === 'terminating') counts.terminating++;
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'ready') counts.ready++;
     else if (state === 'failed') counts.failed++;
-    else if (state === 'force-stopped') counts.force_stopped++;
+    else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
     else if (state === 'skipped') counts.skipped++;
     const p = (session.procs || []).find(x => x.index === node.proc_index);
@@ -1402,6 +1431,9 @@ function wfBuildGraphHtml(session, nowUnix) {
     const procAttr = node.proc_index != null ? ' data-proc-index="' + esc(String(node.proc_index)) + '"' : '';
     const tipRunning = (state === 'running' && p && p.started_at)
       ? ' data-tip-running="' + esc(String(p.started_at)) + '"' : '';
+    const elapsed = p ? procElapsed(p, nowUnix) : null;
+    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
+    const stateElapsed = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     return '<a class="wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
       '" href="' + '#task-' + encodeURIComponent(node.id) + '" id="wf-node-' + esc(node.id) +
       '" data-workflow-step="' + esc(node.id) + '" data-wf-state="' + state + '"' + procAttr +
@@ -1409,7 +1441,8 @@ function wfBuildGraphHtml(session, nowUnix) {
       'px;min-height:' + WF_NODE_H + 'px" data-tip="' + esc(tip) + '"' + tipRunning +
       ' aria-label="' + esc(tip.replace(/\n/g, ', ')) +
       '"><span class="wf-state"><span class="wf-ico" aria-hidden="true">' + wfStateIcon(state) +
-      '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span></span><span class="wf-id">' +
+      '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span><span class="wf-state-elapsed">' +
+      stateElapsed + '</span></span><span class="wf-id">' +
       esc(title) + gate + '</span>' + wfAnnotationHtml(session, p) +
       '<span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
   }).join('') + wfBookendHtml(finish, false);
@@ -1417,13 +1450,13 @@ function wfBuildGraphHtml(session, nowUnix) {
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
     wfJobOutcomeHtml(session, nowUnix) +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
-    wfLegendHtml(present) + '<div class="workflow-zoom" aria-label="Graph view controls">' +
+    '<div class="workflow-zoom" aria-label="Graph view controls">' +
     '<button type="button" data-wf-zoom-out aria-label="Zoom out">−</button>' +
     '<button type="button" data-wf-zoom-reset>100%</button>' +
     '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button>' +
     '<button type="button" data-wf-zoom-fit>Fit</button>' +
     '<button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button>' +
-    '</div></div>' +
+    '</div></div><div class="workflow-visual">' + wfLegendHtml(present) +
     '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
     wfLoopIslandsHtml(session, layout) +
@@ -1432,7 +1465,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     '<marker id="wf-arrow" viewBox="0 0 14 14" refX="12" refY="7" markerWidth="9" markerHeight="9" orient="auto" markerUnits="userSpaceOnUse">' +
     '<path class="wf-arrowhead" d="M3.5 2.5 L11 7 L3.5 11.5" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>' +
     '</marker></defs>' + wfEdgesSvg(nodes, layout, start, finish) + '</svg>' +
-    '<div class="workflow-nodes">' + nodesHtml + '</div></div></div></div>';
+    '<div class="workflow-nodes">' + nodesHtml + '</div></div></div></div></div>';
 }
 function ensureWorkflowGraphMounted(session, nowUnix) {
   const nodes = (session && session.workflow && session.workflow.nodes) || [];
@@ -1500,7 +1533,7 @@ function updateWorkflowGraph(session, nowUnix) {
   const root = ensureWorkflowGraphMounted(session, nowUnix);
   if (!root) return;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, waiting: 0, ready: 0, failed: 0, force_stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, ready: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
@@ -1509,10 +1542,11 @@ function updateWorkflowGraph(session, nowUnix) {
     if (state === 'done') counts.done++;
     else if (state === 'graceful') counts.graceful++;
     else if (state === 'running') counts.running++;
+    else if (state === 'terminating') counts.terminating++;
     else if (state === 'waiting') counts.waiting++;
     else if (state === 'ready') counts.ready++;
     else if (state === 'failed') counts.failed++;
-    else if (state === 'force-stopped') counts.force_stopped++;
+    else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
     else if (state === 'skipped') counts.skipped++;
     const prev = el.dataset.wfState;
@@ -1540,17 +1574,16 @@ function updateWorkflowGraph(session, nowUnix) {
     el.setAttribute('aria-label', tip.replace(/\n/g, ', '));
     if (state === 'running' && p && p.started_at) el.setAttribute('data-tip-running', String(p.started_at));
     else el.removeAttribute('data-tip-running');
+    const elapsed = p ? procElapsed(p, nowUnix) : null;
+    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
+    const stateElapsed = el.querySelector('.wf-state-elapsed');
+    if (stateElapsed) stateElapsed.textContent = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     const meta = el.querySelector('.wf-meta');
     if (meta) {
       const bits = [];
       if (node.id === 'build_base' || node.id.indexOf('build_') === 0) bits.push('image build');
       else if (p && p.harness) bits.push(p.harness);
       if (p && p.model) bits.push(p.model);
-      const elapsed = p ? procElapsed(p, nowUnix) : null;
-      if (elapsed != null && (state === 'running' || state === 'done' || state === 'graceful' || state === 'failed' ||
-          state === 'force-stopped' || state === 'stalled')) {
-        bits.push(formatElapsedClock(elapsed));
-      }
       if (state === 'waiting' && unmetIds.length === 1) bits.push('waiting on ' + wfNodeTitle(unmetIds[0]));
       else if (state === 'waiting' && unmetIds.length > 1 && unmetIds.length <= 3) {
         bits.push('waiting on ' + unmetIds.map(wfNodeTitle).join(', '));
@@ -1582,14 +1615,14 @@ function updateWorkflowGraph(session, nowUnix) {
     }
     const summary = head.querySelector('.workflow-summary');
     if (summary) summary.innerHTML = wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix));
+  }
+  const visual = root.querySelector('.workflow-visual');
+  if (visual) {
     const next = wfLegendHtml(present);
-    const cur = head.querySelector('.workflow-legend');
+    const cur = visual.querySelector('.workflow-legend');
     if (next) {
       if (cur) cur.outerHTML = next;
-      else {
-        if (summary) summary.insertAdjacentHTML('afterend', next);
-        else head.insertAdjacentHTML('beforeend', next);
-      }
+      else visual.insertAdjacentHTML('afterbegin', next);
     } else if (cur) {
       cur.remove();
     }
@@ -2165,13 +2198,17 @@ async function stopHarness(btn) {
   if (!harness) return;
   const ok = await scshConfirm({
     title: 'Stop all ' + harness + ' containers?',
-    body: 'Every running ' + harness + ' container across every job will be force-stopped.',
+    body: 'Every running ' + harness + ' container across every job will be stopped.',
     confirmLabel: 'Stop all ' + harness,
     danger: true,
   });
   if (!ok) return;
+  const original = btn.textContent;
   btn.disabled = true;
-  setBtnLabel(btn, 'stopping\u2026');
+  btn.classList.remove('btn--red');
+  btn.classList.add('btn--orange');
+  setBtnLabel(btn, 'Terminating all ' + harness + '\u2026');
+  showToast('Stop requested for all ' + harness + ' tasks');
   try {
     const resp = await fetch('/api/v1/harness/stop', {
       method: 'POST',
@@ -2181,14 +2218,22 @@ async function stopHarness(btn) {
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok !== true) {
       btn.disabled = false;
-      setBtnLabel(btn, '\u2715 stop all ' + harness);
+      btn.classList.remove('btn--orange');
+      btn.classList.add('btn--red');
+      setBtnLabel(btn, original);
       showToast(data.error || ('stop failed (HTTP ' + resp.status + ')'));
       return;
     }
-    setBtnLabel(btn, 'stopped ' + (data.stopped || 0));
+    const n = data.stopped || 0;
+    btn.classList.remove('btn--orange');
+    btn.classList.add('btn--red');
+    setBtnLabel(btn, 'Stopped ' + n + ' ' + harness + ' task' + (n === 1 ? '' : 's'));
+    showToast('Stopped ' + n + ' ' + harness + ' task' + (n === 1 ? '' : 's'));
   } catch (e) {
     btn.disabled = false;
-    setBtnLabel(btn, '\u2715 stop all ' + harness);
+    btn.classList.remove('btn--orange');
+    btn.classList.add('btn--red');
+    setBtnLabel(btn, original);
     showToast(String(e));
   }
 }
@@ -3053,7 +3098,7 @@ function renderRepoJobs(sessions, nowUnix) {
   });
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
-    if (!s || !s.repo || isInternalRepo(s.repo)) return;
+    if (!s || s.parent_session || !s.repo || isInternalRepo(s.repo)) return;
     if (wantRepo && s.repo !== wantRepo) return;
     (byRepo[s.repo] = byRepo[s.repo] || []).push(Object.assign({ id: id }, s));
   });
@@ -3116,7 +3161,7 @@ function renderInternalJobs(sessions, nowUnix) {
   const jobs = [];
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
-    if (s && s.repo && isInternalRepo(s.repo)) jobs.push(Object.assign({ id: id }, s));
+    if (s && !s.parent_session && s.repo && isInternalRepo(s.repo)) jobs.push(Object.assign({ id: id }, s));
   });
   let card = document.getElementById('internal-jobs-card');
   if (!jobs.length) {

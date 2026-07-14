@@ -343,16 +343,21 @@ pub(crate) const PAGE_CSS: &str = r#"
     color: var(--cyan); text-decoration-color: var(--cyan);
   }
   .workflow-summary a.wf-jump:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .workflow-visual { position: relative; min-height: 0; }
   .workflow-legend {
-    list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 0.35rem 0.85rem;
-    font-size: 0.78rem; color: var(--text-muted);
+    position: absolute; z-index: 4; top: 0.75rem; right: 0.75rem;
+    list-style: none; margin: 0; padding: 0.35rem 0.55rem; display: flex; flex-wrap: wrap;
+    justify-content: flex-end; gap: 0.35rem 0.85rem; max-width: calc(100% - 1.5rem);
+    color: var(--text-muted); background: rgba(22,27,34,0.92); border: 1px solid var(--border);
+    border-radius: 5px; font-size: 0.78rem;
   }
   .workflow-legend .wf-ico { margin-right: 0.2rem; }
   .wf-leg-running { color: var(--orange); }
+  .wf-leg-terminating { color: var(--orange); }
   .wf-leg-done { color: var(--green); }
   .wf-leg-graceful { color: var(--orange); }
   .wf-leg-failed { color: var(--red); }
-  .wf-leg-force-stopped { color: var(--red); }
+  .wf-leg-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
@@ -394,6 +399,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     display: flex; flex-direction: column; max-width: none; min-height: 0;
     background: var(--surface); box-shadow: 0 24px 80px rgba(0,0,0,0.65);
   }
+  .workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; min-height: 0; }
   .workflow-card.wf-expanded .workflow-scroll { flex: 1 1 auto; height: auto; min-height: 0; }
   .wf-loop-island {
     position: absolute; z-index: 0; box-sizing: border-box; pointer-events: none;
@@ -427,6 +433,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .wf-node.wf-flash { box-shadow: 0 0 0 2px var(--cyan); }
   .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
+  .wf-state-elapsed { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
+  .wf-state-elapsed:empty { display: none; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-gate {
@@ -437,8 +445,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-running { border-left-color: var(--orange); }
   .wf-node.wf-running .wf-state { color: var(--orange); }
   .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.45); }
+  .wf-node.wf-terminating { border-left-color: var(--orange); box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.45); }
+  .wf-node.wf-terminating .wf-state, .wf-node.wf-terminating .wf-id { color: var(--orange); }
   @media (prefers-reduced-motion: no-preference) {
-    .wf-node.wf-running { animation: wf-pulse 1.6s ease-in-out infinite; }
+    .wf-node.wf-running, .wf-node.wf-terminating { animation: wf-pulse 1.6s ease-in-out infinite; }
     @keyframes wf-pulse {
       0%, 100% { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35); }
       50% { box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.55); }
@@ -457,8 +467,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { border-left-color: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
-  .wf-node.wf-force-stopped { border-left-color: var(--red); }
-  .wf-node.wf-force-stopped .wf-state, .wf-node.wf-force-stopped .wf-id { color: var(--red); }
+  .wf-node.wf-stopped { border-left-color: var(--red); }
+  .wf-node.wf-stopped .wf-state, .wf-node.wf-stopped .wf-id { color: var(--red); }
   .wf-node.wf-stalled { border-left-color: var(--purple); }
   .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--purple); }
   .wf-node.wf-waiting, .wf-node.wf-ready { border-left-color: var(--text-muted); }
@@ -545,6 +555,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc.graceful { border-left-color: var(--orange); }
   details.proc.fail { border-left-color: var(--red); }
   details.proc.running { border-left-color: var(--orange); }
+  details.proc.terminating { border-left-color: var(--orange); }
   details.proc.waiting { border-left-color: var(--cyan); }
   details.proc.skipped { border-left-color: var(--text-muted); }
   summary {
@@ -564,6 +575,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc.ok summary .label { color: var(--green); }
   details.proc.graceful summary .label { color: var(--orange); }
   details.proc.running summary .label { color: var(--orange); }
+  details.proc.terminating summary .label { color: var(--orange); }
   details.proc.waiting summary .label { color: var(--cyan); }
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }

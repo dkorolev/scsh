@@ -170,6 +170,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 fn harness_stop_strip(store: &Store, now: u64) -> String {
   use crate::daemon::model::{ProcKind, ProcStatus};
   let mut counts: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+  let mut terminating: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
   for s in store.sessions.values() {
     // Lifecycle, not `ended_at`: a client that died without deregistering leaves its session
     // un-ended (and its procs "running") FOREVER — those are Terminated zombies, and offering
@@ -181,15 +182,26 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
       let live = p.status == ProcStatus::Running || p.status == ProcStatus::Waiting;
       if live && p.kind == ProcKind::Skill {
         if let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) {
-          *counts.entry(h.to_string()).or_insert(0) += 1;
+          let target = if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+            &mut terminating
+          } else {
+            &mut counts
+          };
+          *target.entry(h.to_string()).or_insert(0) += 1;
         }
       }
     }
   }
-  if counts.is_empty() {
+  if counts.is_empty() && terminating.is_empty() {
     return String::new();
   }
   let mut buttons = String::new();
+  for (harness, n) in &terminating {
+    buttons.push_str(&format!(
+      "<button type=\"button\" class=\"chamfer btn btn--orange btn--sm\" disabled title=\"Stopping every running {h} container, in every job\"><span>Terminating all {h} ({n})…</span></button>\n",
+      h = esc(harness),
+    ));
+  }
   for (harness, n) in &counts {
     buttons.push_str(&format!(
       "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" data-harness-stop=\"{h}\" title=\"Stop every running {h} container, in every job\"><span>✕ stop all {h} ({n})</span></button>\n",
@@ -371,7 +383,8 @@ fn internal_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
   if filter.is_some() {
     return String::new();
   }
-  let mut jobs: Vec<&Session> = store.sessions.values().filter(|s| is_internal_repo(&s.repo)).collect();
+  let mut jobs: Vec<&Session> =
+    store.sessions.values().filter(|s| s.parent_session.is_none() && is_internal_repo(&s.repo)).collect();
   if jobs.is_empty() {
     return String::new();
   }
@@ -446,7 +459,7 @@ fn repo_jobs_rows(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
     by_repo.entry(path).or_default();
   }
   for s in store.sessions.values() {
-    if s.repo.is_empty() || is_internal_repo(&s.repo) {
+    if s.parent_session.is_some() || s.repo.is_empty() || is_internal_repo(&s.repo) {
       continue;
     }
     if filter_repo.as_ref().is_some_and(|want| &s.repo != want) {
