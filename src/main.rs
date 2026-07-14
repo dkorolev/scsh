@@ -4665,7 +4665,7 @@ fn integrate_commits(
 /// no readable range, or a pack failure skips with a hint — never a run failure.
 ///
 /// Invokes packdiff in machine mode (`--json`): stdout is a single `{ "Packed": … }` or
-/// error document (packdiff 0.4.2). Progress stays on stderr and is discarded.
+/// error document (packdiff 0.4.3). Progress stays on stderr and is discarded.
 fn pack_step_diff(
   root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
   daemon_client: Option<&daemon::Client>,
@@ -4709,7 +4709,7 @@ fn pack_step_diff(
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
       hint(
-        "packdiff not found — `cargo install packdiff --version 0.4.2 --locked` to browse each step's commits from the job page",
+        "packdiff not found — `cargo install packdiff --version 0.4.3 --locked` to browse each step's commits from the job page",
       );
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),

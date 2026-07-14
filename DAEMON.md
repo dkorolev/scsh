@@ -254,8 +254,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 - `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
   brought into the caller's branch (one self-contained HTML file: the diff, commits, and
   in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists
-  only for commit-enabled steps whose commits were integrated while `packdiff` (0.4.2
-  required; `cargo install packdiff --version 0.4.2 --locked`) was on the
+  only for commit-enabled steps whose commits were integrated while `packdiff` (0.4.3
+  required; `cargo install packdiff --version 0.4.3 --locked`) was on the
   PATH of the `scsh run` host; 404 otherwise
 - `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
 - `GET /api/v1/sessions` — JSON session id list
