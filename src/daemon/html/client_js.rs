@@ -772,13 +772,23 @@ function castPlaceholderHtml(status) {
   return '<div class="cast-placeholder dim">' +
     (live ? 'Recording in progress — no frames yet.' : 'No recorded frames.') + '</div>';
 }
+function castOwnsFullscreen(box) {
+  const fullscreen = document.fullscreenElement || document.webkitFullscreenElement;
+  return !!(fullscreen && box.contains(fullscreen));
+}
 // (Re-)create the player for a .cast box: fetch the cast text (cache-busted) and the
 // chapters sidecar together, then either mount the player over the inline data or — for a
 // cast with no complete event lines yet (a run that just started) — show a calm placeholder
 // instead of letting the player error on the empty/404 cast. The placeholder upgrades to a
 // real player on the next reload (a WS cast_growth notification, or the finish reload).
+// Browser fullscreen belongs to the exact player DOM node: removing it exits fullscreen.
+// Preserve that node and coalesce refreshes until the viewer leaves fullscreen voluntarily.
 function createCastPlayer(box, startAt, autoplay) {
   if (typeof BeeCastPlayer === 'undefined') return;
+  if (castOwnsFullscreen(box)) {
+    box._deferredPlayerRefresh = { startAt, autoplay };
+    return;
+  }
   const mount = box.querySelector('.cast-player');
   if (box._player) { try { box._player.dispose(); } catch (_) {} box._player = null; }
   box._loading = true;
@@ -966,10 +976,19 @@ function renderCastSummary(box, summary) {
 }
 // Entering/exiting fullscreen changes the box size: refit the player (beecast-player
 // re-lays-out on window resize). Chapters are player chrome now — the ☰ panel rides
-// into fullscreen with the player; no scsh-side sidebar to manage.
-document.addEventListener('fullscreenchange', () => {
+// into fullscreen with the player; no scsh-side sidebar to manage. A refresh deferred to
+// preserve the fullscreen DOM node is safe only after that box no longer owns fullscreen.
+function onCastFullscreenChange() {
   try { window.dispatchEvent(new Event('resize')); } catch (_) {}
-});
+  document.querySelectorAll('.cast[data-ready]').forEach(box => {
+    const refresh = box._deferredPlayerRefresh;
+    if (!refresh || castOwnsFullscreen(box)) return;
+    box._deferredPlayerRefresh = null;
+    createCastPlayer(box, refresh.startAt, refresh.autoplay);
+  });
+}
+document.addEventListener('fullscreenchange', onCastFullscreenChange);
+document.addEventListener('webkitfullscreenchange', onCastFullscreenChange);
 function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
   // Mirrors the server-rendered shape (session.rs): recorded procs embed the player;
