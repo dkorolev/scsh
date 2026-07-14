@@ -301,6 +301,30 @@ fn running_cast_preview_starts_near_the_end() {
 }
 
 #[test]
+fn fullscreen_cast_refresh_preserves_the_active_player_dom() {
+  let js = live_client_js();
+  let create = js
+    .split("function createCastPlayer")
+    .nth(1)
+    .and_then(|tail| tail.split("function focusCastPlayer").next())
+    .expect("createCastPlayer body");
+  let defer_at = create.find("if (castOwnsFullscreen(box))").expect("fullscreen preservation guard");
+  let dispose_at = create.find("box._player.dispose()").expect("player replacement path");
+  assert!(defer_at < dispose_at, "fullscreen must be checked before the active DOM node is disposed");
+  assert!(create.contains("box._deferredPlayerRefresh = { startAt, autoplay }"), "repeated refreshes coalesce");
+
+  let fullscreen_change = js
+    .split("function onCastFullscreenChange")
+    .nth(1)
+    .and_then(|tail| tail.split("function procHtml").next())
+    .expect("fullscreenchange body");
+  assert!(fullscreen_change.contains("if (!refresh || castOwnsFullscreen(box)) return;"));
+  assert!(fullscreen_change.contains("createCastPlayer(box, refresh.startAt, refresh.autoplay)"));
+  assert!(js.contains("document.addEventListener('fullscreenchange', onCastFullscreenChange)"));
+  assert!(js.contains("document.addEventListener('webkitfullscreenchange', onCastFullscreenChange)"));
+}
+
+#[test]
 fn ui_review_fixes_hold() {
   // 1. Agent-route badges: the chamfer overlay must not swallow the text (the
   //    empty-rectangle bug — .agent-badge's inner span needs the z-index lift too).
