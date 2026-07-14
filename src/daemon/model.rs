@@ -83,6 +83,10 @@ pub enum ProcStatus {
   Waiting,
   Running,
   Ok,
+  /// The harness produced a valid result and exited zero, but its container runtime lost the
+  /// outer shell response during teardown. Successful for dependency and job outcomes; orange
+  /// in the UI so the infrastructure wrinkle remains visible.
+  Graceful,
   Fail,
   /// Decided but never run — a workflow step gated off (or downstream of a skipped step).
   Skipped,
@@ -94,6 +98,7 @@ impl ProcStatus {
       ProcStatus::Waiting => "waiting",
       ProcStatus::Running => "running",
       ProcStatus::Ok => "ok",
+      ProcStatus::Graceful => "graceful",
       ProcStatus::Fail => "fail",
       ProcStatus::Skipped => "skipped",
     }
@@ -104,6 +109,7 @@ impl ProcStatus {
       "waiting" => Some(ProcStatus::Waiting),
       "running" => Some(ProcStatus::Running),
       "ok" => Some(ProcStatus::Ok),
+      "graceful" => Some(ProcStatus::Graceful),
       "fail" => Some(ProcStatus::Fail),
       "skipped" => Some(ProcStatus::Skipped),
       _ => None,

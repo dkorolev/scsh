@@ -39,6 +39,7 @@ pub enum WorkflowDisplayState {
   Ready,
   Running,
   Done,
+  Graceful,
   Failed,
   /// Failed because the user (or session Force stop) killed it — not a natural failure.
   ForceStopped,
@@ -53,6 +54,7 @@ impl WorkflowDisplayState {
       Self::Ready => "ready",
       Self::Running => "running",
       Self::Done => "done",
+      Self::Graceful => "graceful",
       Self::Failed => "failed",
       Self::ForceStopped => "force-stopped",
       Self::Skipped => "skipped",
@@ -65,7 +67,8 @@ impl WorkflowDisplayState {
       Self::Waiting => "Waiting",
       Self::Ready => "Ready",
       Self::Running => "Running",
-      Self::Done => "Done",
+      Self::Done => "Succeeded",
+      Self::Graceful => "Graceful shutdown",
       Self::Failed => "Failed",
       Self::ForceStopped => "Force-stopped",
       Self::Skipped => "Skipped",
@@ -581,7 +584,7 @@ fn node_proc<'a>(session: &'a Session, node: &WorkflowNodeMeta) -> Option<&'a Pr
 }
 
 fn status_terminal(status: ProcStatus) -> bool {
-  matches!(status, ProcStatus::Ok | ProcStatus::Fail | ProcStatus::Skipped)
+  matches!(status, ProcStatus::Ok | ProcStatus::Graceful | ProcStatus::Fail | ProcStatus::Skipped)
 }
 
 /// Unmet direct prerequisites (non-terminal or missing procs), resolved against `meta`
@@ -626,6 +629,7 @@ pub fn display_state(
     }
     Some(p) => match p.status {
       ProcStatus::Ok => WorkflowDisplayState::Done,
+      ProcStatus::Graceful => WorkflowDisplayState::Graceful,
       ProcStatus::Fail => {
         if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) {
           WorkflowDisplayState::ForceStopped

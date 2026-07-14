@@ -338,6 +338,8 @@ fn ui_review_fixes_hold() {
     "force-stopped shares fail red"
   );
   assert!(js.contains("stalled:'Abandoned'"), "legend label is Abandoned");
+  assert!(js.contains("done:'Succeeded'"), "successful graph tasks are called Succeeded, not Done");
+  assert!(js.contains("failed:'Job failed'"), "graph carries an explicit overall failure verdict");
   {
     let p = &mut store.sessions.get_mut("castab").unwrap().procs[0];
     p.elapsed = Some(18.0);
@@ -875,7 +877,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
   assert!(
     html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
-    "packdiff 0.4.3 needs scripts + same-origin for WASM/localStorage: {html}"
+    "packdiff 0.4.4 needs scripts + same-origin for WASM/localStorage: {html}"
   );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
@@ -1156,9 +1158,36 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
   assert!(html.contains(r#"data-skill-source="add""#), "grouped by skill_source");
   assert!(html.contains(r#"class="fleet-jump" data-proc="0""#), "jump to first route");
   assert!(html.contains(r#"class="fleet-jump" data-proc="1""#), "jump to second route");
+  assert!(html.contains("· 2 routes"), "true route matrices keep route terminology");
+  assert!(html.contains("<th>Route</th>"), "true route matrices keep the Route column");
   let fleets_at = html.find(r#"class="fleets""#).expect("fleets");
-  let procs_at = html.find(r#"id="session-procs""#).expect("procs");
-  assert!(fleets_at < procs_at, "fleet HTML sits before #session-procs");
+  let first_proc_at = html.find(r#"data-index="0""#).expect("first proc");
+  let last_proc_at = html.find(r#"data-index="1""#).expect("last proc");
+  assert!(first_proc_at < last_proc_at && last_proc_at < fleets_at, "comparison follows the work it summarizes");
+
+  // Repeated workflow steps are cycles, not model/harness routes.
+  {
+    let session = store.sessions.get_mut("fleet1").unwrap();
+    for (i, proc) in session.procs.iter_mut().enumerate() {
+      proc.skill_source = Some("review_docs".into());
+      proc.skill_name = Some(format!("review_docs-while-decide-{}", i + 1));
+      proc.route = proc.skill_name.clone();
+    }
+  }
+  let cycles = session_page(&store, "fleet1").expect("cycle page");
+  assert!(cycles.contains("· 2 cycle iterations"), "loop repetitions are named as cycle iterations");
+  assert!(cycles.contains("<th>Cycle iteration</th>"), "cycle table names its first column honestly");
+  assert!(cycles.contains("all cycle iterations agree"), "cycle rollup avoids route terminology");
+  assert!(cycles.contains("rgba(88,166,255,0.09)"), "comparison islands carry a light-blue tint");
+  assert_eq!(
+    cycles.matches("<strong>skill</strong> <code>review_docs</code>").count(),
+    2,
+    "run metadata shows the authored action, not generated while-loop wiring"
+  );
+  assert!(
+    live_client_js().contains("skillName = p.skill_source"),
+    "live-added loop rows use the same human-facing action name"
+  );
 }
 
 #[test]
@@ -2031,9 +2060,9 @@ fn workflow_graph_renders_builtin_shapes() {
   let html = session_page(&store, "arith1").expect("page");
   assert!(html.contains(r#"id="workflow-graph""#), "workflow card present");
   assert!(html.contains("3 tasks · "), "summary starts with task count");
-  assert!(html.contains(r#">3 done</a>"#), "summary counts by status, not edge count");
+  assert!(html.contains(r#">3 succeeded</a>"#), "summary counts successful tasks unambiguously");
   assert!(html.contains(r#"class="wf-jump""#), "status counters are jump links");
-  assert!(html.contains("Jump to first done task"), "done counter links to a done node");
+  assert!(html.contains("Jump to first succeeded task"), "success counter links to a successful node");
   assert!(
     html.contains("href=\"#task-add\"") || html.contains("href=\"#task-multiply\""),
     "done jump targets a real node"
@@ -2077,7 +2106,11 @@ fn workflow_graph_renders_builtin_shapes() {
   let fan_in = by_x.values().find(|ys| ys.len() == 2).expect("summarize fan-in pair missing");
   assert_ne!(fan_in[0], fan_in[1], "fan-in edges must enter at different heights: {fan_in:?}");
 
-  // All-done graph: legend only lists Done, not unused statuses.
+  // All-successful graph: show one overall verdict and only the Succeeded legend state.
+  assert!(html.contains(r#"workflow-outcome--completed"#));
+  assert!(html.contains(">Job succeeded</span>"));
+  assert!(html.contains("> Succeeded</li>"));
+  assert!(!html.contains("> Done</li>"));
   assert!(html.contains(r#"<li class="wf-leg wf-leg-done""#));
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-running""#));
   assert!(!html.contains(r#"<li class="wf-leg wf-leg-waiting""#));
@@ -2139,7 +2172,7 @@ fn workflow_graph_renders_builtin_shapes() {
   );
   let fruits = session_page(&store, "fruit1").expect("fruits");
   assert!(
-    fruits.contains(r#">1 done</a>"#) && fruits.contains(r#">2 ready</a>"#),
+    fruits.contains(r#">1 succeeded</a>"#) && fruits.contains(r#">2 ready</a>"#),
     "ready stays separate from waiting in the headline"
   );
   assert!(fruits.contains("data-tip="), "nodes carry instant tooltips");
@@ -2335,6 +2368,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(summary.contains("force-stopped"), "summary counts force-stopped separately: {summary}");
   assert!(summary.contains("failed"), "natural failure stays failed: {summary}");
   assert!(stopped.contains("wf-leg-force-stopped"), "legend lists force-stopped");
+  assert!(stopped.contains(r#"workflow-outcome--failed"#), "mixed terminal states have one failed job verdict");
+  assert!(stopped.contains(">Job failed</span>"), "overall failure is explicit above the task legend");
 
   // Flat skill session (no authored DAG): still gets a job graph from its skill proc,
   // bookended Start → task → Finish so even a single-run job shows arrows.
@@ -2342,6 +2377,8 @@ fn workflow_graph_renders_builtin_shapes() {
   let flat_html = session_page(&flat, "castab").expect("flat");
   assert!(flat_html.contains(r#"id="workflow-graph""#), "every job with skills gets a graph");
   assert!(flat_html.contains("Job graph"), "card title is Job graph");
+  assert!(flat_html.contains("card--accent-left-orange workflow-card"), "graph island uses the orange accent");
+  assert!(!flat_html.contains("card--accent-left-cyan workflow-card"), "graph no longer competes with cyan summaries");
   assert!(flat_html.contains(r#"data-workflow-step="add""#) || flat_html.contains("wf-node"), "skill node present");
   assert!(flat_html.contains(r#"class="wf-bookend wf-start""#), "Start bookend");
   assert!(flat_html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
@@ -2350,6 +2387,10 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(flat_html.contains("scrollbar-width: none"), "graph remains scrollable without visible scrollbar chrome");
   assert!(flat_html.contains(".workflow-scroll::-webkit-scrollbar"), "WebKit scrollbar chrome is hidden too");
   assert!(flat_html.contains("data-wf-zoom-fit>Fit</button>"), "server-rendered graph includes Fit");
+  assert!(flat_html.contains("data-wf-expand"), "server-rendered graph includes the large-view control");
+  assert!(flat_html.contains(">Full screen</button>"), "large-view control has a clear label");
+  assert!(flat_html.contains("height: 29rem"), "normal graph viewport is about 60% of its former 48rem height");
+  assert!(flat_html.contains(".workflow-card.wf-expanded"), "large view is an inset card, not the browser Fullscreen API");
   assert!(!flat_html.contains("wf-selected"), "task links do not leave a persistent graph-side selection state");
   assert!(!flat_html.contains("wf-start-line"), "dashed race-line start glyph is gone");
   assert!(!flat_html.contains("wf-bookend-label"), "bookends are icon-only");
@@ -2384,6 +2425,17 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("' → '"), "a multi-step do-while island is named for its whole body (first → final)");
   assert!(js.contains("data-wf-zoom-in"), "graph has explicit zoom controls");
   assert!(js.contains("data-wf-zoom-fit"), "graph has a Fit control");
+  assert!(js.contains("data-wf-expand"), "graph has a large-view control");
+  assert!(js.contains("let workflowExpanded = false"), "large view survives dynamic graph remounts");
+  assert!(js.contains("aria-modal"), "large graph view exposes modal semantics");
+  assert!(js.contains("ev.key !== 'Escape'"), "Escape closes the large graph view");
+  assert!(js.contains("ev.key === 'Tab'"), "keyboard focus stays inside the large graph view");
+  assert_eq!(
+    js.matches("if (workflowExpanded) applyExpanded(false, false);").count(),
+    2,
+    "both graph run links and status-summary run links close large view before navigation"
+  );
+  assert!(!js.contains("requestFullscreen"), "large view deliberately avoids the browser Fullscreen API");
   assert!(js.contains("stage.style.zoom"), "zoom changes the graph without changing its topology");
   assert!(js.contains("let workflowZoom = 1"), "zoom survives dynamic graph remounts");
   assert!(!js.contains("window.scrollBy"), "the page viewport never moves except on direct human input");

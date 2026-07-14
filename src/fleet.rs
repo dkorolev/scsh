@@ -40,6 +40,7 @@ pub struct FleetRoute {
   pub elapsed: Option<f64>,
   pub detail: Option<String>,
   pub grade: Option<String>,
+  pub comments_count: Option<u64>,
   pub issues_found: Option<u64>,
   pub result_message: Option<String>,
 }
@@ -79,6 +80,7 @@ pub fn fleet_groups(procs: &[ProcRecord]) -> Vec<FleetGroup> {
         elapsed: p.elapsed,
         detail: p.detail.clone(),
         grade: parsed.as_ref().and_then(|s| s.grade.clone()),
+        comments_count: parsed.as_ref().and_then(|s| s.comments_count),
         issues_found: parsed.as_ref().and_then(|s| s.issues_found),
         result_message: parsed.as_ref().and_then(|s| s.message.clone()).or_else(|| p.detail.clone()),
       });
@@ -96,10 +98,11 @@ pub fn fleet_groups(procs: &[ProcRecord]) -> Vec<FleetGroup> {
 fn fleet_status_stack_rank(status: ProcStatus) -> u8 {
   match status {
     ProcStatus::Ok => 0,
-    ProcStatus::Fail => 1,
-    ProcStatus::Skipped => 2,
-    ProcStatus::Running => 3,
-    ProcStatus::Waiting => 4,
+    ProcStatus::Graceful => 1,
+    ProcStatus::Fail => 2,
+    ProcStatus::Skipped => 3,
+    ProcStatus::Running => 4,
+    ProcStatus::Waiting => 5,
   }
 }
 
@@ -117,7 +120,7 @@ pub fn write_rollups(session_id: &str, procs: &[ProcRecord]) -> Vec<PathBuf> {
     let mut ok = 0usize;
     let mut fail = 0usize;
     for r in &g.routes {
-      if r.status == ProcStatus::Ok {
+      if matches!(r.status, ProcStatus::Ok | ProcStatus::Graceful) {
         ok += 1;
       } else if r.status == ProcStatus::Fail {
         fail += 1;
@@ -168,6 +171,7 @@ fn opt_json_str(s: Option<&str>) -> String {
 struct ResultSummary {
   message: Option<String>,
   grade: Option<String>,
+  comments_count: Option<u64>,
   issues_found: Option<u64>,
 }
 
@@ -175,8 +179,14 @@ fn parse_result_summary(path: &str) -> Option<ResultSummary> {
   let text = std::fs::read_to_string(path).ok()?;
   let message = json::message(&text);
   let grade = extract_string_field(&text, "grade");
+  let comments_count = extract_u64_field(&text, "comment_count").or_else(|| {
+    extract_string_field(&text, "comments").map(|comments| {
+      let paragraphs = comments.split("\n\n").filter(|part| !part.trim().is_empty()).count() as u64;
+      paragraphs.max(u64::from(!comments.trim().is_empty()))
+    })
+  });
   let issues_found = extract_u64_field(&text, "issues_found");
-  Some(ResultSummary { message, grade, issues_found })
+  Some(ResultSummary { message, grade, comments_count, issues_found })
 }
 
 fn extract_string_field(json_text: &str, key: &str) -> Option<String> {
@@ -212,7 +222,7 @@ fn extract_u64_field(json_text: &str, key: &str) -> Option<u64> {
 }
 
 pub fn summarize_group(skill_source: &str, routes: &[FleetRoute]) -> String {
-  let ok = routes.iter().filter(|r| r.status == ProcStatus::Ok).count();
+  let ok = routes.iter().filter(|r| matches!(r.status, ProcStatus::Ok | ProcStatus::Graceful)).count();
   let fail = routes.iter().filter(|r| r.status == ProcStatus::Fail).count();
   let msgs: Vec<_> = routes.iter().filter_map(|r| r.result_message.as_deref()).collect();
   let agree = !msgs.is_empty() && msgs.iter().all(|m| *m == msgs[0]);
@@ -236,6 +246,22 @@ mod tests {
     assert_eq!(route_name("add-opencode", "add"), Some("opencode"));
     assert_eq!(route_name("add", "add"), None);
     assert_eq!(route_name("conventions-reviewer-codex-gpt-5.5", "conventions-reviewer"), Some("codex-gpt-5.5"));
+  }
+
+  #[test]
+  fn result_summary_reads_explicit_and_legacy_comment_counts() {
+    let dir = std::env::temp_dir().join(format!("scsh-fleet-summary-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let explicit = dir.join("explicit.json");
+    std::fs::write(&explicit, r#"{"grade":"good","comments":"one\n\ntwo","comment_count":2}"#).unwrap();
+    let summary = parse_result_summary(&explicit.to_string_lossy()).unwrap();
+    assert_eq!(summary.grade.as_deref(), Some("good"));
+    assert_eq!(summary.comments_count, Some(2));
+
+    let legacy = dir.join("legacy.json");
+    std::fs::write(&legacy, r#"{"grade":"excellent","comments":"one legacy comment"}"#).unwrap();
+    assert_eq!(parse_result_summary(&legacy.to_string_lossy()).unwrap().comments_count, Some(1));
+    let _ = std::fs::remove_dir_all(dir);
   }
 
   #[test]

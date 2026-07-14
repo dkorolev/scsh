@@ -325,6 +325,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-card { margin: 1rem 0; }
   .workflow-head { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; align-items: baseline; margin-bottom: 0.75rem; }
   .workflow-title { margin: 0; font-size: 1.05rem; }
+  .workflow-outcome {
+    display: inline-flex; align-items: center; min-height: 1.55rem; padding: 0.05rem 0.55rem;
+    border: 1px solid currentColor; border-radius: 999px; font-size: 0.75rem; font-weight: 700;
+    letter-spacing: 0.01em;
+  }
+  .workflow-outcome--running { color: var(--orange); background: rgba(210,153,34,0.09); }
+  .workflow-outcome--completed { color: var(--green); background: rgba(63,185,80,0.09); }
+  .workflow-outcome--failed, .workflow-outcome--cancelled { color: var(--red); background: rgba(248,81,73,0.09); }
+  .workflow-outcome--terminated { color: var(--purple); background: rgba(163,113,247,0.09); }
   .workflow-summary { margin: 0; }
   .workflow-summary a.wf-jump {
     color: inherit; text-decoration: underline; text-decoration-color: transparent;
@@ -341,12 +350,13 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-legend .wf-ico { margin-right: 0.2rem; }
   .wf-leg-running { color: var(--orange); }
   .wf-leg-done { color: var(--green); }
+  .wf-leg-graceful { color: var(--orange); }
   .wf-leg-failed { color: var(--red); }
   .wf-leg-force-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
-    overflow: auto; max-width: 100%; height: 48rem; padding-bottom: 0.75rem;
+    overflow: auto; max-width: 100%; height: 29rem; padding-bottom: 0.75rem;
     overscroll-behavior: contain; touch-action: pan-x pan-y;
     scrollbar-width: none;
     border-radius: 6px; /* same as the enclosing .card island */
@@ -372,6 +382,17 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-zoom button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .workflow-zoom [data-wf-zoom-reset] { width: 4.6rem; }
   .workflow-zoom [data-wf-zoom-fit] { width: 3rem; }
+  .workflow-zoom [data-wf-expand] { width: 6.4rem; }
+  body.wf-modal-open { overflow: hidden; }
+  body.wf-modal-open::before {
+    content: ""; position: fixed; inset: 0; z-index: 999; background: rgba(1,4,9,0.76);
+  }
+  .workflow-card.wf-expanded {
+    position: fixed; inset: clamp(0.75rem, 2.5vw, 2rem); z-index: 1000; margin: 0;
+    display: flex; flex-direction: column; max-width: none; min-height: 0;
+    background: var(--surface); box-shadow: 0 24px 80px rgba(0,0,0,0.65);
+  }
+  .workflow-card.wf-expanded .workflow-scroll { flex: 1 1 auto; height: auto; min-height: 0; }
   .wf-loop-island {
     position: absolute; z-index: 0; box-sizing: border-box; pointer-events: none;
     border: 1px solid rgba(139, 148, 158, 0.42); border-radius: 9px;
@@ -423,6 +444,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     .toast { transition: opacity 0.22s ease, transform 0.22s ease; }
   }
   .wf-node.wf-done { border-left-color: var(--green); }
+  .wf-node.wf-graceful { border-left-color: var(--orange); }
+  .wf-node.wf-graceful .wf-state { color: var(--orange); }
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { border-left-color: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
@@ -472,10 +495,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 2px; border-radius: 1px;
     background: var(--text-muted);
   }
-  /* Fleet comparison tables (multi-route skill_source groups) sit above #session-procs. */
+  /* Fleet/cycle summaries sit immediately after the last proc they summarize. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
   .fleet {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    background: linear-gradient(90deg, rgba(88,166,255,0.09), rgba(88,166,255,0.025) 42%, var(--surface));
+    border: 1px solid rgba(88,166,255,0.42); border-left: 3px solid var(--cyan); border-radius: 6px;
     margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
   }
   .fleet-title { margin: 0 0 0.35rem; font-size: 0.95rem; font-weight: 600; }
@@ -490,6 +514,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fleet-compare th { color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
   .fleet-compare tr:last-child td { border-bottom: 0; }
   .fleet-row.ok .glyph { color: var(--green); }
+  .fleet-row.graceful .glyph { color: var(--orange); }
   .fleet-row.fail .glyph { color: var(--red); }
   .fleet-harness { font-size: 0.75rem; margin-top: 0.1rem; }
   .fleet-jump {
@@ -509,6 +534,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   /* Status lives on the left accent bar (same language as the purple meta card). */
   details.proc.ok { border-left-color: var(--green); }
+  details.proc.graceful { border-left-color: var(--orange); }
   details.proc.fail { border-left-color: var(--red); }
   details.proc.running { border-left-color: var(--orange); }
   details.proc.waiting { border-left-color: var(--cyan); }
@@ -528,10 +554,12 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* Label (and fleet glyphs) still tint with status; the row bar carries the primary cue. */
   details.proc.fail summary .label { color: var(--red); }
   details.proc.ok summary .label { color: var(--green); }
+  details.proc.graceful summary .label { color: var(--orange); }
   details.proc.running summary .label { color: var(--orange); }
   details.proc.waiting summary .label { color: var(--cyan); }
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
+  .graceful .glyph { color: var(--orange); }
   .running .glyph { color: var(--cyan); }
   .skipped .glyph, details.proc.skipped summary .label { color: var(--text-muted); }
   .proc-meta {
@@ -720,7 +748,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     width: 100%; box-sizing: border-box;
   }
   .line { white-space: pre; }
-  .detail, .container { overflow-x: auto; white-space: pre; max-width: 100%; color: var(--text-muted); }
+  .detail { overflow-wrap: anywhere; white-space: pre-wrap; max-width: 100%; color: var(--text-muted); }
+  .container { overflow-x: auto; white-space: pre; max-width: 100%; color: var(--text-muted); }
   .at { opacity: 0.5; margin-right: 0.35rem; }
 
   /* ── cast player embed ── */

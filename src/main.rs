@@ -3261,7 +3261,13 @@ fn build_and_run(
         index: o.proc_index,
         label: format!("{}: {}", skill.harness.as_str(), skill.name),
         kind: ProcKind::Skill,
-        status: if o.ok { ProcStatus::Ok } else { ProcStatus::Fail },
+        status: if o.graceful_shutdown {
+          ProcStatus::Graceful
+        } else if o.ok {
+          ProcStatus::Ok
+        } else {
+          ProcStatus::Fail
+        },
         skill_name: Some(skill.name.clone()),
         harness: Some(skill.harness.as_str().to_string()),
         model: skill.model.clone(),
@@ -3483,6 +3489,9 @@ struct SkillRun {
   /// workflow orchestrator can feed one step's output into the next. `None` when no result
   /// was produced (a failure) or it could not be read.
   result_content: Option<String>,
+  /// The harness completed successfully, but Apple Container lost the outer shell response
+  /// during teardown. This remains an `ok` outcome while rendering orange in the UI.
+  graceful_shutdown: bool,
 }
 
 impl SkillRun {
@@ -3499,10 +3508,14 @@ impl SkillRun {
       clone_dir: None,
       cached_commits: None,
       result_content: None,
+      graceful_shutdown: false,
     }
   }
   fn ok(log: String, clone_dir: Option<PathBuf>, result_content: Option<String>) -> SkillRun {
     SkillRun { ok: true, log: Some(log), clone_dir, result_content, ..SkillRun::base() }
+  }
+  fn graceful(log: String, clone_dir: Option<PathBuf>, result_content: Option<String>) -> SkillRun {
+    SkillRun { ok: true, graceful_shutdown: true, log: Some(log), clone_dir, result_content, ..SkillRun::base() }
   }
   fn failed(reason: &str, run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
     SkillRun { fail_reason: Some(reason.into()), run_dir, log, clone_dir, ..SkillRun::base() }
@@ -3536,6 +3549,46 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
     }
   }
   parts.join("\n")
+}
+
+fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
+  last.is_some_and(|line| {
+    line.contains("failed to send signal") && line.contains("missing signal in xpc message") && line.contains("signal")
+  })
+}
+
+fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
+  let exit = run_dir.join(format!("{}.exit", runtime::RUN_LOG_REL));
+  let exit_zero = std::fs::read_to_string(exit).is_ok_and(|code| code.trim() == "0");
+  if !exit_zero {
+    return false;
+  }
+  let result_good = std::fs::read_to_string(run_dir.join(result_rel))
+    .ok()
+    .and_then(|body| json::parse(&body).ok())
+    .is_some_and(|value| matches!(value, json::Value::Object(_)));
+  if !result_good || !commits {
+    return result_good;
+  }
+  git_capture(&run_dir.join(runtime::PULL_BARE), &["for-each-ref", "--format=%(refname)", "refs/heads"])
+    .is_some_and(|refs| !refs.trim().is_empty())
+}
+
+/// Apple Container can lose the outer `container run` response while leaving the container
+/// alive. The harness remains authoritative: wait only for the same bounded inactivity window
+/// it normally receives, and accept recovery only when both its result JSON and inner exit-0
+/// marker arrive.
+fn wait_for_inner_harness_result(run_dir: &Path, result_rel: &str, commits: bool, limit: Duration) -> bool {
+  let deadline = Instant::now() + limit;
+  loop {
+    if inner_harness_result_is_good(run_dir, result_rel, commits) {
+      return true;
+    }
+    if Instant::now() >= deadline {
+      return false;
+    }
+    std::thread::sleep(Duration::from_millis(200));
+  }
 }
 
 /// Run a single skill end to end in its own clone and container, driving `spinner`
@@ -3761,6 +3814,23 @@ fn run_one_skill(
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch));
+  let mut graceful_shutdown = false;
+  let result = match result {
+    Ok((false, ui::screen::Killed::No, last))
+      if rt.name == "container" && apple_container_lost_shell_response(last.as_deref()) =>
+    {
+      let recovery_limit = timeout
+        .map(|limit| limit.saturating_sub(run_started.elapsed()))
+        .unwrap_or_else(|| Duration::from_secs(inactivity_secs));
+      if wait_for_inner_harness_result(&run_dir, &skill.result, skill.commits, recovery_limit) {
+        graceful_shutdown = true;
+        Ok((true, ui::screen::Killed::No, last))
+      } else {
+        Ok((false, ui::screen::Killed::No, last))
+      }
+    }
+    other => other,
+  };
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name);
   }
@@ -3863,14 +3933,25 @@ fn run_one_skill(
       }
       let message = content.as_deref().and_then(json::message);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
-      spinner.finish_ok(Some(headline));
+      if graceful_shutdown {
+        let detail = format!(
+          "{headline}\n\nGraceful shutdown: accepted the valid result and inner exit 0 after Apple Container lost its shell response."
+        );
+        spinner.finish_graceful(Some(&detail));
+      } else {
+        spinner.finish_ok(Some(headline));
+      }
       if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
         if let Some(c) = &daemon_client {
           c.proc_result(spinner.index(), &path);
         }
       }
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
-      SkillRun::ok(log, clone_dir, content)
+      if graceful_shutdown {
+        SkillRun::graceful(log, clone_dir, content)
+      } else {
+        SkillRun::ok(log, clone_dir, content)
+      }
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -4665,7 +4746,7 @@ fn integrate_commits(
 /// no readable range, or a pack failure skips with a hint — never a run failure.
 ///
 /// Invokes packdiff in machine mode (`--json`): stdout is a single `{ "Packed": … }` or
-/// error document (packdiff 0.4.3). Progress stays on stderr and is discarded.
+/// error document (packdiff 0.4.4). Progress stays on stderr and is discarded.
 fn pack_step_diff(
   root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
   daemon_client: Option<&daemon::Client>,
@@ -4709,7 +4790,7 @@ fn pack_step_diff(
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
       hint(
-        "packdiff not found — `cargo install packdiff --version 0.4.3 --locked` to browse each step's commits from the job page",
+        "packdiff not found — `cargo install packdiff --version 0.4.4 --locked` to browse each step's commits from the job page",
       );
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
@@ -6894,6 +6975,23 @@ fn print_help_cache() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn apple_shell_response_recovery_requires_valid_json_and_inner_exit_zero() {
+    assert!(apple_container_lost_shell_response(Some(
+      r#"failed to send signal: ["signal": 15, "error": invalidArgument: "missing signal in xpc message"]"#
+    )));
+    assert!(!apple_container_lost_shell_response(Some("ordinary harness failure")));
+
+    let dir = std::env::temp_dir().join(format!("scsh-graceful-{}", runtime::random_nonce_6()));
+    std::fs::create_dir_all(dir.join("tmp/scsh/job")).unwrap();
+    std::fs::write(dir.join(format!("{}.exit", runtime::RUN_LOG_REL)), "0\n").unwrap();
+    std::fs::write(dir.join("tmp/scsh/job/result.json"), r#"{"result":"ok"}"#).unwrap();
+    assert!(inner_harness_result_is_good(&dir, "tmp/scsh/job/result.json", false));
+    std::fs::write(dir.join(format!("{}.exit", runtime::RUN_LOG_REL)), "1\n").unwrap();
+    assert!(!inner_harness_result_is_good(&dir, "tmp/scsh/job/result.json", false));
+    let _ = std::fs::remove_dir_all(dir);
+  }
 
   #[test]
   fn do_while_repeat_marker_is_a_required_json_boolean() {
