@@ -1682,6 +1682,16 @@ function syncWorkflowTaskFromLocation() {
   try { step = decodeURIComponent(m[1]); } catch (_) { return; }
   activateWorkflowTask(step, { fromHistory: true, pushHistory: false });
 }
+function wfFitZoom(scroller, stage) {
+  if (!scroller || !stage) return 1;
+  const naturalWidth = parseFloat(stage.style.width) || stage.scrollWidth || 1;
+  const naturalHeight = parseFloat(stage.style.height) || stage.scrollHeight || 1;
+  const gutter = 16;
+  const widthZoom = Math.max(1, scroller.clientWidth - gutter) / naturalWidth;
+  const heightZoom = Math.max(1, scroller.clientHeight - gutter) / naturalHeight;
+  // Fit only shrinks: a graph that already fits remains at a readable 100%.
+  return Math.min(1, widthZoom, heightZoom);
+}
 function initWorkflowGraph() {
   const root = document.querySelector('[data-workflow-graph]');
   if (!root || root.dataset.bound) return;
@@ -1694,6 +1704,7 @@ function initWorkflowGraph() {
   }
   const stage = root.querySelector('.workflow-stage');
   const reset = root.querySelector('[data-wf-zoom-reset]');
+  const zoomOut = root.querySelector('[data-wf-zoom-out]');
   const expand = root.querySelector('[data-wf-expand]');
   const applyExpanded = (expanded, focusButton) => {
     workflowExpanded = expanded;
@@ -1714,27 +1725,39 @@ function initWorkflowGraph() {
       expand.setAttribute('aria-pressed', expanded ? 'true' : 'false');
       if (focusButton) expand.focus({ preventScroll: true });
     }
+    // The modal changes both available dimensions. Re-apply the lower bound after layout.
+    requestAnimationFrame(() => applyZoom(workflowZoom));
   };
   const applyZoom = next => {
-    workflowZoom = Math.max(0.5, Math.min(2, next));
+    const minimum = wfFitZoom(scroller, stage);
+    workflowZoom = Math.max(minimum, Math.min(2, next));
     // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
     // so zooming (like graph growth) can never reflow the page around it.
     if (stage) stage.style.zoom = String(workflowZoom);
     if (reset) reset.textContent = Math.round(workflowZoom * 100) + '%';
+    if (zoomOut) zoomOut.disabled = workflowZoom <= minimum + 0.001;
   };
   const fit = () => {
     if (!stage || !scroller) return;
-    const naturalWidth = parseFloat(stage.style.width) || stage.scrollWidth;
-    applyZoom((scroller.clientWidth - 16) / naturalWidth);
+    applyZoom(wfFitZoom(scroller, stage));
     scroller.scrollLeft = 0;
+    scroller.scrollTop = 0;
   };
   applyZoom(workflowZoom);
-  root.querySelector('[data-wf-zoom-out]')?.addEventListener('click', () => applyZoom(workflowZoom - 0.1));
+  zoomOut?.addEventListener('click', () => applyZoom(workflowZoom - 0.1));
   root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(workflowZoom + 0.1));
   reset?.addEventListener('click', () => applyZoom(1));
   root.querySelector('[data-wf-zoom-fit]')?.addEventListener('click', fit);
   expand?.addEventListener('click', () => applyExpanded(!workflowExpanded, false));
   applyExpanded(workflowExpanded, false);
+  root.__scshApplyWorkflowZoom = () => applyZoom(workflowZoom);
+  if (!window.__scshWfResizeBound) {
+    window.__scshWfResizeBound = true;
+    window.addEventListener('resize', () => {
+      const current = document.querySelector('[data-workflow-graph]');
+      if (current && current.__scshApplyWorkflowZoom) current.__scshApplyWorkflowZoom();
+    });
+  }
   if (!window.__scshWfExpandBound) {
     window.__scshWfExpandBound = true;
     document.addEventListener('keydown', ev => {

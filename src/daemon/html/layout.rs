@@ -356,7 +356,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
-    overflow: auto; max-width: 100%; height: 29rem; padding-bottom: 0.75rem;
+    overflow: auto; max-width: 100%; height: 29rem; padding: 0.5rem;
+    display: flex;
     overscroll-behavior: contain; touch-action: pan-x pan-y;
     scrollbar-width: none;
     border-radius: 6px; /* same as the enclosing .card island */
@@ -371,14 +372,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .workflow-scroll::-webkit-scrollbar { display: none; }
   .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  /* Center when the graph fits; when it overflows, auto margins collapse and scroll works. */
-  .workflow-stage { position: relative; min-height: 16rem; margin-inline: auto; }
+  /* Auto margins center each axis independently, and collapse to zero on an overflowing axis. */
+  .workflow-stage { position: relative; flex: 0 0 auto; min-height: 16rem; margin: auto; }
   .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
   .workflow-zoom button {
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
     background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
   }
   .workflow-zoom button:hover { color: var(--text); border-color: #3a4558; }
+  .workflow-zoom button:disabled { color: #545d69; border-color: var(--border); cursor: default; opacity: 0.62; }
   .workflow-zoom button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .workflow-zoom [data-wf-zoom-reset] { width: 4.6rem; }
   .workflow-zoom [data-wf-zoom-fit] { width: 3rem; }

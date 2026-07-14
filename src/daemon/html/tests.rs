@@ -2307,7 +2307,7 @@ fn workflow_graph_renders_builtin_shapes() {
   let waiting = session_page(&store, "wait1").expect("waiting");
   assert!(waiting.contains("Waiting on:"), "waiting tip explains blockers");
   assert!(waiting.contains("waiting on add"), "meta line names the blocker");
-  assert!(waiting.contains("margin-inline: auto"), "graph stage centers when it fits");
+  assert!(waiting.contains("margin: auto"), "graph stage centers on both axes when it fits");
 
   // Force-stopped is distinct from a natural failure (✕ vs ✗) but shares the fail/red accent.
   store.sessions.insert(
@@ -2429,6 +2429,13 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("' → '"), "a multi-step do-while island is named for its whole body (first → final)");
   assert!(js.contains("data-wf-zoom-in"), "graph has explicit zoom controls");
   assert!(js.contains("data-wf-zoom-fit"), "graph has a Fit control");
+  assert!(js.contains("function wfFitZoom"), "Fit has one shared two-axis calculation");
+  assert!(js.contains("Math.min(1, widthZoom, heightZoom)"), "Fit uses the tighter horizontal or vertical bound");
+  assert!(js.contains("Math.max(minimum, Math.min(2, next))"), "zoom-out stops at the fitted lower bound");
+  assert!(js.contains("zoomOut.disabled"), "the zoom-out control advertises when Fit is the lower bound");
+  assert!(js.contains("scroller.scrollTop = 0"), "Fit resets both scroll axes before CSS centers the graph");
+  assert!(flat_html.contains("display: flex"), "the graph viewport can center spare space on either axis");
+  assert!(flat_html.contains("margin: auto"), "the stage centers only along axes with spare room");
   assert!(js.contains("data-wf-expand"), "graph has a large-view control");
   assert!(js.contains("let workflowExpanded = false"), "large view survives dynamic graph remounts");
   assert!(js.contains("aria-modal"), "large graph view exposes modal semantics");
