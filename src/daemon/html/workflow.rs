@@ -121,8 +121,8 @@ fn loop_islands_html(layout: &[LaidOut]) -> String {
   let mut groups: std::collections::BTreeMap<(&str, &str), Vec<&LaidOut>> = std::collections::BTreeMap::new();
   for pos in layout {
     let Some((base, suffix, _)) = crate::daemon::workflow::parse_loop_iteration_id(&pos.id) else { continue };
-    let key = if suffix.starts_with("__while_") { suffix } else { base };
-    groups.entry((key, if suffix.starts_with("__while_") { "do-while" } else { "repeat" })).or_default().push(pos);
+    let key = if suffix.starts_with("-while-") { suffix } else { base };
+    groups.entry((key, if suffix.starts_with("-while-") { "do-while" } else { "repeat" })).or_default().push(pos);
   }
   let mut html = String::new();
   for ((group, kind), items) in groups {
@@ -133,11 +133,22 @@ fn loop_islands_html(layout: &[LaidOut]) -> String {
     let top = items.iter().map(|p| p.y).fold(f64::INFINITY, f64::min) - pad - label_h;
     let right = items.iter().map(|p| p.x + p.w).fold(0.0_f64, f64::max) + pad;
     let bottom = items.iter().map(|p| p.y + p.h).fold(0.0_f64, f64::max) + bottom_pad;
+    // Name a do-while island for its whole body — "first → final" — not just the final
+    // (deciding) step, which read as if only that step looped. The body's first step is the
+    // member with the lowest authored order; single-step bodies keep the single name.
+    let end = group.trim_start_matches("-while-");
+    let first = items
+      .iter()
+      .min_by_key(|p| p.order)
+      .and_then(|p| crate::daemon::workflow::parse_loop_iteration_id(&p.id))
+      .map(|(base, _, _)| base)
+      .unwrap_or(end);
+    let name = if kind == "do-while" && first != end { format!("{first} → {end}") } else { end.to_string() };
     html.push_str(&format!(
       r#"<div class="wf-loop-island" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span>{kind} · {name}</span></div>"#,
       width = right - left,
       height = bottom - top,
-      name = esc(group.trim_start_matches("__while_")),
+      name = esc(&name),
     ));
   }
   html

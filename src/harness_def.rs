@@ -352,13 +352,14 @@ impl Step {
     self.repeat.is_some() || self.do_while.is_some()
   }
 
-  /// The run id of one loop iteration — `<id>__repeat_<n>` / `<id>__while_<n>` (the graph
-  /// parses this shape back into "step · iteration n") — or the plain step id when not a loop.
+  /// The run id of one loop iteration — `<id>-repeat-<n>` / `<id>-while-<end>-<n>` (the graph
+  /// parses this shape back into "step · iteration n"; dashes cannot appear in step ids, so it
+  /// is unambiguous and reads cleanly in file names) — or the plain step id when not a loop.
   pub fn iteration_run_id(&self, iteration: usize) -> String {
     if self.repeat.is_some() {
-      format!("{}__repeat_{iteration}", self.id)
+      format!("{}-repeat-{iteration}", self.id)
     } else if self.do_while.is_some() {
-      format!("{}__while_{}_{iteration}", self.id, self.id)
+      format!("{}-while-{}-{iteration}", self.id, self.id)
     } else {
       self.id.clone()
     }
