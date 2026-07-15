@@ -1464,7 +1464,9 @@ mod tests {
     for r in initial.iter().chain(&reviewers) {
       let expected_need = match r.id.as_str() {
         "initial_testing_cursor" => "initial_conventions_cursor",
+        "initial_sanity_cursor" => "initial_justification_cursor",
         "review_testing_cursor" => "review_conventions_cursor",
+        "review_sanity_cursor" => "review_justification_cursor",
         id if id.starts_with("initial_") => "prepare",
         _ => "fix",
       };
@@ -1507,6 +1509,18 @@ mod tests {
       if r.id.contains("reviewability") {
         assert!(r.prompt.contains("required demo artifact"));
       }
+    }
+    for prefix in ["initial", "review"] {
+      let direct_cursor_reviewers = reviewers
+        .iter()
+        .chain(&initial)
+        .filter(|r| {
+          r.id.starts_with(prefix)
+            && r.id.ends_with("_cursor")
+            && r.needs[0] == if prefix == "initial" { "prepare" } else { "fix" }
+        })
+        .count();
+      assert_eq!(direct_cursor_reviewers, 3, "{prefix} review round must open exactly three Cursor lanes");
     }
 
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
