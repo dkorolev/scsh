@@ -183,14 +183,14 @@ pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) 
 }
 
 /// The human "Ended" cell shared by the live meta and the offline export: the wall-clock
-/// end when known, "still running" while live, and the last heartbeat for a terminated
-/// (heartbeat-stale) session — when we last heard from the run is its effective end.
+/// end when known, "still running" while live, and the phase deadline for a job whose
+/// startup or running-idle timeout elapsed.
 pub(crate) fn session_ended_text(session: &Session, lifecycle: SessionLifecycle) -> String {
   match (session.ended_at, lifecycle) {
     (Some(t), _) => format!("{} UTC", crate::runtime::format_utc_timestamp(t)),
     (None, SessionLifecycle::Running) => "still running".into(),
-    (None, SessionLifecycle::Terminated) => {
-      format!("{} UTC", crate::runtime::format_utc_timestamp(session.last_seen_at))
+    (None, SessionLifecycle::Failed) => {
+      format!("{} UTC", crate::runtime::format_utc_timestamp(session.liveness_deadline()))
     }
     (None, _) => "—".into(),
   }
@@ -313,6 +313,7 @@ fn session_meta_html(session: &Session, now: u64) -> String {
   format!(
     r#"<dl class="session-meta" id="session-meta"
  data-started="{started_at}" data-ended="{ended_at}" data-last-seen="{last_seen}"
+ data-lifecycle="{lifecycle_class}" data-lifecycle-label="{lifecycle_label}"
  data-repo="{repo}" data-branch="{branch}">
 <dt>Started</dt><dd data-session-started>{started}</dd>
 <dt>Ended</dt><dd data-session-ended>{ended}</dd>
@@ -323,6 +324,8 @@ fn session_meta_html(session: &Session, now: u64) -> String {
     started_at = session.started_at,
     ended_at = session.ended_at.map(|t| t.to_string()).unwrap_or_default(),
     last_seen = last_seen,
+    lifecycle_class = lifecycle.css_class(),
+    lifecycle_label = lifecycle.label(),
     repo = esc(&session.repo),
     branch = esc(&session.branch),
     started = esc(&started),

@@ -26,6 +26,16 @@ git -C "$REPO" commit -q --allow-empty -m init
 
 **Expect:** `daemon status` reports the daemon listening on `http://127.0.0.1:7391`.
 
+## Lifecycle rules
+
+The daemon is the source of truth for job lifecycle; the browser does not invent a second outcome from a shorter timer.
+
+- A registered job is `running` while it has up to 30 seconds to start its first process.
+- If no process starts within 30 seconds, the job is `failed`.
+- After any process starts, the job remains `running` unless it reports a terminal result or the entire job is silent for more than 20 minutes.
+- An explicit process failure is always a failure. An explicit success is always a success. A running or waiting process is never rendered as failed merely because 30 seconds passed after registration.
+- Annotation links and workflow nodes consume this same lifecycle; they do not apply annotation-specific guesses.
+
 ## 1. Open a clean repository
 
 ```console

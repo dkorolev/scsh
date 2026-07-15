@@ -13,8 +13,14 @@ pub const EPHEMERAL_IDLE_SECS: u64 = 300;
 /// Grace period with no alive clients before the browser shows an ephemeral shutdown countdown.
 pub const EPHEMERAL_COUNTDOWN_AFTER_SECS: u64 = 5;
 
-/// Silence threshold before a session without `ended_at` is marked terminated.
-pub const SESSION_STALE_SECS: u64 = 30;
+/// A registered job must start at least one proc within this window. Before work starts,
+/// silence is a startup failure rather than evidence that a long-running proc is dead.
+pub const SESSION_START_TIMEOUT_SECS: u64 = 30;
+
+/// Once any proc has started, only sustained job-wide inactivity is a liveness failure.
+/// Individual harness watchdogs may be stricter; this daemon-level bound deliberately
+/// tolerates agents that think quietly for a long time.
+pub const SESSION_IDLE_TIMEOUT_SECS: u64 = 20 * 60;
 
 /// Maximum sessions retained in daemon state.
 pub const MAX_STORED_SESSIONS: usize = 200;
@@ -52,7 +58,6 @@ pub enum SessionLifecycle {
   Completed,
   Failed,
   Cancelled,
-  Terminated,
 }
 
 impl SessionLifecycle {
@@ -62,7 +67,6 @@ impl SessionLifecycle {
       SessionLifecycle::Completed => "completed",
       SessionLifecycle::Failed => "failed",
       SessionLifecycle::Cancelled => "cancelled",
-      SessionLifecycle::Terminated => "terminated abruptly",
     }
   }
 
@@ -72,7 +76,6 @@ impl SessionLifecycle {
       SessionLifecycle::Completed => "completed",
       SessionLifecycle::Failed => "failed",
       SessionLifecycle::Cancelled => "cancelled",
-      SessionLifecycle::Terminated => "terminated",
     }
   }
 }
@@ -379,6 +382,21 @@ impl Session {
     self.procs.iter().any(|p| p.status == ProcStatus::Running || p.status == ProcStatus::Waiting)
   }
 
+  /// Whether this job crossed the start boundary. Predeclared workflow rows may wait on
+  /// dependencies for a long time after another row started, so `Waiting` alone is not a
+  /// startup signal; `started_at` and terminal proc states are.
+  pub fn has_started_work(&self) -> bool {
+    self.procs.iter().any(|p| p.started_at.is_some() || !matches!(p.status, ProcStatus::Waiting))
+  }
+
+  pub(crate) fn liveness_deadline(&self) -> u64 {
+    if self.has_started_work() {
+      self.last_seen_at.saturating_add(SESSION_IDLE_TIMEOUT_SECS)
+    } else {
+      self.started_at.saturating_add(SESSION_START_TIMEOUT_SECS)
+    }
+  }
+
   pub fn lifecycle_status(&self, now: u64) -> SessionLifecycle {
     if self.ended_at.is_some() {
       if self.has_incomplete_procs() {
@@ -400,8 +418,8 @@ impl Session {
       }
       return SessionLifecycle::Completed;
     }
-    if now.saturating_sub(self.last_seen_at) > SESSION_STALE_SECS {
-      return SessionLifecycle::Terminated;
+    if now > self.liveness_deadline() {
+      return SessionLifecycle::Failed;
     }
     SessionLifecycle::Running
   }
@@ -414,8 +432,8 @@ impl Session {
     if lifecycle == SessionLifecycle::Running {
       return Some(now.saturating_sub(self.started_at));
     }
-    if lifecycle == SessionLifecycle::Terminated {
-      return Some(self.last_seen_at.saturating_sub(self.started_at));
+    if lifecycle == SessionLifecycle::Failed {
+      return Some(self.liveness_deadline().saturating_sub(self.started_at));
     }
     None
   }
@@ -424,6 +442,31 @@ impl Session {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  fn test_proc(status: ProcStatus) -> ProcRecord {
+    ProcRecord {
+      index: 0,
+      label: "skill".into(),
+      kind: ProcKind::Skill,
+      status,
+      skill_name: None,
+      harness: None,
+      model: None,
+      started_at: None,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+    }
+  }
 
   #[test]
   fn lifecycle_completed_when_ended_cleanly() {
@@ -469,7 +512,7 @@ mod tests {
   }
 
   #[test]
-  fn lifecycle_terminated_when_stale_without_ended_at() {
+  fn lifecycle_fails_start_after_thirty_seconds_without_work() {
     let session = Session {
       id: "stale".into(),
       started_at: 100,
@@ -486,8 +529,35 @@ mod tests {
       workflow: None,
       parent_session: None,
     };
-    assert_eq!(session.lifecycle_status(100 + SESSION_STALE_SECS), SessionLifecycle::Running);
-    assert_eq!(session.lifecycle_status(100 + SESSION_STALE_SECS + 1), SessionLifecycle::Terminated);
+    assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS), SessionLifecycle::Running);
+    assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
+    assert_eq!(session.duration_secs(100 + SESSION_START_TIMEOUT_SECS + 1), Some(SESSION_START_TIMEOUT_SECS));
+  }
+
+  #[test]
+  fn lifecycle_allows_twenty_minutes_idle_after_work_starts() {
+    let mut session = Session {
+      id: "idle".into(),
+      started_at: 100,
+      ended_at: None,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at: 150,
+      client_connected: true,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+    };
+    let mut proc = test_proc(ProcStatus::Running);
+    proc.started_at = Some(110);
+    session.procs.push(proc);
+    assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS), SessionLifecycle::Running);
+    assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
+    assert_eq!(session.duration_secs(150 + SESSION_IDLE_TIMEOUT_SECS + 1), Some(1250));
   }
 
   #[test]
@@ -601,7 +671,7 @@ mod tests {
 
   #[test]
   fn sessions_for_index_puts_running_first_then_recent() {
-    let running = Session {
+    let mut running = Session {
       id: "run".into(),
       started_at: 10,
       ended_at: None,
@@ -617,6 +687,9 @@ mod tests {
       workflow: None,
       parent_session: None,
     };
+    let mut running_proc = test_proc(ProcStatus::Running);
+    running_proc.started_at = Some(10);
+    running.procs.push(running_proc);
     let done = Session {
       id: "done".into(),
       started_at: 200,
@@ -694,7 +767,7 @@ mod tests {
   }
 
   #[test]
-  fn terminated_client_not_counted_alive() {
+  fn startup_timed_out_client_not_counted_alive() {
     let now = 100;
     let mut store = Store::new(DaemonMode::Ephemeral, DEFAULT_PORT, now);
     store.insert_session(
@@ -716,9 +789,9 @@ mod tests {
         parent_session: None,
       },
     );
-    assert_eq!(store.alive_clients(now + SESSION_STALE_SECS), 1);
-    assert_eq!(store.alive_clients(now + SESSION_STALE_SECS + 1), 0);
-    store.reconcile(now + SESSION_STALE_SECS + 1);
+    assert_eq!(store.alive_clients(now + SESSION_START_TIMEOUT_SECS), 1);
+    assert_eq!(store.alive_clients(now + SESSION_START_TIMEOUT_SECS + 1), 0);
+    store.reconcile(now + SESSION_START_TIMEOUT_SECS + 1);
     assert_eq!(store.active_clients, 0);
     assert!(store.no_alive_since.is_some());
   }

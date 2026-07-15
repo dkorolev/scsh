@@ -819,7 +819,7 @@ mod tests {
   }
 
   #[test]
-  fn stalled_when_session_terminated() {
+  fn stalled_when_running_session_exceeds_idle_timeout() {
     let mut store = Store::new(DaemonMode::Persistent, 7274, 100);
     let mut session = Session {
       id: "abcdef".into(),
@@ -852,7 +852,7 @@ mod tests {
         result_path: None,
         annotate_target: None,
       }],
-      last_seen_at: 60, // stale vs now=100 with SESSION_STALE_SECS=30
+      last_seen_at: 60, // running-idle timeout elapses at 60 + 20 minutes
       client_connected: true,
       run_pid: Some(1),
       workflow: Some(arith_meta()),
@@ -864,7 +864,7 @@ mod tests {
     store.sessions.insert("abcdef".into(), session.clone());
     let meta = session.workflow.as_ref().unwrap();
     let node = &meta.nodes[0];
-    assert_eq!(display_state(&session, meta, node, 100), WorkflowDisplayState::Stalled);
+    assert_eq!(display_state(&session, meta, node, 1261), WorkflowDisplayState::Stalled);
   }
 
   #[test]
