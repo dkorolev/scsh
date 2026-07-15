@@ -26,9 +26,7 @@ description = (
     "## Summary\n"
     "- Add `demo_pr_note.txt` — a tiny tracked feature stub.\n"
     "- Add `PR-DESCRIPTION.md` — this pull-request description (packdiff lifts it into\n"
-    "  the review page's Description panel via the notes-author convention).\n\n"
-    "## Test plan\n"
-    "- [x] Open the job page ⇄ commits diff and confirm the Description panel renders.\n"
+    "  the review page's Description panel via the notes-author convention).\n"
 )
 
 (ROOT / "demo_pr_note.txt").write_text(feature, encoding="utf-8")

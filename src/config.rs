@@ -1594,6 +1594,23 @@ mod tests {
   }
 
   #[test]
+  fn shipped_skills_never_generate_pr_checklists() {
+    let forbidden = ["test", "plan"].join(" ");
+    for (path, body) in bundled_skills() {
+      assert!(
+        !body.to_ascii_lowercase().contains(&forbidden),
+        "bundled skill {path} recommends a forbidden PR section"
+      );
+    }
+    for (path, body, _) in demo_skills() {
+      assert!(
+        !body.to_ascii_lowercase().contains(&forbidden),
+        "demo scaffold {path} recommends a forbidden PR section"
+      );
+    }
+  }
+
+  #[test]
   fn commits_is_an_optional_boolean() {
     let yes = one_skill(
       r#"    harness: opencode

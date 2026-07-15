@@ -92,9 +92,6 @@ steps:
          - Replace the stub `greet()` that returned `"hi"` with `Hello, {name}!`.
          - Keep the stdlib unittest green for NAME={NAME} (expected `{GREETING}`).
 
-         ## Test plan
-         - [x] `NAME={NAME} python3 test_greet.py`
-
       2. Commit ONLY `PR-DESCRIPTION.md` with message: `docs: add PR-DESCRIPTION.md for greet`
 
       Do not change `greet.py` or `test_greet.py`. Then write the result JSON.

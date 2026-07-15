@@ -10,7 +10,7 @@ Never pipe long-running or important commands through `| tail`, `| head`, or sim
 
 ## Pull request bodies
 
-Do **not** include a Test plan section (or checklist) in pull request descriptions. Summary bullets are enough; testing stays in the branch and CI.
+Pull request descriptions contain summary and implementation-detail prose only. Testing stays in the branch and CI, never in the pull request body.
 
 ## Exact Beecast and Packdiff versions
 
