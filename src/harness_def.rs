@@ -79,6 +79,47 @@ pub enum ParamType {
   Enum,
 }
 
+/// A workflow result field's machine type. Output values cross a JSON boundary, so this is
+/// deliberately distinct from [`ParamType`]: arrays are valid workflow results but are not
+/// scalar HTML-form parameters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OutputType {
+  /// A JSON string.
+  String,
+  /// An integral JSON number.
+  Int,
+  /// A JSON boolean.
+  Bool,
+  /// A JSON string restricted to one of the field's declared choices.
+  Enum,
+  /// A JSON array containing only strings.
+  StringList,
+}
+
+impl OutputType {
+  fn parse(s: &str) -> Option<OutputType> {
+    match s {
+      "string" => Some(OutputType::String),
+      "int" => Some(OutputType::Int),
+      "bool" => Some(OutputType::Bool),
+      "enum" => Some(OutputType::Enum),
+      "string_list" => Some(OutputType::StringList),
+      _ => None,
+    }
+  }
+
+  /// The human-readable type label rendered into the workflow step's output contract.
+  pub fn as_str(self) -> &'static str {
+    match self {
+      OutputType::String => "string",
+      OutputType::Int => "int",
+      OutputType::Bool => "bool",
+      OutputType::Enum => "enum",
+      OutputType::StringList => "array of strings",
+    }
+  }
+}
+
 impl ParamType {
   fn parse(s: &str) -> Option<ParamType> {
     match s {
@@ -242,8 +283,11 @@ pub type When = Vec<Cond>;
 /// One output field a step promises to write to its result JSON (name + type, enum choices).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OutputField {
+  /// Top-level JSON field name.
   pub name: String,
-  pub ty: ParamType,
+  /// Exact JSON type accepted for this field.
+  pub ty: OutputType,
+  /// Allowed string values when `ty` is [`OutputType::Enum`]; empty otherwise.
   pub choices: Vec<String>,
 }
 
@@ -397,7 +441,7 @@ impl Step {
     s.push_str("\n## Output\n\nWrite a single JSON object to the file at `$SCSH_RESULT` with exactly these fields:\n");
     for o in &self.outputs {
       let ty = match o.ty {
-        ParamType::Enum => format!("one of: {}", o.choices.join(", ")),
+        OutputType::Enum => format!("one of: {}", o.choices.join(", ")),
         other => other.as_str().to_string(),
       };
       s.push_str(&format!("- `{}` ({ty})\n", o.name));
@@ -910,16 +954,33 @@ fn validate_step_outputs(id: &str, node: Option<&Node>, errors: &mut Vec<String>
     for (k, v) in fm {
       m.insert(k.as_str(), v);
     }
+    for key in m.keys() {
+      if !matches!(*key, "type" | "choices") {
+        errors.push(format!("unknown key 'steps.{id}.output.{field}.{key}' (allowed: type, choices)"));
+      }
+    }
     let ty = match m.get("type").copied() {
-      Some(Node::Scalar(s)) => ParamType::parse(s.trim()).unwrap_or(ParamType::String),
-      _ => ParamType::String,
+      Some(Node::Scalar(s)) => match OutputType::parse(s.trim()) {
+        Some(ty) => ty,
+        None => {
+          errors.push(format!("'steps.{id}.output.{field}.type' must be string, int, bool, enum, or string_list"));
+          OutputType::String
+        }
+      },
+      _ => {
+        errors.push(format!("'steps.{id}.output.{field}' is missing required key 'type'"));
+        OutputType::String
+      }
     };
     let choices = match m.get("choices").copied() {
       Some(Node::Scalar(s)) => s.split(',').map(|c| c.trim().to_string()).filter(|c| !c.is_empty()).collect(),
       _ => Vec::new(),
     };
-    if ty == ParamType::Enum && choices.is_empty() {
+    if ty == OutputType::Enum && choices.is_empty() {
       errors.push(format!("'steps.{id}.output.{field}' is an enum but has no 'choices'"));
+    }
+    if ty != OutputType::Enum && !choices.is_empty() {
+      errors.push(format!("'steps.{id}.output.{field}.choices' is allowed only for enum outputs"));
     }
     out.push(OutputField { name: field.to_string(), ty, choices });
   }
@@ -1060,7 +1121,7 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         errors.push(format!("step '{}' uses 'break: true' but is not the unique first step of a do-while body", s.id));
       }
       match s.outputs.iter().find(|o| o.name == "SCSH_LOOP_BREAK") {
-        Some(field) if field.ty == ParamType::Bool => {}
+        Some(field) if field.ty == OutputType::Bool => {}
         Some(_) => errors.push(format!("step '{}' output SCSH_LOOP_BREAK must have type bool", s.id)),
         None => {
           errors.push(format!("step '{}' uses 'break: true' and must declare boolean output SCSH_LOOP_BREAK", s.id))
@@ -1364,7 +1425,7 @@ mod tests {
     let check = def.steps.iter().find(|s| s.id == "check").unwrap();
     let carry = def.steps.iter().find(|s| s.id == "carry").unwrap();
     assert!(check.break_loop);
-    assert!(check.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == ParamType::Bool));
+    assert!(check.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
     assert_eq!(carry.do_while.as_deref(), Some("check"));
     assert_eq!(do_while_body(&def.steps, carry), ["check", "increment", "carry"]);
     assert!(check.render_skill_body().contains("exits this do-while immediately"));
@@ -1424,10 +1485,22 @@ mod tests {
         assert!(r.agent.effort.is_none());
       }
       let grade = r.outputs.iter().find(|o| o.name == "grade").expect("every reviewer grades");
-      assert_eq!(grade.ty, ParamType::Enum);
+      assert_eq!(grade.ty, OutputType::Enum);
       assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
-      assert!(r.outputs.iter().any(|o| o.name == "comments"));
-      assert!(r.outputs.iter().any(|o| o.name == "comment_count"));
+      assert!(r.outputs.iter().any(|o| o.name == "comments" && o.ty == OutputType::StringList));
+      assert!(!r.outputs.iter().any(|o| o.name == "comment_count"));
+      let prompt_words = r.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+      assert!(
+        prompt_words.contains("`grade` as a string") && prompt_words.contains("`comments` as an array"),
+        "{} must state the distinct grade and comments types without ambiguity",
+        r.id
+      );
+      assert!(
+        r.prompt.contains("Never request, recommend, or create any")
+          && r.prompt.contains("additional PR-description section"),
+        "{} must enforce the PR-description policy at the reviewer boundary",
+        r.id
+      );
       if r.id.contains("testing") {
         assert!(r.prompt.contains("PR-DESCRIPTION.md is") && r.prompt.contains("change narrative only"));
       }
@@ -1440,10 +1513,17 @@ mod tests {
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
     assert_eq!(decide.agent.harness, crate::config::Harness::Cursor);
     assert!(decide.break_loop);
-    assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == ParamType::Bool));
+    assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
     assert_eq!(collect.do_while.as_deref(), Some("decide"));
-    assert!(collect.outputs.iter().any(|o| o.name == "approved" && o.ty == ParamType::Bool));
+    assert!(collect.outputs.iter().any(|o| o.name == "approved" && o.ty == OutputType::Bool));
     assert!(collect.outputs.iter().any(|o| o.name == "feedback"));
+    for boundary in [prepare, decide, fix, collect] {
+      assert!(
+        boundary.prompt.contains("additional") && boundary.prompt.contains("PR-description section"),
+        "{} must preserve the PR-description invariant",
+        boundary.id
+      );
+    }
     let body = do_while_body(&def.steps, collect);
     assert_eq!(body.len(), 18);
     assert_eq!(body.first(), Some(&"decide"));

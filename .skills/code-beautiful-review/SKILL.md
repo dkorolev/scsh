@@ -5,6 +5,8 @@ description: "Runs the `scsh` `code-review` profile: five reviewer specialties, 
 
 # code-beautiful-review — run the review fleet, then cluster the findings
 
+Never forward or endorse a reviewer request for an additional `PR-DESCRIPTION.md` section covering verification commands, expected results, or checklists. Treat it as a policy violation and omit it from clustered feedback; verification evidence belongs in committed tests, README, or another committed verification document.
+
 The contract:
 
 > **Probe three model routes (Codex Terra, Claude Opus 4.8, and Cursor Auto) and stop only when none is available; review against local `main`/`master` or the local base the user names; run the `code-review` fleet through `scsh`; wait for it; then report the important findings first and stylistic comments separately. Report only; change nothing.**

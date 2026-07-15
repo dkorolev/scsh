@@ -284,6 +284,7 @@ pub enum Killed {
 
 /// A worker's handle to one proc: mark it started, run a child while pumping its output into the
 /// model as timestamped lines, and finish it ✓/✗.
+#[derive(Clone)]
 pub struct Proc {
   i: usize,
   label: String,
@@ -302,7 +303,12 @@ impl Proc {
 
   /// Mark the proc running and start its clock. Off-TTY, announce it with a `▶` line.
   pub fn start(&self) {
-    *self.starts.lock().unwrap().get_mut(self.i).unwrap() = Some(Instant::now());
+    let mut starts = self.starts.lock().unwrap();
+    let started = starts.get_mut(self.i).unwrap();
+    if started.is_none() {
+      *started = Some(Instant::now());
+    }
+    drop(starts);
     self.model.lock().unwrap().set_status(self.i, Status::Running);
     if let Some(s) = &self.sink {
       s.proc_start(self.i);
@@ -868,6 +874,17 @@ mod tests {
     // Every captured line carries a non-negative relative timestamp.
     assert!(m.procs[0].lines.iter().all(|l| l.at >= 0.0));
     assert_eq!(m.procs[0].status, Status::Ok);
+  }
+
+  #[test]
+  fn restarting_one_logical_proc_preserves_its_original_clock() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("schema repair", false);
+    p.start();
+    let first = p.starts.lock().unwrap()[p.index()];
+    p.clone().start();
+    let second = p.starts.lock().unwrap()[p.index()];
+    assert_eq!(second, first);
   }
 
   #[cfg(unix)]
