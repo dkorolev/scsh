@@ -384,6 +384,13 @@ pub fn bundled_skills() -> [(&'static str, &'static str); 12] {
   ]
 }
 
+/// The canonical body of one skill embedded in the install bundle. Harness definitions use
+/// this lookup when a workflow step names `skill:` instead of duplicating a long prompt in YAML.
+pub fn bundled_skill_body(name: &str) -> Option<&'static str> {
+  let path = format!(".skills/{name}/SKILL.md");
+  bundled_skills().into_iter().find(|(candidate, _)| *candidate == path).map(|(_, body)| body)
+}
+
 /// Manifest source for bundled skill profiles. Keeping this pointed at the repository's own
 /// `.scsh.yml` makes the embedded install routes identical to the routes used to develop them.
 pub fn bundled_skills_manifest() -> &'static str {
@@ -1580,6 +1587,14 @@ mod tests {
     ] {
       assert!(manifest.skills.iter().any(|skill| skill.name == name), "bundled manifest is missing {name}");
     }
+    let feature_factory = manifest
+      .skills
+      .iter()
+      .find(|skill| skill.name == "big-beautiful-build")
+      .expect("bundled manifest should contain big-beautiful-build");
+    assert_eq!(feature_factory.harness, Some(Harness::Cursor));
+    assert_eq!(feature_factory.model.as_deref(), Some("auto"));
+    assert_eq!(feature_factory.effort, None);
   }
 
   #[test]

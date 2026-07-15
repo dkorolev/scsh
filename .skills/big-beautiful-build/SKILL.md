@@ -13,6 +13,8 @@ You collect the feature description in a single intake step, then build a comple
 
 ## The one and only question (step 1)
 
+When a non-interactive runner provides a non-empty `FEATURE` environment variable, that value is the user's answer to this one question. Do not ask again: begin delivery immediately from that brief, resolve every omitted detail through documented assumptions, and satisfy any runner-provided Output and Required files contracts in addition to the deliverables below.
+
 Send the user **exactly one** message asking them to describe the feature in enough detail to build it end-to-end. Make it a single prose request — not a multiple-choice form — and tell them plainly this is their only chance to add detail. Prompt them to cover, in their own words:
 
 - What it does — the core behavior, in one or two sentences.
@@ -82,7 +84,7 @@ Prefer a tight, CI-runnable definition, even if it comes in the form of a prose,
 3. Set up the workspace — for a separate feature, scaffold `features/<feature-id>/`; otherwise work in the repo, where the change belongs.
 4. Build the implementation, demo, tests, README, and deps.
 5. Run the tests (the primary proof) and the demo; fix anything that fails (no questions).
-6. Report — print the file tree, the commands to run it, the demo/test output you captured, and the full Assumptions list. Tell the user it's complete and how to try it. Write this same report to `tmp/big-beautiful-build.md` so it persists after the run.
+6. Report — print the file tree, the commands to run it, the demo/test output you captured, and the full Assumptions list. Tell the user it's complete and how to try it. Write this same report to `tmp/big-beautiful-build.md` so it persists after the run. When the runner declares `big-beautiful-build.md` under Required files, write the report beside `$SCSH_RESULT` under that exact filename instead; the runner will preserve it with the job.
 
 ## Anti-patterns
 

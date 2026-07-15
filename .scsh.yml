@@ -78,9 +78,8 @@ skills:
         harness: cursor
         model: auto
   big-beautiful-build:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
+    harness: cursor
+    model: auto
     timeout: 1200
     profile: big-beautiful-build
     result: tmp/big-beautiful-build.md

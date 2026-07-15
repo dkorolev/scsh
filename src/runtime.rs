@@ -559,7 +559,11 @@ pub fn harness_command(
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(&cursor_model_with_effort(m, effort)));
       }
-      tui.push(' ');
+      // Cursor's prompt is variadic positional input. Without the standard option delimiter,
+      // a legitimate prompt beginning with Markdown frontmatter (`---`) is parsed as an unknown
+      // CLI flag and the agent never starts. Every prompt belongs after `--`, regardless of its
+      // first character; this also makes future user-authored direct prompts safe by construction.
+      tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
@@ -2737,6 +2741,10 @@ TAG
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
+    assert!(
+      cmd.contains("cursor-agent --force --sandbox disabled --disable-auto-update --model composer-2.5-fast -- "),
+      "the Cursor prompt follows an option delimiter: {cmd}"
+    );
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
     let bare = harness_command(
       Harness::Cursor,
@@ -2749,6 +2757,21 @@ TAG
     );
     assert!(bare.contains("cursor-agent --force --sandbox disabled"));
     assert!(!bare.contains(" --model "));
+
+    let frontmatter = harness_command(
+      Harness::Cursor,
+      Some("auto"),
+      None,
+      "build",
+      "tmp/build.json",
+      crate::config::Terminal::default(),
+      &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
+    );
+    assert!(
+      frontmatter.contains("cursor-agent --force --sandbox disabled --disable-auto-update --model auto -- ")
+        && frontmatter.contains("name: build"),
+      "frontmatter must be positional, never parsed as an option: {frontmatter}"
+    );
   }
 
   #[test]
