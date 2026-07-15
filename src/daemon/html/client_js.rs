@@ -166,10 +166,16 @@ function sessionStartedCell(session, nowUnix) {
     '<span class="session-started-abs">' + esc(abs) + '</span><br>' +
     '<span class="dim session-started-rel">' + esc(rel) + '</span></span>';
 }
+function procRunHref(jobId, session, proc) {
+  const nodes = session && session.workflow && session.workflow.nodes;
+  const node = nodes && nodes.find(n => n.proc_index === proc.index);
+  const fragment = node ? '#task-' + encodeURIComponent(node.id) : '#proc-' + encodeURIComponent(proc.index);
+  return '/job/' + encodeURIComponent(jobId) + fragment;
+}
 // Mirrors harness_chips_html in index.rs — keep the markup identical. A running chip's
 // tooltip duration lives OUT of the markup (data-tip-running + the tip module's ticker),
 // so live re-renders compare equal and the hover survives.
-function harnessChipsHtml(session) {
+function harnessChipsHtml(jobId, session) {
   let out = '';
   const procs = (session.procs || []).filter(p => (p.kind || 'skill') === 'skill' && p.harness);
   procs.slice(0, 8).forEach((p) => {
@@ -184,9 +190,9 @@ function harnessChipsHtml(session) {
     else if (p.status === 'graceful') tip = base + '\ngraceful shutdown';
     else if (p.status === 'fail') tip = base + '\nfailed';
     else tip = base + '\nskipped';
-    out += '<span class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" data-tip="' +
-      esc(tip) + '"' + runningAttr + '>' +
-      esc(p.harness.charAt(0).toUpperCase()) + '</span>';
+    out += '<a class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" href="' +
+      esc(procRunHref(jobId, session, p)) + '" data-tip="' + esc(tip) + '"' + runningAttr + '>' +
+      esc(p.harness.charAt(0).toUpperCase()) + '</a>';
   });
   if (procs.length > 8) out += '<span class="chip-overflow">+ ' + (procs.length - 8) + '</span>';
   return out;
@@ -204,8 +210,10 @@ function indexRowHtml(id, session, nowUnix) {
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
     '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + chipCountHtml(n) +
-    harnessChipsHtml(session) + '</td>' +
-    '<td class="dim repo-path" data-tip="' + esc(session.repo || '') + '">' + esc(session.repo || '') + '</td></tr>';
+    harnessChipsHtml(id, session) + '</td>' +
+    '<td class="dim repo-path session-repo-path"><button type="button" class="repo-copy" data-copy-value="' +
+    esc(session.repo || '') + '" data-tip="' + esc(session.repo || '') +
+    '" aria-label="Copy full repository path">' + esc(session.repo || '') + '</button></td></tr>';
 }
 function syncIndexRow(row, session, nowUnix) {
   const lifecycle = sessionLifecycle(session, nowUnix);
@@ -217,13 +225,18 @@ function syncIndexRow(row, session, nowUnix) {
   if (durationCell) setTextUnlessSelecting(durationCell, sessionDurationLabel(session, nowUnix, lifecycle));
   const procsCell = row.querySelector('.session-procs-cell');
   if (procsCell) {
-    const next = chipCountHtml((session.procs || []).length) + harnessChipsHtml(session);
+    const next = chipCountHtml((session.procs || []).length) + harnessChipsHtml(row.dataset.sessionId || '', session);
     if (procsCell.innerHTML !== next) procsCell.innerHTML = next;
   }
   const repoCell = row.querySelector('.repo-path');
   if (repoCell) {
-    setTextUnlessSelecting(repoCell, session.repo || '');
-    repoCell.setAttribute('data-tip', session.repo || '');
+    const copy = repoCell.querySelector('.repo-copy');
+    if (copy) {
+      setTextUnlessSelecting(copy, session.repo || '');
+      copy.setAttribute('data-copy-value', session.repo || '');
+      // A live tick must not erase the short "Copied!" acknowledgement mid-flight.
+      if (!copy._scshCopyTimer) copy.setAttribute('data-tip', session.repo || '');
+    }
   }
 }
 // A bare repo-relative artifact path (a system pointer like tmp/scsh/<id>/add.json), as
@@ -1952,6 +1965,12 @@ function restoreOpenProcs() {
     if (det) det.open = true;
   });
 }
+function syncProcFromLocation() {
+  const match = /^#proc-([0-9]+)$/.exec(location.hash || '');
+  if (!match) return;
+  const det = document.querySelector('details.proc[data-index="' + CSS.escape(match[1]) + '"]');
+  activateProcPanel(det, null, false);
+}
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
   root.dataset.changeBound = '1';
@@ -2084,6 +2103,8 @@ startProcClock();
   initFleetJumps();
   initWorkflowGraph();
   restoreOpenProcs();
+  window.addEventListener('hashchange', syncProcFromLocation);
+  if (/^#proc-/.test(location.hash || '')) setTimeout(syncProcFromLocation, 0);
 })();
 function initFleetJumps() {
   document.querySelectorAll('.fleet-jump').forEach((btn) => {
@@ -2766,6 +2787,8 @@ function startImageBuildOne(name, upToDate) {
 (function initTips() {
   const tip = document.createElement('div');
   tip.className = 'ui-tip';
+  tip.setAttribute('role', 'status');
+  tip.setAttribute('aria-live', 'polite');
   tip.hidden = true;
   document.body.appendChild(tip);
   let anchor = null, timer = null;
@@ -2807,7 +2830,54 @@ function startImageBuildOne(name, upToDate) {
       }, 1000);
     }
   });
+  document.addEventListener('scsh-tip-refresh', (e) => {
+    const el = e.target && e.target.closest ? e.target.closest('[data-tip]') : null;
+    if (!el) return;
+    anchor = el;
+    tip.hidden = false;
+    render(el);
+  });
   document.addEventListener('scroll', hide, true);
+})();
+function copyPlainText(value) {
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    return navigator.clipboard.writeText(value).catch(() => copyPlainTextFallback(value));
+  }
+  return copyPlainTextFallback(value);
+}
+function copyPlainTextFallback(value) {
+  return new Promise((resolve, reject) => {
+    const input = document.createElement('textarea');
+    input.value = value;
+    input.setAttribute('readonly', '');
+    input.style.position = 'fixed';
+    input.style.opacity = '0';
+    document.body.appendChild(input);
+    input.select();
+    const copied = document.execCommand && document.execCommand('copy');
+    input.remove();
+    if (copied) resolve();
+    else reject(new Error('copy unavailable'));
+  });
+}
+function showCopiedTip(el) {
+  clearTimeout(el._scshCopyTimer);
+  el.setAttribute('data-tip', 'Copied!');
+  el.dispatchEvent(new CustomEvent('scsh-tip-refresh', { bubbles: true }));
+  el._scshCopyTimer = setTimeout(() => {
+    if (!document.contains(el)) return;
+    el.setAttribute('data-tip', el.getAttribute('data-copy-value') || '');
+    el._scshCopyTimer = null;
+    el.dispatchEvent(new CustomEvent('scsh-tip-refresh', { bubbles: true }));
+  }, 1400);
+}
+(function initCopyValues() {
+  document.addEventListener('click', (e) => {
+    const el = e.target && e.target.closest ? e.target.closest('[data-copy-value]') : null;
+    if (!el) return;
+    const value = el.getAttribute('data-copy-value') || '';
+    copyPlainText(value).then(() => showCopiedTip(el)).catch(() => showToast('Could not copy.'));
+  });
 })();
 // ---- repositories panel (index page only) ----
 let OPEN_REPO = null;

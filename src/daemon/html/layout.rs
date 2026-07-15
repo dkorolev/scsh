@@ -610,6 +610,14 @@ pub(crate) const PAGE_CSS: &str = r#"
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;
     white-space: nowrap; direction: rtl; text-align: left;
   }
+  td.session-repo-path { direction: ltr; }
+  .repo-copy {
+    display: block; width: 34ch; max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+    white-space: nowrap; direction: rtl; text-align: left; padding: 0; border: 0;
+    color: inherit; background: transparent; font: inherit; cursor: copy;
+  }
+  .repo-copy:hover, .repo-copy:focus-visible { color: var(--cyan); }
+  .repo-copy:focus-visible { outline: 1px solid var(--cyan); outline-offset: 2px; }
   a.repo-filter-link {
     color: inherit; text-decoration: none; direction: rtl;
   }
@@ -707,7 +715,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     display: inline-flex; align-items: center; justify-content: center;
     width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
     font-size: 0.7rem; font-weight: 700; color: #0d1117; background: var(--hchip-bg, #8b949e);
-    vertical-align: middle; cursor: default;
+    vertical-align: middle; cursor: pointer; text-decoration: none;
   }
   .hchip--opencode { --hchip-bg: #58a6ff; }
   .hchip--claude { --hchip-bg: #d97757; }
@@ -716,6 +724,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .hchip--cursor { --hchip-bg: #a371f7; }
   .hchip--done { opacity: 0.35; }
   .hchip:hover { transform: scale(1.3); opacity: 1; }
+  .hchip:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; opacity: 1; }
   .ui-tip {
     position: fixed; z-index: 100; pointer-events: none;
     background: #1c2128; border: 1px solid var(--border); border-radius: 6px;
