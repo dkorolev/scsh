@@ -1456,9 +1456,16 @@ mod tests {
 
   #[test]
   fn builtins_yield_valid_workflow_meta() {
-    for name in
-      ["arith", "fruits", "code-review", "greet", "demo-loop-repeat", "demo-loop-do-while", "demo-fantastic-loop"]
-    {
+    for name in [
+      "arith",
+      "fruits",
+      "code-review",
+      "greet",
+      "demo-loop-repeat",
+      "demo-loop-do-while",
+      "demo-loop-break",
+      "demo-beautiful-loop",
+    ] {
       let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == name).unwrap();
       let def = crate::harness_def::validate(name, src, crate::harness_def::DefSource::Builtin)
         .unwrap_or_else(|e| panic!("{name}: {}", e.join("; ")));
