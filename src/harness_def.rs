@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 15] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 16] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -34,7 +34,8 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 15] {
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
     ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
-    ("demo-fantastic-loop", include_str!("harness_defs/demo-fantastic-loop.yml")),
+    ("demo-loop-break", include_str!("harness_defs/demo-loop-break.yml")),
+    ("demo-beautiful-loop", include_str!("harness_defs/demo-beautiful-loop.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
     ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
@@ -289,6 +290,9 @@ pub struct Step {
   /// step's result JSON decides whether to repeat via the fixed top-level boolean
   /// `SCSH_DO_WHILE_REPEAT`; scsh deliberately has no built-in comparison language.
   pub do_while: Option<String>,
+  /// This step is the first step of a do-while body and may end that loop immediately by
+  /// returning the fixed top-level boolean `SCSH_LOOP_BREAK`.
+  pub break_loop: bool,
 }
 
 /// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
@@ -400,6 +404,11 @@ impl Step {
     }
     if self.do_while.is_some() && !self.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT") {
       s.push_str("- `SCSH_DO_WHILE_REPEAT` (boolean; `true` requests another loop iteration, `false` ends the loop)\n");
+    }
+    if self.break_loop {
+      s.push_str(
+        "\n`SCSH_LOOP_BREAK: true` exits this do-while immediately; `false` continues with the rest of the body.\n",
+      );
     }
     s.push_str("\nDo not write anything else to that file.\n");
     if !self.artifacts.is_empty() {
@@ -691,11 +700,11 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
       }
     }
     const SK: &[&str] =
-      &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat", "do-while"];
+      &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat", "do-while", "break"];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat, do-while)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat, do-while, break)"
         ));
       }
     }
@@ -760,6 +769,21 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     if repeat.is_some() && do_while.is_some() {
       errors.push(format!("step '{id}' cannot have both 'repeat' and 'do-while'"));
     }
+    let break_loop = match fm.get("break") {
+      None => false,
+      Some(Node::Scalar(s)) => match s.trim() {
+        "true" | "yes" | "on" | "1" => true,
+        "false" | "no" | "off" | "0" => false,
+        other => {
+          errors.push(format!("'steps.{id}.break': expected a boolean, got '{other}'"));
+          false
+        }
+      },
+      Some(_) => {
+        errors.push(format!("'steps.{id}.break': expected a boolean"));
+        false
+      }
+    };
 
     if let (Some(agent), Some(prompt)) = (agent, prompt) {
       steps.push(Step {
@@ -774,6 +798,7 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         commits,
         repeat,
         do_while,
+        break_loop,
       });
     }
   }
@@ -1024,6 +1049,22 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         errors.push(format!("step '{}' do-while starts at '{start}', which is not a defined step", s.id));
       } else if start != &s.id && !depends_transitively(steps, &s.id, start) {
         errors.push(format!("step '{}' do-while start '{start}' is not an ancestor of the final step", s.id));
+      }
+    }
+    if s.break_loop {
+      let loops: Vec<&Step> = steps
+        .iter()
+        .filter(|end| end.do_while.is_some() && do_while_body(steps, end).first().copied() == Some(s.id.as_str()))
+        .collect();
+      if loops.len() != 1 {
+        errors.push(format!("step '{}' uses 'break: true' but is not the unique first step of a do-while body", s.id));
+      }
+      match s.outputs.iter().find(|o| o.name == "SCSH_LOOP_BREAK") {
+        Some(field) if field.ty == ParamType::Bool => {}
+        Some(_) => errors.push(format!("step '{}' output SCSH_LOOP_BREAK must have type bool", s.id)),
+        None => {
+          errors.push(format!("step '{}' uses 'break: true' and must declare boolean output SCSH_LOOP_BREAK", s.id))
+        }
       }
     }
   }
@@ -1294,7 +1335,7 @@ mod tests {
     assert_eq!(def.steps[1].needs, vec!["initialize".to_string()]);
     assert!(def.steps.iter().all(|s| s.commits));
     assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
-    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.5")));
+    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.6-luna")));
     assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
   }
 
@@ -1312,72 +1353,104 @@ mod tests {
     assert_eq!(do_while_body(&def.steps, compare), ["increment", "compare"]);
     assert!(compare.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
     assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
-    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.5")));
+    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.6-luna")));
     assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
   }
 
   #[test]
-  fn builtin_fantastic_loop_demo_wires_a_review_panel_do_while() {
-    let def = builtin("demo-fantastic-loop");
-    assert_eq!(def.steps.len(), 9);
+  fn builtin_break_demo_exits_from_the_first_do_while_step() {
+    let def = builtin("demo-loop-break");
+    assert_eq!(def.steps.len(), 4);
+    let check = def.steps.iter().find(|s| s.id == "check").unwrap();
+    let carry = def.steps.iter().find(|s| s.id == "carry").unwrap();
+    assert!(check.break_loop);
+    assert!(check.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == ParamType::Bool));
+    assert_eq!(carry.do_while.as_deref(), Some("check"));
+    assert_eq!(do_while_body(&def.steps, carry), ["check", "increment", "carry"]);
+    assert!(check.render_skill_body().contains("exits this do-while immediately"));
+  }
 
-    // The feature and PR preparation happen once outside the loop; declare_done_or_fix is the
-    // loop body's first step. All three code-writing steps use claude opus.
+  #[test]
+  fn builtin_beautiful_loop_demo_wires_a_review_panel_do_while() {
+    let def = builtin("demo-beautiful-loop");
+    assert_eq!(def.steps.len(), 35);
+
     let implement = def.steps.iter().find(|s| s.id == "implement").unwrap();
     let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
-    let declare = def.steps.iter().find(|s| s.id == "declare_done_or_fix").unwrap();
+    let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
     assert!(implement.needs.is_empty() && implement.commits);
     assert_eq!(prepare.needs, vec!["implement".to_string()]);
-    assert!(prepare.commits);
-    assert_eq!(declare.needs, vec!["prepare".to_string()]);
-    assert!(declare.commits);
-    for coder in [implement, prepare, declare] {
-      assert_eq!(coder.agent.harness, crate::config::Harness::Claude);
-      assert_eq!(coder.agent.model.as_deref(), Some("opus"));
+    assert_eq!(fix.needs, vec!["decide".to_string()]);
+    for coder in [implement, prepare, fix] {
+      assert_eq!(coder.agent.harness, crate::config::Harness::Cursor);
+      assert_eq!(coder.agent.model.as_deref(), Some("auto"));
+      assert!(coder.commits);
     }
-    // The loop-carried input: declare_done_or_fix reads the PREVIOUS round's decide.feedback
-    // (empty on round one) with no `needs: decide` — the back-edge that keeps review comments
-    // out of git.
-    assert_eq!(declare.inputs.len(), 1);
-    assert_eq!(declare.inputs[0].name, "FEEDBACK");
-    assert_eq!(declare.inputs[0].source, Ref::StepField { step: "decide".into(), field: "feedback".into() });
+    for heading in ["## Summary", "## What This Changes", "## Implementation Details"] {
+      assert!(prepare.prompt.contains(heading), "prepare pins {heading}");
+      assert!(fix.prompt.contains(heading), "fix preserves {heading}");
+    }
+    assert!(fix.prompt.contains("required demo artifact"));
 
-    // The panel: five read-only reviewer personas, all codex gpt-5.5, each grading on the same
-    // enum and each gated on declare_done_or_fix so every round reviews freshly revised code.
+    let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
     let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
-    assert_eq!(reviewers.len(), 5);
-    for r in &reviewers {
-      assert_eq!(r.needs, vec!["declare_done_or_fix".to_string()]);
+    assert_eq!(initial.len(), 15);
+    assert_eq!(reviewers.len(), 15);
+    for profile in ["conventions", "justification", "reviewability", "sanity", "testing"] {
+      assert_eq!(initial.iter().filter(|r| r.id.starts_with(&format!("initial_{profile}_"))).count(), 3);
+      assert_eq!(reviewers.iter().filter(|r| r.id.starts_with(&format!("review_{profile}_"))).count(), 3);
+    }
+    for r in initial.iter().chain(&reviewers) {
+      let expected_need = match r.id.as_str() {
+        "initial_testing_cursor" => "initial_conventions_cursor",
+        "review_testing_cursor" => "review_conventions_cursor",
+        id if id.starts_with("initial_") => "prepare",
+        _ => "fix",
+      };
+      assert_eq!(r.needs, vec![expected_need.to_string()]);
       assert!(!r.commits, "reviewers are read-only");
-      assert_eq!(r.agent.harness, crate::config::Harness::Codex);
-      assert_eq!(r.agent.model.as_deref(), Some("gpt-5.5"));
+      if r.id.ends_with("_opus") {
+        assert_eq!(r.agent.harness, crate::config::Harness::Claude);
+        assert_eq!(r.agent.model.as_deref(), Some("claude-opus-4-8"));
+        assert!(r.agent.effort.is_none());
+      } else if r.id.ends_with("_terra") {
+        assert_eq!(r.agent.harness, crate::config::Harness::Codex);
+        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(r.agent.effort.as_deref(), Some("high"));
+      } else {
+        assert!(r.id.ends_with("_cursor"));
+        assert_eq!(r.agent.harness, crate::config::Harness::Cursor);
+        assert_eq!(r.agent.model.as_deref(), Some("auto"));
+        assert!(r.agent.effort.is_none());
+      }
       let grade = r.outputs.iter().find(|o| o.name == "grade").expect("every reviewer grades");
       assert_eq!(grade.ty, ParamType::Enum);
       assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
       assert!(r.outputs.iter().any(|o| o.name == "comments"));
       assert!(r.outputs.iter().any(|o| o.name == "comment_count"));
+      if r.id.contains("testing") {
+        assert!(r.prompt.contains("PR-DESCRIPTION.md is") && r.prompt.contains("change narrative only"));
+      }
+      if r.id.contains("reviewability") {
+        assert!(r.prompt.contains("required demo artifact"));
+      }
     }
 
-    // decide closes the loop: it consumes all ten grade/comment fields, emits the round report
-    // as its `feedback` OUTPUT (never a committed file), and SCSH_DO_WHILE_REPEAT re-runs the body.
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
-    assert_eq!(decide.do_while.as_deref(), Some("declare_done_or_fix"));
-    assert!(!decide.commits, "review comments must never enter the repository's git history");
-    assert!(decide.outputs.iter().any(|o| o.name == "feedback"));
-    assert_eq!(decide.inputs.len(), 10);
-    assert_eq!(
-      do_while_body(&def.steps, decide),
-      [
-        "declare_done_or_fix",
-        "review_correctness",
-        "review_conventions",
-        "review_simplicity",
-        "review_testing",
-        "review_docs",
-        "decide"
-      ]
-    );
-    assert!(decide.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
+    let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
+    assert_eq!(decide.agent.harness, crate::config::Harness::Cursor);
+    assert!(decide.break_loop);
+    assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == ParamType::Bool));
+    assert_eq!(collect.do_while.as_deref(), Some("decide"));
+    assert!(collect.outputs.iter().any(|o| o.name == "approved" && o.ty == ParamType::Bool));
+    assert!(collect.outputs.iter().any(|o| o.name == "feedback"));
+    let body = do_while_body(&def.steps, collect);
+    assert_eq!(body.len(), 18);
+    assert_eq!(body.first(), Some(&"decide"));
+    assert_eq!(body.last(), Some(&"collect"));
+    assert!(body.contains(&"fix"));
+    assert!(reviewers.iter().all(|r| body.contains(&r.id.as_str())));
+    assert!(collect.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
   }
 
   #[test]
@@ -1385,6 +1458,28 @@ mod tests {
     let src = wf("    needs: a\n    repeat: 2\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
     assert!(err.iter().any(|e| e.contains("cannot have both 'repeat' and 'do-while'")), "{err:?}");
+  }
+
+  #[test]
+  fn workflow_break_must_be_the_first_step_and_declare_a_boolean_result() {
+    let outside = wf(
+      "    break: true\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      SCSH_LOOP_BREAK:\n        type: bool",
+    );
+    let err = validate("t", &outside, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("not the unique first step")), "{err:?}");
+
+    let missing = wf(
+      "    break: true\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n  b:\n    needs: a\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool",
+    );
+    let err = validate("t", &missing, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("must declare boolean output SCSH_LOOP_BREAK")), "{err:?}");
+
+    let wrong_type = missing.replace(
+      "    prompt: |\n      go\n  b:",
+      "    prompt: |\n      go\n    output:\n      SCSH_LOOP_BREAK:\n        type: string\n  b:",
+    );
+    let err = validate("t", &wrong_type, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("SCSH_LOOP_BREAK must have type bool")), "{err:?}");
   }
 
   #[test]
@@ -1456,7 +1551,7 @@ mod tests {
   fn builtin_smoke_pr_defs_are_one_harness_each() {
     let expected = [
       ("smoke-pr-claude", "claude", "sonnet"),
-      ("smoke-pr-codex", "codex", "gpt-5.5"),
+      ("smoke-pr-codex", "codex", "gpt-5.6-luna"),
       ("smoke-pr-grok", "grok", "grok-composer-2.5-fast"),
       ("smoke-pr-cursor", "cursor", "composer-2.5-fast"),
     ];

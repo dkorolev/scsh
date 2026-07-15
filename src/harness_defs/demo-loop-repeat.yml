@@ -4,7 +4,7 @@ steps:
   initialize:
     agent:
       harness: codex
-      model: gpt-5.5
+      model: gpt-5.6-luna
     prompt: |
       Create `number.txt` at the repository root with exactly `0` followed by one newline.
       Commit only that file with the message `demo-loop-repeat: initialize number`. Put `0` in
@@ -18,7 +18,7 @@ steps:
     repeat: 3
     agent:
       harness: codex
-      model: gpt-5.5
+      model: gpt-5.6-luna
     prompt: |
       Read the single integer in `number.txt`, increment it by exactly one, and overwrite the
       file with the new integer followed by one newline. Commit only that file with the message

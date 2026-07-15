@@ -1,0 +1,58 @@
+# Small executable proof of an early do-while break. The first loop step examines the previous
+# iteration's value and either exits immediately or lets increment → carry run. The final step
+# requests another iteration unconditionally; only the explicit break ends this loop.
+description: "Count to two, then break from the first step of a do-while body."
+steps:
+  initialize:
+    agent:
+      harness: cursor
+      model: auto
+    prompt: |
+      Initialize the demo counter to zero. Do not change files or commit.
+    output:
+      count:
+        type: int
+  check:
+    needs: initialize
+    inputs:
+      INITIAL_COUNT: initialize.count
+      PREVIOUS_COUNT: carry.count
+    agent:
+      harness: cursor
+      model: auto
+    prompt: |
+      Read PREVIOUS_COUNT when it is non-empty; otherwise read INITIAL_COUNT. Return that value
+      as `count`. Set `SCSH_LOOP_BREAK` to true when count is at least two, otherwise false.
+      Do not change files or commit.
+    output:
+      count:
+        type: int
+      SCSH_LOOP_BREAK:
+        type: bool
+    break: true
+  increment:
+    needs: check
+    inputs:
+      COUNT: check.count
+    agent:
+      harness: cursor
+      model: auto
+    prompt: |
+      Return COUNT plus one as `count`. Do not change files or commit.
+    output:
+      count:
+        type: int
+  carry:
+    needs: increment
+    inputs:
+      COUNT: increment.count
+    agent:
+      harness: cursor
+      model: auto
+    prompt: |
+      Return COUNT unchanged as `count`, and set `SCSH_DO_WHILE_REPEAT` to true. The check step,
+      not this step, is responsible for ending the loop. Do not change files or commit.
+    output:
+      count:
+        type: int
+    do-while: check

@@ -178,6 +178,7 @@ scsh run [--profile X]     Preflight, then build the image & run the selected sk
 scsh run --def <name>      Run a harness definition (built-in, ~/.harness/, or repo .harness/).
 scsh list  (alias: ls)     List every skill by profile — result, commits, env (--verbose: + internals).
 scsh init-demo-project     Scaffold AND commit a demo: .scsh.yml + example skills + tmp/ ignore.
+scsh init-beautiful-demo   Scaffold AND commit the word-counting project for demo-beautiful-loop.
 scsh installskills [url]   Install skills — bundled, or a git repo's (merges its .scsh.yml).
 scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's.
 scsh help                  Show help (includes the schema).

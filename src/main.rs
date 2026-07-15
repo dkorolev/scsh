@@ -59,6 +59,7 @@ fn run(args: &[String]) -> i32 {
       0
     }
     Mode::InitDemo => init_demo(),
+    Mode::InitBeautifulDemo => init_beautiful_demo(),
     Mode::InstallSkills => install_skills(false, &cli.sources),
     Mode::UpdateSkills => install_skills(true, &cli.sources),
     Mode::List => {
@@ -589,6 +590,7 @@ enum Mode {
   Help(HelpTopic),
   Version,
   InitDemo,
+  InitBeautifulDemo,
   InstallSkills,
   UpdateSkills,
   List,
@@ -657,6 +659,7 @@ const COMMAND_NAMES: &[&str] = &[
   "build-images",
   "check-profile",
   "init-demo-project",
+  "init-beautiful-demo",
   "installskills",
   "updateskills",
   "daemon",
@@ -678,6 +681,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "build-images" | "build-image" | "buildimages" => "build-images",
     "check-profile" | "checkprofile" => "check-profile",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
+    "init-beautiful-demo" | "init-beautiful-demo-project" => "init-beautiful-demo",
     "installskills" | "install-skills" => "installskills",
     "updateskills" | "update-skills" => "updateskills",
     "daemon" => "daemon",
@@ -850,6 +854,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         None
       }
       "init-demo-project" | "init" | "--init-demo-project" => Some(Mode::InitDemo),
+      "init-beautiful-demo" | "init-beautiful-demo-project" => Some(Mode::InitBeautifulDemo),
       // `installskills [<git-url>…]` / `updateskills [<git-url>…]`: positional source repos
       // (one or more) install skills from those repos, in order, instead of scsh's bundled one.
       "installskills" => Some(Mode::InstallSkills),
@@ -1016,7 +1021,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "--override-dot-scsh-yml" => {
         i += 1;
         let path = args.get(i).ok_or(
-          "--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-fantastic-review/.scsh.yml",
+          "--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-beautiful-review/.scsh.yml",
         )?;
         if path.trim().is_empty() {
           return Err("--override-dot-scsh-yml path must not be empty".into());
@@ -1754,6 +1759,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
   // channel `resolve_input` falls back to, so a body step can read what the deciding step
   // produced LAST round (review feedback, accumulated notes) without committing any file.
   let mut loop_prev: HashMap<String, StepState> = HashMap::new();
+  let mut ran_count = 0usize;
+  let mut skipped_count = 0usize;
   let mut failure: Option<String> = None;
   while state.len() < def.steps.len() && failure.is_none() {
     let ready: Vec<&harness_def::Step> = def
@@ -1778,6 +1785,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         if let Some(p) = step_procs.remove(&s.id) {
           p.finish_skipped(&why);
         }
+        skipped_count += 1;
         state.insert(s.id.clone(), StepState { skipped: true, outputs: HashMap::new() });
       } else {
         to_run.push(s);
@@ -1786,6 +1794,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     if to_run.is_empty() {
       continue;
     }
+    ran_count += to_run.len();
 
     // Resolve inputs and pair each runnable step with its pre-declared proc row.
     let mut invs: Vec<ResolvedInvocation> = Vec::new();
@@ -1843,7 +1852,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           let sid = session_id.as_str();
           scope.spawn(move || {
             let proc_index = p.index();
-            let mut run = run_one_skill(inv, rt, root, secs, p, base_ref, dc, sid);
+            let mut run = run_one_skill(inv, rt, root, secs, p, base_ref, base_ref, dc, sid);
             run.proc_index = proc_index;
             (id, run)
           })
@@ -1873,7 +1882,10 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         Some(Ok(outputs)) => {
           let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
           let completed = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
-          let again = if let Some(total) = s.repeat {
+          let break_requested = s.break_loop && outputs.get("SCSH_LOOP_BREAK").is_some_and(|value| value == "true");
+          let again = if break_requested {
+            false
+          } else if let Some(total) = s.repeat {
             completed < total
           } else if s.do_while.is_some() {
             let holds = match run.result_content.as_deref().map(extract_do_while_repeat) {
@@ -1896,7 +1908,36 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           } else {
             false
           };
-          if again {
+          if break_requested {
+            state.insert(s.id.clone(), StepState { skipped: false, outputs });
+            if let Some(body) = do_while_bodies.get(loop_key) {
+              for id in body.iter().filter(|id| *id != &s.id) {
+                if state.contains_key(id) {
+                  continue;
+                }
+                let skipped = def.steps.iter().find(|step| &step.id == id).expect("validated loop step");
+                let run_id = format!("{}-while-{}-{completed}", skipped.id, loop_key);
+                let label = format!("{}: {} · iteration {completed}", skipped.agent.harness.as_str(), skipped.id);
+                let p = ui.proc(label.clone(), false);
+                if let Some(c) = &daemon_client {
+                  c.proc_add(
+                    p.index(),
+                    &label,
+                    daemon::ProcKind::Skill,
+                    Some(&run_id),
+                    Some(skipped.agent.harness.as_str()),
+                    skipped.agent.model.as_deref(),
+                    Some(&skipped.id),
+                    None,
+                    None,
+                  );
+                }
+                p.finish_skipped(&format!("skipped — '{}' broke the loop", s.id));
+                skipped_count += 1;
+                state.insert(id.clone(), StepState { skipped: true, outputs: HashMap::new() });
+              }
+            }
+          } else if again {
             repeat_done.insert(loop_key.to_string(), completed);
             // The final step's outputs become the NEXT iteration's loop-carried values.
             loop_prev.insert(s.id.clone(), StepState { skipped: false, outputs });
@@ -1934,6 +1975,16 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
               base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
             }
             Ok(Some(Integration::Saved { branch, count, range })) => {
+              if let Some((_, tip)) = &range {
+                // A commit-producing workflow step may deliberately rewrite its input
+                // history. The caller branch stays untouched for safety, but this saved
+                // tip is now the workflow's authoritative revision: every dependent wave
+                // must clone it rather than independently guessing which branch to inspect.
+                base = Some(tip.clone());
+              }
+              if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+                pack_job_diff(root, &session_id, from, to);
+              }
               warn(&format!(
                 "{}: {count} commit{} didn't rebase cleanly — saved to branch {branch} (inspect, then merge/cherry-pick)",
                 s.id,
@@ -1958,16 +2009,14 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     fail(&msg);
     return 1;
   }
-  if let (Some(from), Some(to)) = (original_base.as_deref(), git_capture(root, &["rev-parse", "HEAD"])) {
-    pack_job_diff(root, &session_id, from, to.trim());
+  if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+    pack_job_diff(root, &session_id, from, to);
   }
-  let ran = state.values().filter(|s| !s.skipped).count();
-  let skipped = state.values().filter(|s| s.skipped).count();
   ok(&format!(
-    "workflow '{}' complete — {ran} step{} ran{}",
+    "workflow '{}' complete — {ran_count} step{} ran{}",
     def.name,
-    plural(ran),
-    if skipped > 0 { format!(", {skipped} skipped") } else { String::new() }
+    plural(ran_count),
+    if skipped_count > 0 { format!(", {skipped_count} skipped") } else { String::new() }
   ));
   annotate_run_casts(root, session_skill_casts(&session_id), daemon_client.as_deref(), &mut next_annotate_idx);
   0
@@ -3184,7 +3233,7 @@ fn build_and_run(
         let first_index = p.index();
         scope.spawn(move || {
           let attempt_started = std::time::Instant::now();
-          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, dc.clone(), session_ref);
+          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, None, dc.clone(), session_ref);
           first.duration_secs = attempt_started.elapsed().as_secs_f64();
           first.proc_index = first_index;
           if first.ok {
@@ -3219,7 +3268,7 @@ fn build_and_run(
           }
           let retry_started = std::time::Instant::now();
           let second_index = p2.index();
-          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, dc, session_ref);
+          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, None, dc, session_ref);
           second.duration_secs = retry_started.elapsed().as_secs_f64();
           second.attempts = 2;
           second.proc_index = second_index;
@@ -3596,7 +3645,7 @@ fn wait_for_inner_harness_result(run_dir: &Path, result_rel: &str, commits: bool
 #[allow(clippy::too_many_arguments)]
 fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
-  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
+  source_revision: Option<&str>, daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -3618,7 +3667,7 @@ fn run_one_skill(
   // Content-addressed cache: if this exact repo content + skill + env was run before,
   // restore the cached result and finish — no clone, no container, no commit. (The key
   // is computed from the caller's committed state, which is what the clone would be.)
-  let key = cache_key(root, skill, &env);
+  let key = cache_key_at(root, skill, &env, source_revision);
   if let Some(key) = &key {
     if let Some(entry) = cache_lookup(root, key) {
       if restore_cached_result(root, &skill.result, &entry.result).is_ok() {
@@ -3674,7 +3723,7 @@ fn run_one_skill(
   let git_transport = runtime::uses_git_transport(&rt.name);
   let mut git_daemon = None;
   if git_transport {
-    if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, &spinner) {
+    if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, source_revision, &spinner) {
       spinner.finish_fail(failure::reason::GIT_TRANSPORT, Some(&e));
       return SkillRun::failed(failure::reason::GIT_TRANSPORT, Some(run_dir_str), None, None);
     }
@@ -3685,7 +3734,7 @@ fn run_one_skill(
         return SkillRun::failed(failure::reason::GIT_DAEMON, Some(run_dir_str), None, None);
       }
     }
-  } else if let Err(e) = clone_into(root, &run_dir, &spinner) {
+  } else if let Err(e) = clone_into(root, &run_dir, source_revision, &spinner) {
     spinner.finish_fail(failure::reason::CLONE, Some(&e));
     return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, None);
   }
@@ -4111,7 +4160,9 @@ fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, Str
 /// already-created, empty `run_dir`, then materialize every remote branch as a
 /// local one so the container sees them all. Used when bind-mounting the run dir
 /// (Linux host → Linux container). Skills must not reach out to git remotes.
-fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result<(), String> {
+fn clone_into(
+  root: &Path, run_dir: &Path, source_revision: Option<&str>, spinner: &ui::screen::Proc,
+) -> Result<(), String> {
   spinner.note("cloning…");
   let cmd = runtime::clone_command(&root.to_string_lossy(), &run_dir.to_string_lossy());
   let (ok, last) = spinner.run(&cmd[0], &cmd[1..]).map_err(|e| format!("failed to run git clone: {e}"))?;
@@ -4122,6 +4173,9 @@ fn clone_into(root: &Path, run_dir: &Path, spinner: &ui::screen::Proc) -> Result
     });
   }
   materialize_branches(run_dir);
+  if let Some(revision) = source_revision {
+    checkout_workflow_revision(run_dir, revision)?;
+  }
   set_clone_identity(run_dir);
   spinner.note("checking clone integrity…");
   let fsck = runtime::fsck_command(&run_dir.to_string_lossy());
@@ -4163,7 +4217,9 @@ fn materialize_skill_body(run_dir: &Path, _git_transport: bool, skill: &Resolved
 
 /// macOS Apple Container push IN: host `git push` into a bare transport repo; the container
 /// clones from a short-lived `git daemon` (Linux-owned `.git`). Only `run_dir/tmp` is mounted.
-fn prepare_git_transport(root: &Path, run_dir: &Path, commits: bool, spinner: &ui::screen::Proc) -> Result<(), String> {
+fn prepare_git_transport(
+  root: &Path, run_dir: &Path, commits: bool, source_revision: Option<&str>, spinner: &ui::screen::Proc,
+) -> Result<(), String> {
   std::fs::create_dir_all(run_dir.join("tmp"))
     .map_err(|e| format!("could not create {}: {e}", run_dir.join("tmp").display()))?;
   spinner.note("pushing…");
@@ -4172,8 +4228,38 @@ fn prepare_git_transport(root: &Path, run_dir: &Path, commits: bool, spinner: &u
     spinner.emit(&format!("git push failed: {e}"));
     e
   })?;
+  if let Some(revision) = source_revision {
+    select_transport_workflow_revision(&bare, revision)?;
+  }
   if commits {
-    runtime::init_bare_repo(&run_dir.join(runtime::PULL_BARE))?;
+    let pull = run_dir.join(runtime::PULL_BARE);
+    runtime::init_bare_repo(&pull)?;
+    if source_revision.is_some() && !git_status_ok(&pull, &["symbolic-ref", "HEAD", "refs/heads/scsh-workflow"]) {
+      return Err(format!("could not select the workflow branch in {}", pull.display()));
+    }
+  }
+  Ok(())
+}
+
+/// Put a workflow run on the exact revision produced by its dependencies. A stable local
+/// branch keeps commit-capable agents on a branch even when the producing step rewrote its
+/// input history and scsh preserved that history under `scsh/incoming/*`.
+fn checkout_workflow_revision(repo: &Path, revision: &str) -> Result<(), String> {
+  if git_status_ok(repo, &["checkout", "--quiet", "-B", "scsh-workflow", revision]) {
+    Ok(())
+  } else {
+    Err(format!("could not check out workflow revision {revision}"))
+  }
+}
+
+/// Apple Container clones a bare transport instead of the host worktree. Point that bare
+/// repository's HEAD at the same authoritative workflow revision used by bind-mount runs.
+fn select_transport_workflow_revision(bare: &Path, revision: &str) -> Result<(), String> {
+  if !git_status_ok(bare, &["update-ref", "refs/heads/scsh-workflow", revision]) {
+    return Err(format!("workflow revision {revision} is not available in {}", bare.display()));
+  }
+  if !git_status_ok(bare, &["symbolic-ref", "HEAD", "refs/heads/scsh-workflow"]) {
+    return Err(format!("could not select the workflow revision in {}", bare.display()));
   }
   Ok(())
 }
@@ -4891,13 +4977,23 @@ fn cache_dir(root: &Path) -> PathBuf {
 /// each hashed, in sorted order), and the resolved env (sorted). So the **same commit +
 /// same skill + same env** map to the same key. `None` when the repo content can't be
 /// read (e.g. a repo with no commit yet) — then the run is simply not cached.
+#[cfg(test)]
 fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) -> Option<String> {
+  cache_key_at(root, skill, env, None)
+}
+
+/// Workflow variant of [`cache_key`]: hash the authoritative carried revision rather than
+/// the caller branch, which may intentionally remain untouched after a history rewrite.
+fn cache_key_at(
+  root: &Path, skill: &ResolvedInvocation, env: &[(String, String)], source_revision: Option<&str>,
+) -> Option<String> {
   // Declared artifacts are side FILES; the cache journals only the result content (plus
   // commits), so a hit could not reproduce them — artifact-bearing steps always run live.
   if !skill.artifacts.is_empty() {
     return None;
   }
-  let tree = git_capture(root, &["rev-parse", "HEAD^{tree}"])?.trim().to_string();
+  let treeish = source_revision.map(|r| format!("{r}^{{tree}}")).unwrap_or_else(|| "HEAD^{tree}".to_string());
+  let tree = git_capture(root, &["rev-parse", &treeish])?.trim().to_string();
   let mut blob = String::new();
   blob.push_str("scsh-cache v2\n");
   blob.push_str(&format!("repo-tree={tree}\n"));
@@ -5614,7 +5710,7 @@ fn init_demo() -> i32 {
   }
   staged.extend(skill_paths);
   staged.extend(links);
-  match commit_scaffold(&root, &staged) {
+  match commit_scaffold(&root, &staged, "Add scsh demo project (config + skills)") {
     Ok(()) => {
       ok("committed the scaffold");
       let remaining = uncommitted_changes(&root);
@@ -5640,12 +5736,98 @@ fn init_demo() -> i32 {
   0
 }
 
+/// Create the small, deliberately imperfect repository consumed by the built-in
+/// `demo-beautiful-loop` workflow. Unlike `init-demo-project`, this scaffold needs no
+/// `.scsh.yml`: its next command is `scsh run --def demo-beautiful-loop`.
+fn init_beautiful_demo() -> i32 {
+  if runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH");
+    hint(install_git_hint());
+    return 1;
+  }
+  let root = match git_root() {
+    Ok(r) => r,
+    Err(_) => {
+      fail("not inside a git repository");
+      hint(&format!("create one here with: {}", bold("git init .")));
+      return 1;
+    }
+  };
+  let dirty = uncommitted_changes(&root);
+  let tracked = git_capture(&root, &["ls-files"]).unwrap_or_default();
+  if !dirty.is_empty() || !tracked.trim().is_empty() {
+    fail("the beautiful demo scaffold needs a clean, empty git repository");
+    for path in tracked.lines().chain(dirty.iter().map(String::as_str)).take(10) {
+      hint(&format!("already present: {path}"));
+    }
+    hint("create a fresh directory, run `git init`, then run `scsh init-beautiful-demo`");
+    return 1;
+  }
+
+  let files = [
+    ("wordstats.py", include_str!("demo_beautiful/wordstats.py"), true),
+    ("test_wordstats.py", include_str!("demo_beautiful/test_wordstats.py"), false),
+    ("README.md", include_str!("demo_beautiful/README.md"), false),
+    ("CONTRIBUTING.md", include_str!("demo_beautiful/CONTRIBUTING.md"), false),
+  ];
+  for (rel, _, _) in files {
+    if root.join(rel).exists() {
+      fail(&format!("{rel} already exists — not overwriting"));
+      hint("use a fresh repository for the beautiful-loop demo");
+      return 1;
+    }
+  }
+
+  match ensure_tmp_gitignored(&root) {
+    Ok(true) => ok("added '/tmp' to .gitignore"),
+    Ok(false) => {}
+    Err(e) => {
+      fail(&format!("could not update .gitignore: {e}"));
+      return 1;
+    }
+  }
+
+  let mut staged = vec![".gitignore".to_string()];
+  for (rel, body, executable) in files {
+    let dest = root.join(rel);
+    if let Err(e) = std::fs::write(&dest, body) {
+      fail(&format!("could not write {}: {e}", dest.display()));
+      return 1;
+    }
+    #[cfg(unix)]
+    if executable {
+      use std::os::unix::fs::PermissionsExt;
+      if let Err(e) = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)) {
+        fail(&format!("could not make {} executable: {e}", dest.display()));
+        return 1;
+      }
+    }
+    staged.push(rel.to_string());
+  }
+  ok("scaffolded the beautiful-loop word-counting project");
+
+  match commit_scaffold(&root, &staged, "Add beautiful loop demo scaffold.") {
+    Ok(()) => {
+      ok("committed the scaffold");
+      println!("\nThe project is committed and clean. Next:");
+      println!("  {}", bold("python3 -m unittest -v"));
+      println!("  {}", bold("scsh run --def demo-beautiful-loop"));
+      0
+    }
+    Err(e) => {
+      fail(&format!("could not commit the beautiful demo scaffold: {e}"));
+      hint("configure git user.name and user.email, commit the scaffold, then run the workflow");
+      1
+    }
+  }
+}
+
 /// Commit the freshly-scaffolded project so the working tree is clean and the very
 /// next `scsh` can run (a real run clones COMMITTED state). Stages only `paths`
 /// (never `git add -A`), so unrelated work already in the repo is left untouched.
 /// `Err` carries git's message when nothing can be committed or git refuses (e.g.
 /// no `user.name`/`user.email` configured) — init then tells the user to commit.
-fn commit_scaffold(root: &Path, paths: &[String]) -> Result<(), String> {
+fn commit_scaffold(root: &Path, paths: &[String], message: &str) -> Result<(), String> {
   let add = Command::new("git").arg("-C").arg(root).arg("add").arg("--").args(paths).output();
   let add = add.map_err(|e| format!("git add: {e}"))?;
   if !add.status.success() {
@@ -5654,7 +5836,7 @@ fn commit_scaffold(root: &Path, paths: &[String]) -> Result<(), String> {
   let out = Command::new("git")
     .arg("-C")
     .arg(root)
-    .args(["commit", "-q", "-m", "Add scsh demo project (config + skills)"])
+    .args(["commit", "-q", "-m", message])
     .output()
     .map_err(|e| format!("git commit: {e}"))?;
   if out.status.success() {
@@ -6343,6 +6525,11 @@ fn print_help_command(name: &str) {
       "scsh init-demo-project",
       &[("(no flags)", "Write and commit a small demo .scsh.yml + skills into the current dir.")],
     ),
+    "init-beautiful-demo" => (
+      "scaffold the code-review loop demo",
+      "scsh init-beautiful-demo",
+      &[("(no flags)", "Write and commit the tiny word-counting project used by demo-beautiful-loop.")],
+    ),
     "installskills" => (
       "install skills into this repo",
       "scsh installskills [git-url…]",
@@ -6484,6 +6671,7 @@ fn print_help_overview() {
   help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
+  help_row("init-beautiful-demo", "Scaffold and commit the code-review loop demo.");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs).");
   help_row("updateskills [url…]", "Reinstall skills, overwriting local copies.");
   help_row("daemon", "start | stop | restart | status");
@@ -6898,6 +7086,9 @@ fn print_help_defs() {
                          while the final step's result JSON sets the boolean
                          `SCSH_DO_WHILE_REPEAT` to true. scsh has no comparison language here —
                          an agent decides. A backstop caps runaway loops at 25 iterations.
+  break: true            on the loop body's FIRST step, lets that step exit before the rest of
+                         the body runs. It must declare the boolean output `SCSH_LOOP_BREAK`;
+                         true exits this loop, false continues through the body normally.
   Loop-carried inputs:   a body step may reference the FINAL step's output with no `needs:` edge
                          — it receives the PREVIOUS iteration's value (empty on round one). This
                          is the loop's data channel: feedback flows between rounds as typed
@@ -6911,9 +7102,10 @@ fn print_help_defs() {
   );
   help_row("demo-loop-repeat", "Fixed loop: increment and commit number.txt three times.");
   help_row("demo-loop-do-while", "Agent-driven loop: increment until a compare step says stop.");
-  help_row("demo-fantastic-loop", "Review loop: fix -> five reviewer personas -> decide, repeating until every");
-  help_cont("grade is excellent or good with at least as many excellent (mean >= 4.5); the");
-  help_cont("feedback rides the loop-carried channel, so review comments never enter git history.");
+  help_row("demo-loop-break", "Early exit: check first, then skip the rest of the loop body.");
+  help_row("demo-beautiful-loop", "Review loop: initial panel -> decide -> fix -> fresh panel; decide can break");
+  help_cont("before any fix. Feedback rides the loop-carried channel, so review comments never");
+  help_cont("enter git history.");
   println!();
 }
 
@@ -7427,6 +7619,49 @@ mod tests {
   }
 
   #[test]
+  fn saved_rewrite_is_the_revision_seen_by_the_next_workflow_wave() {
+    let caller = repo("workflow-rewrite-caller");
+    std::fs::write(caller.join("feature.txt"), "first version\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "feature"]);
+    let base = head(&caller);
+
+    let rewritten = mt_dir("workflow-rewrite-run");
+    assert!(Command::new("git")
+      .args(["clone", "-q", &caller.to_string_lossy(), &rewritten.to_string_lossy()])
+      .status()
+      .unwrap()
+      .success());
+    set_clone_identity(&rewritten);
+    g(&rewritten, &["reset", "--hard", "HEAD~1"]);
+    std::fs::write(rewritten.join("feature.txt"), "authoritative rewrite\n").unwrap();
+    g(&rewritten, &["add", "-A"]);
+    g(&rewritten, &["commit", "-qm", "rewrite feature"]);
+
+    let outcome = integrate_commits(&caller, &rewritten, &base, "fix", "S").unwrap();
+    let (branch, tip) = match outcome {
+      Some(Integration::Saved { branch, range: Some((_, tip)), .. }) => (branch, tip),
+      _ => panic!("rewritten history should be preserved on an incoming branch"),
+    };
+    assert_eq!(head(&caller), base, "the caller branch remains untouched");
+    assert_eq!(git_capture(&caller, &["rev-parse", &branch]).unwrap().trim(), tip);
+
+    let next = mt_dir("workflow-next-wave");
+    assert!(Command::new("git")
+      .args(["clone", "-q", &caller.to_string_lossy(), &next.to_string_lossy()])
+      .status()
+      .unwrap()
+      .success());
+    checkout_workflow_revision(&next, &tip).unwrap();
+    assert_eq!(std::fs::read_to_string(next.join("feature.txt")).unwrap(), "authoritative rewrite\n");
+
+    let bare = mt_dir("workflow-transport").join("transport.git");
+    runtime::push_transport_refs(&caller, &bare).unwrap();
+    select_transport_workflow_revision(&bare, &tip).unwrap();
+    assert_eq!(git_capture(&bare, &["rev-parse", "HEAD"]).unwrap().trim(), tip);
+  }
+
+  #[test]
   fn integrate_is_a_noop_when_the_skill_added_no_commits() {
     let caller = repo("noop-caller");
     let base = head(&caller);
@@ -7648,6 +7883,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       commits: false,
       repeat: None,
       do_while: None,
+      break_loop: false,
     };
     let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new());
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
@@ -7662,9 +7898,9 @@ Subject: [PATCH] add: 2 + 3 = 5
   fn resolve_input_falls_back_to_the_previous_loop_iteration() {
     // The loop-carried channel: a do-while body step reads the loop end's PREVIOUS-iteration
     // output. Empty on round one, populated once the loop repeats, and current state wins once
-    // the step has a value THIS round. Exercised live by the demo-fantastic-loop builtin.
-    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-fantastic-loop").unwrap();
-    let def = harness_def::validate("demo-fantastic-loop", src, harness_def::DefSource::Builtin).unwrap();
+    // the step has a value THIS round. Exercised live by the demo-beautiful-loop builtin.
+    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-beautiful-loop").unwrap();
+    let def = harness_def::validate("demo-beautiful-loop", src, harness_def::DefSource::Builtin).unwrap();
     let feedback = harness_def::Ref::StepField { step: "decide".into(), field: "feedback".into() };
     let mut state = std::collections::HashMap::new();
     let mut loop_prev = std::collections::HashMap::new();
