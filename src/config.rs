@@ -33,16 +33,10 @@ pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 
 /// Default seconds of screen inactivity (the recorded cast gaining no NOVEL frame — pure
 /// spinner repaints do not count, see `ui::screen::ActivityWatch`) before a running skill is
-/// killed as stuck — used for every harness except Grok (see
-/// [`Harness::default_inactivity_timeout_secs`]). Override with `inactivity_timeout:` on a
-/// skill or an `invocations:` route in `.scsh.yml`.
-pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 120;
-
-/// Grok's Build TUI can think for long stretches without producing anything new on screen; a
-/// 120s inactivity kill burns the one transient retry on every code-review fleet run. (Its
-/// wedged states — an endlessly looping spinner — are still caught at this limit, because
-/// repeated frames no longer count as activity.)
-pub const GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 600;
+/// killed as stuck. Agents can think silently for several minutes, so the harness watchdog and
+/// daemon job-idle watchdog deliberately share this 20-minute allowance. Override it with
+/// `inactivity_timeout:` on a skill or an `invocations:` route in `.scsh.yml`.
+pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 20 * 60;
 
 /// Resolve the inactivity watchdog limit: YAML override (route or skill) wins, else the
 /// harness default ([`Harness::default_inactivity_timeout_secs`]).
@@ -304,13 +298,8 @@ impl Harness {
   }
 
   /// Seconds of cast inactivity before a run is killed when YAML omits `inactivity_timeout:`.
-  /// Grok's Build TUI thinks silently for long stretches (no redraw → cast does not grow),
-  /// so it gets a longer budget than the global default.
   pub fn default_inactivity_timeout_secs(self) -> u64 {
-    match self {
-      Harness::Grok => GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS,
-      _ => DEFAULT_INACTIVITY_TIMEOUT_SECS,
-    }
+    DEFAULT_INACTIVITY_TIMEOUT_SECS
   }
 
   /// Whether this harness has a reasoning-effort knob (`effort:` in `.scsh.yml`):
@@ -1983,11 +1972,11 @@ mod tests {
 
   #[test]
   fn inactivity_timeout_harness_defaults_and_route_overrides() {
-    assert_eq!(Harness::Grok.default_inactivity_timeout_secs(), GROK_DEFAULT_INACTIVITY_TIMEOUT_SECS);
+    assert_eq!(Harness::Grok.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
     assert_eq!(Harness::Codex.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
     assert_eq!(Harness::Claude.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
-    assert_eq!(effective_inactivity_timeout(Harness::Grok, None), 600);
-    assert_eq!(effective_inactivity_timeout(Harness::Codex, None), 120);
+    assert_eq!(effective_inactivity_timeout(Harness::Grok, None), 1200);
+    assert_eq!(effective_inactivity_timeout(Harness::Codex, None), 1200);
     assert_eq!(effective_inactivity_timeout(Harness::Grok, Some(900)), 900);
 
     // Direct run with no YAML → ResolvedInvocation keeps None; effective uses harness default.
@@ -1999,7 +1988,7 @@ mod tests {
     );
     let inv = expand_invocations(&validate(&grok).unwrap());
     assert_eq!(inv[0].inactivity_timeout, None);
-    assert_eq!(effective_inactivity_timeout(inv[0].harness, inv[0].inactivity_timeout), 600);
+    assert_eq!(effective_inactivity_timeout(inv[0].harness, inv[0].inactivity_timeout), 1200);
 
     // Skill-level override applies to every route.
     let yaml = r#"skills:

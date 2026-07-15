@@ -17,10 +17,9 @@ pub const EPHEMERAL_COUNTDOWN_AFTER_SECS: u64 = 5;
 /// silence is a startup failure rather than evidence that a long-running proc is dead.
 pub const SESSION_START_TIMEOUT_SECS: u64 = 30;
 
-/// Once any proc has started, only sustained job-wide inactivity is a liveness failure.
-/// Individual harness watchdogs may be stricter; this daemon-level bound deliberately
-/// tolerates agents that think quietly for a long time.
-pub const SESSION_IDLE_TIMEOUT_SECS: u64 = 20 * 60;
+/// Once any proc has started, only sustained job-wide inactivity is a liveness failure. Use the
+/// same allowance as the harness watchdog so the executor and browser share one running rule.
+pub const SESSION_IDLE_TIMEOUT_SECS: u64 = crate::config::DEFAULT_INACTIVITY_TIMEOUT_SECS;
 
 /// Maximum sessions retained in daemon state.
 pub const MAX_STORED_SESSIONS: usize = 200;

@@ -1664,7 +1664,15 @@ fn annotation_control_links_to_the_job_and_persists_its_state() {
   assert!(js.contains("annotation-link--' + status"), "running/ok/fail each retain a status class");
   assert!(js.contains("annotation-dots"), "running annotation gets animated dots");
   assert!(js.contains("SESSION_START_TIMEOUT_SECS = 30"), "startup has one short deadline");
-  assert!(js.contains("SESSION_IDLE_TIMEOUT_SECS = 20 * 60"), "started work gets a 20-minute idle allowance");
+  assert!(
+    js.contains("SESSION_IDLE_TIMEOUT_SECS = 20 * 60"),
+    "started work gets a 20-minute idle allowance"
+  );
+  assert_eq!(
+    crate::daemon::model::SESSION_IDLE_TIMEOUT_SECS,
+    crate::config::DEFAULT_INACTIVITY_TIMEOUT_SECS,
+    "browser and harnesses must agree on running-idle timeout"
+  );
   assert!(js.contains("session.lifecycle && session.lifecycle !== 'running'"), "terminal lifecycle comes from the daemon");
   assert!(
     js.contains("sessionLifecycle(candidate, Date.now() / 1000).class === 'running'"),

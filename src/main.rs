@@ -7044,9 +7044,9 @@ fn print_help_config() {
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
-      inactivity_timeout: 120  # optional; seconds the recorded screen may show nothing new
-                          #       before the run is killed as stuck. Default 120, or 600
-                          #       for grok (silent Build TUI thinking). Per-route override
+      inactivity_timeout: 1200 # optional; seconds the recorded screen may show nothing new
+                          #       before the run is killed as stuck. Default 1200 (20 minutes).
+                          #       Per-route override
                           #       under invocations: is allowed too.
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
