@@ -787,6 +787,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .line { white-space: pre; }
   .detail { overflow-wrap: anywhere; white-space: pre-wrap; max-width: 100%; color: var(--text-muted); }
   .container { overflow-x: auto; white-space: pre; max-width: 100%; color: var(--text-muted); }
+  .container-runtime-label { color: var(--text); font-weight: 700; }
+  .container-runtime-name { color: var(--cyan); font-weight: 700; }
   .at { opacity: 0.5; margin-right: 0.35rem; }
 
   /* ── cast player embed ── */

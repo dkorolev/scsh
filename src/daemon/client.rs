@@ -300,13 +300,14 @@ impl Client {
     }
   }
 
-  pub fn container_event(&self, proc_index: usize, action: &str, name: &str) {
+  pub fn container_event(&self, proc_index: usize, action: &str, name: &str, runtime: &str) {
     let body = format!(
-      "{{ \"session\": {}, \"proc\": {}, \"action\": {}, \"name\": {} }}",
+      "{{ \"session\": {}, \"proc\": {}, \"action\": {}, \"name\": {}, \"runtime\": {} }}",
       quote(&self.inner.session_id),
       proc_index,
       quote(action),
-      quote(name)
+      quote(name),
+      quote(runtime),
     );
     if action == "stop" {
       if !self.post_sync_after_flush("/api/v1/container", &body) {

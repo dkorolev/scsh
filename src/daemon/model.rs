@@ -172,6 +172,9 @@ pub struct ProcRecord {
   pub elapsed: Option<f64>,
   pub lines: Vec<OutputLine>,
   pub container_name: Option<String>,
+  /// Runtime that owns `container_name`: `container` (Apple Containers), `docker`, or
+  /// `podman`. Absent on cached work and sessions persisted by older scsh builds.
+  pub container_runtime: Option<String>,
   /// Host path of this proc's asciinema recording: the live run-dir file while the
   /// container runs (grows in real time; a prefix is a valid partial cast), then the
   /// durable copy under the daemon dir after the skill finishes.
@@ -458,6 +461,7 @@ mod tests {
       elapsed: None,
       lines: Vec::new(),
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -493,6 +497,7 @@ mod tests {
         elapsed: Some(5.0),
         lines: Vec::new(),
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,
@@ -590,6 +595,7 @@ mod tests {
         elapsed: None,
         lines: Vec::new(),
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,
@@ -633,6 +639,7 @@ mod tests {
           elapsed: None,
           lines: Vec::new(),
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: None,
@@ -655,6 +662,7 @@ mod tests {
           elapsed: None,
           lines: Vec::new(),
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: None,

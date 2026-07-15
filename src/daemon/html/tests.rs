@@ -32,6 +32,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
         diff_path: None,
         skill_source: None,
@@ -64,6 +65,18 @@ fn session_procs_html(html: &str) -> &str {
 #[test]
 fn esc_handles_basic_html() {
   assert_eq!(esc("<a>"), "&lt;a&gt;");
+}
+
+#[test]
+fn running_container_names_its_runtime_without_guessing() {
+  let mut store = store_with_cast_proc(ProcStatus::Running);
+  let proc = &mut store.sessions.get_mut("castab").unwrap().procs[0];
+  proc.container_name = Some("scsh-abcdef-run-add".into());
+  proc.container_runtime = Some("container".into());
+  let html = session_page(&store, "castab").unwrap();
+  assert!(html.contains(r#"class="container-runtime-name">Apple Containers</span> · container: scsh-abcdef-run-add"#));
+  assert!(html.contains("function containerRuntimeName"), "live updates must preserve the explicit runtime label");
+  assert!(html.contains("Not recorded (legacy run)"), "old stored jobs must stay honest instead of guessing");
 }
 
 #[test]
@@ -704,6 +717,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,
@@ -758,6 +772,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           detail: None,
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: Some("/tmp/scsh-home/sessions/difjob/diffs/add-p0.html".into()),
           skill_source: None,
@@ -780,6 +795,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           detail: None,
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: None,
@@ -939,6 +955,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       detail: Some("ok".into()),
       fail_reason: None,
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: Some("/tmp/diff.html".into()),
       skill_source: None,
@@ -997,6 +1014,7 @@ fn offline_export_keeps_text_log_lines() {
       detail: None,
       fail_reason: None,
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -1064,6 +1082,7 @@ fn offline_export_includes_workflow_graph() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: Some("add".into()),
@@ -1086,6 +1105,7 @@ fn offline_export_includes_workflow_graph() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: Some("summarize".into()),
@@ -1198,6 +1218,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           detail: Some("2 + 3 = 5".into()),
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
@@ -1220,6 +1241,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           detail: Some("2 + 3 = 5".into()),
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
@@ -1303,6 +1325,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           detail: None,
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
@@ -1325,6 +1348,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           detail: Some("ok".into()),
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
@@ -1347,6 +1371,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           detail: None,
           fail_reason: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source: Some("add".into()),
@@ -1475,6 +1500,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: Some("/tmp/x.cast".into()),
         diff_path: None,
         skill_source: None,
@@ -1559,6 +1585,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,
@@ -1616,6 +1643,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,
@@ -2117,6 +2145,7 @@ fn workflow_graph_renders_builtin_shapes() {
       detail: None,
       fail_reason: None,
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: Some(id.into()),
@@ -2706,6 +2735,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         detail: None,
         fail_reason: None,
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: Some("add".into()),
