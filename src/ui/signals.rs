@@ -128,11 +128,37 @@ pub fn terminate_children() {
   }
 }
 
-/// Stop one named container: SIGTERM via the runtime CLI, wait one second, then SIGKILL.
+/// Remove argv for a named container. Apple Container uses `delete`; Docker and Podman use
+/// `rm -f`. Kept pure so the cleanup policy is unit-testable without a running engine.
+fn remove_container_args(runtime: &str, name: &str) -> Vec<String> {
+  if runtime == "container" {
+    vec!["delete".into(), name.into()]
+  } else {
+    vec!["rm".into(), "-f".into(), name.into()]
+  }
+}
+
+/// Explicitly remove one named container and its writable layer. This is deliberately issued
+/// even though harness runs use `--rm`: Apple Container can retain a stopped container, and an
+/// interrupted runtime client can leave any engine's container outside `--rm`'s normal path.
+fn remove_container(runtime: &str, name: &str) {
+  let _ = Command::new(runtime)
+    .args(remove_container_args(runtime, name))
+    .stdout(std::process::Stdio::null())
+    .stderr(std::process::Stdio::null())
+    .status();
+}
+
+/// Stop and explicitly remove one named container: SIGTERM, one-second grace, SIGKILL, then
+/// `delete`/`rm -f`. A missing container returns immediately, keeping normal `--rm` runs cheap.
 pub fn stop_container(runtime: &str, name: &str) {
+  if !crate::runtime::container_named_exists(runtime, name) {
+    return;
+  }
   signal_container(runtime, name, "TERM");
   thread::sleep(Duration::from_secs(1));
   signal_container(runtime, name, "KILL");
+  remove_container(runtime, name);
 }
 
 fn signal_container(runtime: &str, name: &str, sig: &str) {
@@ -155,6 +181,7 @@ pub fn terminate_all() {
   }
   for (runtime, name) in &containers {
     signal_container(runtime, name, "KILL");
+    remove_container(runtime, name);
   }
 }
 
@@ -209,5 +236,12 @@ mod tests {
       assert!(CONTAINERS.lock().unwrap().iter().any(|(_, n)| n == "scsh-guard-test"));
     }
     assert!(!CONTAINERS.lock().unwrap().iter().any(|(_, n)| n == "scsh-guard-test"));
+  }
+
+  #[test]
+  fn removal_is_explicit_for_every_runtime() {
+    assert_eq!(remove_container_args("container", "scsh-run"), ["delete", "scsh-run"]);
+    assert_eq!(remove_container_args("docker", "scsh-run"), ["rm", "-f", "scsh-run"]);
+    assert_eq!(remove_container_args("podman", "scsh-run"), ["rm", "-f", "scsh-run"]);
   }
 }
