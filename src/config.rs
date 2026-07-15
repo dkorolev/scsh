@@ -1594,7 +1594,7 @@ mod tests {
   }
 
   #[test]
-  fn shipped_skills_never_generate_pr_checklists() {
+  fn shipped_skills_enforce_the_pr_description_invariant() {
     let forbidden = ["test", "plan"].join(" ");
     for (path, body) in bundled_skills() {
       assert!(
@@ -1607,6 +1607,26 @@ mod tests {
         !body.to_ascii_lowercase().contains(&forbidden),
         "demo scaffold {path} recommends a forbidden PR section"
       );
+    }
+    for name in [
+      "code-beautiful-review",
+      "the-beautiful-loop",
+      "conventions-reviewer",
+      "justification-reviewer",
+      "reviewability-reviewer",
+      "sanity-reviewer",
+      "testing-reviewer",
+    ] {
+      let path = format!(".skills/{name}/SKILL.md");
+      let body = bundled_skills()
+        .into_iter()
+        .find_map(|(candidate, body)| (candidate == path).then_some(body))
+        .expect("policy-bearing skill is bundled");
+      assert!(
+        body.contains("additional `PR-DESCRIPTION.md` section") || body.contains("additional PR-description section"),
+        "bundled skill {path} must explicitly reject extra PR-description sections"
+      );
+      assert!(body.contains("Verification evidence belongs") || body.contains("verification evidence belongs"));
     }
   }
 

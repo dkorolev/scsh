@@ -1489,71 +1489,98 @@ fn resolve_input(
   resolve_ref(reference, def, state).or_else(|| resolve_ref(reference, def, loop_prev)).unwrap_or_default()
 }
 
-/// Parse a step's result JSON into `field -> scalar-as-string` (non-scalar values are dropped;
-/// the schema check reports any that are then missing).
-fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String, String>, String> {
+/// Parse a step's result JSON into its exact top-level fields. Workflow output is a strict
+/// machine boundary: duplicate keys are rejected rather than silently choosing one value.
+fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String, json::Value>, String> {
   let value = json::parse(content).map_err(|e| format!("result is not valid JSON: {e}"))?;
   let json::Value::Object(obj) = value else {
     return Err("result is not a JSON object".into());
   };
   let mut out = std::collections::HashMap::new();
   for (k, v) in obj {
-    let scalar = match v {
-      json::Value::String(s) => Some(s),
-      json::Value::Bool(b) => Some(b.to_string()),
-      json::Value::Number(n) => Some(if n.fract() == 0.0 { format!("{}", n as i64) } else { n.to_string() }),
-      _ => None,
-    };
-    if let Some(s) = scalar {
-      out.insert(k, s);
+    if out.insert(k.clone(), v).is_some() {
+      return Err(format!("result contains duplicate field '{k}'"));
     }
   }
   Ok(out)
 }
 
-/// Extract and type-check a step's declared output fields from its result JSON.
+/// The workflow-only result contract handed to a skill before it can publish a terminal state.
+#[derive(Clone, Copy)]
+struct WorkflowResultContract<'a> {
+  /// Fields declared by the workflow step.
+  outputs: &'a [harness_def::OutputField],
+  /// Whether this do-while endpoint also owes the generated repeat-decision field.
+  require_do_while_repeat: bool,
+}
+
+/// Extract and type-check a workflow step's complete result. Returned strings are the exact
+/// values forwarded through environment variables; string arrays remain compact JSON arrays.
 fn extract_step_outputs(
-  content: &str, outputs: &[harness_def::OutputField],
+  content: &str, contract: WorkflowResultContract<'_>,
 ) -> Result<std::collections::HashMap<String, String>, String> {
   let obj = parse_result_object(content)?;
   let mut out = std::collections::HashMap::new();
-  for f in outputs {
+  let expected = contract.outputs.len() + usize::from(contract.require_do_while_repeat);
+  if obj.len() != expected {
+    let mut extras: Vec<&str> = obj
+      .keys()
+      .map(String::as_str)
+      .filter(|name| {
+        !contract.outputs.iter().any(|field| field.name == *name)
+          && !(contract.require_do_while_repeat && *name == "SCSH_DO_WHILE_REPEAT")
+      })
+      .collect();
+    extras.sort_unstable();
+    if !extras.is_empty() {
+      return Err(format!("result contains undeclared field{}: {}", plural(extras.len()), extras.join(", ")));
+    }
+  }
+  for f in contract.outputs {
     let Some(value) = obj.get(&f.name) else {
       return Err(format!("result is missing the '{}' field", f.name));
     };
-    match f.ty {
-      harness_def::ParamType::Int => {
-        if value.trim().parse::<i64>().is_err() {
-          return Err(format!("output '{}' must be an integer (got '{value}')", f.name));
-        }
+    let rendered = match (f.ty, value) {
+      (harness_def::OutputType::String, json::Value::String(value)) => value.clone(),
+      (harness_def::OutputType::Int, json::Value::Number(value))
+        if value.is_finite() && value.fract() == 0.0 && value.abs() < 9.0e15 =>
+      {
+        format!("{}", *value as i64)
       }
-      harness_def::ParamType::Bool => {
-        if !matches!(value.trim(), "true" | "false") {
-          return Err(format!("output '{}' must be true or false (got '{value}')", f.name));
-        }
+      (harness_def::OutputType::Bool, json::Value::Bool(value)) => value.to_string(),
+      (harness_def::OutputType::Enum, json::Value::String(value)) if f.choices.iter().any(|choice| choice == value) => {
+        value.clone()
       }
-      harness_def::ParamType::Enum => {
-        if !f.choices.iter().any(|c| c == value.trim()) {
-          return Err(format!("output '{}' must be one of: {} (got '{value}')", f.name, f.choices.join(", ")));
-        }
+      (harness_def::OutputType::StringList, json::Value::Array(values))
+        if values.iter().all(|value| matches!(value, json::Value::String(_))) =>
+      {
+        json::write(value)
       }
-      harness_def::ParamType::String => {}
+      (harness_def::OutputType::Enum, json::Value::String(value)) => {
+        return Err(format!("output '{}' must be one of: {} (got '{value}')", f.name, f.choices.join(", ")));
+      }
+      (harness_def::OutputType::String, _) => return Err(format!("output '{}' must be a string", f.name)),
+      (harness_def::OutputType::Int, _) => return Err(format!("output '{}' must be an integer", f.name)),
+      (harness_def::OutputType::Bool, _) => return Err(format!("output '{}' must be true or false", f.name)),
+      (harness_def::OutputType::Enum, _) => {
+        return Err(format!("output '{}' must be one of: {}", f.name, f.choices.join(", ")));
+      }
+      (harness_def::OutputType::StringList, _) => {
+        return Err(format!("output '{}' must be an array of strings", f.name));
+      }
+    };
+    out.insert(f.name.clone(), rendered);
+  }
+  if contract.require_do_while_repeat {
+    match obj.get("SCSH_DO_WHILE_REPEAT") {
+      Some(json::Value::Bool(value)) => {
+        out.insert("SCSH_DO_WHILE_REPEAT".into(), value.to_string());
+      }
+      Some(_) => return Err("'SCSH_DO_WHILE_REPEAT' must be a boolean".into()),
+      None => return Err("result is missing the 'SCSH_DO_WHILE_REPEAT' field".into()),
     }
-    out.insert(f.name.clone(), value.clone());
   }
   Ok(out)
-}
-
-fn extract_do_while_repeat(content: &str) -> Result<bool, String> {
-  let value = json::parse(content).map_err(|e| format!("result is not valid JSON: {e}"))?;
-  let json::Value::Object(obj) = value else {
-    return Err("result is not a JSON object".into());
-  };
-  match obj.iter().find(|(key, _)| key == "SCSH_DO_WHILE_REPEAT").map(|(_, value)| value) {
-    Some(json::Value::Bool(value)) => Ok(*value),
-    Some(_) => Err("'SCSH_DO_WHILE_REPEAT' must be a boolean".into()),
-    None => Err("result is missing the 'SCSH_DO_WHILE_REPEAT' field".into()),
-  }
 }
 
 /// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body
@@ -1581,6 +1608,19 @@ fn step_invocation(
     delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
+}
+
+/// Clone a workflow invocation for its single result-schema repair attempt. The task runs from
+/// the same authoritative source revision; only the prompt gains the concrete validation error
+/// and an explicit instruction to satisfy the already-rendered machine contract.
+fn schema_repair_invocation(invocation: &ResolvedInvocation, error: &str) -> ResolvedInvocation {
+  let mut repaired = invocation.clone();
+  if let config::SkillDelivery::DirectPrompt(prompt) = &mut repaired.delivery {
+    prompt.push_str(&format!(
+      "\n\n## Result correction retry\n\nThe previous attempt completed its work but wrote an invalid result: {error}. Run the task once more from this clean source revision and write a complete result matching the Output contract exactly. This is the only correction retry.\n"
+    ));
+  }
+  repaired
 }
 
 /// Build (or reuse) the base + per-harness images a workflow's steps need, reporting each as a
@@ -1845,14 +1885,46 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       let handles: Vec<_> = invs
         .iter()
         .zip(procs)
-        .map(|(inv, p)| {
+        .zip(to_run.iter())
+        .map(|((inv, p), step)| {
           let dc = daemon_client.clone();
           let base_ref = base.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
+          let contract = WorkflowResultContract {
+            outputs: &step.outputs,
+            require_do_while_repeat: step.do_while.is_some()
+              && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+          };
           scope.spawn(move || {
             let proc_index = p.index();
-            let mut run = run_one_skill(inv, rt, root, secs, p, base_ref, base_ref, dc, sid);
+            let mut run =
+              run_one_skill(inv, rt, root, secs, p.clone(), base_ref, base_ref, Some(contract), dc.clone(), sid);
+            if run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID) && failure::retry_enabled() {
+              let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
+              failure::log_retry(
+                sid,
+                &inv.name,
+                inv.harness.as_str(),
+                inv.model.as_deref(),
+                failure::reason::RESULT_INVALID,
+              );
+              let repaired = schema_repair_invocation(inv, error);
+              if !keep_run_dirs() {
+                if let Some(clone) = &run.clone_dir {
+                  let _ = std::fs::remove_dir_all(clone);
+                }
+              }
+              run = run_one_skill(&repaired, rt, root, secs, p.clone(), base_ref, base_ref, Some(contract), dc, sid);
+            }
+            if run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID) {
+              let why = format!(
+                "invalid workflow result: {}",
+                run.fail_detail.as_deref().unwrap_or("result did not match the declared schema")
+              );
+              let detail = skill_fail_detail(&why, inv.harness, run.run_dir.as_deref(), run.log.as_deref());
+              p.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
+            }
             run.proc_index = proc_index;
             (id, run)
           })
@@ -1878,8 +1950,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         failure = Some(format!("step '{}' failed ({})", s.id, run.fail_reason.as_deref().unwrap_or("unknown")));
         break;
       }
-      match run.result_content.as_deref().map(|c| extract_step_outputs(c, &s.outputs)) {
-        Some(Ok(outputs)) => {
+      match run.workflow_outputs.clone() {
+        Some(outputs) => {
           let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
           let completed = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
           let break_requested = s.break_loop && outputs.get("SCSH_LOOP_BREAK").is_some_and(|value| value == "true");
@@ -1888,14 +1960,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           } else if let Some(total) = s.repeat {
             completed < total
           } else if s.do_while.is_some() {
-            let holds = match run.result_content.as_deref().map(extract_do_while_repeat) {
-              Some(Ok(value)) => value,
-              Some(Err(e)) => {
-                failure = Some(format!("step '{}' produced an invalid result: {e}", s.id));
-                break;
-              }
-              None => false,
-            };
+            let holds = outputs.get("SCSH_DO_WHILE_REPEAT").is_some_and(|value| value == "true");
             if holds && completed >= harness_def::DO_WHILE_MAX_ITERATIONS {
               failure = Some(format!(
                 "step '{}' hit the do-while backstop ({} iterations) with its condition still true",
@@ -1950,12 +2015,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
             state.insert(s.id.clone(), StepState { skipped: false, outputs });
           }
         }
-        Some(Err(e)) => {
-          failure = Some(format!("step '{}' produced an invalid result: {e}", s.id));
-          break;
-        }
         None => {
-          failure = Some(format!("step '{}' produced no result", s.id));
+          failure = Some(format!("step '{}' completed without validated workflow outputs", s.id));
           break;
         }
       }
@@ -3238,7 +3299,7 @@ fn build_and_run(
         let first_index = p.index();
         scope.spawn(move || {
           let attempt_started = std::time::Instant::now();
-          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, None, dc.clone(), session_ref);
+          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, None, None, dc.clone(), session_ref);
           first.duration_secs = attempt_started.elapsed().as_secs_f64();
           first.proc_index = first_index;
           if first.ok {
@@ -3273,7 +3334,7 @@ fn build_and_run(
           }
           let retry_started = std::time::Instant::now();
           let second_index = p2.index();
-          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, None, dc, session_ref);
+          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, None, None, dc, session_ref);
           second.duration_secs = retry_started.elapsed().as_secs_f64();
           second.attempts = 2;
           second.proc_index = second_index;
@@ -3521,6 +3582,9 @@ struct SkillRun {
   proc_index: usize,
   /// Stable reason code when `ok == false`.
   fail_reason: Option<String>,
+  /// Human diagnostic associated with `fail_reason`, retained when finalization is deferred
+  /// for one workflow result-schema repair attempt.
+  fail_detail: Option<String>,
   /// Served from the content-addressed cache (no clone, no container).
   cached: bool,
   /// Wall-clock seconds of the (final) attempt — set by the orchestrator, for stats.
@@ -3543,6 +3607,9 @@ struct SkillRun {
   /// workflow orchestrator can feed one step's output into the next. `None` when no result
   /// was produced (a failure) or it could not be read.
   result_content: Option<String>,
+  /// Typed workflow fields validated before this run's proc became terminal. `None` for flat
+  /// skills, which have no workflow result contract.
+  workflow_outputs: Option<std::collections::HashMap<String, String>>,
   /// The harness completed successfully, but Apple Container lost the outer shell response
   /// during teardown. This remains an `ok` outcome while rendering orange in the UI.
   graceful_shutdown: bool,
@@ -3554,6 +3621,7 @@ impl SkillRun {
       ok: false,
       proc_index: 0,
       fail_reason: None,
+      fail_detail: None,
       cached: false,
       duration_secs: 0.0,
       attempts: 1,
@@ -3562,25 +3630,63 @@ impl SkillRun {
       clone_dir: None,
       cached_commits: None,
       result_content: None,
+      workflow_outputs: None,
       graceful_shutdown: false,
     }
   }
-  fn ok(log: String, clone_dir: Option<PathBuf>, result_content: Option<String>) -> SkillRun {
-    SkillRun { ok: true, log: Some(log), clone_dir, result_content, ..SkillRun::base() }
+  fn ok(
+    log: String, clone_dir: Option<PathBuf>, result_content: Option<String>,
+    workflow_outputs: Option<std::collections::HashMap<String, String>>,
+  ) -> SkillRun {
+    SkillRun { ok: true, log: Some(log), clone_dir, result_content, workflow_outputs, ..SkillRun::base() }
   }
-  fn graceful(log: String, clone_dir: Option<PathBuf>, result_content: Option<String>) -> SkillRun {
-    SkillRun { ok: true, graceful_shutdown: true, log: Some(log), clone_dir, result_content, ..SkillRun::base() }
+  fn graceful(
+    log: String, clone_dir: Option<PathBuf>, result_content: Option<String>,
+    workflow_outputs: Option<std::collections::HashMap<String, String>>,
+  ) -> SkillRun {
+    SkillRun {
+      ok: true,
+      graceful_shutdown: true,
+      log: Some(log),
+      clone_dir,
+      result_content,
+      workflow_outputs,
+      ..SkillRun::base()
+    }
   }
   fn failed(reason: &str, run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
     SkillRun { fail_reason: Some(reason.into()), run_dir, log, clone_dir, ..SkillRun::base() }
+  }
+  fn invalid_result(
+    detail: String, run_dir: String, log: String, clone_dir: Option<PathBuf>, result_content: String,
+  ) -> SkillRun {
+    SkillRun {
+      fail_reason: Some(failure::reason::RESULT_INVALID.into()),
+      fail_detail: Some(detail),
+      run_dir: Some(run_dir),
+      log: Some(log),
+      clone_dir,
+      result_content: Some(result_content),
+      ..SkillRun::base()
+    }
   }
   /// A cache hit: the result was restored from the cache without running the skill (no
   /// clone, no container). `cached_commits` carries any journaled commits to replay, so a
   /// hit for a commit-enabled skill still reproduces the commit. `result_content` is the
   /// restored JSON — workflows need it to bind downstream `inputs:` / `when:` from this
   /// step's outputs (a hit that only wrote the file to disk left the DAG with nothing to read).
-  fn cached(cached_commits: Option<String>, result_content: String) -> SkillRun {
-    SkillRun { ok: true, cached: true, cached_commits, result_content: Some(result_content), ..SkillRun::base() }
+  fn cached(
+    cached_commits: Option<String>, result_content: String,
+    workflow_outputs: Option<std::collections::HashMap<String, String>>,
+  ) -> SkillRun {
+    SkillRun {
+      ok: true,
+      cached: true,
+      cached_commits,
+      result_content: Some(result_content),
+      workflow_outputs,
+      ..SkillRun::base()
+    }
   }
 }
 
@@ -3650,7 +3756,8 @@ fn wait_for_inner_harness_result(run_dir: &Path, result_rel: &str, commits: bool
 #[allow(clippy::too_many_arguments)]
 fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
-  source_revision: Option<&str>, daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
+  source_revision: Option<&str>, result_contract: Option<WorkflowResultContract<'_>>,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -3675,7 +3782,9 @@ fn run_one_skill(
   let key = cache_key_at(root, skill, &env, source_revision);
   if let Some(key) = &key {
     if let Some(entry) = cache_lookup(root, key) {
-      if restore_cached_result(root, &skill.result, &entry.result).is_ok() {
+      let workflow_outputs = result_contract.and_then(|contract| extract_step_outputs(&entry.result, contract).ok());
+      let valid = result_contract.is_none() || workflow_outputs.is_some();
+      if valid && restore_cached_result(root, &skill.result, &entry.result).is_ok() {
         let when = entry.cached_at.map(|t| format!(" · {}", format_cached_at(t))).unwrap_or_default();
         let line = match json::message(&entry.result) {
           Some(m) => format!("{}  (cached{when})", first_line(&m)),
@@ -3708,7 +3817,7 @@ fn run_one_skill(
         // for a commit-enabled skill reproduces the commit, not just the result file.
         // Also carry the result JSON so a workflow can feed this step's outputs into later
         // steps (without it, run_workflow aborts with "produced no result" after a cache hit).
-        return SkillRun::cached(entry.commits, entry.result);
+        return SkillRun::cached(entry.commits, entry.result, workflow_outputs);
       }
     }
   }
@@ -3971,8 +4080,33 @@ fn run_one_skill(
       // (same repo content + skill + env) is a hit. Then show the skill's *message*,
       // not just the file (its `result`/`message`/sole field — see json::message),
       // falling back to the result path; a multi-line message shows its first line.
-      let content = std::fs::read_to_string(&dest).ok();
-      if let (Some(key), Some(c)) = (&key, &content) {
+      let content = match std::fs::read_to_string(&dest) {
+        Ok(content) => content,
+        Err(error) => {
+          schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+          let why = format!("could not read collected result '{}': {error}", skill.result);
+          let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+          spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+          return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir);
+        }
+      };
+      let workflow_outputs = match result_contract.map(|contract| extract_step_outputs(&content, contract)) {
+        Some(Err(error)) => {
+          if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
+            if let Some(c) = &daemon_client {
+              c.proc_result(spinner.index(), &path);
+            }
+          }
+          // Do not publish a terminal transition yet. The workflow owns one bounded correction
+          // attempt and keeps this same logical proc running across it; only the corrected result
+          // or the final validation error becomes observable as terminal state.
+          spinner.note("result schema invalid; preparing one correction retry…");
+          return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content);
+        }
+        Some(Ok(outputs)) => Some(outputs),
+        None => None,
+      };
+      if let Some(key) = &key {
         // Journal a commit-enabled skill's new commits (base..clone-HEAD) as a patch
         // alongside the result, so a future cache hit can replay them.
         let commits =
@@ -3980,14 +4114,21 @@ fn run_one_skill(
         cache_store(
           root,
           key,
-          c,
+          &content,
           commits.as_deref(),
           Some(run_started.elapsed().as_secs_f64()),
           durable_cast.as_deref().map(Path::new),
         );
       }
-      let message = content.as_deref().and_then(json::message);
+      let message = json::message(&content);
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
+      // Register the durable result before publishing the terminal proc transition. A browser
+      // that observes green must already be able to read the exact result that earned it.
+      if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
+        if let Some(c) = &daemon_client {
+          c.proc_result(spinner.index(), &path);
+        }
+      }
       if graceful_shutdown {
         let detail = format!(
           "{headline}\n\nGraceful shutdown: accepted the valid result and inner exit 0 after Apple Container lost its shell response."
@@ -3996,16 +4137,11 @@ fn run_one_skill(
       } else {
         spinner.finish_ok(Some(headline));
       }
-      if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
-        if let Some(c) = &daemon_client {
-          c.proc_result(spinner.index(), &path);
-        }
-      }
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
       if graceful_shutdown {
-        SkillRun::graceful(log, clone_dir, content)
+        SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs)
       } else {
-        SkillRun::ok(log, clone_dir, content)
+        SkillRun::ok(log, clone_dir, Some(content), workflow_outputs)
       }
     }
     Err(e) => {
@@ -7266,10 +7402,59 @@ mod tests {
   }
 
   #[test]
-  fn do_while_repeat_marker_is_a_required_json_boolean() {
-    assert_eq!(extract_do_while_repeat(r#"{"SCSH_DO_WHILE_REPEAT":true}"#), Ok(true));
-    assert!(extract_do_while_repeat(r#"{"SCSH_DO_WHILE_REPEAT":"true"}"#).unwrap_err().contains("must be a boolean"));
-    assert!(extract_do_while_repeat(r#"{}"#).unwrap_err().contains("missing"));
+  fn workflow_results_are_strictly_typed_before_they_become_terminal() {
+    let outputs = [
+      harness_def::OutputField {
+        name: "grade".into(),
+        ty: harness_def::OutputType::Enum,
+        choices: vec!["excellent".into(), "good".into()],
+      },
+      harness_def::OutputField { name: "comments".into(), ty: harness_def::OutputType::StringList, choices: vec![] },
+    ];
+    let contract = WorkflowResultContract { outputs: &outputs, require_do_while_repeat: true };
+    let valid =
+      extract_step_outputs(r#"{"grade":"good","comments":["one","two"],"SCSH_DO_WHILE_REPEAT":false}"#, contract)
+        .unwrap();
+    assert_eq!(valid.get("grade").map(String::as_str), Some("good"));
+    assert_eq!(valid.get("comments").map(String::as_str), Some(r#"["one","two"]"#));
+    assert_eq!(valid.get("SCSH_DO_WHILE_REPEAT").map(String::as_str), Some("false"));
+
+    let missing = extract_step_outputs(r#"{"grade":"good","comments":[]}"#, contract).unwrap_err();
+    assert!(missing.contains("SCSH_DO_WHILE_REPEAT") && missing.contains("missing"));
+    let wrong =
+      extract_step_outputs(r#"{"grade":"good","comments":"one\n\ntwo","SCSH_DO_WHILE_REPEAT":false}"#, contract)
+        .unwrap_err();
+    assert!(wrong.contains("array of strings"));
+    let extra = extract_step_outputs(
+      r#"{"grade":"good","comments":[],"comment_count":0,"SCSH_DO_WHILE_REPEAT":false}"#,
+      contract,
+    )
+    .unwrap_err();
+    assert!(extra.contains("undeclared field") && extra.contains("comment_count"));
+  }
+
+  #[test]
+  fn workflow_schema_repair_keeps_the_invocation_identity_and_names_the_error() {
+    let definition = harness_def::builtin_defs()
+      .into_iter()
+      .find_map(|(name, source)| {
+        (name == "demo-loop-do-while").then(|| harness_def::validate(name, source, harness_def::DefSource::Builtin))
+      })
+      .expect("built-in definition exists")
+      .expect("built-in definition validates");
+    let step = definition.steps.first().expect("demo has a first step");
+    let invocation = step_invocation(step, "increment", "tmp/scsh/session", Vec::new());
+    let repaired = schema_repair_invocation(&invocation, "result is missing the 'value' field");
+    assert_eq!(repaired.name, invocation.name);
+    assert_eq!(repaired.result, invocation.result);
+    match repaired.delivery {
+      config::SkillDelivery::DirectPrompt(prompt) => {
+        assert!(prompt.contains("Result correction retry"));
+        assert!(prompt.contains("missing the 'value' field"));
+        assert!(prompt.contains("only correction retry"));
+      }
+      _ => panic!("workflow steps always use a direct prompt"),
+    }
   }
   use std::ffi::OsString;
 
@@ -7563,12 +7748,13 @@ mod tests {
 
   #[test]
   fn cached_skill_run_carries_result_json_for_workflow_outputs() {
-    // A workflow reads step outputs from SkillRun.result_content after each wave. A cache
-    // hit that only restored the file on disk used to leave result_content=None and abort
-    // the DAG with "produced no result" (session wpyouk / arith after add+multiply hits).
-    let run = SkillRun::cached(None, r#"{"sum":5}"#.into());
+    // A workflow consumes validated outputs after each wave. A cache hit must carry both the
+    // original JSON and the already-validated fields, or the DAG cannot bind downstream inputs.
+    let outputs = std::collections::HashMap::from([("sum".to_string(), "5".to_string())]);
+    let run = SkillRun::cached(None, r#"{"sum":5}"#.into(), Some(outputs));
     assert!(run.ok && run.cached);
     assert_eq!(run.result_content.as_deref(), Some(r#"{"sum":5}"#));
+    assert_eq!(run.workflow_outputs.as_ref().and_then(|fields| fields.get("sum")).map(String::as_str), Some("5"));
   }
 
   use std::sync::atomic::{AtomicUsize, Ordering};

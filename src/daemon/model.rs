@@ -469,7 +469,7 @@ mod tests {
   }
 
   #[test]
-  fn lifecycle_completed_when_ended_cleanly() {
+  fn lifecycle_uses_the_terminal_proc_status_for_ended_jobs() {
     let session = Session {
       id: "done".into(),
       started_at: 100,
@@ -509,6 +509,11 @@ mod tests {
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     assert_eq!(session.duration_secs(200), Some(100));
+
+    let mut invalid_result = session.clone();
+    invalid_result.procs[0].status = ProcStatus::Fail;
+    invalid_result.procs[0].fail_reason = Some(crate::failure::reason::RESULT_INVALID.into());
+    assert_eq!(invalid_result.lifecycle_status(200), SessionLifecycle::Failed);
   }
 
   #[test]

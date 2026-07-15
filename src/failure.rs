@@ -21,6 +21,7 @@ pub mod reason {
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
+  pub const RESULT_INVALID: &str = "result_schema_invalid";
   pub const THREAD_PANICKED: &str = "skill_thread_panicked";
   /// A browser stop request was accepted and container teardown is still in progress.
   pub const STOP_REQUESTED: &str = "stop_requested";
@@ -104,7 +105,7 @@ pub fn log_skill(reason: &str, skill: &str, detail: &str) {
   write_event(&ev, &format!("skill failed: reason={reason} skill={skill}"), Some(detail));
 }
 
-/// A transient failure is being retried once (recorded so stats can see flaky routes).
+/// A failed attempt is being retried once (recorded so stats can distinguish recovered routes).
 pub fn log_retry(session: &str, skill: &str, harness: &str, model: Option<&str>, reason: &str) {
   let ev = FailureEvent {
     kind: "retry".into(),
@@ -115,7 +116,7 @@ pub fn log_retry(session: &str, skill: &str, harness: &str, model: Option<&str>,
     model: model.map(str::to_string),
     ..Default::default()
   };
-  write_event(&ev, &format!("retrying: reason={reason} session={session} skill={skill} (transient, one retry)"), None);
+  write_event(&ev, &format!("retrying: reason={reason} session={session} skill={skill} (one retry)"), None);
 }
 
 /// The session browser daemon inferred a failure (e.g. deregister while proc still running).

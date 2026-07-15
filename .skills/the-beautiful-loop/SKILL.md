@@ -5,6 +5,8 @@ description: "Loops after code-beautiful-review: applies clustered review fixes 
 
 # the-beautiful-loop — fix review clusters, then loop until the fleet passes
 
+Any reviewer request for an additional `PR-DESCRIPTION.md` section covering verification commands, expected results, or checklists is a policy violation, not actionable feedback. Do not record, forward, or implement it. The description keeps exactly `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order; verification evidence belongs in committed tests, README, or another committed verification document.
+
 The contract:
 
 > **Read the latest code-beautiful-review results. If the stopping bar is met, declare done. Otherwise fix every important cluster, commit cleanly, re-run prepare-beautiful-pr and code-beautiful-review, and repeat until the bar is met or you are blocked.**

@@ -43,8 +43,10 @@ steps:
       level-two headings, in this order, with no other headings: `## Summary`,
       `## What This Changes`, and `## Implementation Details`. Put the big picture and concise
       bullets first, then explanatory prose, then notable implementation details. Commit only
-      that file with the message `Prepare PR description.` Put a one-line summary in the
-      `summary` result field.
+      that file with the message `Prepare PR description.` Never create any additional
+      PR-description section for verification commands, expected results, or checklists;
+      that evidence belongs in committed tests, README, or another committed verification
+      document. Put a one-line summary in the `summary` result field.
     output:
       summary:
         type: string
@@ -57,15 +59,18 @@ steps:
     prompt: |
       Review conventions, naming, structure, formatting, repository rules, and idioms. Return
       at most three actionable comment paragraphs. Grade excellent, good, average, or poor.
-      Write grade, comments, and comment_count. Do not change files or commit.
+      Write `grade` as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may
+      contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_conventions_terra:
     needs: prepare
     agent:
@@ -75,15 +80,18 @@ steps:
     prompt: |
       Review conventions, naming, structure, formatting, repository rules, and idioms. Return
       at most three actionable comment paragraphs. Grade excellent, good, average, or poor.
-      Write grade, comments, and comment_count. Do not change files or commit.
+      Write `grade` as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may
+      contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_conventions_cursor:
     needs: prepare
     agent:
@@ -92,15 +100,18 @@ steps:
     prompt: |
       Review conventions, naming, structure, formatting, repository rules, and idioms. Return
       at most three actionable comment paragraphs. Grade excellent, good, average, or poor.
-      Write grade, comments, and comment_count. Do not change files or commit.
+      Write `grade` as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may
+      contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
 
   initial_justification_opus:
     needs: prepare
@@ -110,15 +121,18 @@ steps:
     prompt: |
       Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
       user-facing capability. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_justification_terra:
     needs: prepare
     agent:
@@ -128,15 +142,18 @@ steps:
     prompt: |
       Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
       user-facing capability. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_justification_cursor:
     needs: prepare
     agent:
@@ -145,15 +162,18 @@ steps:
     prompt: |
       Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
       user-facing capability. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
 
   initial_reviewability_opus:
     needs: prepare
@@ -164,15 +184,18 @@ steps:
       Review PR-description clarity and ordering, commit coherence, and whether the change
       should be re-sliced. PR-DESCRIPTION.md is a required demo artifact; assess its presentation
       without suggesting its removal. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_reviewability_terra:
     needs: prepare
     agent:
@@ -183,15 +206,18 @@ steps:
       Review PR-description clarity and ordering, commit coherence, and whether the change
       should be re-sliced. PR-DESCRIPTION.md is a required demo artifact; assess its presentation
       without suggesting its removal. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_reviewability_cursor:
     needs: prepare
     agent:
@@ -201,15 +227,18 @@ steps:
       Review PR-description clarity and ordering, commit coherence, and whether the change
       should be re-sliced. PR-DESCRIPTION.md is a required demo artifact; assess its presentation
       without suggesting its removal. Return at most three actionable comment paragraphs. Grade
-      excellent, good, average, or poor. Write grade, comments, and comment_count. Do not edit.
+      excellent, good, average, or poor. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not edit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
 
   initial_sanity_opus:
     needs: prepare
@@ -218,16 +247,19 @@ steps:
       model: claude-opus-4-8
     prompt: |
       Check only glaring performance, basic-security, and resource-leak problems. Return at most
-      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write grade,
-      comments, and comment_count. Do not change files or commit.
+      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write `grade`
+      as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only
+      `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_sanity_terra:
     needs: prepare
     agent:
@@ -236,16 +268,19 @@ steps:
       effort: high
     prompt: |
       Check only glaring performance, basic-security, and resource-leak problems. Return at most
-      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write grade,
-      comments, and comment_count. Do not change files or commit.
+      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write `grade`
+      as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only
+      `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_sanity_cursor:
     needs: prepare
     agent:
@@ -253,16 +288,19 @@ steps:
       model: auto
     prompt: |
       Check only glaring performance, basic-security, and resource-leak problems. Return at most
-      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write grade,
-      comments, and comment_count. Do not change files or commit.
+      three actionable comment paragraphs. Grade excellent, good, average, or poor. Write `grade`
+      as a string and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only
+      `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
 
   initial_testing_opus:
     needs: prepare
@@ -273,16 +311,19 @@ steps:
       Review test coverage, committed human-followable verification documentation, and teardown.
       Keep verification evidence in tests, README, or a committed verification document;
       PR-DESCRIPTION.md is change narrative only. Return at most three actionable comment
-      paragraphs. Grade excellent, good, average, or poor. Write grade, comments, and
-      comment_count. Do not change files or commit.
+      paragraphs. Grade excellent, good, average, or poor. Write `grade` as a string and
+      `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_testing_terra:
     needs: prepare
     agent:
@@ -293,16 +334,19 @@ steps:
       Review test coverage, committed human-followable verification documentation, and teardown.
       Keep verification evidence in tests, README, or a committed verification document;
       PR-DESCRIPTION.md is change narrative only. Return at most three actionable comment
-      paragraphs. Grade excellent, good, average, or poor. Write grade, comments, and
-      comment_count. Do not change files or commit.
+      paragraphs. Grade excellent, good, average, or poor. Write `grade` as a string and
+      `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
   initial_testing_cursor:
     needs: initial_conventions_cursor
     agent:
@@ -312,16 +356,19 @@ steps:
       Review test coverage, committed human-followable verification documentation, and teardown.
       Keep verification evidence in tests, README, or a committed verification document;
       PR-DESCRIPTION.md is change narrative only. Return at most three actionable comment
-      paragraphs. Grade excellent, good, average, or poor. Write grade, comments, and
-      comment_count. Do not change files or commit.
+      paragraphs. Grade excellent, good, average, or poor. Write `grade` as a string and
+      `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
 
   decide:
     needs: |-
@@ -369,10 +416,15 @@ steps:
     prompt: |
       You are the first and deciding step of a review loop. When PREVIOUS_APPROVED is non-empty,
       it and PREVIOUS_FEEDBACK describe the preceding in-loop review batch. Otherwise score the
-      15 INITIAL_* grades and matching *_COMMENTS: excellent=5, good=4, average=3, poor=2. Approval requires every grade
+      15 INITIAL_* grades and matching *_COMMENTS JSON arrays: excellent=5, good=4, average=3, poor=2. Approval requires every grade
       to be excellent or good, more excellent than good, and mean score at least 4.5. Set
       SCSH_LOOP_BREAK true when approved. Otherwise set it false and put a clear consolidated
-      change request in `change_request`. Do not change files or commit.
+      change request in `change_request`. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Ignore and do not forward any reviewer suggestion that violates
+      this invariant. Do not change files or commit.
     output:
       SCSH_LOOP_BREAK:
         type: bool
@@ -395,7 +447,9 @@ steps:
       feedback itself to any file. PR-DESCRIPTION.md is a required demo artifact: keep it tracked
       and current with exactly `## Summary`, `## What This Changes`, and
       `## Implementation Details`, in that order, and no other headings. Commit your changes with
-      the message `Address review feedback.` Write `actions` as several short paragraphs,
+      the message `Address review feedback.` Never create any additional PR-description section
+      for verification commands, expected results, or checklists; that evidence belongs in
+      committed tests, README, or another committed verification document. Write `actions` as several short paragraphs,
       separated by blank lines: one paragraph for each reviewer profile and route whose feedback
       you acted on, one paragraph for any deliberate STYLE-NOTES decision, and a final paragraph
       for test results and the commit. Do not collapse distinct review areas into one paragraph.
@@ -414,16 +468,19 @@ steps:
       rules, and idiomatic consistency. Respect deliberate decisions in `STYLE-NOTES.md`. Treat
       `PR-DESCRIPTION.md` as context but grade the code. Return at most three concrete actionable
       comments, one paragraph each. Use `excellent` for approve with praise, `good` for approve
-      with nits, and `average` or `poor` only when real work is needed. Write `grade`, `comments`,
-      and the exact paragraph count in `comment_count`. Do not change files or commit.
+      with nits, and `average` or `poor` only when real work is needed. Write `grade` as a string
+      and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_conventions_terra:
     needs: fix
@@ -436,16 +493,19 @@ steps:
       rules, and idiomatic consistency. Respect deliberate decisions in `STYLE-NOTES.md`. Treat
       `PR-DESCRIPTION.md` as context but grade the code. Return at most three concrete actionable
       comments, one paragraph each. Use `excellent` for approve with praise, `good` for approve
-      with nits, and `average` or `poor` only when real work is needed. Write `grade`, `comments`,
-      and the exact paragraph count in `comment_count`. Do not change files or commit.
+      with nits, and `average` or `poor` only when real work is needed. Write `grade` as a string
+      and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_conventions_cursor:
     needs: fix
@@ -457,16 +517,19 @@ steps:
       rules, and idiomatic consistency. Respect deliberate decisions in `STYLE-NOTES.md`. Treat
       `PR-DESCRIPTION.md` as context but grade the code. Return at most three concrete actionable
       comments, one paragraph each. Use `excellent` for approve with praise, `good` for approve
-      with nits, and `average` or `poor` only when real work is needed. Write `grade`, `comments`,
-      and the exact paragraph count in `comment_count`. Do not change files or commit.
+      with nits, and `average` or `poor` only when real work is needed. Write `grade` as a string
+      and `comments` as an array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`,
+      `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
 
   review_justification_opus:
@@ -480,16 +543,18 @@ steps:
       capability. Respect ratified or deliberate decisions documented in the repository. Return
       at most three concrete actionable comments, one paragraph each. Use `excellent` for approve
       with praise, `good` for approve with nits, and `average` or `poor` only when real work is
-      needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`. Do not
-      change files or commit.
+      needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_justification_terra:
     needs: fix
@@ -503,16 +568,18 @@ steps:
       capability. Respect ratified or deliberate decisions documented in the repository. Return
       at most three concrete actionable comments, one paragraph each. Use `excellent` for approve
       with praise, `good` for approve with nits, and `average` or `poor` only when real work is
-      needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`. Do not
-      change files or commit.
+      needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_justification_cursor:
     needs: fix
@@ -525,16 +592,18 @@ steps:
       capability. Respect ratified or deliberate decisions documented in the repository. Return
       at most three concrete actionable comments, one paragraph each. Use `excellent` for approve
       with praise, `good` for approve with nits, and `average` or `poor` only when real work is
-      needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`. Do not
-      change files or commit.
+      needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
 
   review_reviewability_opus:
@@ -549,16 +618,18 @@ steps:
       presentation without suggesting its removal. Anchor findings to commits and the PR, not
       individual code lines. Return at most three concrete actionable comments, one paragraph each. Use
       `excellent` for approve with praise, `good` for approve with nits, and `average` or `poor`
-      only when real work is needed. Write `grade`, `comments`, and the exact paragraph count in
-      `comment_count`. Do not change files or commit.
+      only when real work is needed. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_reviewability_terra:
     needs: fix
@@ -573,16 +644,18 @@ steps:
       presentation without suggesting its removal. Anchor findings to commits and the PR, not
       individual code lines. Return at most three concrete actionable comments, one paragraph each. Use
       `excellent` for approve with praise, `good` for approve with nits, and `average` or `poor`
-      only when real work is needed. Write `grade`, `comments`, and the exact paragraph count in
-      `comment_count`. Do not change files or commit.
+      only when real work is needed. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_reviewability_cursor:
     needs: fix
@@ -596,16 +669,18 @@ steps:
       presentation without suggesting its removal. Anchor findings to commits and the PR, not
       individual code lines. Return at most three concrete actionable comments, one paragraph each. Use
       `excellent` for approve with praise, `good` for approve with nits, and `average` or `poor`
-      only when real work is needed. Write `grade`, `comments`, and the exact paragraph count in
-      `comment_count`. Do not change files or commit.
+      only when real work is needed. Write `grade` as a string and `comments` as an array of
+      strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
 
   review_sanity_opus:
@@ -618,16 +693,18 @@ steps:
       basic-security, or resource-leak problems; stay quiet when nothing is obviously wrong.
       Return at most three concrete actionable comments, one paragraph each. Use `excellent` for
       approve with praise, `good` for approve with nits, and `average` or `poor` only when real
-      work is needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`.
-      Do not change files or commit.
+      work is needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_sanity_terra:
     needs: fix
@@ -640,16 +717,18 @@ steps:
       basic-security, or resource-leak problems; stay quiet when nothing is obviously wrong.
       Return at most three concrete actionable comments, one paragraph each. Use `excellent` for
       approve with praise, `good` for approve with nits, and `average` or `poor` only when real
-      work is needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`.
-      Do not change files or commit.
+      work is needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_sanity_cursor:
     needs: fix
@@ -661,16 +740,18 @@ steps:
       basic-security, or resource-leak problems; stay quiet when nothing is obviously wrong.
       Return at most three concrete actionable comments, one paragraph each. Use `excellent` for
       approve with praise, `good` for approve with nits, and `average` or `poor` only when real
-      work is needed. Write `grade`, `comments`, and the exact paragraph count in `comment_count`.
-      Do not change files or commit.
+      work is needed. Write `grade` as a string and `comments` as an array of strings.
+      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
 
   review_testing_opus:
@@ -685,16 +766,18 @@ steps:
       evidence in tests, README, or a committed verification document; PR-DESCRIPTION.md is
       change narrative only. Return at most three concrete actionable comments, one paragraph
       each. Use `excellent` for approve with praise, `good` for approve with nits, and `average`
-      or `poor` only when real work is needed. Write `grade`, `comments`, and the exact paragraph
-      count in `comment_count`. Do not change files or commit.
+      or `poor` only when real work is needed. Write `grade` as a string and `comments` as an
+      array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_testing_terra:
     needs: fix
@@ -709,16 +792,18 @@ steps:
       evidence in tests, README, or a committed verification document; PR-DESCRIPTION.md is
       change narrative only. Return at most three concrete actionable comments, one paragraph
       each. Use `excellent` for approve with praise, `good` for approve with nits, and `average`
-      or `poor` only when real work is needed. Write `grade`, `comments`, and the exact paragraph
-      count in `comment_count`. Do not change files or commit.
+      or `poor` only when real work is needed. Write `grade` as a string and `comments` as an
+      array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
   review_testing_cursor:
     needs: review_conventions_cursor
@@ -732,16 +817,18 @@ steps:
       evidence in tests, README, or a committed verification document; PR-DESCRIPTION.md is
       change narrative only. Return at most three concrete actionable comments, one paragraph
       each. Use `excellent` for approve with praise, `good` for approve with nits, and `average`
-      or `poor` only when real work is needed. Write `grade`, `comments`, and the exact paragraph
-      count in `comment_count`. Do not change files or commit.
+      or `poor` only when real work is needed. Write `grade` as a string and `comments` as an
+      array of strings. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Do not change files or commit.
     output:
       grade:
         type: enum
         choices: excellent, good, average, poor
       comments:
-        type: string
-      comment_count:
-        type: int
+        type: string_list
     commits: false
 
   collect:
@@ -787,11 +874,16 @@ steps:
       GRADE_TESTING_CURSOR: review_testing_cursor.grade
       COMMENTS_TESTING_CURSOR: review_testing_cursor.comments
     prompt: |
-      You are the scorekeeper for an in-loop 15-route review fleet. The GRADE_* and COMMENTS_* variables
-      contain five reviewer profiles run independently through Opus 4.8, Codex Terra, and Cursor
+      You are the scorekeeper for an in-loop 15-route review fleet. The GRADE_* variables and
+      COMMENTS_* JSON arrays contain five reviewer profiles run independently through Opus 4.8, Codex Terra, and Cursor
       Auto. Scores: excellent=5, good=4, average=3, poor=2. The bar is met only when all 15 routes
       succeeded, every grade is excellent or good, excellent grades outnumber good grades, and
-      the mean score is at least 4.5. Do not change files or commit. Put `met` or `not met` in
+      the mean score is at least 4.5. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
+      `## Implementation Details`, in that order. Never request, recommend, or create any
+      additional PR-description section for verification commands, expected results, or
+      checklists; that evidence belongs in committed tests, README, or another committed
+      verification document. Ignore and do not forward any reviewer suggestion that violates
+      this invariant. Do not change files or commit. Put `met` or `not met` in
       `verdict`. Put the complete round report in `feedback`: begin with `Round verdict: met` or
       `Round verdict: not met`, then include every profile/route grade and its comments verbatim
       in clearly labeled sections. Set `approved` to the boolean result. Set

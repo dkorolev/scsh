@@ -178,47 +178,35 @@ struct ResultSummary {
 fn parse_result_summary(path: &str) -> Option<ResultSummary> {
   let text = std::fs::read_to_string(path).ok()?;
   let message = json::message(&text);
-  let grade = extract_string_field(&text, "grade");
-  let comments_count = extract_u64_field(&text, "comment_count").or_else(|| {
-    extract_string_field(&text, "comments").map(|comments| {
-      let paragraphs = comments.split("\n\n").filter(|part| !part.trim().is_empty()).count() as u64;
-      paragraphs.max(u64::from(!comments.trim().is_empty()))
-    })
-  });
-  let issues_found = extract_u64_field(&text, "issues_found");
-  Some(ResultSummary { message, grade, comments_count, issues_found })
-}
-
-fn extract_string_field(json_text: &str, key: &str) -> Option<String> {
-  let needle = format!("\"{key}\"");
-  let i = json_text.find(&needle)?;
-  let after = json_text[i + needle.len()..].trim_start().strip_prefix(':')?.trim_start();
-  if !after.starts_with('"') {
-    return None;
-  }
-  let rest = &after[1..];
-  let mut out = String::new();
-  let mut chars = rest.chars();
-  while let Some(c) = chars.next() {
-    if c == '\\' {
-      if let Some(n) = chars.next() {
-        out.push(n);
-      }
-    } else if c == '"' {
-      break;
-    } else {
-      out.push(c);
+  let json::Value::Object(fields) = json::parse(&text).ok()? else { return None };
+  let field = |name: &str| fields.iter().find(|(key, _)| key == name).map(|(_, value)| value);
+  let grade = match field("grade") {
+    Some(json::Value::String(value)) => Some(value.clone()),
+    _ => None,
+  };
+  let comments_count = match field("comments") {
+    Some(json::Value::Array(comments)) if comments.iter().all(|value| matches!(value, json::Value::String(_))) => {
+      Some(comments.len() as u64)
     }
-  }
-  (!out.is_empty()).then_some(out)
-}
-
-fn extract_u64_field(json_text: &str, key: &str) -> Option<u64> {
-  let needle = format!("\"{key}\"");
-  let i = json_text.find(&needle)?;
-  let after = json_text[i + needle.len()..].trim_start().strip_prefix(':')?.trim_start();
-  let num: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
-  num.parse().ok()
+    // Old session artifacts remain readable after the workflow moves to structured comments.
+    Some(json::Value::String(comments)) => {
+      let paragraphs = comments.split("\n\n").filter(|part| !part.trim().is_empty()).count() as u64;
+      Some(paragraphs.max(u64::from(!comments.trim().is_empty())))
+    }
+    _ => match field("comment_count") {
+      Some(json::Value::Number(value)) if value.is_finite() && value.fract() == 0.0 && *value >= 0.0 => {
+        Some(*value as u64)
+      }
+      _ => None,
+    },
+  };
+  let issues_found = match field("issues_found") {
+    Some(json::Value::Number(value)) if value.is_finite() && value.fract() == 0.0 && *value >= 0.0 => {
+      Some(*value as u64)
+    }
+    _ => None,
+  };
+  Some(ResultSummary { message, grade, comments_count, issues_found })
 }
 
 pub fn summarize_group(skill_source: &str, routes: &[FleetRoute]) -> String {
@@ -249,17 +237,17 @@ mod tests {
   }
 
   #[test]
-  fn result_summary_reads_explicit_and_legacy_comment_counts() {
+  fn result_summary_derives_structured_comment_count_and_reads_legacy_results() {
     let dir = std::env::temp_dir().join(format!("scsh-fleet-summary-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
-    let explicit = dir.join("explicit.json");
-    std::fs::write(&explicit, r#"{"grade":"good","comments":"one\n\ntwo","comment_count":2}"#).unwrap();
-    let summary = parse_result_summary(&explicit.to_string_lossy()).unwrap();
+    let structured = dir.join("structured.json");
+    std::fs::write(&structured, r#"{"grade":"good","comments":["one","two"]}"#).unwrap();
+    let summary = parse_result_summary(&structured.to_string_lossy()).unwrap();
     assert_eq!(summary.grade.as_deref(), Some("good"));
     assert_eq!(summary.comments_count, Some(2));
 
     let legacy = dir.join("legacy.json");
-    std::fs::write(&legacy, r#"{"grade":"excellent","comments":"one legacy comment"}"#).unwrap();
+    std::fs::write(&legacy, r#"{"grade":"excellent","comments":"one legacy comment","comment_count":99}"#).unwrap();
     assert_eq!(parse_result_summary(&legacy.to_string_lossy()).unwrap().comments_count, Some(1));
     let _ = std::fs::remove_dir_all(dir);
   }
