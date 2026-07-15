@@ -251,7 +251,7 @@ pub enum Harness {
 
 impl Harness {
   /// Every harness, in UI listing order (Setup tab, image tables, doctor preflight).
-  pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Opencode, Harness::Cursor];
+  pub const ALL: [Harness; 5] = [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode];
 
   /// Parse a `harness:` value; `None` for an unknown harness.
   pub fn parse(s: &str) -> Option<Harness> {

@@ -2720,13 +2720,14 @@ function postImagesBuild(req) {
     }
   }).catch(() => { if (note) note.textContent = 'build request failed'; });
 }
-function startImagesBuild(all) {
-  const harnesses = all ? [] :
-    Array.from(document.querySelectorAll('.image-select:checked')).map(cb => cb.value);
+function startImagesBuild(scope) {
+  const harnesses = scope === 'selected' ?
+    Array.from(document.querySelectorAll('.image-select:checked')).map(cb => cb.value) : [];
   postImagesBuild({
     harnesses: harnesses,
     rebuild_base: !!document.getElementById('images-rebuild-base')?.checked,
-    force: !!document.getElementById('images-force')?.checked,
+    force: scope === 'all' ||
+      (scope === 'selected' && !!document.getElementById('images-force')?.checked),
   });
 }
 function startImageBuildOne(name, upToDate) {
@@ -2736,8 +2737,9 @@ function startImageBuildOne(name, upToDate) {
 (function initSetupPanel() {
   if (!document.getElementById('setup-cards') && !document.getElementById('images-body')) return;
   refreshSetup();
-  document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild(false));
-  document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild(true));
+  document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild('selected'));
+  document.getElementById('images-build-stale')?.addEventListener('click', () => startImagesBuild('stale'));
+  document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild('all'));
   document.getElementById('images-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
   document.getElementById('setup-refresh')?.addEventListener('click', (e) => { e.preventDefault(); refreshSetup(); });
   document.getElementById('setup-test-all')?.addEventListener('click', (e) => {

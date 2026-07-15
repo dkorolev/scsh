@@ -11,9 +11,9 @@ task: |
 
   Do nothing else — no commits, no network, no other files.
 invocations:
-  opencode-gpt-5.5:
+  opencode-gpt-5.6:
     harness: opencode
-    model: openai/gpt-5.5
+    model: openai/gpt-5.6
   claude-opus-4-8:
     harness: claude
     model: claude-opus-4-8
@@ -21,9 +21,9 @@ invocations:
     harness: codex
     model: gpt-5.6-luna
     effort: low
-  cursor-composer-fast:
+  cursor-auto:
     harness: cursor
-    model: composer-2.5-fast
-  grok-composer-fast:
+    model: auto
+  grok-4-5:
     harness: grok
-    model: grok-composer-2.5-fast
+    model: grok-4.5

@@ -559,7 +559,14 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(html.contains("card--accent-left-purple"), "images island uses purple accent");
   assert!(!html.contains("Advanced image management"), "no advanced disclosure");
   // Advanced still has the image table controls.
-  for id in ["images-body", "images-build-selected", "images-build-all", "images-rebuild-base", "images-force"] {
+  for id in [
+    "images-body",
+    "images-build-selected",
+    "images-build-stale",
+    "images-build-all",
+    "images-rebuild-base",
+    "images-force",
+  ] {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
   // First paint already lists every harness + known image (§13: no empty limbo).
@@ -567,6 +574,9 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   for name in ["Claude", "Codex", "Grok", "Opencode", "Cursor"] {
     assert!(html.contains(name), "harness card {name} on first paint");
   }
+  let cursor_card = html.find(">Cursor</strong>").expect("Cursor skeleton card");
+  let opencode_card = html.find(">Opencode</strong>").expect("Opencode skeleton card");
+  assert!(cursor_card < opencode_card, "OpenCode belongs after every native harness");
   assert!(html.contains("scsh-base:latest"), "base image row on first paint");
   for tag in
     ["scsh-opencode:latest", "scsh-claude:latest", "scsh-codex:latest", "scsh-grok:latest", "scsh-cursor:latest"]
@@ -593,6 +603,10 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(js.contains("setupModelStatusHtml"), "model rows hide raw not_tested");
   assert!(js.contains("setup-ready"), "ready-to-test badge styling");
   assert!(js.contains("function startImageBuildOne"), "per-row build buttons are wired");
+  assert!(html.contains("btn--orange btn--sm\" id=\"images-build-stale\"><span>Build stale"));
+  assert!(html.contains("btn--purple btn--sm\" id=\"images-build-all\"><span>Build all"));
+  assert!(js.contains("startImagesBuild('stale')"));
+  assert!(js.contains("startImagesBuild('all')"));
   assert!(html.contains("image-action-cell"), "skeleton rows reserve the per-row action cell");
 }
 

@@ -19,22 +19,20 @@ pub struct CatalogModel {
 /// Primary entries match `doctor.yml`; additional entries cover demo/builtin aliases.
 pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
   match harness {
-    Harness::Opencode => &[
-      CatalogModel { id: "openai/gpt-5.5", kind: "primary" },
-      CatalogModel { id: "openai/gpt-5.4-mini-fast", kind: "builtin" },
-    ],
+    Harness::Opencode => &[CatalogModel { id: "openai/gpt-5.6", kind: "primary" }],
     Harness::Claude => {
-      &[CatalogModel { id: "claude-opus-4-8", kind: "primary" }, CatalogModel { id: "sonnet", kind: "builtin" }]
+      &[CatalogModel { id: "claude-opus-4-8", kind: "primary" }, CatalogModel { id: "claude-fable-5", kind: "builtin" }]
     }
     Harness::Codex => {
       &[CatalogModel { id: "gpt-5.6-luna", kind: "primary" }, CatalogModel { id: "gpt-5.6-terra", kind: "builtin" }]
     }
     Harness::Grok => &[
-      // UK/Europe: grok-build is unavailable; composer is the reachable smoke model.
-      CatalogModel { id: "grok-composer-2.5-fast", kind: "primary" },
-      CatalogModel { id: "grok-build", kind: "builtin" },
+      CatalogModel { id: "grok-4.5", kind: "primary" },
+      CatalogModel { id: "grok-composer-2.5-fast", kind: "builtin" },
     ],
-    Harness::Cursor => &[CatalogModel { id: "composer-2.5-fast", kind: "primary" }],
+    Harness::Cursor => {
+      &[CatalogModel { id: "auto", kind: "primary" }, CatalogModel { id: "composer-2.5", kind: "builtin" }]
+    }
   }
 }
 
@@ -246,17 +244,23 @@ mod tests {
   }
 
   #[test]
+  fn setup_orders_native_harnesses_before_opencode() {
+    assert_eq!(Harness::ALL, [Harness::Claude, Harness::Codex, Harness::Grok, Harness::Cursor, Harness::Opencode]);
+  }
+
+  #[test]
   fn doctor_primaries_are_in_the_catalog() {
     let expected = [
-      (Harness::Opencode, "openai/gpt-5.5"),
+      (Harness::Opencode, "openai/gpt-5.6"),
       (Harness::Claude, "claude-opus-4-8"),
       (Harness::Codex, "gpt-5.6-luna"),
-      (Harness::Grok, "grok-composer-2.5-fast"),
-      (Harness::Cursor, "composer-2.5-fast"),
+      (Harness::Grok, "grok-4.5"),
+      (Harness::Cursor, "auto"),
     ];
     for (h, id) in expected {
       assert_eq!(primary_model_id(h), id, "{h:?}");
     }
+    assert!(!Harness::ALL.into_iter().flat_map(catalog_models).any(|model| model.id.contains("mini")));
   }
 
   #[test]

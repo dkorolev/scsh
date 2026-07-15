@@ -261,7 +261,8 @@ selected runtime.</p>
 </table></div>
 <div class="images-controls">
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="images-build-selected" disabled><span>Build selected</span></button>
-<button type="button" class="chamfer btn btn--orange btn--sm" id="images-build-all"><span>Build all</span></button>
+<button type="button" class="chamfer btn btn--orange btn--sm" id="images-build-stale"><span>Build stale</span></button>
+<button type="button" class="chamfer btn btn--purple btn--sm" id="images-build-all"><span>Build all</span></button>
 <label><input type="checkbox" id="images-rebuild-base"> also rebuild the base image (--no-cache)</label>
 <label><input type="checkbox" id="images-force"> force rebuild even when up to date</label>
 <a href="#" id="images-refresh">refresh</a>
