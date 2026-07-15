@@ -139,7 +139,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     workflow = workflow,
     procs = procs_html,
   );
-  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), &lede, &body))
+  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), None, &lede, &body))
 }
 
 fn annotation_target_link_html(
@@ -173,7 +173,7 @@ pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) 
   let profile = session.profile.as_deref().unwrap_or("default");
   let n = session.procs.len();
   format!(
-    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}.",
+    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}",
     kind = esc(kind),
     profile = esc(profile),
     life = esc(lifecycle.label()),

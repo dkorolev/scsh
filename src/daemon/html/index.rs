@@ -77,6 +77,15 @@ impl IndexTab {
       _ => None,
     }
   }
+
+  fn crumb(self) -> Option<(&'static str, &'static str)> {
+    match self {
+      Self::Run => None,
+      Self::Jobs => Some(("/jobs", "jobs")),
+      Self::Projects => Some(("/projects", "projects")),
+      Self::Setup => Some(("/setup", "setup")),
+    }
+  }
 }
 
 pub fn index_page(store: &Store) -> String {
@@ -161,7 +170,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
     start = start_panel(),
     images = images_panel()
   );
-  wrap_page("scsh", port, None, "", &body)
+  wrap_page("scsh", port, None, tab.crumb(), "", &body)
 }
 
 /// One red "✕ stop all <harness> (n)" button per harness with running skill containers, so a
@@ -578,7 +587,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
-<td>{profile}</td><td class=\"session-procs-cell\">{chips}<span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span></td><td class=\"dim repo-path\">{repo}</td></tr>\n",
+<td>{profile}</td><td class=\"session-procs-cell\"><span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span>{chips}</td><td class=\"dim repo-path\" data-tip=\"{repo}\">{repo}</td></tr>\n",
     id = id,
     status = status,
     started = started,
@@ -600,14 +609,15 @@ fn index_session_row(session: &Session, now: u64) -> String {
 /// client JS (`client_js.rs`).
 fn harness_chips_html(session: &Session) -> String {
   use crate::daemon::model::{ProcKind, ProcStatus};
+  const MAX_CHIPS: usize = 8;
   let mut chips = String::new();
-  for p in &session.procs {
-    if p.kind != ProcKind::Skill {
-      continue;
-    }
-    let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) else {
-      continue;
-    };
+  let skill_procs: Vec<_> = session
+    .procs
+    .iter()
+    .filter(|p| p.kind == ProcKind::Skill)
+    .filter_map(|p| p.harness.as_deref().filter(|h| !h.is_empty()).map(|h| (p, h)))
+    .collect();
+  for (p, h) in skill_procs.iter().take(MAX_CHIPS).copied() {
     let letter = h.chars().next().map(|c| c.to_ascii_uppercase()).unwrap_or('?');
     let done = matches!(p.status, ProcStatus::Ok | ProcStatus::Graceful | ProcStatus::Fail | ProcStatus::Skipped);
     let skill = p.skill_name.as_deref().unwrap_or(&p.label);
@@ -629,6 +639,9 @@ fn harness_chips_html(session: &Session) -> String {
       done = if done { " hchip--done" } else { "" },
       tip = esc(&tip),
     ));
+  }
+  if skill_procs.len() > MAX_CHIPS {
+    chips.push_str(&format!("<span class=\"chip-overflow\">+ {}</span>", skill_procs.len() - MAX_CHIPS));
   }
   chips
 }

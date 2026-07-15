@@ -391,7 +391,7 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   assert!(
-    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/">jobs</a><span class="crumb-sep">›</span><a class="job-id" href="/job/castab">castab</a>"#),
+    html.contains(r#"<a href="/">scsh</a><span class="crumb-sep">›</span><a href="/jobs">jobs</a><span class="crumb-sep">›</span><a class="job-id" href="/job/castab">castab</a>"#),
     "breadcrumb permalinks in the top island (the id in a fixed font)"
   );
   // The status dot sits at the very RIGHT edge of the island.
@@ -412,9 +412,17 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   let html = session_page(&old, "castab").expect("session renders");
   assert!(html.contains("profile <strong>default</strong>"), "lede defaults kind to profile: {html}");
   assert!(!html.contains(r#"class="session-kind""#), "no session-kind on default profile: {html}");
-  // The index island shows just "scsh".
+  // The Run tab keeps the retained index crumb hidden; the Jobs URL renders it on
+  // first paint so returning through the job-page breadcrumb never drops "jobs".
   let html = super::index_page(&store);
-  assert!(html.contains(r#"<span class="crumbs"><a href="/">scsh</a></span>"#), "got crumbs on index");
+  assert!(html.contains(r#"<span id="index-crumb-tail" hidden>"#), "Run hides the retained index crumb: {html}");
+  let html = super::index::index_page_for(&store, None, super::index::IndexTab::Jobs);
+  assert!(
+    html.contains(
+      r#"<span class="crumbs"><a href="/">scsh</a><span id="index-crumb-tail"><span class="crumb-sep">›</span><a id="index-crumb" href="/jobs">jobs</a></span></span>"#
+    ),
+    "Jobs stays present in the top island on /jobs: {html}"
+  );
 }
 
 #[test]
@@ -485,6 +493,8 @@ fn session_meta_agrees_with_lifecycle_badge() {
 #[test]
 fn index_page_shows_colored_harness_chips_per_proc() {
   let mut store = store_with_cast_proc(ProcStatus::Running);
+  let full_repo = "/Users/dima/github/dimacurrentai/a-repository-name-that-is-long-enough-to-be-truncated";
+  store.sessions.get_mut("castab").unwrap().repo = full_repo.into();
   // A second, finished proc on another harness: its chip renders dimmed.
   {
     let session = store.sessions.get_mut("castab").unwrap();
@@ -500,6 +510,12 @@ fn index_page_shows_colored_harness_chips_per_proc() {
     build.kind = ProcKind::Build;
     build.harness = Some("codex".into());
     session.procs.push(build);
+    for index in 3..11 {
+      let mut extra = session.procs[1].clone();
+      extra.index = index;
+      extra.harness = Some("cursor".into());
+      session.procs.push(extra);
+    }
   }
   let html = super::index_page(&store);
   // A running chip's tip is just `harness · skill`; its start time rides in
@@ -514,6 +530,15 @@ fn index_page_shows_colored_harness_chips_per_proc() {
     "got: {html}"
   );
   assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
+  assert!(
+    html.contains(r#"class="session-procs-cell"><span class="chip-count""#),
+    "the total precedes the bounded chip sample"
+  );
+  assert!(html.contains(r#"<span class="chip-overflow">+ 2</span>"#), "only eight harness chips are shown: {html}");
+  assert!(
+    html.contains(&format!(r#"class="dim repo-path" data-tip="{full_repo}""#)),
+    "truncated repo path keeps its full, unabridged tooltip: {html}"
+  );
   // The stylesheet distinguishes the same letter by harness color, and the client JS
   // mirrors the markup for live re-renders.
   assert!(html.contains(".hchip--claude"));
@@ -620,6 +645,8 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(js.contains("const live = life === 'running'"), "Ready only while the job is live");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
   assert!(js.contains("function initTabs"), "client js wires the tabs");
+  assert!(js.contains("function syncIndexCrumb"), "tab navigation keeps the top-island crumb in sync");
+  assert!(js.contains("tail.hidden = !visible"), "tab navigation retains rather than recreates crumb nodes");
   assert!(js.contains("history.pushState"), "tab clicks push history (WEB-UI §1)");
   assert!(js.contains("popstate"), "Back/Forward restore the active tab");
   assert!(js.contains("function sessionEndedLabel"), "Ended label shares lifecycle with the badge");
@@ -825,9 +852,10 @@ fn offline_export_carries_lede_and_full_meta() {
   let html = session_export_page(&session, &[], 100);
   assert!(html.contains(r#"class="page-lede""#), "export carries the live page's lede: {html}");
   assert!(
-    html.contains("profile <strong>code-review</strong> · completed · 0 tasks."),
+    html.contains("profile <strong>code-review</strong> · completed · 0 tasks"),
     "lede shows kind, profile, lifecycle, and task count: {html}"
   );
+  assert!(!html.contains("0 tasks."), "task count is not punctuated as a sentence: {html}");
   assert!(html.contains(r#"<dl class="session-meta">"#), "export keeps session-meta: {html}");
   assert!(html.contains("<code>exp01</code>"), "job id in meta: {html}");
   assert!(html.contains("<dt>Ended</dt>"), "export meta shows when the job ended: {html}");
@@ -1785,7 +1813,7 @@ fn live_client_js_shows_connecting_on_ws_close() {
 #[test]
 fn wrap_page_connecting_status_uses_blue() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, "", "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, None, "", "<p>body</p>");
   assert!(html.contains("class=\"daemon-status connecting\""));
   assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
   assert!(!html.contains("fonts.googleapis.com"), "offline-first: no CDN fonts (WEB-UI §5)");
@@ -1800,7 +1828,7 @@ fn wrap_page_connecting_status_uses_blue() {
 fn every_daemon_page_carries_the_inline_favicon() {
   use super::layout::wrap_page;
   // A data: URI, so the dashboard and the standalone player page stay request-free.
-  let html = wrap_page("scsh sessions", 7274, None, "", "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, None, "", "<p>body</p>");
   assert!(html.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "dashboard favicon");
   let player = cast_player_page(&store_with_cast_proc(ProcStatus::Ok), "castab", 0).expect("player page");
   assert!(player.contains("<link rel=\"icon\" href=\"data:image/svg+xml,"), "player-page favicon");
@@ -1810,7 +1838,7 @@ fn every_daemon_page_carries_the_inline_favicon() {
 #[test]
 fn wrap_page_serves_valid_css_braces() {
   use super::layout::wrap_page;
-  let html = wrap_page("scsh sessions", 7274, None, "Hello lede", "<p>body</p>");
+  let html = wrap_page("scsh sessions", 7274, None, None, "Hello lede", "<p>body</p>");
   assert!(html.contains(":root {"));
   assert!(!html.contains(":root {{"));
   assert!(html.contains(".daemon-status {"));
@@ -2480,6 +2508,8 @@ fn workflow_graph_renders_builtin_shapes() {
   // bookended Start → task → Finish so even a single-run job shows arrows.
   let flat = store_with_cast_proc(ProcStatus::Ok);
   let flat_html = session_page(&flat, "castab").expect("flat");
+  assert!(flat_html.contains("· 1 task</p>"), "single-task lede has no terminal punctuation");
+  assert!(!flat_html.contains("· 1 task.</p>"), "single-task lede is not punctuated as a sentence");
   assert!(flat_html.contains(r#"id="workflow-graph""#), "every job with skills gets a graph");
   assert!(flat_html.contains("Job graph"), "card title is Job graph");
   assert!(flat_html.contains("card--accent-left-orange workflow-card"), "graph island uses the orange accent");
@@ -2541,6 +2571,10 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("scroller.scrollTop = 0"), "Fit resets both scroll axes before CSS centers the graph");
   assert!(flat_html.contains("display: flex"), "the graph viewport can center spare space on either axis");
   assert!(flat_html.contains("margin: auto"), "the stage centers only along axes with spare room");
+  assert!(
+    !flat_html.contains(".workflow-stage { position: relative; flex: 0 0 auto; min-height:"),
+    "the stage height follows the actual graph so a small graph is vertically centered"
+  );
   assert!(js.contains("data-wf-expand"), "graph has a large-view control");
   assert!(js.contains("let workflowExpanded = false"), "large view survives dynamic graph remounts");
   assert!(js.contains("aria-modal"), "large graph view exposes modal semantics");
