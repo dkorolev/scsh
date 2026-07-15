@@ -163,6 +163,7 @@ fn proc_json(p: &ProcRecord) -> String {
     None => "null".to_string(),
   };
   let container = opt_str(&p.container_name);
+  let container_runtime = opt_str(&p.container_runtime);
   let cast = opt_str(&p.cast_path);
   let diff = opt_str(&p.diff_path);
   let lines: Vec<String> =
@@ -174,7 +175,7 @@ fn proc_json(p: &ProcRecord) -> String {
   format!(
     "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
-\"elapsed\": {}, \"container_name\": {}, \"cast_path\": {}, \"diff_path\": {}, \
+\"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
@@ -188,6 +189,7 @@ fn proc_json(p: &ProcRecord) -> String {
     opt_str(&p.fail_reason),
     elapsed,
     container,
+    container_runtime,
     cast,
     diff,
     opt_str(&p.skill_source),
@@ -272,6 +274,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   let fail_reason = field_str(obj, "fail_reason");
   let elapsed = field_num(obj, "elapsed");
   let container_name = field_str(obj, "container_name");
+  let container_runtime = field_str(obj, "container_runtime");
   let cast_path = field_str(obj, "cast_path");
   let diff_path = field_str(obj, "diff_path"); // absent on sessions persisted by older builds
   let skill_source = field_str(obj, "skill_source");
@@ -295,6 +298,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     fail_reason,
     elapsed,
     container_name,
+    container_runtime,
     cast_path,
     diff_path,
     skill_source,
@@ -368,6 +372,7 @@ mod tests {
       elapsed: Some(f64::NAN),
       lines: vec![OutputLine { at: f64::INFINITY, text: "x".into() }],
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -407,6 +412,7 @@ mod tests {
         fail_reason: None,
         elapsed: Some(1.5),
         container_name: None,
+        container_runtime: Some("container".into()),
         cast_path: Some("/tmp/scsh-daemon/casts/abcdef-p0.cast".into()),
         diff_path: Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html".into()),
         skill_source: None,
@@ -427,6 +433,7 @@ mod tests {
     assert_eq!(s.procs[0].detail.as_deref(), Some("up to date"));
     assert_eq!(s.procs[0].cast_path.as_deref(), Some("/tmp/scsh-daemon/casts/abcdef-p0.cast"));
     assert_eq!(s.procs[0].diff_path.as_deref(), Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html"));
+    assert_eq!(s.procs[0].container_runtime.as_deref(), Some("container"));
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
     assert_eq!(s.parent_session, None);

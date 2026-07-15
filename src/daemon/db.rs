@@ -145,6 +145,7 @@ mod tests {
         elapsed: Some(1.0),
         lines: Vec::new(),
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: None,

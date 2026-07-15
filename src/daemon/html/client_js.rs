@@ -583,6 +583,17 @@ function followOutput(out) {
 function lineHtml(l) {
   return '<div class="line"><span class="at">+' + esc(Number(l.at).toFixed(1)) + 's</span> ' + esc(l.text) + '</div>';
 }
+function containerRuntimeName(runtime) {
+  if (runtime === 'container') return 'Apple Containers';
+  if (runtime === 'docker') return 'Docker';
+  if (runtime === 'podman') return 'Podman';
+  if (runtime) return 'Other runtime';
+  return 'Not recorded (legacy run)';
+}
+function containerDetailsHtml(p) {
+  return '<span class="container-runtime-label">runtime</span> <span class="container-runtime-name">' +
+    esc(containerRuntimeName(p.container_runtime)) + '</span> · container: ' + esc(p.container_name);
+}
 function syncProcOutput(det, p) {
   const lines = p.lines || [];
   let out = det.querySelector('.output');
@@ -672,11 +683,11 @@ function updateProcFields(det, p, nowUnix) {
   if (detailEl) detailEl.textContent = p.detail || '';
   const containerEl = det.querySelector('.container');
   if (p.container_name) {
-    if (containerEl) containerEl.textContent = 'container: ' + p.container_name;
+    if (containerEl) containerEl.innerHTML = containerDetailsHtml(p);
     else {
       const div = document.createElement('div');
       div.className = 'container dim';
-      div.textContent = 'container: ' + p.container_name;
+      div.innerHTML = containerDetailsHtml(p);
       // A slim row (no recording, no lines yet) has no body element to anchor on, so the
       // container line simply closes out the row until an output box appears above it.
       const before = det.querySelector('.cast') || det.querySelector('.output');
@@ -1031,7 +1042,7 @@ function onCastFullscreenChange() {
 document.addEventListener('fullscreenchange', onCastFullscreenChange);
 document.addEventListener('webkitfullscreenchange', onCastFullscreenChange);
 function procHtml(p, isOpen, nowUnix) {
-  const container = p.container_name ? '<div class="container dim">container: ' + esc(p.container_name) + '</div>' : '';
+  const container = p.container_name ? '<div class="container dim">' + containerDetailsHtml(p) + '</div>' : '';
   // Mirrors the server-rendered shape (session.rs): recorded procs embed the player;
   // text-logging procs keep the output box (sticky follow); a proc with neither — an
   // annotate row without a recording, say — stays a slim summary-only row.

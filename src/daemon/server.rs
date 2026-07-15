@@ -985,8 +985,13 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let session_id = field_str(&obj, "session").unwrap_or_default();
       if !session_id.is_empty() {
         if let Some(s) = store.session_mut(&session_id) {
-          orphan_containers =
-            s.procs.iter().filter_map(|p| p.container_name.as_ref().map(|n| (n.clone(), String::new()))).collect();
+          orphan_containers = s
+            .procs
+            .iter()
+            .filter_map(|p| {
+              p.container_name.as_ref().map(|n| (n.clone(), p.container_runtime.clone().unwrap_or_default()))
+            })
+            .collect();
           s.client_connected = false;
           s.last_seen_at = now;
           if s.ended_at.is_none() {
@@ -1065,6 +1070,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           fail_reason: None,
           elapsed: None,
           container_name: None,
+          container_runtime: None,
           cast_path: None,
           diff_path: None,
           skill_source,
@@ -1204,9 +1210,11 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
       let action = field_str(&obj, "action").unwrap_or_default();
       let name = field_str(&obj, "name").unwrap_or_default();
+      let runtime = field_str(&obj, "runtime");
       if let Some(p) = store.proc_mut(&session, proc_index) {
         if action == "start" {
           p.container_name = Some(name);
+          p.container_runtime = runtime;
         } else if action == "stop" {
           p.container_name = None;
         }
@@ -1864,6 +1872,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       elapsed: Some(0.0),
       lines: Vec::new(),
       container_name: None,
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -2463,7 +2472,7 @@ mod tests {
   }
 
   #[test]
-  fn proc_line_updates_session_last_seen_at() {
+  fn proc_events_update_liveness_and_record_container_runtime() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
     {
@@ -2494,6 +2503,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2513,6 +2523,21 @@ mod tests {
     assert!(handle_api_post("/api/v1/proc/line", body, &store, &prune));
     let last = store.lock().unwrap().sessions.get("xyzabc").unwrap().last_seen_at;
     assert!(last > 50);
+
+    let start = r#"{"session":"xyzabc","proc":0,"action":"start","name":"scsh-run","runtime":"container"}"#;
+    assert!(handle_api_post("/api/v1/container", start, &store, &prune));
+    {
+      let guard = store.lock().unwrap();
+      let proc = &guard.sessions.get("xyzabc").unwrap().procs[0];
+      assert_eq!(proc.container_name.as_deref(), Some("scsh-run"));
+      assert_eq!(proc.container_runtime.as_deref(), Some("container"));
+    }
+    let stop = r#"{"session":"xyzabc","proc":0,"action":"stop","name":"scsh-run","runtime":"container"}"#;
+    assert!(handle_api_post("/api/v1/container", stop, &store, &prune));
+    let guard = store.lock().unwrap();
+    let proc = &guard.sessions.get("xyzabc").unwrap().procs[0];
+    assert_eq!(proc.container_name, None);
+    assert_eq!(proc.container_runtime.as_deref(), Some("container"));
   }
 
   #[test]
@@ -2547,6 +2572,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2602,6 +2628,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2677,6 +2704,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2738,6 +2766,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2790,6 +2819,7 @@ mod tests {
       elapsed: None,
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -2890,6 +2920,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -2989,6 +3020,7 @@ mod tests {
       elapsed: None,
       lines: Vec::new(),
       container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+      container_runtime: None,
       cast_path: None,
       diff_path: None,
       skill_source: None,
@@ -3238,6 +3270,7 @@ mod tests {
             elapsed: None,
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: None,
             diff_path: None,
             skill_source: None,
@@ -3343,6 +3376,7 @@ mod tests {
             elapsed: Some(2.0),
             lines: Vec::new(),
             container_name: None,
+            container_runtime: None,
             cast_path: Some(cast_path.to_string_lossy().into_owned()),
             diff_path: None,
             skill_source: None,
@@ -3411,6 +3445,7 @@ mod tests {
       elapsed: Some(2.0),
       lines: Vec::new(),
       container_name: None,
+      container_runtime: None,
       cast_path,
       diff_path: None,
       skill_source: None,
@@ -3719,6 +3754,7 @@ mod tests {
               elapsed: None,
               lines: Vec::new(),
               container_name: None,
+              container_runtime: None,
               cast_path: None,
               diff_path: None,
               skill_source: None,

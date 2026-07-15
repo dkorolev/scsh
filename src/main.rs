@@ -3393,6 +3393,7 @@ fn build_and_run(
         elapsed: Some(o.duration_secs),
         lines: vec![],
         container_name: None,
+        container_runtime: None,
         cast_path: None,
         diff_path: None,
         skill_source: Some(skill.skill_source.clone()),
@@ -3988,7 +3989,7 @@ fn run_one_skill(
   };
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   if let Some(c) = &daemon_client {
-    c.container_event(spinner.index(), "start", &name);
+    c.container_event(spinner.index(), "start", &name, &rt.name);
     // The bind-mounted cast grows on the host while the harness runs; registering it now
     // lets the session browser download/replay the recording mid-run.
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
@@ -4034,7 +4035,7 @@ fn run_one_skill(
   // `stop_container` returns immediately when the named container is already gone.
   ui::signals::stop_container(&rt.name, &name);
   if let Some(c) = &daemon_client {
-    c.container_event(spinner.index(), "stop", &name);
+    c.container_event(spinner.index(), "stop", &name, &rt.name);
   }
   // Run dirs are pruned shortly after the skill ends (on any outcome); keep the recording
   // and logs under $SCSH_HOME (default ~/.scsh) so session export survives throwaway clones.

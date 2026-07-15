@@ -28,7 +28,6 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
     let note_html =
       if finished && looks_like_artifact_path(note) { format!("<code>{}</code>", esc(note)) } else { esc(note) };
-    let container = proc.container_name.as_deref().unwrap_or("");
     // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
     // build fallbacks (no asciinema on PATH) keep the timestamped output (sticky follow).
     // A proc with neither a recording nor a single log line — annotate rows without a
@@ -81,11 +80,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       elapsed = esc(&elapsed),
       note = note_html,
       detail = esc(detail),
-      container_line = if container.is_empty() {
-        String::new()
-      } else {
-        format!("<div class=\"container dim\">container: {c}</div>\n", c = esc(container))
-      },
+      container_line = container_line_html(proc),
       body_html = body_html
     ));
     if let Some(fleets) = fleet_sections.remove(&proc.index) {
@@ -140,6 +135,28 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     procs = procs_html,
   );
   Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), None, &lede, &body))
+}
+
+fn container_runtime_name(runtime: Option<&str>) -> &'static str {
+  match runtime {
+    Some("container") => "Apple Containers",
+    Some("docker") => "Docker",
+    Some("podman") => "Podman",
+    Some(_) => "Other runtime",
+    None => "Not recorded (legacy run)",
+  }
+}
+
+fn container_line_html(proc: &crate::daemon::model::ProcRecord) -> String {
+  let Some(container) = proc.container_name.as_deref() else {
+    return String::new();
+  };
+  format!(
+    "<div class=\"container dim\"><span class=\"container-runtime-label\">runtime</span> \
+<span class=\"container-runtime-name\">{runtime}</span> · container: {container}</div>\n",
+    runtime = container_runtime_name(proc.container_runtime.as_deref()),
+    container = esc(container),
+  )
 }
 
 fn annotation_target_link_html(
