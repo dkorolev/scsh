@@ -1,6 +1,6 @@
 ---
 name: prepare-beautiful-pr
-description: "Run after a feature is built (for example with big-beautiful-build) to get the branch PR-ready. Confirms you are on a clean, non-default branch whose commits sit on top of main (and tells you to run /fast-beautiful-forward first if they do not), thoroughly analyzes the commit structure and OFFERS to factor oversized or mixed commits into several focused ones while keeping the code tree byte-identical, ensures PR-DESCRIPTION.md is the unique last commit, then writes or updates PR-DESCRIPTION.md using a BLUF Summary, What This Changes, and Implementation Details shape (no separate test plan) and commits it as the special PR-notes author Elon Presley. It never pushes and never opens the PR. Use when the user invokes prepare-beautiful-pr, /prepare-beautiful-pr, or asks to shape a branch and write its PR description."
+description: "Run after a feature is built (for example with big-beautiful-build) to get the branch PR-ready. Confirms you are on a clean, non-default branch whose commits sit on top of main (and tells you to run /fast-beautiful-forward first if they do not), thoroughly analyzes the commit structure and OFFERS to factor oversized or mixed commits into several focused ones while keeping the code tree byte-identical, ensures PR-DESCRIPTION.md is the unique last commit, then writes or updates PR-DESCRIPTION.md using only a BLUF Summary, What This Changes, and Implementation Details shape and commits it as the special PR-notes author Elon Presley. It never pushes and never opens the PR. Use when the user invokes prepare-beautiful-pr, /prepare-beautiful-pr, or asks to shape a branch and write its PR description."
 ---
 
 # prepare-beautiful-pr — shape the commits, then write the PR description
@@ -65,7 +65,7 @@ The contract:
   - [Another implementation detail when the change benefits from one.]
   ```
 
-  Write it as a synthesized explanation of what the code does, not as a checklist copied from `git diff`. Start with the user-facing/product or system behavior, then explain how the branch achieves it. Use component/language grouping inside `Implementation Details` when the PR spans large areas such as Python API, Rust, Go, SQL, JavaScript/TypeScript, docs, or infrastructure. Do not include a `Testing`, `Test plan`, or `Validation` section.
+  Write it as a synthesized explanation of what the code does, not as a checklist copied from `git diff`. Start with the user-facing/product or system behavior, then explain how the branch achieves it. Use component/language grouping inside `Implementation Details` when the PR spans large areas such as Python API, Rust, Go, SQL, JavaScript/TypeScript, docs, or infrastructure. The body ends with implementation details; testing stays in the branch and CI.
 
   It must follow cleanly from the commit history and the actual code changes: no contradictions, no surprises. A reader should be able to map every claim back to the commits.
 

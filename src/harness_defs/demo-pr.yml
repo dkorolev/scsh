@@ -29,9 +29,6 @@ task: |
      - Add `PR-DESCRIPTION.md` — this pull-request description (packdiff lifts it into
        the review page's Description panel via the notes-author convention).
 
-     ## Test plan
-     - [x] Open the job page ⇄ commits diff and confirm the Description panel renders.
-
   3. Commit ONLY `demo_pr_note.txt` with message: `demo-pr: add feature note (<TITLE>)`
   4. Commit ONLY `PR-DESCRIPTION.md` with message: `demo-pr: add PR-DESCRIPTION.md`
   5. Write {"ok": true, "title": "<TITLE>", "files": ["demo_pr_note.txt", "PR-DESCRIPTION.md"]}

@@ -1679,6 +1679,17 @@ steps:
   }
 
   #[test]
+  fn builtins_never_generate_pr_checklists() {
+    let forbidden = ["test", "plan"].join(" ");
+    for (name, src) in builtin_defs() {
+      assert!(
+        !src.to_ascii_lowercase().contains(&forbidden),
+        "built-in definition {name} recommends a forbidden PR section"
+      );
+    }
+  }
+
+  #[test]
   fn builtin_fruits_workflow_parses() {
     let f = builtin("fruits");
     assert!(f.is_workflow(), "fruits is a workflow");
