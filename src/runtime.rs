@@ -2341,6 +2341,7 @@ TAG
   fn dockerfile_cursor_stage_points_cursor_home_into_repo_tmp() {
     let df = dockerfile();
     assert!(df.contains("FROM scsh-base AS scsh-cursor"));
+    assert!(df.contains("ARG CURSOR_AGENT_VERSION=2026.07.09-c59fd9a"));
     assert!(df.contains("downloads.cursor.com/lab/"));
     assert!(df.contains("ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent"));
     assert!(df.contains("mv \"$tmp/dist-package\" \"$CURSOR_AGENT_HOME\""));
