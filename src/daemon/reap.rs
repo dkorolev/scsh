@@ -97,15 +97,6 @@ fn list_scsh_run_containers(rt: &str) -> Vec<String> {
     .collect()
 }
 
-/// Stop (TERM, then KILL) and remove one container. docker/podman containers are `--rm`,
-/// so the kill usually suffices and `rm -f` is belt and braces; Apple `container` keeps
-/// stopped containers (and their disk) until an explicit delete.
-fn destroy_container(rt: &str, name: &str) {
-  crate::ui::signals::stop_container(rt, name);
-  let args: &[&str] = if rt == "container" { &["delete", name] } else { &["rm", "-f", name] };
-  let _ = Command::new(rt).args(args).stdout(Stdio::null()).stderr(Stdio::null()).status();
-}
-
 /// One full sweep: list every runtime, subtract the live jobs' claims, destroy what has
 /// stayed unclaimed for [`REAP_AFTER_UNCLAIMED_SWEEPS`] consecutive sweeps, and enqueue
 /// the victims' run dirs for the dir janitor. Returns how many containers were destroyed.
@@ -130,7 +121,7 @@ pub fn reap_pass(
     decide_reaps(&unclaimed, &mut counts)
   };
   for (rt, name) in &victims {
-    destroy_container(rt, name);
+    crate::ui::signals::stop_container(rt, name);
     eprintln!("scsh daemon: reaped orphaned container {name} ({rt})");
   }
   if !victims.is_empty() {

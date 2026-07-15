@@ -3885,6 +3885,10 @@ fn run_one_skill(
     }
     other => other,
   };
+  // `--rm` is the normal path, but verify cleanup eagerly. A killed runtime client can leave a
+  // live container behind, and Apple Container can retain stopped containers and their disk.
+  // `stop_container` returns immediately when the named container is already gone.
+  ui::signals::stop_container(&rt.name, &name);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "stop", &name);
   }
@@ -3916,8 +3920,6 @@ fn run_one_skill(
       }
     }
     Ok((false, ui::screen::Killed::Timeout, _)) => {
-      // Timed out: the client was killed; stop the container too (best effort).
-      ui::signals::stop_container(&rt.name, &name);
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
@@ -3925,9 +3927,8 @@ fn run_one_skill(
       return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir);
     }
     Ok((false, ui::screen::Killed::Inactive, _)) => {
-      // The recorded screen froze past the watchdog limit: same teardown as a timeout,
-      // but its own reason so stats can tell a stuck harness from a slow one.
-      ui::signals::stop_container(&rt.name, &name);
+      // The recorded screen froze past the watchdog limit. Cleanup already ran above; retain
+      // its own reason so stats can tell a stuck harness from a slow one.
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
@@ -4270,8 +4271,12 @@ fn select_transport_workflow_revision(bare: &Path, revision: &str) -> Result<(),
 }
 
 /// Per-run `git daemon` serving `transport.git` (and optionally `pull.git`) from a run dir.
+/// `--detach` is intentional: git's detached master closes every inherited descriptor before
+/// accepting connections. Without it, a connection child can inherit a concurrently running
+/// harness's stdout pipe and keep that harness stuck forever while scsh waits for EOF.
 struct GitTransport {
-  child: std::process::Child,
+  pid: u32,
+  pid_file: PathBuf,
   port: u16,
 }
 
@@ -4279,23 +4284,39 @@ impl GitTransport {
   fn start(run_dir: &Path) -> Result<Self, String> {
     let port = runtime::pick_ephemeral_port()?;
     let base = run_dir.to_string_lossy();
-    let child = Command::new("git")
+    let pid_file = run_dir.join("scsh-git-daemon.pid");
+    let status = Command::new("git")
       .args([
         "daemon",
+        "--detach",
         "--reuseaddr",
         &format!("--base-path={base}"),
         "--export-all",
         "--enable=receive-pack",
         &format!("--port={port}"),
         "--listen=0.0.0.0",
+        "--log-destination=none",
+        &format!("--pid-file={}", pid_file.to_string_lossy()),
       ])
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::null())
-      .spawn()
+      .status()
       .map_err(|e| format!("could not start git daemon: {e}"))?;
-    std::thread::sleep(Duration::from_millis(100));
-    Ok(Self { child, port })
+    if !status.success() {
+      return Err(format!("git daemon exited with {status}"));
+    }
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pid = loop {
+      if let Ok(pid) = std::fs::read_to_string(&pid_file).as_deref().map(str::trim).unwrap_or("").parse::<u32>() {
+        break pid;
+      }
+      if Instant::now() >= deadline {
+        return Err(format!("git daemon did not publish a valid PID to {} within 2s", pid_file.display()));
+      }
+      std::thread::sleep(Duration::from_millis(20));
+    };
+    Ok(Self { pid, pid_file, port })
   }
 
   fn env(&self) -> Vec<(String, String)> {
@@ -4305,8 +4326,9 @@ impl GitTransport {
 
 impl Drop for GitTransport {
   fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    let _ =
+      Command::new("kill").arg("-TERM").arg(self.pid.to_string()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    let _ = std::fs::remove_file(&self.pid_file);
   }
 }
 
