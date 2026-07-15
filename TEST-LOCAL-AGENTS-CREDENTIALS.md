@@ -20,7 +20,7 @@ The four routes (invocation → result file under the repo's gitignored `tmp/`):
 | Route | Harness · model | Result file | Availability |
 | --- | --- | --- | --- |
 | `harness-smoke-creds-claude-opus-4-8` | claude · claude-opus-4-8 | `tmp/harness-smoke-creds-claude-opus-4-8.json` | needs claude auth |
-| `harness-smoke-creds-codex-gpt-5.5` | codex · gpt-5.5 | `tmp/harness-smoke-creds-codex-gpt-5.5.json` | needs codex auth |
+| `harness-smoke-creds-codex-luna` | codex · gpt-5.6-luna | `tmp/harness-smoke-creds-codex-luna.json` | needs codex auth |
 | `harness-smoke-creds-cursor-composer-fast` | cursor · composer-2.5-fast | `tmp/harness-smoke-creds-cursor-composer-fast.json` | needs cursor auth |
 | `harness-smoke-creds-grok-build` | grok · grok-build | `tmp/harness-smoke-creds-grok-build.json` | needs grok auth |
 
@@ -68,7 +68,7 @@ profile.
 
 6. **Casts recorded, chapters annotated.** `ls -t ~/.scsh/sessions/*/casts/harness-smoke-creds-*.cast`
    and, for each fresh cast, check its sidecar: `ls <cast-basename>.chapters.json`
-   (e.g. `~/.scsh/sessions/<session>/casts/harness-smoke-creds-codex-gpt-5.5-<stamp>-utc-<nonce>.chapters.json`).
+   (e.g. `~/.scsh/sessions/<session>/casts/harness-smoke-creds-codex-luna-<stamp>-utc-<nonce>.chapters.json`).
    - **Predict:** one fresh `<route>-<YYYYMMDD-HHMMSS>-utc-<nonce>.cast` per succeeded
      route. **If cursor/Composer is available on the host**, the run's tail printed
      `scsh: annotating N cast(s) with cursor · composer-2.5-fast …` and every fresh cast

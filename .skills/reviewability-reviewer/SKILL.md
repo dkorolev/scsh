@@ -23,7 +23,7 @@ You read the change the way a human reviewer will, and ask one question: can thi
 
 **What you review.** Compare the branch against `origin/main`; the range is `origin/main..HEAD`. Use only those local refs — never fetch or pull to refresh them first. Review **commit by commit**, not the squashed diff — every issue must name the commit a human should amend. Exclude commits authored by the special author **Elon Presley** (`dmitry.korolev+elon-presley@gmail.com`): those are notes (such as `PR-DESCRIPTION.md`), not code under review. Also confirm each commit message and in-code comment matches what the code actually does; a contradiction is itself a finding.
 
-**Output.** scsh sets `$SCSH_RESULT` to this invocation's result path (`{name}` in `.scsh.yml` is expanded per route before the container starts — e.g. `tmp/code-review-reviewability-reviewer-opencode-glm-5.2.json`). When `$SCSH_RESULT` is set, write **only** there; never use the standalone fallback. When invoked alone (no `$SCSH_RESULT`), write to `tmp/code-review-reviewability-reviewer.json`. Output is a single JSON object of this shape:
+**Output.** scsh sets `$SCSH_RESULT` to this invocation's result path (`{name}` in `.scsh.yml` is expanded per route before the container starts — e.g. `tmp/code-review-reviewability-reviewer-cursor-auto.json`). When `$SCSH_RESULT` is set, write **only** there; never use the standalone fallback. When invoked alone (no `$SCSH_RESULT`), write to `tmp/code-review-reviewability-reviewer.json`. Output is a single JSON object of this shape:
 
 ```ts
 type Grade = "excellent" | "good" | "average" | "poor";

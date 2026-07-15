@@ -100,7 +100,7 @@ pub struct StatRecord {
   pub repo: String,
   pub branch: String,
   pub profile: Option<String>,
-  /// Resolved invocation name (e.g. `conventions-reviewer-codex-gpt-5.5`); skill rows only.
+  /// Resolved invocation name (e.g. `conventions-reviewer-codex-terra`); skill rows only.
   pub skill: Option<String>,
   /// The `.skills/<dir>` the invocation ran (e.g. `conventions-reviewer`); skill rows only.
   pub skill_source: Option<String>,
@@ -306,10 +306,10 @@ mod tests {
       repo: "/r".into(),
       branch: "feature".into(),
       profile: Some("code-review".into()),
-      skill: Some("conventions-reviewer-codex-gpt-5.5".into()),
+      skill: Some("conventions-reviewer-codex-terra".into()),
       skill_source: Some("conventions-reviewer".into()),
       harness: Some("codex".into()),
-      model: Some("gpt-5.5".into()),
+      model: Some("gpt-5.6-terra".into()),
       effort: Some("high".into()),
       outcome: Some(outcome.into()),
       fail_reason: (outcome == "fail").then(|| "container_timeout".to_string()),
@@ -351,7 +351,7 @@ mod tests {
   #[test]
   fn route_label_includes_effort_when_set() {
     let rec = sample_skill("ok", 1.0, 0, 0, 1);
-    assert_eq!(rec.route_label(), "codex · gpt-5.5 (high)");
+    assert_eq!(rec.route_label(), "codex · gpt-5.6-terra (high)");
     let plain = StatRecord { harness: Some("claude".into()), model: Some("opus".into()), ..Default::default() };
     assert_eq!(plain.route_label(), "claude · opus");
   }

@@ -25,7 +25,7 @@ invocations:
   claude-sonnet-4-6:
     harness: claude
     model: sonnet
-  codex-gpt-5.5:
+  codex-terra:
     harness: codex
-    model: gpt-5.5
-    effort: low
+    model: gpt-5.6-terra
+    effort: high

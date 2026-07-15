@@ -39,9 +39,9 @@ task: |
 
   Do nothing else.
 invocations:
-  codex-gpt-5.5:
+  codex-luna:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-luna
     commits: true
   claude-sonnet:
     harness: claude

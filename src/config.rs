@@ -371,16 +371,34 @@ pub fn demo_yaml() -> &'static str {
   include_str!("demo.scsh.yml")
 }
 
-/// scsh's own skills, embedded at build time, that `scsh installskills` /
-/// `scsh updateskills` install into a user's repo (as `(repo-relative path, contents)`
-/// pairs). Just the demo/self-test skill — so a no-URL `installskills` gives you a way to
-/// exercise scsh end to end (real skills come from a repo URL; see `install_skills`). These
-/// are distinct from the demo-only example skills in [`demo_skills`].
-pub fn bundled_skills() -> [(&'static str, &'static str); 1] {
-  [(
-    ".skills/scsh-harness-demo-and-selftest/SKILL.md",
-    include_str!("../.skills/scsh-harness-demo-and-selftest/SKILL.md"),
-  )]
+/// `scsh`'s own skills, embedded at build time, that `scsh installskills` and
+/// `scsh updateskills` install into a user's repo as `(repo-relative path, contents)` pairs.
+/// The bundle contains the complete beautiful delivery family, all five reviewer specialties,
+/// and the original harness demo/self-test.
+pub fn bundled_skills() -> [(&'static str, &'static str); 12] {
+  [
+    (".skills/big-beautiful-build/SKILL.md", include_str!("../.skills/big-beautiful-build/SKILL.md")),
+    (".skills/fast-beautiful-forward/SKILL.md", include_str!("../.skills/fast-beautiful-forward/SKILL.md")),
+    (".skills/code-beautiful-review/SKILL.md", include_str!("../.skills/code-beautiful-review/SKILL.md")),
+    (".skills/the-beautiful-loop/SKILL.md", include_str!("../.skills/the-beautiful-loop/SKILL.md")),
+    (".skills/prepare-beautiful-pr/SKILL.md", include_str!("../.skills/prepare-beautiful-pr/SKILL.md")),
+    (".skills/send-beautiful-pr/SKILL.md", include_str!("../.skills/send-beautiful-pr/SKILL.md")),
+    (".skills/conventions-reviewer/SKILL.md", include_str!("../.skills/conventions-reviewer/SKILL.md")),
+    (".skills/justification-reviewer/SKILL.md", include_str!("../.skills/justification-reviewer/SKILL.md")),
+    (".skills/reviewability-reviewer/SKILL.md", include_str!("../.skills/reviewability-reviewer/SKILL.md")),
+    (".skills/sanity-reviewer/SKILL.md", include_str!("../.skills/sanity-reviewer/SKILL.md")),
+    (".skills/testing-reviewer/SKILL.md", include_str!("../.skills/testing-reviewer/SKILL.md")),
+    (
+      ".skills/scsh-harness-demo-and-selftest/SKILL.md",
+      include_str!("../.skills/scsh-harness-demo-and-selftest/SKILL.md"),
+    ),
+  ]
+}
+
+/// Manifest source for bundled skill profiles. Keeping this pointed at the repository's own
+/// `.scsh.yml` makes the embedded install routes identical to the routes used to develop them.
+pub fn bundled_skills_manifest() -> &'static str {
+  include_str!("../.scsh.yml")
 }
 
 /// The example skills `scsh --init-demo-project` scaffolds into the repo, as
@@ -1424,7 +1442,7 @@ mod tests {
     invocations:
       codex:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
       grok:
         harness: grok
         model: grok-build
@@ -1475,24 +1493,24 @@ mod tests {
     let yaml = r#"skills:
   x:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-luna
     result: tmp/x.json
 "#;
     let cfg = validate(yaml).unwrap();
     assert_eq!(cfg.skills[0].harness, Some(Harness::Codex));
-    assert_eq!(cfg.skills[0].model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(cfg.skills[0].model.as_deref(), Some("gpt-5.6-luna"));
     let yaml = r#"skills:
   review:
     result: tmp/review-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-luna:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
 "#;
     let cfg = validate(yaml).unwrap();
     let inv = expand_invocations(&cfg);
     assert_eq!(inv[0].harness, Harness::Codex);
-    assert_eq!(inv[0].name, "review-codex-gpt-5.5");
+    assert_eq!(inv[0].name, "review-codex-luna");
     assert!(Harness::known().contains(&"codex"));
   }
 
@@ -1527,9 +1545,7 @@ mod tests {
     // demo-pr: one commit-enabled route per agent (claude / codex / grok / cursor).
     let demo = cfg.skills.iter().find(|s| s.name == "demo-pr").expect("demo-pr present");
     assert_eq!(demo.invocations.len(), 4);
-    for route in
-      ["demo-pr-claude-sonnet", "demo-pr-codex-gpt-5.5", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"]
-    {
+    for route in ["demo-pr-claude-sonnet", "demo-pr-codex-luna", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"] {
       let inv = expanded.iter().find(|s| s.name == route).unwrap_or_else(|| panic!("missing {route}"));
       assert!(inv.commits, "{route} must be commit-enabled for packdiff");
       assert_eq!(inv.skill_source, "demo-pr");
@@ -1537,14 +1553,44 @@ mod tests {
   }
 
   #[test]
-  fn bundled_skills_ship_the_demo_selftest() {
+  fn bundled_skills_ship_the_beautiful_family_and_reviewers() {
     let skills = bundled_skills();
-    assert_eq!(skills.len(), 1);
-    assert_eq!(skills[0].0, ".skills/scsh-harness-demo-and-selftest/SKILL.md");
-    assert!(
-      skills[0].1.contains("name: scsh-harness-demo-and-selftest"),
-      "the bundled skill should be the demo/self-test"
-    );
+    assert_eq!(skills.len(), 12);
+    for name in [
+      "big-beautiful-build",
+      "fast-beautiful-forward",
+      "code-beautiful-review",
+      "the-beautiful-loop",
+      "prepare-beautiful-pr",
+      "send-beautiful-pr",
+      "conventions-reviewer",
+      "justification-reviewer",
+      "reviewability-reviewer",
+      "sanity-reviewer",
+      "testing-reviewer",
+      "scsh-harness-demo-and-selftest",
+    ] {
+      let expected_path = format!(".skills/{name}/SKILL.md");
+      let (_, body) =
+        skills.iter().find(|(path, _)| *path == expected_path).unwrap_or_else(|| panic!("missing {name}"));
+      assert!(body.contains(&format!("name: {name}")), "wrong body for {name}");
+    }
+    let manifest = validate(bundled_skills_manifest()).expect("bundled manifest should validate");
+    for name in [
+      "big-beautiful-build",
+      "fast-beautiful-forward",
+      "code-beautiful-review",
+      "the-beautiful-loop",
+      "prepare-beautiful-pr",
+      "send-beautiful-pr",
+      "conventions-reviewer",
+      "justification-reviewer",
+      "reviewability-reviewer",
+      "sanity-reviewer",
+      "testing-reviewer",
+    ] {
+      assert!(manifest.skills.iter().any(|skill| skill.name == name), "bundled manifest is missing {name}");
+    }
   }
 
   #[test]
@@ -1926,7 +1972,7 @@ mod tests {
     invocations:
       codex:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
       grok:
         harness: grok
         model: grok-build
@@ -1943,7 +1989,7 @@ mod tests {
     invocations:
       codex:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
       grok:
         harness: grok
         model: grok-build

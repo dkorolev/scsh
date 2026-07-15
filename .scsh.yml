@@ -7,109 +7,118 @@ skills:
     timeout: 1200
     result: tmp/code-review-conventions-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
         effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      grok-build:
-        harness: grok
-        model: grok-build
-        effort: high
+      cursor-auto:
+        harness: cursor
+        model: auto
   justification-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-justification-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
         effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      grok-build:
-        harness: grok
-        model: grok-build
-        effort: high
+      cursor-auto:
+        harness: cursor
+        model: auto
   reviewability-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-reviewability-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
         effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      grok-build:
-        harness: grok
-        model: grok-build
-        effort: high
+      cursor-auto:
+        harness: cursor
+        model: auto
   sanity-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-sanity-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
         effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      grok-build:
-        harness: grok
-        model: grok-build
-        effort: high
+      cursor-auto:
+        harness: cursor
+        model: auto
   testing-reviewer:
     profile: code-review
     timeout: 1200
     result: tmp/code-review-testing-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
         effort: high
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      grok-build:
-        harness: grok
-        model: grok-build
-        effort: high
+      cursor-auto:
+        harness: cursor
+        model: auto
   big-beautiful-build:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-terra
     effort: high
     timeout: 1200
     profile: big-beautiful-build
     result: tmp/big-beautiful-build.md
   fast-beautiful-forward:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-terra
     effort: high
     timeout: 1200
     profile: fast-beautiful-forward
     result: tmp/fast-beautiful-forward.md
   code-beautiful-review:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-terra
     effort: high
     timeout: 1200
     profile: code-beautiful-review
     result: tmp/code-beautiful-review.md
   prepare-beautiful-pr:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-terra
     effort: high
     timeout: 1200
     profile: prepare-beautiful-pr
     result: tmp/prepare-beautiful-pr.md
+  the-beautiful-loop:
+    harness: codex
+    model: gpt-5.6-terra
+    effort: high
+    timeout: 7200
+    profile: the-beautiful-loop
+    result: tmp/the-beautiful-loop.md
+  send-beautiful-pr:
+    harness: codex
+    model: gpt-5.6-terra
+    effort: high
+    timeout: 1200
+    profile: send-beautiful-pr
+    result: tmp/send-beautiful-pr.md
   harness-smoke:
     profile: harness-smoke
     timeout: 600
@@ -118,9 +127,9 @@ skills:
       claude-opus-4-8:
         harness: claude
         model: claude-opus-4-8
-      codex-gpt-5.5:
+      codex-luna:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
         effort: low
       cursor-composer-fast:
         harness: cursor
@@ -133,9 +142,9 @@ skills:
         harness: claude
         model: claude-opus-4-8
         profile: local-agents-credentials
-      creds-codex-gpt-5.5:
+      creds-codex-luna:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
         effort: low
         profile: local-agents-credentials
       creds-cursor-composer-fast:

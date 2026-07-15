@@ -58,9 +58,9 @@ skills:
         harness: claude
         model: sonnet
         commits: true
-      codex-gpt-5.5:
+      codex-luna:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-luna
         commits: true
       grok-build:
         harness: grok
