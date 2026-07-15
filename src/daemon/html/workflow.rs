@@ -823,13 +823,11 @@ fn state_icon(state: WorkflowDisplayState) -> &'static str {
   }
 }
 
-/// Stable task anchor attributes for a proc panel when it maps to a graph node.
-pub(crate) fn proc_task_attrs(session: &Session, proc: &ProcRecord) -> String {
-  let Some(meta) = effective_workflow_meta(session) else {
-    return String::new();
-  };
+/// Stable task id for a proc panel when it maps to a graph node.
+pub(crate) fn proc_task_id(session: &Session, proc: &ProcRecord) -> Option<String> {
+  let meta = effective_workflow_meta(session)?;
   if let Some(node) = meta.nodes.iter().find(|n| n.proc_index == Some(proc.index)) {
-    return format!(r#" id="task-{id}" data-workflow-step="{id}""#, id = esc(&node.id));
+    return Some(node.id.clone());
   }
   // Fallbacks before proc_index binding lands.
   if proc.kind == crate::daemon::model::ProcKind::Build {
@@ -838,15 +836,21 @@ pub(crate) fn proc_task_attrs(session: &Session, proc: &ProcRecord) -> String {
       None => "build_base".into(),
     };
     if meta.nodes.iter().any(|n| n.id == id) {
-      return format!(r#" id="task-{id}" data-workflow-step="{id}""#, id = esc(&id));
+      return Some(id);
     }
   }
   let step = proc.skill_name.as_deref().or(proc.skill_source.as_deref());
-  let Some(step) = step else {
+  let step = step?;
+  if !meta.nodes.iter().any(|n| n.id == step) {
+    return None;
+  }
+  Some(step.to_string())
+}
+
+/// Stable task anchor attributes for a proc panel when it maps to a graph node.
+pub(crate) fn proc_task_attrs(session: &Session, proc: &ProcRecord) -> String {
+  let Some(id) = proc_task_id(session, proc) else {
     return String::new();
   };
-  if !meta.nodes.iter().any(|n| n.id == step) {
-    return String::new();
-  }
-  format!(r#" id="task-{id}" data-workflow-step="{id}""#, id = esc(step))
+  format!(r#" id="task-{id}" data-workflow-step="{id}""#, id = esc(&id))
 }

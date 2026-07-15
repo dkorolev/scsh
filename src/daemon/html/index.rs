@@ -588,7 +588,7 @@ fn index_session_row(session: &Session, now: u64) -> String {
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
-<td>{profile}</td><td class=\"session-procs-cell\"><span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span>{chips}</td><td class=\"dim repo-path\" data-tip=\"{repo}\">{repo}</td></tr>\n",
+<td>{profile}</td><td class=\"session-procs-cell\"><span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span>{chips}</td><td class=\"dim repo-path session-repo-path\"><button type=\"button\" class=\"repo-copy\" data-copy-value=\"{repo}\" data-tip=\"{repo}\" aria-label=\"Copy full repository path\">{repo}</button></td></tr>\n",
     id = id,
     status = status,
     started = started,
@@ -634,10 +634,15 @@ fn harness_chips_html(session: &Session) -> String {
       ProcStatus::Fail => (format!("{base}\nfailed"), String::new()),
       ProcStatus::Skipped => (format!("{base}\nskipped"), String::new()),
     };
+    let fragment = match super::workflow::proc_task_id(session, p) {
+      Some(step) => format!("#task-{}", esc(&step)),
+      None => format!("#proc-{}", p.index),
+    };
     chips.push_str(&format!(
-      "<span class=\"hchip hchip--{h}{done}\" data-tip=\"{tip}\"{running_attr}>{letter}</span>",
+      "<a class=\"hchip hchip--{h}{done}\" href=\"/job/{session_id}{fragment}\" data-tip=\"{tip}\"{running_attr}>{letter}</a>",
       h = esc(h),
       done = if done { " hchip--done" } else { "" },
+      session_id = esc(&session.id),
       tip = esc(&tip),
     ));
   }

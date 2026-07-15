@@ -520,12 +520,14 @@ fn index_page_shows_colored_harness_chips_per_proc() {
   // A running chip's tip is just `harness · skill`; its start time rides in
   // data-tip-running, from which the tip module ticks a live "running for …" line.
   assert!(
-    html.contains(r#"<span class="hchip hchip--claude" data-tip="claude · add" data-tip-running="1">C</span>"#),
+    html.contains(r#"<a class="hchip hchip--claude" href="/job/castab#task-"#)
+      && html.contains(r#"data-tip="claude · add" data-tip-running="1">C</a>"#),
     "got: {html}"
   );
   // A finished chip's tip is two lines: `harness · skill`, then the plain status word.
   assert!(
-    html.contains("<span class=\"hchip hchip--grok hchip--done\" data-tip=\"grok · add\ndone\">G</span>"),
+    html.contains(r#"<a class="hchip hchip--grok hchip--done" href="/job/castab#task-"#)
+      && html.contains("data-tip=\"grok · add\ndone\">G</a>"),
     "got: {html}"
   );
   assert!(!html.contains(r#"class="hchip hchip--codex"#), "build procs must not render a chip");
@@ -535,14 +537,19 @@ fn index_page_shows_colored_harness_chips_per_proc() {
   );
   assert!(html.contains(r#"<span class="chip-overflow">+ 2</span>"#), "only eight harness chips are shown: {html}");
   assert!(
-    html.contains(&format!(r#"class="dim repo-path" data-tip="{full_repo}""#)),
-    "truncated repo path keeps its full, unabridged tooltip: {html}"
+    html.contains(&format!(r#"class="repo-copy" data-copy-value="{full_repo}" data-tip="{full_repo}""#)),
+    "truncated repo path copies and discloses its full, unabridged value: {html}"
   );
   // The stylesheet distinguishes the same letter by harness color, and the client JS
   // mirrors the markup for live re-renders.
   assert!(html.contains(".hchip--claude"));
   assert!(html.contains(".hchip--codex"));
   assert!(html.contains("function harnessChipsHtml"));
+  assert!(html.contains("function procRunHref"), "live chips preserve the same deep links");
+  assert!(html.contains("function syncProcFromLocation"), "flat-job links open their selected run");
+  assert!(html.contains("navigator.clipboard.writeText(value)"), "repo copy uses the Clipboard API");
+  assert!(html.contains("'Copied!'"), "successful copies confirm through the tooltip");
+  assert!(html.contains("if (!copy._scshCopyTimer)"), "live ticks preserve copy confirmation long enough to read");
 }
 
 #[test]
