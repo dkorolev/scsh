@@ -181,7 +181,7 @@ pub struct ProcRecord {
   /// Manifest skill key this invocation came from (`add`, `conventions-reviewer`). Shared
   /// across a matrix fleet so the job page can group routes side-by-side. `None` for builds.
   pub skill_source: Option<String>,
-  /// Matrix route name (`codex-gpt-5.5`); `None` for a direct (non-matrix) skill or builds.
+  /// Matrix route name (`codex-terra`); `None` for a direct (non-matrix) skill or builds.
   pub route: Option<String>,
   /// Durable copy of the skill's result JSON under `$SCSH_HOME/sessions/<id>/results/`.
   pub result_path: Option<String>,
@@ -384,7 +384,18 @@ impl Session {
       if self.has_incomplete_procs() {
         return SessionLifecycle::Cancelled;
       }
-      if self.procs.iter().any(|p| p.status == ProcStatus::Fail) {
+      let failed: Vec<&ProcRecord> = self.procs.iter().filter(|p| p.status == ProcStatus::Fail).collect();
+      let interrupted = !failed.is_empty()
+        && failed.iter().all(|p| {
+          matches!(
+            p.fail_reason.as_deref(),
+            Some(crate::failure::reason::FORCE_STOPPED | crate::failure::reason::SESSION_END_INCOMPLETE)
+          )
+        });
+      if interrupted {
+        return SessionLifecycle::Cancelled;
+      }
+      if !failed.is_empty() {
         return SessionLifecycle::Failed;
       }
       return SessionLifecycle::Completed;

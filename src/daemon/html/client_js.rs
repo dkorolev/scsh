@@ -22,7 +22,11 @@ function sessionHasIncompleteProcs(session) {
 function sessionLifecycle(session, nowUnix) {
   if (session.ended_at) {
     if (sessionHasIncompleteProcs(session)) return { label: 'cancelled', class: 'cancelled' };
-    if ((session.procs || []).some(p => p.status === 'fail')) return { label: 'failed', class: 'failed' };
+    const failed = (session.procs || []).filter(p => p.status === 'fail');
+    const interrupted = failed.length > 0 && failed.every(p =>
+      p.fail_reason === 'force_stopped' || p.fail_reason === 'session_end_before_proc_finish');
+    if (interrupted) return { label: 'cancelled', class: 'cancelled' };
+    if (failed.length) return { label: 'failed', class: 'failed' };
     return { label: 'completed', class: 'completed' };
   }
   const lastSeen = session.last_seen_at || session.started_at || 0;
@@ -156,8 +160,8 @@ function sessionStartedCell(session, nowUnix) {
 // so live re-renders compare equal and the hover survives.
 function harnessChipsHtml(session) {
   let out = '';
-  (session.procs || []).forEach((p) => {
-    if ((p.kind || 'skill') !== 'skill' || !p.harness) return;
+  const procs = (session.procs || []).filter(p => (p.kind || 'skill') === 'skill' && p.harness);
+  procs.slice(0, 8).forEach((p) => {
     const done = (p.status === 'ok' || p.status === 'graceful' || p.status === 'fail' || p.status === 'skipped');
     const skill = p.skill_name || p.label || '';
     const base = p.harness + ' · ' + skill;
@@ -173,6 +177,7 @@ function harnessChipsHtml(session) {
       esc(tip) + '"' + runningAttr + '>' +
       esc(p.harness.charAt(0).toUpperCase()) + '</span>';
   });
+  if (procs.length > 8) out += '<span class="chip-overflow">+ ' + (procs.length - 8) + '</span>';
   return out;
 }
 function chipCountHtml(n) {
@@ -187,9 +192,9 @@ function indexRowHtml(id, session, nowUnix) {
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
-    '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + harnessChipsHtml(session) +
-    chipCountHtml(n) + '</td>' +
-    '<td class="dim repo-path">' + esc(session.repo || '') + '</td></tr>';
+    '<td>' + esc(profile) + '</td><td class="session-procs-cell">' + chipCountHtml(n) +
+    harnessChipsHtml(session) + '</td>' +
+    '<td class="dim repo-path" data-tip="' + esc(session.repo || '') + '">' + esc(session.repo || '') + '</td></tr>';
 }
 function syncIndexRow(row, session, nowUnix) {
   const lifecycle = sessionLifecycle(session, nowUnix);
@@ -201,8 +206,13 @@ function syncIndexRow(row, session, nowUnix) {
   if (durationCell) setTextUnlessSelecting(durationCell, sessionDurationLabel(session, nowUnix, lifecycle));
   const procsCell = row.querySelector('.session-procs-cell');
   if (procsCell) {
-    const next = harnessChipsHtml(session) + chipCountHtml((session.procs || []).length);
+    const next = chipCountHtml((session.procs || []).length) + harnessChipsHtml(session);
     if (procsCell.innerHTML !== next) procsCell.innerHTML = next;
+  }
+  const repoCell = row.querySelector('.repo-path');
+  if (repoCell) {
+    setTextUnlessSelecting(repoCell, session.repo || '');
+    repoCell.setAttribute('data-tip', session.repo || '');
   }
 }
 // A bare repo-relative artifact path (a system pointer like tmp/scsh/<id>/add.json), as
@@ -1129,7 +1139,7 @@ function wfDisplayState(session, node, nowUnix) {
   if (p.status === 'ok') return 'done';
   if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
-    return p.fail_reason === 'force_stopped' ? 'stopped' : 'failed';
+    return (p.fail_reason === 'force_stopped' || p.fail_reason === 'session_end_before_proc_finish') ? 'stopped' : 'failed';
   }
   if (p.status === 'skipped') return 'skipped';
   if (p.status === 'running') return live ? 'running' : 'stalled';
@@ -2807,12 +2817,23 @@ const DEFS_BY_NAME = {};  // name -> definition
     if (m) return normalizeTab(m[1]);
     return null;
   }
+  function syncIndexCrumb(id) {
+    const tail = document.getElementById('index-crumb-tail');
+    const crumb = document.getElementById('index-crumb');
+    if (!tail || !crumb) return;
+    const visible = id !== 'run';
+    tail.hidden = !visible;
+    if (!visible) return;
+    crumb.href = pathForTab(id);
+    crumb.textContent = id;
+  }
   function activate(id, mode) {
     id = normalizeTab(id);
     const t = document.querySelector('.tab[data-tab="' + id + '"]');
     if (!t) id = 'run';
     const active = document.querySelector('.tab[data-tab="' + id + '"]') || tabs[0];
     id = active.dataset.tab;
+    syncIndexCrumb(id);
     document.querySelectorAll('.tab').forEach(x => {
       const on = x === active;
       x.classList.toggle('active', on);

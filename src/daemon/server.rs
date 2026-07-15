@@ -2704,7 +2704,7 @@ mod tests {
       .as_deref()
       .unwrap_or("")
       .contains("session ended before this proc reported finish"));
-    assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Failed);
+    assert_eq!(session.lifecycle_status(session.ended_at.unwrap()), SessionLifecycle::Cancelled);
   }
 
   #[test]
@@ -3739,7 +3739,7 @@ mod tests {
       let s = store.sessions.get("deadpid").expect("reloaded");
       assert!(s.ended_at.is_some(), "dead run_pid must end the session on reload");
       assert!(s.run_pid.is_none(), "run_pid cleared after orphan end");
-      assert_eq!(s.lifecycle_status(now_unix_secs()), SessionLifecycle::Failed);
+      assert_eq!(s.lifecycle_status(now_unix_secs()), SessionLifecycle::Cancelled);
       assert_eq!(s.procs[0].status, ProcStatus::Fail, "a dead owner cannot leave a running/waiting proc behind");
       let mut annotation = s.clone();
       annotation.procs[0].kind = ProcKind::Annotate;

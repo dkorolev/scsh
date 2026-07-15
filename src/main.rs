@@ -1971,8 +1971,13 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
                 plural(count),
                 current_branch(root)
               ));
-              pack_step_diff(root, &session_id, inv, &run, range, daemon_client.as_deref());
               base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+              if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+                pack_job_diff(root, &session_id, from, to);
+              }
+              // The browser reveals its all-commits link when the first step diff is
+              // registered, so make the whole-job artifact current before that event.
+              pack_step_diff(root, &session_id, inv, &run, range, daemon_client.as_deref());
             }
             Ok(Some(Integration::Saved { branch, count, range })) => {
               if let Some((_, tip)) = &range {
@@ -4892,17 +4897,22 @@ fn pack_job_diff(root: &Path, session_id: &str, from: &str, to: &str) {
     return;
   }
   let out = dir.join("job.html");
+  let next = dir.join("job.next.html");
   let title = format!("scsh job {session_id} · all commits");
   let result = Command::new("packdiff")
     .arg(format!("{from}..{to}"))
-    .args(["-C", &root.to_string_lossy(), "-o", &out.to_string_lossy(), "--title", &title, "--json"])
+    .args(["-C", &root.to_string_lossy(), "-o", &next.to_string_lossy(), "--title", &title, "--json"])
     .env("PACKDIFF_SYSTEM_USER_EMAIL", SCSH_COMMIT_EMAIL)
     .stdin(Stdio::null())
     .stdout(Stdio::piped())
     .stderr(Stdio::null())
     .output();
-  if result.is_ok_and(|output| output.status.success() && out.is_file()) {
-    ok(&format!("whole-job commits diff packed — {}", out.display()));
+  if result.is_ok_and(|output| output.status.success() && next.is_file()) {
+    if std::fs::rename(&next, &out).is_ok() {
+      ok(&format!("whole-job commits diff packed — {}", out.display()));
+    }
+  } else {
+    let _ = std::fs::remove_file(next);
   }
 }
 

@@ -377,8 +377,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .workflow-scroll::-webkit-scrollbar { display: none; }
   .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  /* Auto margins center each axis independently, and collapse to zero on an overflowing axis. */
-  .workflow-stage { position: relative; flex: 0 0 auto; min-height: 16rem; margin: auto; }
+  /* Auto margins center each axis independently, and collapse to zero on an overflowing axis.
+     The stage must remain exactly as tall as its graph: a synthetic minimum would center the
+     stage while leaving a small graph visibly above the viewport's vertical midpoint. */
+  .workflow-stage { position: relative; flex: 0 0 auto; margin: auto; }
   .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
   .workflow-zoom button {
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
@@ -596,6 +598,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
   /* single-letter harness chips: same letter, different hue (claude vs codex vs cursor) */
   .session-procs-cell { white-space: nowrap; }
+  .session-procs-cell .chip-count { display: inline-block; min-width: 1.7rem; margin-right: 0.4rem; text-align: right; }
+  .chip-overflow { margin-left: 0.35rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
   #sessions-body td, #sessions-body th { white-space: nowrap; }
   /* Long repo paths keep their TAIL visible (rtl flips the ellipsis to the front). */
   td.repo-path {
@@ -921,14 +925,25 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
 /// The location path shown bold on the LEFT of the top island — `scsh` on the index,
 /// `scsh › jobs › <id>` on a job page. Every segment is a permalink (the id links
 /// to its own job page); the daemon status cluster keeps the island's right side.
-fn crumbs_html(session_id: Option<&str>) -> String {
+fn crumbs_html(session_id: Option<&str>, index_crumb: Option<(&str, &str)>) -> String {
   match session_id {
     Some(id) => format!(
-      "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/\">jobs</a>\
+      "<a href=\"/\">scsh</a><span class=\"crumb-sep\">›</span><a href=\"/jobs\">jobs</a>\
 <span class=\"crumb-sep\">›</span><a class=\"job-id\" href=\"/job/{id}\">{id}</a>",
       id = crate::daemon::html::escape::esc(id)
     ),
-    None => "<a href=\"/\">scsh</a>".to_string(),
+    None => {
+      let (path, label, hidden) = match index_crumb {
+        Some((path, label)) => (path, label, ""),
+        None => ("/", "", " hidden"),
+      };
+      format!(
+        "<a href=\"/\">scsh</a><span id=\"index-crumb-tail\"{hidden}>\
+<span class=\"crumb-sep\">›</span><a id=\"index-crumb\" href=\"{path}\">{label}</a></span>",
+        path = esc(path),
+        label = esc(label)
+      )
+    }
   }
 }
 
@@ -946,7 +961,9 @@ fn scsh_version_html() -> String {
 /// every page (the live dashboard AND the downloaded offline exports) stays request-free.
 pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d1117'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2358a6ff'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
 
-pub(crate) fn wrap_page(title: &str, port: u16, session_id: Option<&str>, lede: &str, body: &str) -> String {
+pub(crate) fn wrap_page(
+  title: &str, port: u16, session_id: Option<&str>, index_crumb: Option<(&str, &str)>, lede: &str, body: &str,
+) -> String {
   let session_js = match session_id {
     Some(id) => format!("const SESSION_ID = {};", quote_js(id)),
     None => "const SESSION_ID = null;".to_string(),
@@ -999,7 +1016,7 @@ const PROJECTS_DIR = {projects_dir};
     live_css = LIVE_ONLY_CSS,
     scsh_version = scsh_version_html(),
     lede = lede_html,
-    crumbs = crumbs_html(session_id),
+    crumbs = crumbs_html(session_id, index_crumb),
     projects_dir = quote_js(&crate::daemon::paths::projects_dir().to_string_lossy()),
     body = body,
     player_js = player_js,
