@@ -3,25 +3,25 @@
 use super::model::{OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
 use crate::json::{parse, quote, Value};
 
-fn sessions_json(map: &std::collections::BTreeMap<String, Session>) -> String {
+fn sessions_json(map: &std::collections::BTreeMap<String, Session>, now: u64) -> String {
   if map.is_empty() {
     return "{}".to_string();
   }
   let mut parts = Vec::new();
   for (id, s) in map {
-    parts.push(format!("{}: {}", quote(id), session_json(s, true)));
+    parts.push(format!("{}: {}", quote(id), session_json(s, true, Some(now))));
   }
   format!("{{ {} }}", parts.join(", "))
 }
 
 pub fn session_json_api(s: &Session) -> String {
   // Live view for HTTP + WebSocket ticks: include the synthesized job graph (builds + skills).
-  session_json(s, true)
+  session_json(s, true, Some(crate::daemon::paths::now_unix_secs()))
 }
 
 /// Persistable session JSON (authored `workflow` only — no synthesized build nodes).
 pub fn session_json_store(s: &Session) -> String {
-  session_json(s, false)
+  session_json(s, false, None)
 }
 
 /// Parse one session from its JSON (the inverse of [`session_json_store`]) — how the daemon's
@@ -51,7 +51,7 @@ fn tick_json_with_sessions(store: &Store, now: u64, include_sessions: bool) -> S
     None => "null".to_string(),
   };
   let sessions_part =
-    if include_sessions { format!(", \"sessions\": {}", sessions_json(&store.sessions)) } else { String::new() };
+    if include_sessions { format!(", \"sessions\": {}", sessions_json(&store.sessions, now)) } else { String::new() };
   format!(
     "{{ \"type\": \"tick\", \"now_secs\": {now}, \"uptime_secs\": {uptime}, \"mode\": {}, \"port\": {}, \
 \"active_clients\": {}, \"alive_clients\": {alive}, \"shutdown_in_secs\": {shutdown_json}, \"scsh_version\": {}, \
@@ -77,7 +77,7 @@ pub fn cast_growth_json(session: &str, proc: usize, duration: f64, running: bool
   )
 }
 
-fn session_json(s: &Session, effective_workflow: bool) -> String {
+fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>) -> String {
   let profile = match &s.profile {
     Some(p) => quote(p),
     None => "null".to_string(),
@@ -125,10 +125,14 @@ fn session_json(s: &Session, effective_workflow: bool) -> String {
     Some(p) => format!(", \"parent_session\": {}", quote(p)),
     None => String::new(),
   };
+  let lifecycle = lifecycle_at.map(|now| {
+    let state = s.lifecycle_status(now);
+    format!(", \"lifecycle\": {}, \"lifecycle_label\": {}", quote(state.css_class()), quote(state.label()))
+  });
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session} }}",
+\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session}{lifecycle} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -139,6 +143,7 @@ fn session_json(s: &Session, effective_workflow: bool) -> String {
     procs.join(", "),
     s.last_seen_at,
     if s.client_connected { "true" } else { "false" },
+    lifecycle = lifecycle.unwrap_or_default(),
   )
 }
 
@@ -479,6 +484,8 @@ mod tests {
     // Live API synthesizes a graph from skills/procs even without authored workflow.
     let live = session_json_api(&session);
     assert!(!live.contains(", \"workflow\":"), "empty session has no effective graph: {live}");
+    assert!(live.contains("\"lifecycle\":"), "live API carries the daemon-authoritative lifecycle: {live}");
+    assert!(!session_json_store(&session).contains("\"lifecycle\":"), "derived lifecycle is not persisted");
     // Missing key entirely (older builds)
     let bare = r#"{ "id": "old", "started_at": 1, "ended_at": null, "profile": null, "kind": null, "repo": "/r", "branch": "main", "skills": [], "procs": [], "last_seen_at": 1, "client_connected": false, "run_pid": null }"#;
     assert!(parse_session_json(bare).unwrap().workflow.is_none());

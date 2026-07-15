@@ -459,12 +459,12 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
 
 #[test]
 fn session_meta_agrees_with_lifecycle_badge() {
-  // WEB-UI §6 / ENG §13: channels must not disagree. A heartbeat-stale zombie must not
-  // say "TERMINATED ABRUPTLY" in the badge and "still running" in Ended.
+  // WEB-UI §6 / ENG §13: channels must not disagree. A job that missed its phase-aware
+  // liveness deadline must not say "failed" in the badge and "still running" in Ended.
   let zombie = store_with_cast_proc(ProcStatus::Running);
   let page = session_page(&zombie, "castab").expect("session renders");
   assert!(
-    page.contains("terminated abruptly") || page.contains("· terminated"),
+    page.contains("· failed"),
     "zombie lifecycle on lede: {page}"
   );
   assert!(!page.contains(r#"class="session-kind""#), "no island status chip: {page}");
@@ -472,10 +472,9 @@ fn session_meta_agrees_with_lifecycle_badge() {
   assert!(page.contains(r#"data-session-ended>"#), "Ended present: {page}");
   assert!(!page.contains(r#"data-session-ended>still running</dd>"#), "Ended must not contradict: {page}");
   assert!(
-    !page.contains(r#"data-session-ended>terminated abruptly</dd>"#),
-    "Ended is a time, badge carries the phrase: {page}"
+    page.contains(r#"data-session-ended>19700101-002001 UTC</dd>"#),
+    "a started job uses the 20-minute idle deadline: {page}"
   );
-  assert!(page.contains(r#"data-session-ended>19700101-000001 UTC</dd>"#), "Ended uses last_seen: {page}");
   // Repo above Branch.
   let repo = page.find("<dt>Repo</dt>").expect("Repo");
   let branch = page.find("<dt>Branch</dt>").expect("Branch");
@@ -1650,9 +1649,12 @@ fn annotation_control_links_to_the_job_and_persists_its_state() {
   assert!(js.contains("#proc-' + Number(meta.annotation_proc"), "the link targets the annotating run");
   assert!(js.contains("annotation-link--' + status"), "running/ok/fail each retain a status class");
   assert!(js.contains("annotation-dots"), "running annotation gets animated dots");
+  assert!(js.contains("SESSION_START_TIMEOUT_SECS = 30"), "startup has one short deadline");
+  assert!(js.contains("SESSION_IDLE_TIMEOUT_SECS = 20 * 60"), "started work gets a 20-minute idle allowance");
+  assert!(js.contains("session.lifecycle && session.lifecycle !== 'running'"), "terminal lifecycle comes from the daemon");
   assert!(
     js.contains("sessionLifecycle(candidate, Date.now() / 1000).class === 'running'"),
-    "a cancelled annotation job cannot retain animated running state"
+    "annotation rendering consumes the shared job lifecycle"
   );
   assert!(js.contains("CHAPTERS_WAIT_SECS"), "the poll window is still bounded");
   assert!(js.contains("renderAnnotationLink(box, meta)"), "a late-registering job links up mid-poll");

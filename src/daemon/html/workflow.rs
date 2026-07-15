@@ -135,7 +135,6 @@ fn job_outcome_html(session: &Session, lifecycle: SessionLifecycle) -> String {
       SessionLifecycle::Completed => "Job succeeded",
       SessionLifecycle::Failed => "Job failed",
       SessionLifecycle::Cancelled => "Job cancelled",
-      SessionLifecycle::Terminated => "Job terminated abruptly",
     }
   };
   format!(

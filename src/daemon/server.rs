@@ -3485,6 +3485,12 @@ mod tests {
     let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
     assert_eq!(status, 200);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
+    // Regression: the old model treated 30 seconds without a session event as a terminal
+    // failure even after the annotation proc had started. Running work gets the 20-minute
+    // idle allowance, so a quiet annotator remains running here.
+    store.lock().unwrap().sessions.get_mut("annjob").unwrap().last_seen_at = now - 31;
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // The match also holds across path spellings: a standalone `scsh annotate-cast` may
     // register a relative argument while the run registered the absolute path — the
     // nonce-stamped file name is the shared key.

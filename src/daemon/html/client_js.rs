@@ -14,12 +14,18 @@ function fmtUptime(secs) {
   const h = Math.floor(secs / 3600);
   return 'up ' + h + 'h ' + (Math.floor((secs % 3600) / 60)) + 'm';
 }
-const SESSION_STALE_SECS = 30;
+const SESSION_START_TIMEOUT_SECS = 30;
+const SESSION_IDLE_TIMEOUT_SECS = 20 * 60;
 function sessionHasIncompleteProcs(session) {
   const procs = session.procs || [];
   return procs.some(p => p.status === 'running' || p.status === 'waiting');
 }
 function sessionLifecycle(session, nowUnix) {
+  // The daemon owns lifecycle. Browser-side derivation exists only for an old persisted
+  // snapshot or the brief server-rendered interval before the first live API snapshot.
+  if (session.lifecycle && session.lifecycle !== 'running') {
+    return { label: session.lifecycle_label || session.lifecycle, class: session.lifecycle };
+  }
   if (session.ended_at) {
     if (sessionHasIncompleteProcs(session)) return { label: 'cancelled', class: 'cancelled' };
     const failed = (session.procs || []).filter(p => p.status === 'fail');
@@ -29,8 +35,15 @@ function sessionLifecycle(session, nowUnix) {
     if (failed.length) return { label: 'failed', class: 'failed' };
     return { label: 'completed', class: 'completed' };
   }
-  const lastSeen = session.last_seen_at || session.started_at || 0;
-  if (nowUnix - lastSeen > SESSION_STALE_SECS) return { label: 'terminated abruptly', class: 'terminated' };
+  const procs = session.procs || [];
+  const started = procs.some(p => p.started_at || p.status !== 'waiting');
+  const deadline = started
+    ? (session.last_seen_at || session.started_at || 0) + SESSION_IDLE_TIMEOUT_SECS
+    : (session.started_at || 0) + SESSION_START_TIMEOUT_SECS;
+  if (nowUnix > deadline) return { label: 'failed', class: 'failed' };
+  if (session.lifecycle === 'running') {
+    return { label: session.lifecycle_label || 'running', class: 'running' };
+  }
   return { label: 'running', class: 'running' };
 }
 function sessionStatus(session) {
@@ -59,8 +72,6 @@ function sessionDurationLabel(session, nowUnix, lifecycle) {
   const start = session.started_at || 0;
   if (session.ended_at && start) return formatDuration(session.ended_at - start);
   if (lifecycle.class === 'running' && start) return formatDuration(nowUnix - start) + ' so far';
-  const lastSeen = session.last_seen_at || start;
-  if (lifecycle.class === 'terminated' && start) return formatDuration(lastSeen - start);
   return '—';
 }
 function sessionStatusBadge(lifecycle) {
@@ -297,16 +308,22 @@ function sessionRunning(session) {
   if (!session.ended_at && procs.length === 0) return true;
   return false;
 }
-// Wall-clock seconds for the job meta — mirrors Session::duration_secs. A terminated
-// (heartbeat-stale) session freezes at last_seen, never keeps ticking as "still running".
+function sessionLivenessDeadline(session) {
+  const procs = session.procs || [];
+  const started = procs.some(p => p.started_at || p.status !== 'waiting');
+  return started
+    ? (session.last_seen_at || session.started_at || 0) + SESSION_IDLE_TIMEOUT_SECS
+    : (session.started_at || 0) + SESSION_START_TIMEOUT_SECS;
+}
+// Wall-clock seconds for the job meta — mirrors Session::duration_secs. A liveness
+// failure freezes at the deadline that actually declared the job failed.
 function sessionDurationSecs(session, nowUnix) {
   const start = session.started_at || 0;
   if (session.ended_at) return Math.max(0, session.ended_at - start);
   const life = sessionLifecycle(session, nowUnix);
   if (life.class === 'running') return Math.max(0, nowUnix - start);
-  if (life.class === 'terminated') {
-    const lastSeen = session.last_seen_at || start;
-    return Math.max(0, lastSeen - start);
+  if (life.class === 'failed' && !session.ended_at) {
+    return Math.max(0, sessionLivenessDeadline(session) - start);
   }
   return 0;
 }
@@ -314,8 +331,7 @@ function sessionEndedLabel(session, nowUnix) {
   if (session.ended_at) return formatUnixTime(session.ended_at);
   const life = sessionLifecycle(session, nowUnix);
   if (life.class === 'running') return 'still running';
-  // Heartbeat-stale: last_seen is the effective end time (badge already says terminated).
-  if (life.class === 'terminated') return formatUnixTime(session.last_seen_at || session.started_at);
+  if (life.class === 'failed') return formatUnixTime(sessionLivenessDeadline(session));
   return '—';
 }
 function renderSessionMeta(session, nowUnix) {
@@ -361,6 +377,8 @@ function initSessionMetaFromDom() {
     started_at: Number(el.dataset.started) || 0,
     ended_at: el.dataset.ended ? Number(el.dataset.ended) : null,
     last_seen_at: Number(el.dataset.lastSeen || el.dataset.started) || 0,
+    lifecycle: el.dataset.lifecycle || null,
+    lifecycle_label: el.dataset.lifecycleLabel || null,
     repo: el.dataset.repo || '',
     branch: el.dataset.branch || '',
     procs: [],
@@ -1062,7 +1080,7 @@ function wfJobOutcome(session, nowUnix) {
   const finalizing = life.class === 'running' && skills.length > 0 && skills.every(terminal);
   const text = finalizing ? 'Finalizing recordings' :
     (({running:'Job running',completed:'Job succeeded',failed:'Job failed',
-      cancelled:'Job cancelled',terminated:'Job terminated abruptly'})[life.class] || ('Job ' + life.label));
+      cancelled:'Job cancelled'})[life.class] || ('Job ' + life.label));
   return { className: life.class, text };
 }
 function wfJobOutcomeHtml(session, nowUnix) {

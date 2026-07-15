@@ -137,7 +137,7 @@ pub fn reap_pass(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session};
+  use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, SESSION_IDLE_TIMEOUT_SECS};
 
   fn session_with_container(id: &str, container: &str, last_seen: u64) -> Session {
     Session {
@@ -181,13 +181,15 @@ mod tests {
 
   #[test]
   fn live_sessions_claim_their_containers_zombies_do_not() {
-    let now = 1_000;
+    let now = 2_000;
     let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
     store.sessions.insert("live".into(), session_with_container("live", "scsh-live-run-add", now));
-    store.sessions.insert("dead".into(), session_with_container("dead", "scsh-dead-run-add", now - 600));
+    store
+      .sessions
+      .insert("dead".into(), session_with_container("dead", "scsh-dead-run-add", now - SESSION_IDLE_TIMEOUT_SECS - 1));
     let claimed = claimed_containers(&store, now);
     assert!(claimed.contains("scsh-live-run-add"), "a pinging session's container is protected");
-    assert!(!claimed.contains("scsh-dead-run-add"), "a Terminated zombie claims nothing");
+    assert!(!claimed.contains("scsh-dead-run-add"), "a job past its running-idle deadline claims nothing");
   }
 
   #[test]
