@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 16] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 17] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -36,6 +36,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 16] {
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
     ("demo-loop-break", include_str!("harness_defs/demo-loop-break.yml")),
     ("demo-beautiful-loop", include_str!("harness_defs/demo-beautiful-loop.yml")),
+    ("big-beautiful-build", include_str!("harness_defs/big-beautiful-build.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
     ("smoke-pr-grok", include_str!("harness_defs/smoke-pr-grok.yml")),
@@ -71,6 +72,8 @@ impl DefSource {
 pub enum ParamType {
   /// Free text (rendered as a text input).
   String,
+  /// Free-form, non-empty prose (rendered as a multiline text area).
+  Text,
   /// An integer (rendered as a number input; validated with `i64::parse`).
   Int,
   /// `true`/`false` (rendered as a checkbox).
@@ -124,6 +127,7 @@ impl ParamType {
   fn parse(s: &str) -> Option<ParamType> {
     match s {
       "string" => Some(ParamType::String),
+      "text" => Some(ParamType::Text),
       "int" => Some(ParamType::Int),
       "bool" => Some(ParamType::Bool),
       "enum" => Some(ParamType::Enum),
@@ -135,6 +139,7 @@ impl ParamType {
   pub fn as_str(self) -> &'static str {
     match self {
       ParamType::String => "string",
+      ParamType::Text => "text",
       ParamType::Int => "int",
       ParamType::Bool => "bool",
       ParamType::Enum => "enum",
@@ -183,6 +188,10 @@ impl Param {
   pub fn validate_value(&self, value: &str) -> Result<(), String> {
     match self.ty {
       ParamType::String => Ok(()),
+      ParamType::Text if self.required && value.trim().is_empty() => {
+        Err(format!("param '{}' must not be empty", self.name))
+      }
+      ParamType::Text => Ok(()),
       ParamType::Int => value
         .trim()
         .parse::<i64>()
@@ -299,6 +308,30 @@ pub struct StepAgent {
   pub effort: Option<String>,
 }
 
+/// The authored work for a workflow step. Inline prompts suit small jobs; a bundled skill keeps
+/// a substantial reusable contract in its canonical `.skills/<name>/SKILL.md` source.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepTask {
+  /// Prose written directly in the harness definition's `prompt:` block.
+  Prompt(String),
+  /// A named skill from [`config::bundled_skills`], resolved while the definition is parsed.
+  BundledSkill {
+    /// Stable skill name shown in the definition and errors.
+    name: String,
+    /// Canonical embedded `SKILL.md` body delivered to the agent.
+    body: String,
+  },
+}
+
+impl StepTask {
+  /// The exact prose delivered before `scsh` appends the workflow I/O contract.
+  pub fn body(&self) -> &str {
+    match self {
+      StepTask::Prompt(body) | StepTask::BundledSkill { body, .. } => body,
+    }
+  }
+}
+
 /// One node in a workflow DAG. A step is a context-free unit: it receives its `inputs` as
 /// named environment variables and writes its `output` fields to `$SCSH_RESULT` — it knows
 /// nothing about the graph, other steps, or its own position (scsh resolves all of that).
@@ -308,8 +341,8 @@ pub struct Step {
   pub id: String,
   /// The agent that runs this step.
   pub agent: StepAgent,
-  /// The task prompt (intent only; scsh appends the I/O contract from `inputs`/`outputs`).
-  pub prompt: String,
+  /// The task prompt or canonical bundled skill; scsh appends the I/O contract.
+  pub task: StepTask,
   /// Input bindings: each names an env var the step sees and where its value comes from.
   pub inputs: Vec<InputBinding>,
   /// The typed result fields this step must produce (validated against `$SCSH_RESULT`).
@@ -428,7 +461,7 @@ impl Step {
   /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]), not
   /// as a synthetic `SKILL.md`.
   pub fn render_skill_body(&self) -> String {
-    let mut s = self.prompt.trim_end().to_string();
+    let mut s = self.task.body().trim_end().to_string();
     s.push_str("\n\n## Inputs\n\n");
     if self.inputs.is_empty() {
       s.push_str("This step takes no inputs.\n");
@@ -700,7 +733,7 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
 }
 
 /// Validate the `steps:` block map (keyed by step id) into a DAG: each step has an agent, a
-/// prompt, and typed `output` fields; `inputs`/`when` references resolve to a declared param or
+/// prompt or bundled skill, and typed `output` fields; `inputs`/`when` references resolve to a declared param or
 /// an upstream step's output field; `needs` names other steps; and the graph is acyclic. The
 /// minimal YAML reader has no flow collections, so `steps:` is a block map (not a sequence),
 /// `needs:` is a comma-separated scalar, and `when:` is a plain block map (AND of its entries).
@@ -743,18 +776,30 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
         errors.push(format!("duplicate key 'steps.{id}.{k}'"));
       }
     }
-    const SK: &[&str] =
-      &["agent", "prompt", "inputs", "output", "when", "needs", "artifacts", "commits", "repeat", "do-while", "break"];
+    const SK: &[&str] = &[
+      "agent",
+      "prompt",
+      "skill",
+      "inputs",
+      "output",
+      "when",
+      "needs",
+      "artifacts",
+      "commits",
+      "repeat",
+      "do-while",
+      "break",
+    ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, inputs, output, when, needs, artifacts, commits, repeat, do-while, break)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break)"
         ));
       }
     }
 
     let agent = validate_step_agent(id, fm.get("agent").copied(), errors);
-    let prompt = required_scalar(fm.get("prompt").copied(), &format!("steps.{id}.prompt"), errors);
+    let task = validate_step_task(id, fm.get("prompt").copied(), fm.get("skill").copied(), errors);
     let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
     let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
     let when = validate_step_cond_block(id, "when", fm.get("when").copied(), errors);
@@ -829,11 +874,11 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
       }
     };
 
-    if let (Some(agent), Some(prompt)) = (agent, prompt) {
+    if let (Some(agent), Some(task)) = (agent, task) {
       steps.push(Step {
         id: id.to_string(),
         agent,
-        prompt,
+        task,
         inputs,
         outputs,
         when,
@@ -849,6 +894,43 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
 
   validate_step_graph(&steps, params, errors);
   steps
+}
+
+/// Resolve exactly one of a step's `prompt:` or `skill:` declarations. Bundled skill lookup is
+/// deliberately strict: a typo fails definition discovery instead of becoming an agent prompt
+/// that only fails after an expensive container starts.
+fn validate_step_task(
+  id: &str, prompt: Option<&Node>, skill: Option<&Node>, errors: &mut Vec<String>,
+) -> Option<StepTask> {
+  match (prompt, skill) {
+    (Some(_), Some(_)) => {
+      errors.push(format!("step '{id}' must declare exactly one of 'prompt' or 'skill', not both"));
+      None
+    }
+    (None, None) => {
+      errors.push(format!("step '{id}' is missing required key 'prompt' or 'skill'"));
+      None
+    }
+    (Some(node), None) => required_scalar(Some(node), &format!("steps.{id}.prompt"), errors).map(StepTask::Prompt),
+    (None, Some(Node::Scalar(name))) if !name.trim().is_empty() => {
+      let name = name.trim();
+      match config::bundled_skill_body(name) {
+        Some(body) => Some(StepTask::BundledSkill { name: name.to_string(), body: body.to_string() }),
+        None => {
+          errors.push(format!("'steps.{id}.skill' names '{name}', which is not a bundled skill"));
+          None
+        }
+      }
+    }
+    (None, Some(Node::Scalar(_))) => {
+      errors.push(format!("'steps.{id}.skill' must not be empty"));
+      None
+    }
+    (None, Some(Node::Map(_))) => {
+      errors.push(format!("'steps.{id}.skill' must be a bundled skill name"));
+      None
+    }
+  }
 }
 
 /// Validate a step's `agent:` block into a [`StepAgent`] (harness required; model/effort optional).
@@ -1278,7 +1360,7 @@ fn validate_params(entries: &[(String, Node)], errors: &mut Vec<String>) -> Vec<
       Some(Node::Scalar(s)) => match ParamType::parse(s.trim()) {
         Some(t) => t,
         None => {
-          errors.push(format!("'params.{name}.type' is '{}', not one of: string, int, bool, enum", s.trim()));
+          errors.push(format!("'params.{name}.type' is '{}', not one of: string, text, int, bool, enum", s.trim()));
           ParamType::String
         }
       },
@@ -1448,10 +1530,10 @@ mod tests {
       assert!(coder.commits);
     }
     for heading in ["## Summary", "## What This Changes", "## Implementation Details"] {
-      assert!(prepare.prompt.contains(heading), "prepare pins {heading}");
-      assert!(fix.prompt.contains(heading), "fix preserves {heading}");
+      assert!(prepare.task.body().contains(heading), "prepare pins {heading}");
+      assert!(fix.task.body().contains(heading), "fix preserves {heading}");
     }
-    assert!(fix.prompt.contains("required demo artifact"));
+    assert!(fix.task.body().contains("required demo artifact"));
 
     let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
     let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
@@ -1491,23 +1573,23 @@ mod tests {
       assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
       assert!(r.outputs.iter().any(|o| o.name == "comments" && o.ty == OutputType::StringList));
       assert!(!r.outputs.iter().any(|o| o.name == "comment_count"));
-      let prompt_words = r.prompt.split_whitespace().collect::<Vec<_>>().join(" ");
+      let prompt_words = r.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
       assert!(
         prompt_words.contains("`grade` as a string") && prompt_words.contains("`comments` as an array"),
         "{} must state the distinct grade and comments types without ambiguity",
         r.id
       );
       assert!(
-        r.prompt.contains("Never request, recommend, or create any")
-          && r.prompt.contains("additional PR-description section"),
+        r.task.body().contains("Never request, recommend, or create any")
+          && r.task.body().contains("additional PR-description section"),
         "{} must enforce the PR-description policy at the reviewer boundary",
         r.id
       );
       if r.id.contains("testing") {
-        assert!(r.prompt.contains("PR-DESCRIPTION.md is") && r.prompt.contains("change narrative only"));
+        assert!(r.task.body().contains("PR-DESCRIPTION.md is") && r.task.body().contains("change narrative only"));
       }
       if r.id.contains("reviewability") {
-        assert!(r.prompt.contains("required demo artifact"));
+        assert!(r.task.body().contains("required demo artifact"));
       }
     }
     for prefix in ["initial", "review"] {
@@ -1533,7 +1615,7 @@ mod tests {
     assert!(collect.outputs.iter().any(|o| o.name == "feedback"));
     for boundary in [prepare, decide, fix, collect] {
       assert!(
-        boundary.prompt.contains("additional") && boundary.prompt.contains("PR-description section"),
+        boundary.task.body().contains("additional") && boundary.task.body().contains("PR-description section"),
         "{} must preserve the PR-description invariant",
         boundary.id
       );
@@ -1770,6 +1852,38 @@ steps:
     assert_eq!(doctor.invocations.len(), 5);
     let doc_agents: std::collections::BTreeSet<&str> = doctor.invocations.iter().map(|r| r.harness.as_str()).collect();
     assert_eq!(doc_agents, ["claude", "codex", "cursor", "grok", "opencode"].into_iter().collect());
+
+    let build = builtin("big-beautiful-build");
+    assert!(build.is_workflow());
+    assert_eq!(build.params.len(), 1);
+    assert_eq!(build.params[0].name, "FEATURE");
+    assert_eq!(build.params[0].ty, ParamType::Text);
+    assert!(build.params[0].required);
+    let step = &build.steps[0];
+    assert_eq!(step.agent.harness, crate::config::Harness::Cursor);
+    assert_eq!(step.agent.model.as_deref(), Some("auto"));
+    assert!(step.commits);
+    assert_eq!(step.artifacts, ["big-beautiful-build.md"]);
+    match &step.task {
+      StepTask::BundledSkill { name, body } => {
+        assert_eq!(name, "big-beautiful-build");
+        assert_eq!(body, crate::config::bundled_skill_body(name).expect("canonical bundled body"));
+      }
+      StepTask::Prompt(_) => panic!("the built-in must execute the canonical skill, not a copied prompt"),
+    }
+    assert!(step.render_skill_body().contains("FEATURE"));
+    assert!(step.render_skill_body().contains("big-beautiful-build.md"));
+  }
+
+  #[test]
+  fn workflow_step_requires_exactly_one_valid_task_source() {
+    let both = "description: x\nsteps:\n  s:\n    agent:\n      harness: cursor\n    prompt: go\n    skill: big-beautiful-build\n    output:\n      ok:\n        type: bool\n";
+    let err = validate("t", both, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("exactly one of 'prompt' or 'skill'")), "{err:?}");
+
+    let unknown = "description: x\nsteps:\n  s:\n    agent:\n      harness: cursor\n    skill: typo\n    output:\n      ok:\n        type: bool\n";
+    let err = validate("t", unknown, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("not a bundled skill")), "{err:?}");
   }
 
   #[test]
@@ -1927,6 +2041,17 @@ steps:
     };
     assert!(choice.validate_value("a").is_ok());
     assert!(choice.validate_value("c").is_err());
+
+    let text = Param {
+      name: "FEATURE".into(),
+      ty: ParamType::Text,
+      default: None,
+      required: true,
+      description: None,
+      choices: vec![],
+    };
+    assert!(text.validate_value("first line\nsecond line").is_ok());
+    assert!(text.validate_value(" \n ").is_err());
   }
 
   #[test]

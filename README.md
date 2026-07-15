@@ -209,6 +209,8 @@ per directory. Here the word "harness" means the runnable definition; the CLI it
 (claude/codex/opencode/…) is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and
 [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
 
+The built-in `big-beautiful-build` workflow is the browser's complete feature factory: open an existing clean repository or create a new project, paste the full feature brief into its multiline form, and start the job. Cursor Auto executes the canonical bundled `big-beautiful-build` skill, commits working code, a runnable demo, documentation, and verification. The job page preserves the structured result and commits diff; the full report is copied into the repository's job scratch directory. No terminal is required to start or follow the build; see [`DEMO-BIG-BEAUTIFUL-BUILD.md`](DEMO-BIG-BEAUTIFUL-BUILD.md).
+
 **Installing skills.** With no arguments, `scsh installskills` installs the complete beautiful delivery family, all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/`. See [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md) for the code-first review-loop demo. Give the command one or more **git URLs** when you want to install another repository's skills instead (installed in order, as if you ran the command once per repo):
 
 ```sh

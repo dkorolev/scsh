@@ -144,18 +144,19 @@ pub(crate) const PAGE_CSS: &str = r#"
   .input-wrap:focus-within { background: var(--purple); }
   .input-wrap:focus-within::before { background: rgba(137,87,229,0.4); }
   .input, .input-wrap .input, #repo-path, .param-row input[type=text],
-  .param-row input[type=number], .param-row select {
+  .param-row input[type=number], .param-row select, .param-row textarea {
     display: block; width: 100%; padding: 10px 16px;
     font-size: 0.95rem; font-family: inherit; color: var(--text);
     background: transparent; border: none; outline: none;
     position: relative; z-index: 1;
   }
   .input::placeholder, #repo-path::placeholder { color: var(--text-muted); }
-  .param-row input[type=text], .param-row input[type=number], .param-row select {
+  .param-row input[type=text], .param-row input[type=number], .param-row select, .param-row textarea {
     background: rgba(255,255,255,0.06); border: 1px solid var(--border);
     border-radius: 4px; padding: 6px 10px; flex: 1 1 16rem; min-width: 16rem; max-width: 100%;
   }
-  .param-row input:focus, .param-row select:focus { border-color: var(--purple); outline: none; }
+  .param-row textarea { min-height: 12rem; resize: vertical; line-height: 1.45; }
+  .param-row input:focus, .param-row select:focus, .param-row textarea:focus { border-color: var(--purple); outline: none; }
 
   /* ── badges / status ── */
   .badge, .session-status, .agent-badge {
@@ -316,6 +317,9 @@ pub(crate) const PAGE_CSS: &str = r#"
     margin-bottom: 0.5rem; font-size: 0.85rem;
   }
   .param-row label { min-width: 6rem; font-weight: 600; }
+  .param-row--text { align-items: flex-start; }
+  .param-row--text label { flex: 0 0 100%; }
+  .param-row--text textarea { flex-basis: 100%; min-width: 0; }
   .param-req { color: var(--red); }
   ul.skills { margin: 0.5rem 0 1rem; padding-left: 1.25rem; font-size: 0.9rem; }
 

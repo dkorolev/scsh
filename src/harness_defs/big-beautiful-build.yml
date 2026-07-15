@@ -1,0 +1,28 @@
+# Built-in Web UI feature factory. The form supplies the skill's sole intake answer; the
+# canonical bundled skill body owns the delivery contract, so this definition does not copy it.
+description: "Build a complete feature from one brief with Cursor — code, demo, docs, and passing tests."
+params:
+  FEATURE:
+    type: text
+    description: "Describe the complete feature, its behavior, boundaries, acceptance criteria, and constraints. This is the only intake question."
+steps:
+  build:
+    agent:
+      harness: cursor
+      model: auto
+    skill: big-beautiful-build
+    inputs:
+      FEATURE: params.FEATURE
+    output:
+      summary:
+        type: string
+      files:
+        type: string_list
+      commands:
+        type: string_list
+      verification:
+        type: string_list
+      assumptions:
+        type: string_list
+    artifacts: big-beautiful-build.md
+    commits: true

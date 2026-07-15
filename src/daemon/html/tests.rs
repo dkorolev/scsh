@@ -657,6 +657,9 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(!js.contains("SESSION_ID && liveSessions[SESSION_ID]"), "no bare liveSessions[SESSION_ID] without null check");
   assert!(js.contains("const live = life === 'running'"), "Ready only while the job is live");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
+  assert!(js.contains("p.type === 'text'"), "multiline definition params render distinctly");
+  assert!(js.contains("<textarea"), "feature briefs use a text area rather than a one-line input");
+  assert!(js.contains("missing.name + ' is required'"), "empty required prose is rejected before start");
   assert!(js.contains("function initTabs"), "client js wires the tabs");
   assert!(js.contains("function syncIndexCrumb"), "tab navigation keeps the top-island crumb in sync");
   assert!(js.contains("tail.hidden = !visible"), "tab navigation retains rather than recreates crumb nodes");

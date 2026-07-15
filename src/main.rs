@@ -8190,7 +8190,7 @@ Subject: [PATCH] add: 2 + 3 = 5
     let step = harness_def::Step {
       id: "summarize".into(),
       agent: harness_def::StepAgent { harness: config::Harness::Grok, model: Some("grok-4.5".into()), effort: None },
-      prompt: "p".into(),
+      task: harness_def::StepTask::Prompt("p".into()),
       inputs: Vec::new(),
       outputs: Vec::new(),
       when: None,

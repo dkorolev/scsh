@@ -3819,7 +3819,11 @@ mod tests {
     assert_eq!(status, 200, "got: {out}");
     assert!(mutated);
     assert!(out.contains("\"ok\":true") && out.contains("\"clean\":true"), "got: {out}");
-    assert!(out.contains("doctor") && out.contains("add") && out.contains("research"), "built-ins listed; got: {out}");
+    assert!(
+      out.contains("doctor") && out.contains("add") && out.contains("research") && out.contains("big-beautiful-build"),
+      "built-ins listed; got: {out}"
+    );
+    assert!(out.contains(r#""name":"FEATURE","type":"text""#), "multiline feature intake is typed; got: {out}");
     // The repo is remembered as open.
     assert_eq!(store.lock().unwrap().open_repos.len(), 1);
     std::fs::remove_dir_all(&dir).ok();
@@ -3875,6 +3879,19 @@ mod tests {
     let (status, out, mutated) = jobs_start_response(&body, &store);
     assert_eq!(status, 400, "got: {out}");
     assert!(!mutated && out.contains("CITY"), "got: {out}");
+    assert!(store.lock().unwrap().sessions.is_empty(), "nothing spawned");
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_rejects_an_empty_feature_brief() {
+    let dir = clean_repo("empty-feature");
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"repo":{},"def":"big-beautiful-build","params":{{"FEATURE":"  \n "}}}}"#, quote(&repo));
+    let (status, out, mutated) = jobs_start_response(&body, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(!mutated && out.contains("FEATURE") && out.contains("must not be empty"), "got: {out}");
     assert!(store.lock().unwrap().sessions.is_empty(), "nothing spawned");
     std::fs::remove_dir_all(&dir).ok();
   }

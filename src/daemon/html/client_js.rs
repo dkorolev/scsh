@@ -3073,11 +3073,15 @@ function selectDef(name) {
     } else if (p.type === 'enum') {
       input = '<select id="' + id + '">' + (p.choices || []).map(c =>
         '<option' + (c === p.default ? ' selected' : '') + '>' + esc(c) + '</option>').join('') + '</select>';
+    } else if (p.type === 'text') {
+      input = '<textarea id="' + id + '" rows="12"' + (p.required ? ' required' : '') +
+        ' placeholder="Describe the complete feature…">' + esc(p.default || '') + '</textarea>';
     } else {
       const t = p.type === 'int' ? 'number' : 'text';
       input = '<input type="' + t + '" id="' + id + '" value="' + esc(p.default || '') + '">';
     }
-    return '<div class="param-row"><label for="' + id + '">' + esc(p.name) +
+    const rowClass = p.type === 'text' ? 'param-row param-row--text' : 'param-row';
+    return '<div class="' + rowClass + '"><label for="' + id + '">' + esc(p.name) +
       (p.required ? ' <span class="param-req">*</span>' : '') + '</label> ' + input +
       (p.description ? ' <span class="dim">' + esc(p.description) + '</span>' : '') + '</div>';
   }).join('');
@@ -3111,6 +3115,16 @@ function startJob(name) {
   const note = document.getElementById('def-note');
   if (!def || !OPEN_REPO) return;
   if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
+  const missing = (def.params || []).find(p => {
+    const el = document.getElementById('param-' + p.name);
+    return p.type === 'text' && p.required && el && !el.value.trim();
+  });
+  if (missing) {
+    const el = document.getElementById('param-' + missing.name);
+    if (note) note.textContent = missing.name + ' is required';
+    if (el) { el.focus(); el.reportValidity(); }
+    return;
+  }
   const req = { repo: OPEN_REPO, def: name, params: collectParams(def) };
   if (note) note.textContent = 'starting…';
   fetch('/api/v1/jobs/start', {
