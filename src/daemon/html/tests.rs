@@ -2602,6 +2602,11 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("data-wf-expand"), "graph has a large-view control");
   assert!(js.contains("let workflowExpanded = false"), "large view survives dynamic graph remounts");
   assert!(js.contains("aria-modal"), "large graph view exposes modal semantics");
+  assert!(js.contains("current.contains(ev.target)"), "clicks inside the large graph keep it open");
+  assert!(
+    js.contains("current.__scshApplyWorkflowExpanded(false, false)"),
+    "a click on the modal backdrop closes the large graph without stealing focus"
+  );
   assert!(js.contains("ev.key !== 'Escape'"), "Escape closes the large graph view");
   assert!(js.contains("ev.key === 'Tab'"), "keyboard focus stays inside the large graph view");
   assert_eq!(

@@ -1823,6 +1823,10 @@ function initWorkflowGraph() {
     scroller.scrollLeft = 0;
     scroller.scrollTop = 0;
   };
+  // Global modal handlers must always act on the current graph node. Live job updates preserve
+  // this card when possible, but a late graph mount can still introduce it after page load.
+  // Expose the closure on the node instead of capturing a stale element in a document listener.
+  root.__scshApplyWorkflowExpanded = applyExpanded;
   applyZoom(workflowZoom);
   zoomOut?.addEventListener('click', () => applyZoom(workflowZoom - 0.1));
   root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(workflowZoom + 0.1));
@@ -1840,6 +1844,14 @@ function initWorkflowGraph() {
   }
   if (!window.__scshWfExpandBound) {
     window.__scshWfExpandBound = true;
+    document.addEventListener('click', ev => {
+      if (!workflowExpanded) return;
+      const current = document.querySelector('[data-workflow-graph]');
+      // The body's fixed ::before layer is the visual backdrop. A click landing anywhere outside
+      // the inset card expresses dismissal; clicks on the graph, controls, or nodes stay inside.
+      if (!current || current.contains(ev.target)) return;
+      if (current.__scshApplyWorkflowExpanded) current.__scshApplyWorkflowExpanded(false, false);
+    });
     document.addEventListener('keydown', ev => {
       if (!workflowExpanded) return;
       const current = document.querySelector('[data-workflow-graph]');
