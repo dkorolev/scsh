@@ -85,9 +85,9 @@ pub enum ProcStatus {
   Waiting,
   Running,
   Ok,
-  /// The harness produced a valid result and exited zero, but its container runtime lost the
-  /// outer shell response during teardown. Successful for dependency and job outcomes; orange
-  /// in the UI so the infrastructure wrinkle remains visible.
+  /// The harness produced a valid durable result, but its own exit or its container teardown was
+  /// unreliable. Successful for dependency and job outcomes; orange in the UI so the
+  /// infrastructure wrinkle remains visible.
   Graceful,
   Fail,
   /// Decided but never run — a workflow step gated off (or downstream of a skipped step).

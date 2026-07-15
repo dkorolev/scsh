@@ -1137,7 +1137,7 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
     lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
   } else if (state === 'terminating') lines.push('Terminating — stop requested');
   else if (state === 'done') lines.push('Succeeded');
-  else if (state === 'graceful') lines.push('Graceful shutdown — valid result and inner exit 0');
+  else if (state === 'graceful') lines.push('Graceful shutdown — valid result survived a teardown issue');
   else if (state === 'failed') lines.push('Failed');
   else if (state === 'stopped') lines.push('Stopped from the session browser');
   else if (state === 'skipped') lines.push('Skipped');

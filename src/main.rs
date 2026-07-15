@@ -3610,8 +3610,8 @@ struct SkillRun {
   /// Typed workflow fields validated before this run's proc became terminal. `None` for flat
   /// skills, which have no workflow result contract.
   workflow_outputs: Option<std::collections::HashMap<String, String>>,
-  /// The harness completed successfully, but Apple Container lost the outer shell response
-  /// during teardown. This remains an `ok` outcome while rendering orange in the UI.
+  /// The durable task result passed, but the harness or container did not finish cleanly. This
+  /// remains an `ok` outcome while rendering orange so teardown trouble stays visible.
   graceful_shutdown: bool,
 }
 
@@ -3732,6 +3732,23 @@ fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool)
   }
   git_capture(&run_dir.join(runtime::PULL_BARE), &["for-each-ref", "--format=%(refname)", "refs/heads"])
     .is_some_and(|refs| !refs.trim().is_empty())
+}
+
+/// Whether an inactivity-stopped harness crossed its durable result boundary first.
+///
+/// Beyond confirming the stop reason, this intentionally asks only "is the declared file
+/// present?" It does *not* pronounce the task successful. The common result path below still
+/// copies the file, parses the workflow schema when one exists, rejects missing/extra/wrongly
+/// typed fields, and performs the bounded schema-correction retry. Keeping those checks in one
+/// place is important: an unreliable TUI exit must not bypass the task's data contract, while a
+/// reliable data contract must not be discarded merely because the TUI failed to close after
+/// writing it.
+///
+/// The ordering is safe because the inactivity watchdog has already stopped the container when
+/// this is called. The file is therefore no longer being written. A partial file can be present,
+/// but it will fail the same downstream parsing/schema validation as any other malformed result.
+fn inactive_harness_result_is_recoverable(killed: ui::screen::Killed, run_dir: &Path, result_rel: &str) -> bool {
+  killed == ui::screen::Killed::Inactive && run_dir.join(result_rel).is_file()
 }
 
 /// Apple Container can lose the outer `container run` response while leaving the container
@@ -3977,7 +3994,13 @@ fn run_one_skill(
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
   let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch));
-  let mut graceful_shutdown = false;
+  // A terminal harness process and a completed task are related, but they are not identical.
+  // The declared result file is the durable task boundary. Some interactive CLIs finish the
+  // requested work, write that result, and then wedge or return a misleading status while their
+  // TUI is closing. In those cases the result still goes through the normal validation path and,
+  // if valid, the proc is successful-but-orange (`graceful`) rather than failed-red. Retain the
+  // infrastructure wrinkle as a reason string so the UI remains honest about what happened.
+  let mut graceful_shutdown_reason: Option<&'static str> = None;
   let result = match result {
     Ok((false, ui::screen::Killed::No, last))
       if rt.name == "container" && apple_container_lost_shell_response(last.as_deref()) =>
@@ -3986,11 +4009,23 @@ fn run_one_skill(
         .map(|limit| limit.saturating_sub(run_started.elapsed()))
         .unwrap_or_else(|| Duration::from_secs(inactivity_secs));
       if wait_for_inner_harness_result(&run_dir, &skill.result, skill.commits, recovery_limit) {
-        graceful_shutdown = true;
+        graceful_shutdown_reason =
+          Some("accepted the valid result and inner exit 0 after Apple Container lost its shell response");
         Ok((true, ui::screen::Killed::No, last))
       } else {
         Ok((false, ui::screen::Killed::No, last))
       }
+    }
+    Ok((false, killed, last)) if inactive_harness_result_is_recoverable(killed, &run_dir, &skill.result) => {
+      // The inactivity watchdog kills a screen that has shown no novel content for its full
+      // allowance. That proves the *process* is stalled; it does not erase work already committed
+      // to the declared output file. Treat the stopped process as a teardown defect and let the
+      // normal collector + schema validator below decide whether the task result is acceptable.
+      // If collection or validation fails, the proc still fails (or receives its one schema
+      // correction attempt). Only a result that survives those checks becomes graceful success.
+      graceful_shutdown_reason =
+        Some("accepted the valid result after the inactivity watchdog stopped a stalled harness exit");
+      Ok((true, killed, last))
     }
     other => other,
   };
@@ -4129,16 +4164,14 @@ fn run_one_skill(
           c.proc_result(spinner.index(), &path);
         }
       }
-      if graceful_shutdown {
-        let detail = format!(
-          "{headline}\n\nGraceful shutdown: accepted the valid result and inner exit 0 after Apple Container lost its shell response."
-        );
+      if let Some(reason) = graceful_shutdown_reason {
+        let detail = format!("{headline}\n\nGraceful shutdown: {reason}.");
         spinner.finish_graceful(Some(&detail));
       } else {
         spinner.finish_ok(Some(headline));
       }
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, true);
-      if graceful_shutdown {
+      if graceful_shutdown_reason.is_some() {
         SkillRun::graceful(log, clone_dir, Some(content), workflow_outputs)
       } else {
         SkillRun::ok(log, clone_dir, Some(content), workflow_outputs)
@@ -7398,6 +7431,22 @@ mod tests {
     assert!(inner_harness_result_is_good(&dir, "tmp/scsh/job/result.json", false));
     std::fs::write(dir.join(format!("{}.exit", runtime::RUN_LOG_REL)), "1\n").unwrap();
     assert!(!inner_harness_result_is_good(&dir, "tmp/scsh/job/result.json", false));
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn inactive_harness_with_a_result_rejoins_the_normal_validation_path() {
+    let dir = std::env::temp_dir().join(format!("scsh-inactive-result-{}", runtime::random_nonce_6()));
+    let result = "tmp/scsh/job/result.json";
+    std::fs::create_dir_all(dir.join("tmp/scsh/job")).unwrap();
+
+    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::Inactive, &dir, result));
+    // Even a malformed file crosses the durable-output boundary here: this helper must not
+    // duplicate or weaken the workflow schema validator that runs after collection.
+    std::fs::write(dir.join(result), "not valid JSON yet").unwrap();
+    assert!(inactive_harness_result_is_recoverable(ui::screen::Killed::Inactive, &dir, result));
+    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::Timeout, &dir, result));
+    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::No, &dir, result));
     let _ = std::fs::remove_dir_all(dir);
   }
 

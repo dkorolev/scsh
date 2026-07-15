@@ -453,8 +453,8 @@ impl Proc {
     self.finish(Status::Ok, detail, None);
   }
 
-  /// Finish orange: the harness result and inner exit status are good, but the container
-  /// framework lost its outer shell response while shutting down.
+  /// Finish orange: the durable result is valid, but the harness or container did not complete
+  /// its teardown cleanly. Dependencies may proceed; the infrastructure wrinkle stays visible.
   pub fn finish_graceful(&self, detail: Option<&str>) {
     self.finish(Status::Graceful, detail, None);
   }

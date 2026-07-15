@@ -760,7 +760,7 @@ fn node_tip(
     }
     WorkflowDisplayState::Terminating => lines.push("Terminating — stop requested".into()),
     WorkflowDisplayState::Done => lines.push("Succeeded".into()),
-    WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result and inner exit 0".into()),
+    WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result survived a teardown issue".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
     WorkflowDisplayState::ForceStopped => lines.push("Stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
