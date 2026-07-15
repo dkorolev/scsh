@@ -2642,7 +2642,7 @@ TAG
   fn harness_command_builds_codex_invocation() {
     let cmd = harness_command(
       Harness::Codex,
-      Some("gpt-5.5"),
+      Some("gpt-5.6-luna"),
       None,
       "add",
       "tmp/add_codex_result.json",
@@ -2655,7 +2655,7 @@ TAG
     assert!(cmd.contains("scsh-tui-record 200 50 slash-quit none tmp/add_codex_result.json "), "got: {cmd}");
     assert!(cmd.contains("codex --dangerously-bypass-approvals-and-sandbox"), "got: {cmd}");
     assert!(!cmd.contains("codex exec"), "got: {cmd}");
-    assert!(cmd.contains(" -m gpt-5.5"));
+    assert!(cmd.contains(" -m gpt-5.6-luna"));
     assert!(!cmd.contains("config.toml"), "got: {cmd}");
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(cmd.contains(".skills/add/SKILL.md"));
@@ -2775,7 +2775,7 @@ TAG
   fn harness_command_codex_passes_reasoning_effort() {
     let cmd = harness_command(
       Harness::Codex,
-      Some("gpt-5.5"),
+      Some("gpt-5.6-terra"),
       Some("xhigh"),
       "add",
       "tmp/add.json",
@@ -2785,7 +2785,7 @@ TAG
     assert!(cmd.contains(" -c model_reasoning_effort=xhigh"));
     let without = harness_command(
       Harness::Codex,
-      Some("gpt-5.5"),
+      Some("gpt-5.6-terra"),
       None,
       "add",
       "tmp/add.json",

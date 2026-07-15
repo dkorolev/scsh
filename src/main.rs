@@ -101,11 +101,11 @@ fn run(args: &[String]) -> i32 {
 
 /// The Codex model annotation uses, overridable via `SCSH_ANNOTATE_MODEL`.
 fn annotate_model() -> String {
-  std::env::var("SCSH_ANNOTATE_MODEL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "gpt-5.4-mini".into())
+  std::env::var("SCSH_ANNOTATE_MODEL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "gpt-5.6-luna".into())
 }
 
 /// `annotate-cast <cast>…`: write a `{summary, chapters}` sidecar next to each cast using
-/// Codex on the fast GPT-5.4 Mini route. Human output (progress, notes) goes to stderr; with
+/// Codex on the lightweight Luna route. Human output (progress, notes) goes to stderr; with
 /// `--json` (or when stdout is not a TTY) the sidecar paths are emitted as JSON on stdout,
 /// and errors as a single-key `{"Error": …}` object (§2).
 ///
@@ -893,7 +893,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         None
       }
       // `annotate-cast <cast>…`: summarize each recording and detect chapters with
-      // Codex on GPT-5.4 Mini, writing a `<cast>.chapters.json` sidecar.
+      // Codex on Luna, writing a `<cast>.chapters.json` sidecar.
       "annotate-cast" | "annotate-casts" => Some(Mode::AnnotateCasts),
       // `export-cast <cast>… [-o <file>]`: render each recording (+ its chapters sidecar)
       // into one self-contained offline HTML player page next to it.
@@ -5994,14 +5994,11 @@ fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
   if installed == 0 && updated == 0 && already == 0 && differing.is_empty() && links.is_empty() {
     ok("skills already installed; nothing to do");
   }
-  // With no URL, all you get is scsh's bundled demo/self-test skill — point users at a real
-  // skills repo for anything else.
+  // The no-URL install is self-contained: it includes the beautiful family, its reviewer
+  // fleet, and the original harness demo/self-test.
   if sources.is_empty() {
-    hint("that's scsh's bundled demo/self-test — run /scsh-harness-demo-and-selftest to exercise scsh end to end");
-    hint(&format!(
-      "for real skills, point me at a repo, e.g. {}",
-      bold("scsh installskills https://github.com/dkorolev/beautiful-skills")
-    ));
+    hint("installed the beautiful delivery family and all five code-review specialties");
+    hint("run /scsh-harness-demo-and-selftest for the basic harness demo, or `scsh run --def demo-beautiful-loop` for the review loop");
   }
   0
 }
@@ -6012,7 +6009,58 @@ fn install_bundled(root: &Path, overwrite: bool) -> InstallCounts {
   for (rel, body) in config::bundled_skills() {
     write_one(&root.join(rel), body.as_bytes(), rel, overwrite, &mut c);
   }
+  merge_bundled_manifest(root);
   c
+}
+
+/// Merge the bundled skills' profile blocks into a consumer manifest without replacing any
+/// existing key. The embedded repository manifest is the route source of truth; skills without
+/// a block (the harness demo/self-test) remain host-invoked skills only.
+fn merge_bundled_manifest(root: &Path) {
+  let source = config::bundled_skills_manifest();
+  let local_path = root.join(".scsh.yml");
+  let local_text = std::fs::read_to_string(&local_path).unwrap_or_default();
+  let existing: std::collections::BTreeSet<String> = config::validate(&local_text)
+    .map(|cfg| cfg.skills.into_iter().map(|skill| skill.name).collect())
+    .unwrap_or_default();
+  let mut append = String::new();
+  let mut added = Vec::new();
+  let mut conflicts = Vec::new();
+  for (rel, _) in config::bundled_skills() {
+    let Some(name) = Path::new(rel).parent().and_then(Path::file_name).and_then(|name| name.to_str()) else {
+      continue;
+    };
+    let Some(block) = config::extract_skill_block(source, name) else { continue };
+    if existing.contains(name) {
+      conflicts.push(name.to_string());
+    } else {
+      append.push_str(&block);
+      added.push(name.to_string());
+    }
+  }
+  for name in &conflicts {
+    hint(&format!("kept your existing '{name}' entry in .scsh.yml (conflicts with bundled manifest)"));
+  }
+  if append.is_empty() {
+    return;
+  }
+  let merged = if local_text.trim().is_empty() {
+    format!("{CONSUMER_MANIFEST_HEADER}{append}")
+  } else {
+    let mut text = local_text;
+    if !text.ends_with('\n') {
+      text.push('\n');
+    }
+    text.push_str(&append);
+    text
+  };
+  if config::validate(&merged).is_ok() && write_file(&local_path, merged.as_bytes()) {
+    ok(&format!("added {} bundled skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
+  } else {
+    hint(
+      "installed the bundled skill files, but merging their profiles would make .scsh.yml invalid — left it unchanged",
+    );
+  }
 }
 
 /// Header for a `.scsh.yml` that `installskills` creates from scratch in a consumer repo
@@ -6637,9 +6685,9 @@ fn print_help_command(name: &str) {
       "summarize + chapter recordings",
       "scsh annotate-cast <cast…> [--json]",
       &[
-        ("<cast…>", "One or more .cast files to annotate via Codex on GPT-5.4 Mini."),
+        ("<cast…>", "One or more .cast files to annotate via Codex on Luna."),
         ("--json", "Emit the written sidecar paths as JSON; on by default when stdout is not a TTY."),
-        ("SCSH_ANNOTATE_MODEL", "Override the model (default gpt-5.4-mini)."),
+        ("SCSH_ANNOTATE_MODEL", "Override the model (default gpt-5.6-luna)."),
       ],
     ),
     "export-cast" => (
@@ -6712,7 +6760,7 @@ fn print_help_overview() {
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
-  help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / GPT-5.4 Mini (--json).");
+  help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / Luna (--json).");
   help_row("export-cast <cast…>", "Render recordings to self-contained offline HTML pages (-o, --json).");
   help_row("version", "Print the version (with the build's git hash).");
   help_row("help [topic]", "Show this help, or one of the topics below.");
@@ -7401,10 +7449,11 @@ mod tests {
     let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
     let c = cli(&["stats"]).unwrap();
     assert!(matches!(c.mode, Mode::Stats));
-    let c = cli(&["stats", "--skill", "conventions-reviewer", "--harness", "codex", "--model", "gpt-5.5"]).unwrap();
+    let c =
+      cli(&["stats", "--skill", "conventions-reviewer", "--harness", "codex", "--model", "gpt-5.6-terra"]).unwrap();
     assert_eq!(c.failures.skill.as_deref(), Some("conventions-reviewer"));
     assert_eq!(c.failures.harness.as_deref(), Some("codex"));
-    assert_eq!(c.failures.model.as_deref(), Some("gpt-5.5"));
+    assert_eq!(c.failures.model.as_deref(), Some("gpt-5.6-terra"));
     let c = cli(&["stats", "--profile", "code-review", "--raw", "--last", "10"]).unwrap();
     assert_eq!(c.profile.as_deref(), Some("code-review"));
     assert!(c.failures.raw);

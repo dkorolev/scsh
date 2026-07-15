@@ -142,7 +142,7 @@ session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fru
 
 ## 10. (Optional) The three-harness bundle, with a file artifact
 
-`arith` is the built-in cross-harness demo: **claude** (sonnet) adds A+B, **codex** (gpt-5.5)
+`arith` is the built-in cross-harness demo: **claude** (sonnet) adds A+B, **codex** (Luna)
 multiplies X×Y in parallel, and **grok** (grok-4.5) folds both results into one plain-English
 paragraph. Needs all three CLIs logged in on the host.
 

@@ -1,5 +1,5 @@
 //! Cast annotation: turn an asciicast recording into a one-sentence summary and a handful
-//! of timestamped chapters, using Codex on the fast GPT-5.4 Mini route.
+//! of timestamped chapters, using Codex on the lightweight Luna route.
 //!
 //! Flow: render the asciicast NDJSON to a compact timestamped transcript, hand it to
 //! Codex (prefer host tmux + asciinema so the annotate proc has a visual cast;
@@ -829,7 +829,7 @@ mod tests {
 
   #[test]
   fn recorded_annotation_emits_a_quiet_work_heartbeat() {
-    let command = recorded_agent_command("gpt-5.4-mini", "summarize");
+    let command = recorded_agent_command("gpt-5.6-luna", "summarize");
     assert!(command.contains("scsh: annotation in progress"), "{command}");
     assert!(command.contains("sleep 10"), "heartbeat stays well inside the daemon's 30s stale window: {command}");
     assert!(command.contains("wait \"$child\""), "heartbeat wrapper preserves the Codex exit status: {command}");

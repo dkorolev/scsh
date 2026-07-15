@@ -209,16 +209,12 @@ per directory. Here the word "harness" means the runnable definition; the CLI it
 (claude/codex/opencode/…) is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and
 [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
 
-**Installing skills.** With no arguments, `scsh installskills` drops scsh's one bundled skill —
-`scsh-harness-demo-and-selftest`, a demo-and-self-test you run with `/scsh-harness-demo-and-selftest`
-— into your repo's `.skills/`, and points you at a real skills repo for anything else. Give it one
-or more **git URLs** to install the skills those repos ship (installed in order, as if you ran the
-command once per repo):
+**Installing skills.** With no arguments, `scsh installskills` installs the complete beautiful delivery family, all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/`. See [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md) for the code-first review-loop demo. Give the command one or more **git URLs** when you want to install another repository's skills instead (installed in order, as if you ran the command once per repo):
 
 ```sh
 scsh installskills https://github.com/dkorolev/beautiful-skills
 # several at once — installed in order, landing as one reviewable diff:
-scsh installskills https://github.com/dkorolev/beautiful-skills https://github.com/dimacurrentai/code-review-skills
+scsh installskills https://github.com/dkorolev/beautiful-skills https://github.com/dkorolev/code-review-skills
 ```
 
 Like a real run, `installskills`/`updateskills` insist on a **clean working tree** (so the install
@@ -422,7 +418,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
 | `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` | off | `1` skips forwarding that harness's host credentials into containers. |
-| `SCSH_ANNOTATE_MODEL` | Composer | Model `scsh annotate-cast` drives via cursor-agent. |
+| `SCSH_ANNOTATE_MODEL` | `gpt-5.6-luna` | Model `scsh annotate-cast` drives via Codex. |
 | `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |
 | `SCSH_HARNESS_HOME` | `~/.harness` | User-level harness-definition directory. |
 | `SCSH_BIN` | self | Path to the scsh binary the daemon re-execs (tests/packaging override). |

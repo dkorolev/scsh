@@ -150,7 +150,7 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   injected by `scsh`), and `multiply` multiplies `X`·`Y` with **no defaults** —
   it lives in the `multiply` profile and `scsh` refuses it if either `X` or `Y`
   is unset. `scsh-harness-demo-and-selftest` is the agent-followed walkthrough of
-  [`DEMO.md`](DEMO.md), and is the one skill `scsh installskills` bundles.
+  [`DEMO.md`](DEMO.md). A no-URL `scsh installskills` bundles it together with the complete beautiful delivery family and the five-specialty code-review fleet documented in [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md).
 
 - **Prefer a shipped script over harness-authored code.** When a skill needs a
   deterministic computation or a fixed multi-step operation, write a small script (e.g.

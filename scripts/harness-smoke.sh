@@ -45,7 +45,7 @@ echo ""
 echo "=== validate result JSON ==="
 present=0
 fail=0
-for route in claude-opus-4-8 codex-gpt-5.5 cursor-composer-fast; do
+for route in claude-opus-4-8 codex-luna cursor-composer-fast; do
   file="tmp/harness-smoke-${route}.json"
   [ -f "$file" ] || continue
   present=$((present + 1))

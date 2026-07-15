@@ -38,7 +38,7 @@ steps:
   multiply:
     agent:
       harness: codex
-      model: gpt-5.5
+      model: gpt-5.6-luna
     inputs:
       X: params.X
       Y: params.Y

@@ -1,6 +1,6 @@
 ---
 name: testing-reviewer
-description: "Reviews whether changed behavior is covered by either unit tests or a human-followable manual-test document, and whether the PR description tells the reviewer how to run the manual tests (check out the branch, have the agent follow steps in a named directory). Also checks that any test tooling tears itself down and does not leak resources. Does NOT require unit tests for everything. Use this whenever assessing test coverage, test instructions, or test cleanup for a branch, even if the user just says \"is this tested?\""
+description: "Reviews whether changed behavior is covered by either unit tests or a committed, human-followable verification document. Also checks that any verification tooling tears itself down and does not leak resources. Does NOT require unit tests for everything and does not add testing material to pull request descriptions. Use this whenever assessing test coverage, verification instructions, or test cleanup for a branch, even if the user just says \"is this tested?\""
 ---
 
 # Testing Reviewer
@@ -54,19 +54,15 @@ For each behavior change, it must be covered by at least one of:
 
 1. **Unit tests** — automated tests exercising the changed behavior.
 
-2. **A human-followable manual-test description** — a document the reviewer (or an agent on their behalf) can execute step by step.
+2. **A committed, human-followable verification document** — instructions the reviewer (or an agent on their behalf) can execute step by step.
 
-For mechanism 2: **assume the manual test passes.** Do not run manual-test steps, unit tests, or any repo command yourself — not even to "sanity check". Trust the human author and the human reviewer. Your job is to confirm the description exists and is followable, not to execute it.
+For mechanism 2: **assume the documented verification passes.** Do not run its steps, unit tests, or any repo command yourself — not even to "sanity check". Trust the human author and the human reviewer. Your job is to confirm the document exists and is followable, not to execute it.
 
 A behavior change covered by **neither** mechanism is a finding.
 
 ## Test tooling must not leak resources
 
 If the change introduces any way to run tests — a script, or a textual description for a human or an agent to follow — that method must not leak anything to the system. Whatever it spins up must be torn down: Docker containers stopped and removed, volumes removed, and any temp files, processes, or networks cleaned up afterward. A test method that can leave containers, volumes, or processes behind on a developer or CI machine is a finding (resource leak), even when the test itself passes. If teardown is missing, say where it should go.
-
-## PR description requirement
-
-When mechanism 2 is used, `PR-DESCRIPTION.md` must tell the reviewer how to run it — typically: check out this branch and have the agent follow the steps in a named directory. If a change relies on a manual test but `PR-DESCRIPTION.md` gives no such instruction, that omission is a finding. `PR-DESCRIPTION.md` is Elon Presley's (`dmitry.korolev+elon-presley@gmail.com`) note, not code.
 
 ## Correctness and logic
 
@@ -76,7 +72,7 @@ You check that behavior is *verifiable*; you also check that it is *correct*. Wh
 
 - **Terseness: high.** Coverage findings are near-mechanical: "behavior in `X` has neither a unit test nor a referenced manual-test doc."
 
-- **Anchoring:** the changed symbol/file where practical; the offending test script/file for a leak; `PR-DESCRIPTION.md` (`line` 0) for a missing-instruction finding.
+- **Anchoring:** the changed symbol/file where practical, or the offending verification script/document for a coverage or resource-leak finding.
 
 - **Grading:** coverage gaps are fairly uniform; let the count drive the grade. A test method that leaks resources is a heavier finding than a plain coverage gap.
 

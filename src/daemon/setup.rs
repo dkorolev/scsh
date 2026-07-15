@@ -26,7 +26,9 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
     Harness::Claude => {
       &[CatalogModel { id: "claude-opus-4-8", kind: "primary" }, CatalogModel { id: "sonnet", kind: "builtin" }]
     }
-    Harness::Codex => &[CatalogModel { id: "gpt-5.5", kind: "primary" }],
+    Harness::Codex => {
+      &[CatalogModel { id: "gpt-5.6-luna", kind: "primary" }, CatalogModel { id: "gpt-5.6-terra", kind: "builtin" }]
+    }
     Harness::Grok => &[
       // UK/Europe: grok-build is unavailable; composer is the reachable smoke model.
       CatalogModel { id: "grok-composer-2.5-fast", kind: "primary" },
@@ -248,7 +250,7 @@ mod tests {
     let expected = [
       (Harness::Opencode, "openai/gpt-5.5"),
       (Harness::Claude, "claude-opus-4-8"),
-      (Harness::Codex, "gpt-5.5"),
+      (Harness::Codex, "gpt-5.6-luna"),
       (Harness::Grok, "grok-composer-2.5-fast"),
       (Harness::Cursor, "composer-2.5-fast"),
     ];
@@ -285,7 +287,7 @@ mod tests {
   fn parse_setup_tests_accepts_a_batch() {
     use crate::json::{parse, Value};
     let Value::Object(obj) = parse(
-      r#"{"tests":[{"harness":"claude","model":"sonnet"},{"harness":"codex","model":"gpt-5.5","effort":"low"}]}"#,
+      r#"{"tests":[{"harness":"claude","model":"sonnet"},{"harness":"codex","model":"gpt-5.6-luna","effort":"low"}]}"#,
     )
     .unwrap() else {
       panic!("object");

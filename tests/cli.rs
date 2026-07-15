@@ -231,16 +231,35 @@ fn installskills_installs_skill_and_symlinks() {
   git_init(&d);
   let r = scsh(&d, &["installskills"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
-  let p = d.join(".skills/scsh-harness-demo-and-selftest/SKILL.md");
-  assert!(p.is_file(), "the bundled skill should be installed");
-  assert!(std::fs::read_to_string(&p).unwrap().contains("name: scsh-harness-demo-and-selftest"));
-  // With no URL, scsh nudges toward a real skills repo.
-  assert!(r.out.contains("beautiful-skills"), "no-URL install should suggest a repo; got: {}", r.out);
+  for name in [
+    "big-beautiful-build",
+    "fast-beautiful-forward",
+    "code-beautiful-review",
+    "the-beautiful-loop",
+    "prepare-beautiful-pr",
+    "send-beautiful-pr",
+    "conventions-reviewer",
+    "justification-reviewer",
+    "reviewability-reviewer",
+    "sanity-reviewer",
+    "testing-reviewer",
+    "scsh-harness-demo-and-selftest",
+  ] {
+    let p = d.join(format!(".skills/{name}/SKILL.md"));
+    assert!(p.is_file(), "the bundled {name} skill should be installed; got: {}", r.out);
+    assert!(std::fs::read_to_string(&p).unwrap().contains(&format!("name: {name}")));
+  }
+  let manifest = std::fs::read_to_string(d.join(".scsh.yml")).expect("bundled profiles should be installed");
+  assert!(manifest.contains("  the-beautiful-loop:") && manifest.contains("  send-beautiful-pr:"), "got: {manifest}");
+  assert_eq!(manifest.matches("      codex-terra:").count(), 5, "one Terra route per reviewer; got: {manifest}");
+  assert_eq!(manifest.matches("      claude-opus-4-8:").count(), 5, "one Opus route per reviewer; got: {manifest}");
+  assert_eq!(manifest.matches("      cursor-auto:").count(), 5, "one Cursor route per reviewer; got: {manifest}");
+  assert!(r.out.contains("beautiful delivery family"), "no-URL install should explain the bundle; got: {}", r.out);
   // The five harness discovery dirs are symlinks resolving to the skill.
   for host in [".claude/skills", ".codex/skills", ".cursor/skills", ".opencode/skills", ".agents/skills"] {
     let link = d.join(host);
     assert!(link.symlink_metadata().expect("symlink meta").file_type().is_symlink(), "{host} should be a symlink");
-    assert!(link.join("scsh-harness-demo-and-selftest/SKILL.md").is_file(), "{host} should resolve to the skill");
+    assert!(link.join("the-beautiful-loop/SKILL.md").is_file(), "{host} should resolve to the skills");
   }
 }
 
@@ -593,7 +612,7 @@ fn list_json_is_machine_readable() {
   // The reserved `default` (add + subtract + demo-pr) and the declared `multiply`.
   assert!(
     r.out.contains(
-      r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "subtract-opencode-gpt-5.4-mini-fast", "demo-pr-claude-sonnet", "demo-pr-codex-gpt-5.5", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"] }"#
+      r#"{ "name": "default", "skills": ["add-opencode-gpt-5.4-mini-fast", "add-claude-sonnet-4-6", "subtract-opencode-gpt-5.4-mini-fast", "demo-pr-claude-sonnet", "demo-pr-codex-luna", "demo-pr-grok-build", "demo-pr-cursor-composer-fast"] }"#
     ),
     "got: {}",
     r.out
@@ -655,7 +674,7 @@ fn harness_smoke_profile_in_tool_repo() {
   let j = scsh(&root, &["list", "--json"]);
   assert_eq!(j.code, 0, "got: {}", j.out);
   assert!(j.out.contains("harness-smoke-claude-opus-4-8"), "got: {}", j.out);
-  assert!(j.out.contains("harness-smoke-codex-gpt-5.5"), "got: {}", j.out);
+  assert!(j.out.contains("harness-smoke-codex-luna"), "got: {}", j.out);
   assert!(j.out.contains("harness-smoke-cursor-composer-fast"), "got: {}", j.out);
 }
 
@@ -1353,9 +1372,9 @@ fn override_yml_check_profile_uses_external_config() {
     timeout: 60
     result: tmp/code-review-conventions-reviewer-{name}.json
     invocations:
-      codex-gpt-5.5:
+      codex-terra:
         harness: codex
-        model: gpt-5.5
+        model: gpt-5.6-terra
 "#,
   )
   .unwrap();

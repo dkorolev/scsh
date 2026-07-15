@@ -17,9 +17,9 @@ invocations:
   claude-opus-4-8:
     harness: claude
     model: claude-opus-4-8
-  codex-gpt-5.5:
+  codex-luna:
     harness: codex
-    model: gpt-5.5
+    model: gpt-5.6-luna
     effort: low
   cursor-composer-fast:
     harness: cursor

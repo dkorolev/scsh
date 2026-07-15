@@ -41,7 +41,7 @@ these harnesses.
      Unavailable harnesses print an `N/A`/skip line and do **not** fail the run.
 
 5. **Validate results.** For each `tmp/harness-smoke-<route>.json` that exists
-   (`claude-opus-4-8`, `codex-gpt-5.5`, `cursor-composer-fast`): `jq .result.status <file>`
+   (`claude-opus-4-8`, `codex-luna`, `cursor-composer-fast`): `jq .result.status <file>`
    - **Predict:** every present file reads `"OK"`, and **at least one** file is present.
 
 6. **Screencasts recorded.** `ls -t ~/.scsh/sessions/*/casts/harness-smoke-*.cast`

@@ -8,7 +8,7 @@ use crate::daemon::{ProcKind, ProcRecord, ProcStatus};
 use crate::json;
 use crate::runtime;
 
-/// Matrix route name for a resolved invocation (`codex-gpt-5.5`), or `None` for a direct skill.
+/// Matrix route name for a resolved invocation (`codex-terra`), or `None` for a direct skill.
 pub fn route_name<'a>(skill_name: &'a str, skill_source: &str) -> Option<&'a str> {
   if skill_name == skill_source {
     return None;
@@ -245,7 +245,7 @@ mod tests {
   fn route_name_strips_skill_source_prefix() {
     assert_eq!(route_name("add-opencode", "add"), Some("opencode"));
     assert_eq!(route_name("add", "add"), None);
-    assert_eq!(route_name("conventions-reviewer-codex-gpt-5.5", "conventions-reviewer"), Some("codex-gpt-5.5"));
+    assert_eq!(route_name("conventions-reviewer-codex-terra", "conventions-reviewer"), Some("codex-terra"));
   }
 
   #[test]
