@@ -643,7 +643,17 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   let elapsed = proc.and_then(|p| proc_elapsed_secs(p, now)).map(format_elapsed_clock);
   let unmet_ids = unmet_need_ids(session, meta, node);
   let unmet = unmet_ids.len();
-  let tip = node_tip(session, meta, node, &title, state, &unmet_ids, now);
+  let mut tip = node_tip(session, meta, node, &title, state, &unmet_ids, now);
+  // The node is bound to the route's NEWEST attempt; when earlier attempts exist
+  // (scsh retried a transient failure), say so — otherwise a red "failed" proc row
+  // under a calmly running node reads as a contradiction.
+  let (attempt, attempts_total) = proc.map(|p| session.proc_attempt(p)).unwrap_or((1, 1));
+  let attempt_html = if attempts_total > 1 {
+    tip.push_str(&format!("\nAttempt {attempt} of {attempts_total} — an earlier attempt failed and was retried"));
+    format!(r#"<span class="wf-attempt"> · attempt {attempt}</span>"#)
+  } else {
+    String::new()
+  };
   let aria = tip.replace('\n', ", ");
   let mut meta_bits = Vec::new();
   if is_build {
@@ -698,7 +708,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   };
   format!(
     r#"<a class="chamfer wf-node wf-{state}{build_class}" href="{href}" id="wf-node-{id}" data-workflow-step="{id}" data-wf-state="{state}"{proc_attr} style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" data-tip="{tip}"{tip_running} aria-label="{aria}">
-<span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span><span class="wf-state-elapsed">{state_elapsed}</span></span>
+<span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span><span class="wf-state-elapsed">{state_elapsed}</span>{attempt_html}</span>
 <span class="wf-id">{title_esc}{gate}</span>
 <span class="wf-meta dim">{meta}</span>
 </a>"#,
@@ -718,6 +728,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
     ico = state_icon(state),
     label = state.label(),
     state_elapsed = state_elapsed,
+    attempt_html = attempt_html,
     gate = gate,
     meta = meta_bits.join(" · "),
   )

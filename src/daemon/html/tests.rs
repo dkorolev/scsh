@@ -426,6 +426,99 @@ fn cards_are_chamfered_islands() {
 }
 
 #[test]
+fn a_retried_route_is_visibly_a_retry() {
+  use crate::daemon::workflow::{WorkflowMeta, WorkflowNodeMeta};
+  fn skill(index: usize, name: &str, route: &str, status: ProcStatus, fail: Option<&str>) -> ProcRecord {
+    ProcRecord {
+      index,
+      kind: ProcKind::Skill,
+      label: format!("claude: {name}"),
+      status,
+      note: None,
+      detail: Some("done".into()),
+      fail_reason: fail.map(Into::into),
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some("add".into()),
+      route: Some(route.into()),
+      result_path: None,
+      annotate_target: None,
+      harness: Some("claude".into()),
+      skill_name: Some(name.into()),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(2.0),
+      lines: vec![],
+    }
+  }
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "retryv".into(),
+    Session {
+      id: "retryv".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      kind: Some("profile".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![
+        skill(0, "add-claude", "claude", ProcStatus::Fail, Some(crate::failure::reason::CONTAINER_TIMEOUT)),
+        skill(1, "add-opencode", "opencode", ProcStatus::Ok, None),
+        skill(2, "add-claude", "claude", ProcStatus::Ok, None),
+      ],
+      workflow: Some(WorkflowMeta {
+        nodes: vec![
+          WorkflowNodeMeta {
+            id: "add-claude".into(),
+            proc_index: Some(2),
+            order: 0,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+          WorkflowNodeMeta {
+            id: "add-opencode".into(),
+            proc_index: Some(1),
+            order: 1,
+            needs: vec![],
+            conditional: false,
+            when_summary: None,
+          },
+        ],
+      }),
+      parent_session: None,
+    },
+  );
+  let html = session_page(&store, "retryv").expect("session renders");
+  // The failed attempt cross-links its retry; the retry wears an attempt chip.
+  assert!(
+    html.contains(r##"<a class="proc-retry-link" href="#proc-2""##),
+    "failed attempt links its retry: {html}"
+  );
+  assert!(html.contains("superseded — see attempt 2 ↓"), "link names the retry's ordinal");
+  assert!(html.contains(r#"attempt-chip"><span>attempt 2</span>"#), "retry row wears an attempt chip");
+  // The graph node (bound to the newest attempt) says it is a second attempt.
+  assert!(html.contains(r#"<span class="wf-attempt"> · attempt 2</span>"#), "node state line shows the attempt");
+  assert!(html.contains("Attempt 2 of 2 — an earlier attempt failed and was retried"), "tooltip explains");
+  // The fleet comparison shows one row per route — the superseded attempt is gone.
+  let fleet = html.split(r#"class="chamfer fleet""#).nth(1).and_then(|s| s.split("</section>").next()).expect("fleet");
+  assert!(fleet.contains(r#"data-proc="2""#), "the retry represents its route");
+  assert!(!fleet.contains(r#"data-proc="0""#), "the superseded attempt is not a fleet row");
+  assert!(fleet.contains("2 ok, 0 fail"), "the rollup counts authoritative attempts only: {fleet}");
+  // The single-attempt route carries neither chip nor link.
+  let procs = session_procs_html(&html);
+  assert_eq!(procs.matches("attempt-chip").count(), 1, "chip on the retry row only");
+  assert_eq!(procs.matches("proc-retry-link").count(), 1, "link on the superseded row only");
+}
+
+#[test]
 fn client_lifecycle_ignores_superseded_retry_failures() {
   // The JS fallback derivation mirrors Session::proc_is_superseded: a failed attempt
   // whose route was re-run by a later proc must not turn the job badge red.

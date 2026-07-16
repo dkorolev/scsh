@@ -405,14 +405,38 @@ impl Session {
   /// authoritative outcome for that route, so a recovered retry must not fail the job.
   /// (Loop iterations and matrix routes carry unique generated names, so only genuine
   /// retries ever share one.)
-  fn proc_is_superseded(&self, proc: &ProcRecord) -> bool {
-    let Some(name) = proc.skill_name.as_deref().filter(|n| !n.is_empty()) else {
-      return false;
-    };
+  pub(crate) fn proc_is_superseded(&self, proc: &ProcRecord) -> bool {
+    self.proc_next_attempt(proc).is_some()
+  }
+
+  /// The proc that re-ran this one's route (the retry), if any — the earliest later
+  /// proc of the same kind and skill name.
+  pub(crate) fn proc_next_attempt(&self, proc: &ProcRecord) -> Option<&ProcRecord> {
+    let name = proc.skill_name.as_deref().filter(|n| !n.is_empty())?;
     self
       .procs
       .iter()
-      .any(|later| later.index > proc.index && later.kind == proc.kind && later.skill_name.as_deref() == Some(name))
+      .filter(|later| later.index > proc.index && later.kind == proc.kind && later.skill_name.as_deref() == Some(name))
+      .min_by_key(|later| later.index)
+  }
+
+  /// (ordinal, total) attempts for this proc's route: (2, 2) is the retry of a route
+  /// attempted twice. (1, 1) — the overwhelmingly common case — means no retries.
+  pub(crate) fn proc_attempt(&self, proc: &ProcRecord) -> (usize, usize) {
+    let Some(name) = proc.skill_name.as_deref().filter(|n| !n.is_empty()) else {
+      return (1, 1);
+    };
+    let mut ordinal = 0;
+    let mut total = 0;
+    for p in &self.procs {
+      if p.kind == proc.kind && p.skill_name.as_deref() == Some(name) {
+        total += 1;
+        if p.index <= proc.index {
+          ordinal += 1;
+        }
+      }
+    }
+    (ordinal.max(1), total.max(1))
   }
 
   pub fn lifecycle_status(&self, now: u64) -> SessionLifecycle {

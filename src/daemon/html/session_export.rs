@@ -227,7 +227,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     r#"<details open class="chamfer proc {status}" data-index="{idx}"{task_attrs}>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
-<span class="label">{label}</span>
+<span class="label">{label}</span>{attempt_chip}
 <span class="meta">{elapsed}</span>
 <span class="note dim">{note}</span>
 {diff_chip}</summary>
@@ -238,6 +238,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     idx = proc.index,
     task_attrs = proc_task_attrs(session, proc),
     label = esc(&proc.label),
+    attempt_chip = super::session::attempt_chip_html(session, proc),
     elapsed = esc(&elapsed),
     note = esc(note),
     diff_chip = diff_chip_html(diff.is_some()),

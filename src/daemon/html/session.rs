@@ -51,13 +51,15 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     let diff_btn = proc_diff_btn_html(&session.id, proc);
     let annotation_target = annotation_target_link_html(session, proc);
+    let attempt_chip = attempt_chip_html(session, proc);
+    let retry_link = retry_link_html(session, proc);
     procs_html.push_str(&format!(
       r#"<details class="chamfer proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
 <div class="proc-actions">{diff_btn}{snapshot_btn}{kill_btn}</div>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
-<span class="label">{label}</span> {proc_stat}
-<span class="meta" data-proc-elapsed="{index}">{elapsed}</span>
+<span class="label">{label}</span>{attempt_chip} {proc_stat}
+<span class="meta" data-proc-elapsed="{index}">{elapsed}</span>{retry_link}
 <span class="note dim">{note}</span>
 {annotation_target}
 </summary>
@@ -81,6 +83,8 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       note = note_html,
       detail = esc(detail),
       container_line = container_line_html(proc),
+      attempt_chip = attempt_chip,
+      retry_link = retry_link,
       body_html = body_html
     ));
     if let Some(fleets) = fleet_sections.remove(&proc.index) {
@@ -252,6 +256,34 @@ fn chapters_pending_html(pending: usize) -> String {
     r#"<p class="chapters-pending dim" id="chapters-pending" data-pending="{n}">{n} cast{plural} finalizing chapters</p>"#,
     n = pending,
     plural = if pending == 1 { "" } else { "s" },
+  )
+}
+
+/// A muted "attempt N" chip next to the label of a retry proc (scsh re-runs routes that
+/// failed transiently as new procs), so the second attempt is visibly a second attempt.
+/// Mirrored by `attemptChipHtml` in the client JS.
+pub(crate) fn attempt_chip_html(session: &Session, proc: &crate::daemon::model::ProcRecord) -> String {
+  let (attempt, _) = session.proc_attempt(proc);
+  if attempt <= 1 {
+    return String::new();
+  }
+  format!(r#" <span class="chamfer agent-badge attempt-chip"><span>attempt {attempt}</span></span>"#)
+}
+
+/// A cross-link from a failed attempt to the retry that superseded it, so the red row and
+/// the running/green node it contradicts visibly belong to the same route. Mirrored by
+/// `retryLinkHtml` in the client JS.
+pub(crate) fn retry_link_html(session: &Session, proc: &crate::daemon::model::ProcRecord) -> String {
+  if proc.status != ProcStatus::Fail {
+    return String::new();
+  }
+  let Some(next) = session.proc_next_attempt(proc) else {
+    return String::new();
+  };
+  format!(
+    r##" <a class="proc-retry-link" href="#proc-{idx}" title="This attempt failed and was retried; the newest attempt is authoritative">superseded — see attempt {ord} ↓</a>"##,
+    idx = next.index,
+    ord = session.proc_attempt(next).0,
   )
 }
 

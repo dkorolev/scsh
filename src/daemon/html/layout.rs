@@ -528,6 +528,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .wf-state-elapsed { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
   .wf-state-elapsed:empty { display: none; }
+  /* Retry marker on the state line — the node is bound to the route's newest attempt. */
+  .wf-attempt { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; white-space: nowrap; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-gate {
@@ -978,6 +980,13 @@ pub(crate) const PAGE_CSS: &str = r#"
     color: var(--orange); font-size: 0.75rem; white-space: nowrap; text-decoration: none;
     border-bottom: 1px solid currentColor;
   }
+  /* Failed attempt → its retry: the red row and the calm node belong to one route. */
+  .proc-retry-link {
+    align-self: center; color: var(--cyan); font-size: 0.75rem; white-space: nowrap;
+    text-decoration: none; border-bottom: 1px dotted currentColor;
+  }
+  .proc-retry-link:hover { border-bottom-style: solid; }
+  summary .attempt-chip { align-self: center; }
   .wf-annotation { display: block; font-size: 0.68rem; line-height: 1.2; white-space: nowrap; }
   .wf-annotation--running { color: var(--orange); }
   .wf-annotation--ok { color: var(--green); }

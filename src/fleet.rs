@@ -65,6 +65,14 @@ pub fn fleet_groups(procs: &[ProcRecord]) -> Vec<FleetGroup> {
   }
   let mut out = Vec::new();
   for (skill_source, group) in by_source {
+    // A failed attempt that was retried registers a second proc with the same skill
+    // name; the newest attempt is the route's authoritative outcome, so superseded
+    // attempts stay out of the comparison (their route is represented by the retry).
+    let group: Vec<&ProcRecord> = group
+      .iter()
+      .filter(|p| !group.iter().any(|later| later.index > p.index && later.skill_name == p.skill_name))
+      .copied()
+      .collect();
     if group.len() < 2 {
       continue;
     }

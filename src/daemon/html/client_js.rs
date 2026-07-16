@@ -20,12 +20,46 @@ function sessionHasIncompleteProcs(session) {
   const procs = session.procs || [];
   return procs.some(p => p.status === 'running' || p.status === 'waiting');
 }
-// Mirrors Session::proc_is_superseded: a failed attempt whose route was re-run by a
-// later proc (scsh's transient-failure retry) is not the route's authoritative outcome.
-function procIsSuperseded(session, p) {
-  if (!p.skill_name) return false;
-  return (session.procs || []).some(q =>
+// Mirrors Session::proc_next_attempt: the proc that re-ran this one's route (scsh's
+// transient-failure retry), if any — the earliest later proc of the same kind and name.
+function procNextAttempt(session, p) {
+  if (!p.skill_name) return null;
+  const later = (session.procs || []).filter(q =>
     q.index > p.index && (q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name);
+  later.sort((a, b) => a.index - b.index);
+  return later[0] || null;
+}
+// Mirrors Session::proc_is_superseded: a failed attempt whose route was re-run by a
+// later proc is not the route's authoritative outcome.
+function procIsSuperseded(session, p) {
+  return procNextAttempt(session, p) != null;
+}
+// Mirrors Session::proc_attempt: [ordinal, total] attempts for this proc's route.
+function procAttempt(session, p) {
+  if (!p.skill_name) return [1, 1];
+  let ordinal = 0, total = 0;
+  (session.procs || []).forEach(q => {
+    if ((q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name) {
+      total += 1;
+      if (q.index <= p.index) ordinal += 1;
+    }
+  });
+  return [Math.max(1, ordinal), Math.max(1, total)];
+}
+// Mirror of attempt_chip_html in session.rs: retries visibly say they are retries.
+function attemptChipHtml(session, p) {
+  const attempt = procAttempt(session, p)[0];
+  if (attempt <= 1) return '';
+  return ' <span class="chamfer agent-badge attempt-chip"><span>attempt ' + attempt + '</span></span>';
+}
+// Mirror of retry_link_html in session.rs: a failed attempt cross-links its retry.
+function retryLinkHtml(session, p) {
+  if (p.status !== 'fail') return '';
+  const next = procNextAttempt(session, p);
+  if (!next) return '';
+  return ' <a class="proc-retry-link" href="' + '#proc-' + esc(String(next.index)) +
+    '" title="This attempt failed and was retried; the newest attempt is authoritative">superseded — see attempt ' +
+    procAttempt(session, next)[0] + ' ↓</a>';
 }
 function sessionLifecycle(session, nowUnix) {
   // The daemon owns lifecycle. Browser-side derivation exists only for an old persisted
@@ -628,6 +662,18 @@ function updateProcFields(det, p, nowUnix) {
   syncProcStat(stat, p, nowUnix, p.status === 'running');
   const meta = det.querySelector('[data-proc-elapsed="' + CSS.escape(String(p.index)) + '"]');
   syncProcElapsed(meta, p, nowUnix, p.status === 'running');
+  // A retry registering mid-run supersedes this row after it was first painted: give
+  // the failed attempt its cross-link (and the retry its chip) on the tick that
+  // introduces them, exactly as a fresh render would.
+  const session = (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null) || { procs: [] };
+  if (labelEl && !det.querySelector('summary .attempt-chip')) {
+    const chip = attemptChipHtml(session, p);
+    if (chip) labelEl.insertAdjacentHTML('afterend', chip);
+  }
+  if (meta && !det.querySelector('summary .proc-retry-link')) {
+    const link = retryLinkHtml(session, p);
+    if (link) meta.insertAdjacentHTML('afterend', link);
+  }
   const noteEl = det.querySelector('summary .note');
   // Finished rows show their ANSWER (the finish detail) in the collapsed summary; only
   // rows still working show the transient note. A bare artifact path is SYSTEM info and
@@ -1076,13 +1122,14 @@ function procHtml(p, isOpen, nowUnix) {
         'Force-stop this container only — the rest of the job continues') + '"><span>' +
       (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span></button>'
     : '';
+  const session = (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null) || { procs: [] };
   const summaryOpen = '<details class="chamfer proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
     ((diff || snap || kill) ? '<div class="proc-actions">' + diff + snap + kill + '</div>' : '') +
     '<summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
-    '<span class="label">' + esc(p.label) + '</span> ' + procStatHtml(p, nowUnix) +
-    ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span> ' +
+    '<span class="label">' + esc(p.label) + '</span>' + attemptChipHtml(session, p) + ' ' + procStatHtml(p, nowUnix) +
+    ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + ' ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
     container + body + '</details>';
@@ -1174,6 +1221,14 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'skipped') lines.push('Skipped');
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
   if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
+  // Mirrors node_html in workflow.rs: the node is bound to the route's newest attempt.
+  const p = node.proc_index != null ? (session.procs || []).find(x => x.index === node.proc_index) : null;
+  if (p) {
+    const attempt = procAttempt(session, p);
+    if (attempt[1] > 1) {
+      lines.push('Attempt ' + attempt[0] + ' of ' + attempt[1] + ' — an earlier attempt failed and was retried');
+    }
+  }
   return lines.join('\n');
 }
 function wfDisplayState(session, node, nowUnix) {
@@ -1512,6 +1567,8 @@ function wfBuildGraphHtml(session, nowUnix) {
     const elapsed = p ? procElapsed(p, nowUnix) : null;
     const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
     const stateElapsed = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
+    const attempt = p ? procAttempt(session, p) : [1, 1];
+    const attemptHtml = attempt[1] > 1 ? '<span class="wf-attempt"> · attempt ' + attempt[0] + '</span>' : '';
     return '<a class="chamfer wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
       '" href="' + '#task-' + encodeURIComponent(node.id) + '" id="wf-node-' + esc(node.id) +
       '" data-workflow-step="' + esc(node.id) + '" data-wf-state="' + state + '"' + procAttr +
@@ -1520,7 +1577,7 @@ function wfBuildGraphHtml(session, nowUnix) {
       ' aria-label="' + esc(tip.replace(/\n/g, ', ')) +
       '"><span class="wf-state"><span class="wf-ico" aria-hidden="true">' + wfStateIcon(state) +
       '</span><span class="wf-state-label">' + wfStateLabel(state) + '</span><span class="wf-state-elapsed">' +
-      stateElapsed + '</span></span><span class="wf-id">' +
+      stateElapsed + '</span>' + attemptHtml + '</span><span class="wf-id">' +
       esc(title) + gate + '</span>' + wfAnnotationHtml(session, p) +
       '<span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
   }).join('') + wfBookendHtml(finish, false);
@@ -1656,6 +1713,18 @@ function updateWorkflowGraph(session, nowUnix) {
     const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
     const stateElapsed = el.querySelector('.wf-state-elapsed');
     if (stateElapsed) stateElapsed.textContent = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
+    // The node rebinds to the retry when one registers mid-run: surface the attempt.
+    const attempt = p ? procAttempt(session, p) : [1, 1];
+    let attemptEl = el.querySelector('.wf-attempt');
+    if (attempt[1] > 1 && stateElapsed) {
+      if (!attemptEl) {
+        stateElapsed.insertAdjacentHTML('afterend', '<span class="wf-attempt"></span>');
+        attemptEl = el.querySelector('.wf-attempt');
+      }
+      attemptEl.textContent = ' · attempt ' + attempt[0];
+    } else if (attemptEl) {
+      attemptEl.remove();
+    }
     const meta = el.querySelector('.wf-meta');
     if (meta) {
       const bits = [];
@@ -2074,8 +2143,14 @@ function syncFleetSections(session, nowUnix) {
     const members = [];
     sec.querySelectorAll('tr.fleet-row').forEach(row => {
       const jump = row.querySelector('.fleet-jump[data-proc]');
-      const p = jump && procs.find(q => String(q.index) === jump.getAttribute('data-proc'));
+      let p = jump && procs.find(q => String(q.index) === jump.getAttribute('data-proc'));
       if (!p) return;
+      // A retry supersedes this row's attempt: re-point the row at the newest attempt
+      // (same route name), exactly what a fresh server render would show.
+      for (let next = procNextAttempt(session, p); next; next = procNextAttempt(session, p)) {
+        p = next;
+      }
+      jump.setAttribute('data-proc', String(p.index));
       members.push(p);
       row.className = 'fleet-row ' + (p.status || '');
       const statusCell = row.querySelector('.fleet-status');
