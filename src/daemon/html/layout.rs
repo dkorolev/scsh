@@ -294,12 +294,21 @@ pub(crate) const PAGE_CSS: &str = r#"
     box-shadow: 0 -0.5rem 0 0 var(--bg);
   }
   .tab {
+    position: relative;
     font: inherit; color: var(--text-muted); background: none; border: none;
-    border-bottom: 2px solid transparent; padding: 0.5rem 0.9rem; cursor: pointer;
+    padding: 0.5rem 0.9rem; cursor: pointer;
   }
   .tab:hover { color: var(--text); }
-  .tab.active {
-    color: var(--cyan); border-bottom-color: var(--cyan); font-weight: 600;
+  .tab:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
+  .tab.active { color: var(--cyan); font-weight: 600; }
+  /* trapezoid underline: 45° ends instead of a plain bar */
+  .tab.active::after {
+    content: '';
+    position: absolute;
+    left: 0; right: 0; bottom: -1px;
+    height: 3px;
+    background: var(--cyan);
+    clip-path: polygon(3px 0%, calc(100% - 3px) 0%, 100% 100%, 0% 100%);
   }
   .tab-panel { display: none; }
   .tab-panel.active { display: block; }
@@ -738,16 +747,34 @@ pub(crate) const PAGE_CSS: &str = r#"
   .session-status.setup-ready > span { color: var(--cyan); }
   .setup-next { margin: 0; font-size: 0.8rem; }
   .seg {
-    display: inline-flex; border: 1px solid var(--border); border-radius: 8px;
-    overflow: hidden; background: var(--surface);
+    --cut: 6px; --bw: 1.5px;
+    --seg-inner: calc(var(--cut) - var(--bw) * 0.5858);
+    display: inline-flex;
+    background: var(--border);
+    padding: var(--bw);
+    gap: var(--bw);
   }
   .seg-opt {
     font: inherit; font-size: 0.85rem; padding: 0.3rem 0.9rem;
-    background: none; border: 0; color: var(--text-muted); cursor: pointer;
+    background: var(--surface); border: 0; color: var(--text-muted); cursor: pointer;
   }
-  .seg-opt + .seg-opt { border-left: 1px solid var(--border); }
   .seg-opt.active { background: var(--purple); color: #fff; font-weight: 600; }
   .seg-opt:hover:not(.active) { color: var(--text); }
+  .seg-opt:focus-visible { filter: brightness(1.3); outline: none; }
+  /* first/last options carry their own inner chamfer so the ring
+     stays visible along the group's corner diagonals */
+  .seg-opt:first-child {
+    clip-path: polygon(
+      var(--seg-inner) 0%, 100% 0%, 100% 100%, var(--seg-inner) 100%,
+      0% calc(100% - var(--seg-inner)), 0% var(--seg-inner)
+    );
+  }
+  .seg-opt:last-child {
+    clip-path: polygon(
+      0% 0%, calc(100% - var(--seg-inner)) 0%, 100% var(--seg-inner),
+      100% calc(100% - var(--seg-inner)), calc(100% - var(--seg-inner)) 100%, 0% 100%
+    );
+  }
   /* Projects tab: jobs grouped by the task they ran, one line per job, with breathing
      room between the badge+link lines. */
   .repo-jobgroup { margin: 0.3rem 0 0.8rem; }

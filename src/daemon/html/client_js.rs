@@ -2740,7 +2740,7 @@ function renderRuntimeSelector(data) {
   // Apple `container` and docker/podman keep SEPARATE image stores — this segmented
   // control says which world the whole tab (cards + Advanced builds) talks to.
   const label = (r) => r === 'container' ? 'Apple Containers' : r === 'docker' ? 'Docker' : r === 'podman' ? 'Podman' : r;
-  box.innerHTML = '<span class="seg" data-tip="Each runtime keeps its own image store — cards and Build buttons apply to the selected one">' +
+  box.innerHTML = '<span class="chamfer seg" data-tip="Each runtime keeps its own image store — cards and Build buttons apply to the selected one">' +
     available.map(r =>
       '<button type="button" class="seg-opt' + (r === data.runtime ? ' active' : '') +
       '" data-runtime="' + esc(r) + '">' + esc(label(r)) + '</button>').join('') +
