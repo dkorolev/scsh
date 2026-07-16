@@ -360,7 +360,7 @@ fn ui_review_fixes_hold() {
   assert!(page.contains(r#"<span class="note dim">2 + 3 = 5</span>"#), "the answer rides the collapsed row");
   assert!(!page.contains(r#"<span class="note dim">claude run…</span>"#), "the stale note does not");
   // 4. The meta island is purple and owns the action buttons (top-right corner).
-  assert!(page.contains(r#"<div class="card card--accent-left-purple"><div class="session-actions">"#));
+  assert!(page.contains(r#"<div class="chamfer card card--accent-left-purple"><div class="session-actions">"#));
   // 5. Proc islands wear status on the left accent bar (and tint the label).
   assert!(html.contains("details.proc.ok { border-left-color: var(--green); }"));
   assert!(html.contains("details.proc.running { border-left-color: var(--orange); }"));
@@ -391,6 +391,22 @@ fn ui_review_fixes_hold() {
   // 6. The builtin source badge wears purple.
   assert!(html.contains(".badge--purple"), "purple badge class ships");
   assert!(live_client_js().contains(r#"chamfer badge badge--purple"><span>builtin"#), "builtin badge is purple");
+}
+
+#[test]
+fn cards_are_chamfered_islands() {
+  let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
+  // Every island card is a chamfered surface: the outer layer is the border (or the
+  // accent stripe, painted wide enough to wrap the cut corner), the ::before is the fill.
+  assert!(html.contains(r#"<div class="chamfer card card--accent-left-green">"#), "Run card is chamfered");
+  assert!(html.contains(r#"<div class="chamfer card card--accent-left-cyan">"#), "Jobs card is chamfered");
+  assert!(html.contains(".chamfer > * { position: relative; z-index: 1; }"), "children lift above the overlay");
+  assert!(html.contains("var(--accent) 0 calc(var(--cut) + var(--accent-w)),"), "accent stripe wraps the chamfer");
+  assert!(html.contains(".card--accent-left-cyan { --accent: var(--cyan); }"));
+  assert!(!html.contains(".card--accent-left-cyan { border-left"), "no rounded-era accent borders remain");
+  // clip-path clips box-shadows: the expanded graph modal must cast a drop-shadow instead.
+  assert!(html.contains("filter: drop-shadow(0 24px 80px rgba(0,0,0,0.65));"));
+  assert!(!html.contains("box-shadow: 0 24px 80px"));
 }
 
 #[test]

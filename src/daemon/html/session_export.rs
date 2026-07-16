@@ -104,7 +104,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 <body>
 <main class="page-shell">
 <p class="page-lede">{lede}</p>
-<div class="card card--accent-left-purple">
+<div class="chamfer card card--accent-left-purple">
 <dl class="session-meta">
 <dt>Job</dt><dd><code>{id}</code></dd>
 <dt>Started</dt><dd>{when}</dd>
