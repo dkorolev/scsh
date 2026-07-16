@@ -56,6 +56,13 @@ fn scsh(dir: &Path, args: &[&str]) -> Run {
 fn scsh_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
   let mut cmd = Command::new(bin());
   cmd.args(args).current_dir(dir);
+  // Hermetic by default: a developer machine may carry a machine-wide manifest
+  // (`scsh installskills --global` under ~/.scsh), and the run/list global fallback would
+  // leak it into every spawned scsh — e.g. "no .scsh.yml" tests suddenly finding config.
+  // Tests that exercise the global manifest pass their own SCSH_HOME.
+  if !envs.iter().any(|(k, _)| *k == "SCSH_HOME") {
+    cmd.env("SCSH_HOME", std::env::temp_dir().join("scsh-cli-tests-home"));
+  }
   for (k, v) in envs {
     cmd.env(k, v);
   }
