@@ -214,6 +214,32 @@ fn parse_result_summary(path: &str) -> Option<ResultSummary> {
     }
     _ => None,
   };
+
+  // The code-review skills nest the summary one level down —
+  // `{ "result": { "grade": ..., "issues_found": ... }, "issues": [...] }` — so when the
+  // top level yields no grade/count, read the nested `result` object, and count the
+  // `issues` array when `result.issues_found` is absent.
+  let nested = match field("result") {
+    Some(json::Value::Object(inner)) => inner.clone(),
+    _ => Vec::new(),
+  };
+  let nested_field = |name: &str| nested.iter().find(|(key, _)| key == name).map(|(_, value)| value);
+  let grade = grade.or_else(|| match nested_field("grade") {
+    Some(json::Value::String(value)) => Some(value.clone()),
+    _ => None,
+  });
+  let issues_found = issues_found
+    .or_else(|| match nested_field("issues_found") {
+      Some(json::Value::Number(value)) if value.is_finite() && value.fract() == 0.0 && *value >= 0.0 => {
+        Some(*value as u64)
+      }
+      _ => None,
+    })
+    .or_else(|| match field("issues") {
+      // Only the reviewer shape (a nested `result` object) counts its `issues` array.
+      Some(json::Value::Array(issues)) if !nested.is_empty() => Some(issues.len() as u64),
+      _ => None,
+    });
   Some(ResultSummary { message, grade, comments_count, issues_found })
 }
 
@@ -257,6 +283,51 @@ mod tests {
     let legacy = dir.join("legacy.json");
     std::fs::write(&legacy, r#"{"grade":"excellent","comments":"one legacy comment","comment_count":99}"#).unwrap();
     assert_eq!(parse_result_summary(&legacy.to_string_lossy()).unwrap().comments_count, Some(1));
+    let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn result_summary_reads_the_code_review_skills_nested_shape() {
+    let dir = std::env::temp_dir().join(format!("scsh-fleet-nested-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // The exact shape dkorolev/code-review-skills documents for its reviewers:
+    // `{ result: { grade, issues_found }, issues: Issue[] }` with issues_found == issues.length.
+    let nested = dir.join("nested.json");
+    std::fs::write(
+      &nested,
+      r#"{"result":{"grade":"excellent","issues_found":2},"issues":[
+        {"commit":"abc1234","file":"src/a.rs","line":10,"description":"d","suggestion":"s"},
+        {"commit":"abc1234","file":"PR-DESCRIPTION.md","line":0,"description":"d2","suggestion":"s2"}]}"#,
+    )
+    .unwrap();
+    let summary = parse_result_summary(&nested.to_string_lossy()).unwrap();
+    assert_eq!(summary.grade.as_deref(), Some("excellent"));
+    assert_eq!(summary.issues_found, Some(2));
+    assert_eq!(summary.comments_count, None);
+    assert_eq!(summary.message.as_deref(), Some("grade: excellent · issues_found: 2"));
+
+    // Without `result.issues_found`, the `issues` array length is the count.
+    let counted = dir.join("counted.json");
+    std::fs::write(
+      &counted,
+      r#"{"result":{"grade":"good"},"issues":[{"commit":"x","file":"f","line":1,"description":"d","suggestion":"s"}]}"#,
+    )
+    .unwrap();
+    let summary = parse_result_summary(&counted.to_string_lossy()).unwrap();
+    assert_eq!(summary.grade.as_deref(), Some("good"));
+    assert_eq!(summary.issues_found, Some(1));
+
+    // A top-level `issues` array alone (no nested `result` object) is NOT counted — only
+    // the reviewer shape opts in.
+    let plain = dir.join("plain.json");
+    std::fs::write(&plain, r#"{"message":"done","issues":[1,2,3]}"#).unwrap();
+    assert_eq!(parse_result_summary(&plain.to_string_lossy()).unwrap().issues_found, None);
+
+    // The flat workflow-def shape still wins over the nested one when both exist.
+    let flat = dir.join("flat.json");
+    std::fs::write(&flat, r#"{"grade":"poor","result":{"grade":"excellent","issues_found":9}}"#).unwrap();
+    assert_eq!(parse_result_summary(&flat.to_string_lossy()).unwrap().grade.as_deref(), Some("poor"));
     let _ = std::fs::remove_dir_all(dir);
   }
 

@@ -26,16 +26,24 @@ pub fn parse(text: &str) -> Result<Value, String> {
 
 /// The best human-readable message from a skill's result file: scsh parses the file
 /// as JSON and, when it is an object, returns the `result` field, else `message`,
-/// else the value of a lone single field (so `{"ab": "…"}` works too). `None` when
-/// there is no obvious message — the caller then falls back to the file path.
+/// else the value of a lone single field (so `{"ab": "…"}` works too). A structured
+/// `result` OBJECT (the code-review skills write `result: {grade, issues_found}`)
+/// becomes a compact glimpse of its scalar fields — `grade: excellent · issues_found: 3`.
+/// `None` when there is no obvious message — the caller then falls back to the file path.
 pub fn message(text: &str) -> Option<String> {
   let obj = match parse(text).ok()? {
     Value::Object(o) => o,
     _ => return None,
   };
   for key in ["result", "message"] {
-    if let Some((_, Value::String(s))) = obj.iter().find(|(k, _)| k == key) {
-      return Some(s.clone());
+    match obj.iter().find(|(k, _)| k == key).map(|(_, v)| v) {
+      Some(Value::String(s)) => return Some(s.clone()),
+      Some(Value::Object(fields)) if key == "result" => {
+        if let Some(glimpse) = scalar_glimpse(fields) {
+          return Some(glimpse);
+        }
+      }
+      _ => {}
     }
   }
   if obj.len() == 1 {
@@ -44,6 +52,30 @@ pub fn message(text: &str) -> Option<String> {
     }
   }
   None
+}
+
+/// `key: value` for each scalar field of an object, joined with ` · ` — the glimpse a
+/// structured result shows on a skill's summary line. Arrays and nested objects are
+/// skipped; `None` when nothing scalar remains.
+fn scalar_glimpse(fields: &[(String, Value)]) -> Option<String> {
+  let parts: Vec<String> = fields
+    .iter()
+    .filter_map(|(k, v)| {
+      let shown = match v {
+        Value::String(s) => s.clone(),
+        Value::Number(n) if n.is_finite() && n.fract() == 0.0 && n.abs() < 1e15 => format!("{}", *n as i64),
+        Value::Number(n) if n.is_finite() => format!("{n}"),
+        Value::Bool(b) => b.to_string(),
+        _ => return None,
+      };
+      Some(format!("{k}: {shown}"))
+    })
+    .collect();
+  if parts.is_empty() {
+    None
+  } else {
+    Some(parts.join(" · "))
+  }
 }
 
 /// The string value of a top-level object field `key`, if present and a string. Used to
@@ -306,5 +338,24 @@ mod tests {
     assert_eq!(message("[1, 2, 3]"), None); // not an object
     assert_eq!(message("not json"), None); // unparseable
     assert_eq!(message(r#"{"a": "x", "b": "y"}"#), None); // ambiguous: two string fields, no result/message
+  }
+
+  #[test]
+  fn message_composes_a_glimpse_for_an_object_result() {
+    // The code-review skills' documented shape: `result` is an object of scalars.
+    assert_eq!(
+      message(r#"{"result": {"grade": "excellent", "issues_found": 3}, "issues": []}"#).as_deref(),
+      Some("grade: excellent · issues_found: 3")
+    );
+    // Non-scalar fields are skipped; the remaining scalars still make a glimpse.
+    assert_eq!(message(r#"{"result": {"grade": "good", "parts": [1, 2]}}"#).as_deref(), Some("grade: good"));
+    // Booleans and non-integer numbers render plainly.
+    assert_eq!(message(r#"{"result": {"passed": true, "score": 4.5}}"#).as_deref(), Some("passed: true · score: 4.5"));
+    // An object result with nothing scalar is no glimpse at all.
+    assert_eq!(message(r#"{"result": {"parts": [1]}}"#), None);
+    // A string `result` still wins, unchanged.
+    assert_eq!(message(r#"{"result": "done", "grade": "poor"}"#).as_deref(), Some("done"));
+    // An object `result` does not shadow a string `message`.
+    assert_eq!(message(r#"{"result": {"parts": [1]}, "message": "hi"}"#).as_deref(), Some("hi"));
   }
 }

@@ -92,11 +92,18 @@ fn fleet_row_html(r: &FleetRoute) -> String {
 
 fn fleet_result_cell(r: &FleetRoute) -> String {
   if let Some(g) = &r.grade {
-    let n = r.comments_count.unwrap_or(0);
+    // Workflow-def reviews count `comments`; the code-review skills count `issues` —
+    // show whichever this route reported.
+    let (n, noun) = match (r.comments_count, r.issues_found) {
+      (Some(n), _) => (n, "comment"),
+      (None, Some(n)) => (n, "issue"),
+      (None, None) => (0, "comment"),
+    };
     return format!(
-      "<span class=\"fleet-grade\">Grade: {}, {} comment{}.</span>",
+      "<span class=\"fleet-grade\">Grade: {}, {} {}{}.</span>",
       esc(g),
       n,
+      noun,
       if n == 1 { "" } else { "s" }
     );
   }
