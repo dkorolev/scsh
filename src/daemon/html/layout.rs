@@ -1084,15 +1084,17 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
     display: flex; gap: 0.55rem; justify-content: flex-end; flex-wrap: wrap;
   }
   .scsh-dialog-actions .btn { min-width: 5.5rem; }
-  /* Snapshot above Force stop, pinned to the meta island's top-right. */
+  /* Snapshot above Force restart above Force stop, pinned to the meta island's top-right.
+     stretch: every button takes the width of the widest, so the stack reads as one column. */
   .session-actions {
     position: absolute; top: 0.7rem; right: 0.85rem; z-index: 2; margin: 0;
-    display: flex; flex-direction: column; align-items: flex-end; gap: 0.35rem;
+    display: flex; flex-direction: column; align-items: stretch; gap: 0.35rem;
   }
   .session-actions #session-stop,
+  .session-actions #session-restart,
   .session-actions .session-export,
   .session-actions .job-diff {
-    min-width: 10.5rem; /* Incomplete job / Job snapshot / Force stop share a stable width */
+    min-width: 10.5rem; /* Incomplete job / Job snapshot / Force restart / Force stop share one width */
     box-sizing: border-box;
     height: 1.85rem;
   }
