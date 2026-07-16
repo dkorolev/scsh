@@ -180,7 +180,8 @@ scsh list  (alias: ls)     List every skill by profile — result, commits, env 
 scsh init-demo-project     Scaffold AND commit a demo: .scsh.yml + example skills + tmp/ ignore.
 scsh init-beautiful-demo   Scaffold AND commit the word-counting project for demo-beautiful-loop.
 scsh installskills [url]   Install skills — bundled, or a git repo's (merges its .scsh.yml).
-scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's.
+                           --global installs machine-wide under ~/.scsh instead (no repo needed).
+scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's (--global too).
 scsh help                  Show help (includes the schema).
 scsh version               Show the version (with the build's git short hash, +`-dirty`).
 scsh daemon start|stop|restart|status
@@ -222,6 +223,22 @@ scsh installskills https://github.com/dkorolev/beautiful-skills https://github.c
 Like a real run, `installskills`/`updateskills` insist on a **clean working tree** (so the install
 is a reviewable diff, not mixed into unrelated work) and make sure **`/tmp` is gitignored** before
 writing, so the repo is run-ready afterward.
+
+**Installing machine-wide.** `scsh installskills --global` needs no git repo at all: skills land
+under **`$SCSH_HOME/.skills/`** (default `~/.scsh/.skills/`), their profile blocks merge into the
+**global manifest** `$SCSH_HOME/.scsh.yml`, and each installed skill is symlinked into the
+user-level skills dir of every coding agent already present on the machine (`~/.claude/skills`,
+`~/.cursor/skills`, `~/.codex/skills`, ... — detected by their home dot-dirs; none are planted).
+From then on, `scsh run`/`list`/`check-profile` in **any** git repo fall back to the global
+manifest for profiles the repo's own `.scsh.yml` does not declare (skill bodies are injected into
+the run clone, exactly like `--override-dot-scsh-yml` — the target repo stays clean), so the full
+machine setup for the review fleet is just:
+
+```sh
+cargo install scsh
+scsh installskills --global
+cd ~/any/repo && scsh run code-review
+```
 
 **If the source repo has its own `.scsh.yml`, that manifest drives the install.** `scsh`
 validates it first (and stops if it's malformed), then for every skill it lists — except
