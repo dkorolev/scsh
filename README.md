@@ -177,6 +177,7 @@ scsh                       Show help (the default — a bare scsh is safe and ne
 scsh run [--profile X]     Preflight, then build the image & run the selected skills in parallel.
 scsh run --def <name>      Run a harness definition (built-in, ~/.harness/, or repo .harness/).
 scsh list  (alias: ls)     List every skill by profile — result, commits, env (--verbose: + internals).
+scsh probe [profile]       Which harness·model routes are runnable here (exit 0 iff at least one is).
 scsh init-demo-project     Scaffold AND commit a demo: .scsh.yml + example skills + tmp/ ignore.
 scsh init-beautiful-demo   Scaffold AND commit the word-counting project for demo-beautiful-loop.
 scsh installskills [url]   Install skills — bundled, or a git repo's (merges its .scsh.yml).
@@ -237,8 +238,13 @@ machine setup for the review fleet is just:
 ```sh
 cargo install scsh
 scsh installskills --global
-cd ~/any/repo && scsh run code-review
+cd ~/any/repo && scsh probe code-review && scsh run code-review
 ```
+
+`scsh probe [profile]` is the runtime-free companion: it reports which of the selected skills'
+harness·model routes are actually runnable on this host (agent CLI installed and authenticated,
+opencode models listed), deduped across skills, and exits 0 iff at least one route is — so agents
+and scripts gate a fleet run on it instead of hand-rolling per-CLI auth checks.
 
 **If the source repo has its own `.scsh.yml`, that manifest drives the install.** `scsh`
 validates it first (and stops if it's malformed), then for every skill it lists — except
