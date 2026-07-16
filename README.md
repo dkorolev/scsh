@@ -24,7 +24,12 @@ agent and ask it to *follow the steps in [`DEMO.md`](DEMO.md)*. (A second walkth
 [`GLOBAL-SKILLS-DEMO.md`](GLOBAL-SKILLS-DEMO.md), demos `--override-dot-scsh-yml`: an
 external bundle's skill installed **globally inside the container** — claude and cursor
 discover it natively in their user-level skills dirs — against a repo that ships no
-`.scsh.yml` and no `.skills/` at all.) It will build a tiny
+`.scsh.yml` and no `.skills/` at all. A third, [`AGENT-FLEET-DEMO.md`](AGENT-FLEET-DEMO.md),
+is agent-first: the agent you hand it to drives `scsh` itself — fanning "explain this
+codebase" out to claude, codex, and cursor as three parallel agent jobs, waiting on the one
+blocking `run`, then synthesizing the three JSON results. It needs no path at all: tell any
+agent with `scsh` on its PATH to *run `scsh demo agent-fleet` and follow the steps it
+prints* — `scsh help agent` is the compact contract behind it.) It will build a tiny
 `scsh` project right there and run it: the `add` skill computes a sum (with defaults and
 with values you pass), and `multiply` runs under its profile when given `X`/`Y` — and is
 refused by `scsh` itself when they're missing.

@@ -60,6 +60,7 @@ fn run(args: &[String]) -> i32 {
     }
     Mode::InitDemo => init_demo(),
     Mode::InitBeautifulDemo => init_beautiful_demo(),
+    Mode::Demo { name } => demo_cmd(name.as_deref()),
     Mode::InstallSkills => install_skills(false, &cli.sources, cli.global),
     Mode::UpdateSkills => install_skills(true, &cli.sources, cli.global),
     Mode::List => {
@@ -627,6 +628,11 @@ enum Mode {
   /// Build the base and/or harness images outside a run (`build-images [harness…]`), streaming
   /// into the session browser — the daemon's images panel spawns this command.
   BuildImages,
+  /// Print an embedded agent-followable walkthrough to stdout (`scsh demo [name]`), so a
+  /// driving agent needs no path to any checkout — `scsh` on PATH is enough. No name lists them.
+  Demo {
+    name: Option<String>,
+  },
 }
 
 #[derive(Clone, Copy)]
@@ -647,6 +653,9 @@ enum HelpTopic {
   Config,
   Internals,
   Cache,
+  /// The agent-first contract (`scsh help agent`) — how another agent or harness drives
+  /// scsh end to end: discover, gate, run, collect — exit codes and JSON only.
+  Agent,
   /// Harness definitions (`scsh help def`) — the `.harness/<name>.yml` format: flat tasks,
   /// workflow steps, gates, and the repeat / do-while loops with loop-carried inputs.
   Defs,
@@ -665,6 +674,7 @@ const COMMAND_NAMES: &[&str] = &[
   "probe",
   "init-demo-project",
   "init-beautiful-demo",
+  "demo",
   "installskills",
   "updateskills",
   "daemon",
@@ -688,6 +698,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "probe" => "probe",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
     "init-beautiful-demo" | "init-beautiful-demo-project" => "init-beautiful-demo",
+    "demo" | "demos" => "demo",
     "installskills" | "install-skills" => "installskills",
     "updateskills" | "update-skills" => "updateskills",
     "daemon" => "daemon",
@@ -819,6 +830,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             i += 1;
             HelpTopic::Cache
           }
+          Some("agent") | Some("agents") | Some("agent-first") => {
+            i += 1;
+            HelpTopic::Agent
+          }
           Some("def") | Some("defs") | Some("definition") | Some("definitions") | Some("harness")
           | Some(".harness") | Some("workflow") | Some("workflows") => {
             i += 1;
@@ -836,7 +851,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           // A non-flag token we don't recognize is a mistyped topic — say so helpfully.
           Some(other) if !other.starts_with('-') => {
             return Err(format!(
-              "unknown help topic '{other}' (commands: {}; topics: .scsh.yml, def, internals, cache, exitcodes)",
+              "unknown help topic '{other}' (commands: {}; topics: agent, .scsh.yml, def, internals, cache, exitcodes)",
               COMMAND_NAMES.join(", ")
             ));
           }
@@ -869,6 +884,18 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       }
       "init-demo-project" | "init" | "--init-demo-project" => Some(Mode::InitDemo),
       "init-beautiful-demo" | "init-beautiful-demo-project" => Some(Mode::InitBeautifulDemo),
+      // `demo [name]`: print an embedded, agent-followable walkthrough verbatim to stdout —
+      // the markdown IS the interface, no checkout path needed. No name lists the demos.
+      "demo" | "demos" => {
+        let name = match args.get(i + 1).map(|s| s.as_str()) {
+          Some(n) if !n.starts_with('-') => {
+            i += 1;
+            Some(n.to_string())
+          }
+          _ => None,
+        };
+        Some(Mode::Demo { name })
+      }
       // `installskills [<git-url>…]` / `updateskills [<git-url>…]`: positional source repos
       // (one or more) install skills from those repos, in order, instead of scsh's bundled one.
       "installskills" => Some(Mode::InstallSkills),
@@ -7241,6 +7268,7 @@ fn print_help(topic: HelpTopic) {
     HelpTopic::Config => print_help_config(),
     HelpTopic::Internals => print_help_internals(),
     HelpTopic::Cache => print_help_cache(),
+    HelpTopic::Agent => print_help_agent(),
     HelpTopic::Defs => print_help_defs(),
     HelpTopic::ExitCodes => print_help_exitcodes(),
     // `run` has a dedicated deep-dive page; every other command gets a focused block.
@@ -7260,6 +7288,98 @@ fn print_help_exitcodes() {
   help_row("2", "Usage error — a bad argument, unknown command, or missing required value.");
   println!();
   println!("{}", h_dim("  scsh defines no command-specific exit codes; these three are the whole set."));
+  println!();
+}
+
+/// The embedded, agent-followable demo walkthroughs (`scsh demo <name>`). Each is the repo's
+/// markdown file, printed verbatim to stdout, so a driving agent needs no path to any
+/// checkout — `scsh` on PATH is enough.
+const DEMOS: &[(&str, &str, &str)] = &[(
+  "agent-fleet",
+  "One agent fans \"explain this codebase\" out to claude, codex, and cursor; one blocking run.",
+  include_str!("../AGENT-FLEET-DEMO.md"),
+)];
+
+/// `scsh demo [name]` — with a name, print that walkthrough verbatim (pipe it, save it, or
+/// follow it); with none, list what's available. `agent-fleet-demo` and the file spelling
+/// `AGENT-FLEET-DEMO.md` resolve to `agent-fleet`.
+fn demo_cmd(name: Option<&str>) -> i32 {
+  let Some(requested) = name else {
+    println!();
+    println!(
+      "{} {}",
+      h_head("Demos"),
+      console::style("\u{2014} print one with `scsh demo <name>`, then follow it").bold()
+    );
+    println!();
+    for (demo_name, blurb, _) in DEMOS {
+      help_row(demo_name, blurb);
+    }
+    println!();
+    println!("{}", h_dim("  Each demo is a self-contained markdown walkthrough: hand the output to an"));
+    println!("{}", h_dim("  agent (or follow it yourself) from any directory not inside a git repo."));
+    println!();
+    return 0;
+  };
+  let normalized = requested.to_ascii_lowercase();
+  let normalized = normalized.trim_end_matches(".md").trim_end_matches("-demo");
+  match DEMOS.iter().find(|(demo_name, _, _)| *demo_name == normalized) {
+    Some((_, _, markdown)) => {
+      print!("{markdown}");
+      0
+    }
+    None => {
+      let names: Vec<&str> = DEMOS.iter().map(|(demo_name, _, _)| *demo_name).collect();
+      eprintln!("scsh: no demo named '{requested}' (available: {})", names.join(", "));
+      eprintln!("try 'scsh demo'");
+      2
+    }
+  }
+}
+
+/// `scsh help agent` — the agent-first contract: how another agent or harness drives scsh
+/// end to end. Written to the driving agent in second person; exit codes and JSON only,
+/// never the human-formatted output.
+fn print_help_agent() {
+  println!();
+  println!("{} {}", h_head("agent"), console::style("\u{2014} drive scsh from another agent or harness").bold());
+  println!();
+  println!("{}", h_dim("You are an agent. scsh is your fan-out primitive: one command runs a repo's"));
+  println!("{}", h_dim("skills as separate agent jobs in parallel \u{2014} each agent (claude, codex, cursor,"));
+  println!("{}", h_dim("opencode, grok) in its own container on a clean clone \u{2014} and BLOCKS until every"));
+  println!("{}", h_dim("job has written its result file. You never poll and never scrape a TTY:"));
+  println!("{}", h_dim("everything you need is exit codes and JSON."));
+  println!();
+  println!("{}", h_head("The loop"));
+  help_row("1. DISCOVER", "scsh list --json \u{2014} profiles, skills, routes, and each job's result path.");
+  help_row("2. GATE", "scsh check-profile <p> \u{2014} exit 0 iff the profile exists (runtime-free).");
+  help_cont("scsh probe [p\u{2026}] --json \u{2014} which agent\u{b7}model routes can run on this host.");
+  help_row("3. RUN", "scsh run [p\u{2026}] \u{2014} synchronous; exit 0 = every job succeeded. Pass skill");
+  help_cont("inputs as environment variables (declared in .scsh.yml `env:`).");
+  help_row("4. COLLECT", "Read each job's result file \u{2014} the paths came from step 1, one per route,");
+  help_cont("always under the repo's gitignored tmp/.");
+  help_row("5. RE-RUN", "Same commit + same env = instant cached result; re-running is free.");
+  println!();
+  println!("{}", h_head("Bring your own work to any repo"));
+  println!("{}", h_dim("  scsh run --override-dot-scsh-yml <bundle>/.scsh.yml"));
+  help_cont("Run an external bundle's skills (config + sibling .skills/) against ANY clean");
+  help_cont("git repo: the target needs no .scsh.yml and no .skills/, and stays byte-clean \u{2014}");
+  help_cont("results land only under its gitignored tmp/. probe/list/check-profile take the");
+  help_cont("same flag, so the whole loop above works without installing anything.");
+  println!();
+  println!("{}", h_head("What scsh enforces (so you don't have to)"));
+  help_row("committed state", "A real run insists on a clean tree and runs the COMMIT, never the tree.");
+  help_row("route skipping", "Unavailable routes are skipped; the run fails only when ALL are skipped.");
+  help_row("preflight", "Missing required env is refused before any container starts.");
+  help_row("exit codes", "0 ok \u{b7} 1 failure \u{b7} 2 usage \u{2014} the whole set (scsh help exitcodes).");
+  println!();
+  println!("{}", h_dim("  Worked end-to-end example: `scsh demo agent-fleet` prints AGENT-FLEET-DEMO.md \u{2014}"));
+  println!(
+    "{}",
+    h_dim("  one agent (you) fans \u{201c}explain this codebase\u{201d} out to claude, codex, and cursor")
+  );
+  println!("{}", h_dim("  as three agent jobs, waits on one blocking run, then synthesizes the three"));
+  println!("{}", h_dim("  JSON results. No checkout path needed \u{2014} follow what the command prints."));
   println!();
 }
 
@@ -7305,6 +7425,17 @@ fn print_help_command(name: &str) {
       "scaffold the code-review loop demo",
       "scsh init-beautiful-demo",
       &[("(no flags)", "Write and commit the tiny word-counting project used by demo-beautiful-loop.")],
+    ),
+    "demo" => (
+      "print an embedded agent-followable walkthrough",
+      "scsh demo [name]",
+      &[
+        ("(no name)", "List the available demos."),
+        (
+          "agent-fleet",
+          "One agent fans \"explain this codebase\" out to claude, codex, and cursor as three agent jobs through one blocking `scsh run`, then synthesizes the three JSON results. Prints AGENT-FLEET-DEMO.md verbatim — no checkout path needed.",
+        ),
+      ],
     ),
     "installskills" => (
       "install skills into this repo (or machine-wide)",
@@ -7458,6 +7589,7 @@ fn print_help_overview() {
   help_row("probe [profile…]", "Exit 0 when at least one harness·model route is runnable on this host.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
   help_row("init-beautiful-demo", "Scaffold and commit the code-review loop demo.");
+  help_row("demo [name]", "Print an embedded agent-followable walkthrough (no name lists them).");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs); --global installs machine-wide.");
   help_row("updateskills [url…]", "Reinstall skills, overwriting local copies (--global for the machine-wide set).");
   help_row("daemon", "start | stop | restart | status");
@@ -7472,6 +7604,7 @@ fn print_help_overview() {
   help_row("help [topic]", "Show this help, or one of the topics below.");
   println!();
   println!("{}", h_head("More help:"));
+  help_row("scsh help agent", "Driving scsh from another agent or harness? Start here.");
   help_row("scsh help <command>", "Focused help for any command above (e.g. `scsh help stats`).");
   help_row("scsh help run", "How to run skills: profiles, preflight, exit codes, env vars.");
   help_row("scsh help .scsh.yml", "The project config file: every field + env syntax.");
