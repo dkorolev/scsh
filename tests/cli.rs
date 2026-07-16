@@ -319,9 +319,6 @@ fn installskills_global_installs_under_scsh_home_and_links_agents() {
   // Global install needs NO git repo — run it from a plain directory.
   let d = unique_dir("ginstall");
   let home = unique_dir("ghome");
-  // Two agents are "present" (their home dot-dirs exist); codex is not.
-  std::fs::create_dir_all(home.join(".claude")).unwrap();
-  std::fs::create_dir_all(home.join(".cursor")).unwrap();
   let scsh_home = home.join(".scsh");
   let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
 
@@ -331,19 +328,42 @@ fn installskills_global_installs_under_scsh_home_and_links_agents() {
   assert!(scsh_home.join(".skills/the-beautiful-loop/SKILL.md").is_file(), "got: {}", r.out);
   let manifest = std::fs::read_to_string(scsh_home.join(".scsh.yml")).expect("global manifest");
   assert!(manifest.contains("  the-beautiful-loop:") && manifest.contains("  sanity-reviewer:"), "got: {manifest}");
-  // Present agents get per-skill symlinks into their user-level skills dirs...
-  for agent in [".claude", ".cursor"] {
-    let link = home.join(agent).join("skills/the-beautiful-loop");
-    assert!(link.symlink_metadata().expect("link meta").file_type().is_symlink(), "{agent} should be linked");
-    assert!(link.join("SKILL.md").is_file(), "{agent} link should resolve");
+  // EVERY agent's user-level skills dir is created — mirroring the repo convention — as
+  // ONE symlink to $SCSH_HOME/.skills, whether or not the agent is on the machine yet
+  // (modern codex reads the cross-agent ~/.agents/skills, so that one rides along too).
+  for agent in [".claude", ".cursor", ".codex", ".opencode", ".agents"] {
+    let dir = home.join(agent).join("skills");
+    assert!(dir.symlink_metadata().expect("skills dir").file_type().is_symlink(), "{agent}/skills is one symlink");
+    assert!(dir.join("the-beautiful-loop/SKILL.md").is_file(), "{agent}/skills resolves to the global skills");
   }
-  // ...and absent agents' dot-dirs are never planted.
-  assert!(!home.join(".codex").exists(), "must not create dot-dirs for agents the user does not have");
 
   // Re-running is idempotent: identical files count as already installed, links stay.
   let again = scsh_env(&d, &["installskills", "--global"], &envs);
   assert_eq!(again.code, 0, "got: {}", again.out);
   assert!(again.out.contains("already installed"), "got: {}", again.out);
+}
+
+#[test]
+fn a_real_agent_skills_dir_is_linked_into_not_replaced() {
+  // A user's own ~/.claude/skills (a REAL directory with their skills in it) is never
+  // swapped for a symlink — the installed skills are linked into it one by one, and the
+  // user's entries stay untouched.
+  let d = unique_dir("gkeep");
+  let home = unique_dir("gkeephome");
+  let mine = home.join(".claude/skills/my-own-skill");
+  std::fs::create_dir_all(&mine).unwrap();
+  std::fs::write(mine.join("SKILL.md"), "# mine\n").unwrap();
+  let scsh_home = home.join(".scsh");
+  let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+
+  let r = scsh_env(&d, &["installskills", "--global"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  let skills = home.join(".claude/skills");
+  assert!(!skills.symlink_metadata().unwrap().file_type().is_symlink(), "a real dir is never replaced");
+  assert_eq!(std::fs::read_to_string(mine.join("SKILL.md")).unwrap(), "# mine\n", "the user's skill is untouched");
+  let link = skills.join("the-beautiful-loop");
+  assert!(link.symlink_metadata().expect("per-skill link").file_type().is_symlink(), "skills link in one by one");
+  assert!(link.join("SKILL.md").is_file(), "per-skill link resolves");
 }
 
 #[test]

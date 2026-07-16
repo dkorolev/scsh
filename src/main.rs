@@ -6391,11 +6391,17 @@ fn install_skills_global(overwrite: bool, sources: &[String]) -> i32 {
 }
 
 /// Symlink every globally-installed skill (`$SCSH_HOME/.skills/<name>`, minus `internal-*`)
-/// into the user-level skills dir of each coding agent PRESENT on this machine — an agent is
-/// "present" when its home dot-dir (`~/.claude`, `~/.cursor`, `~/.codex`, `~/.opencode`,
-/// `~/.agents`) already exists; scsh never plants dot-dirs for agents the user does not have.
-/// Existing entries are left untouched (a symlink already pointing at the skill counts as
-/// done; anything else gets a keep-hint). Returns how many links it created.
+/// into every coding agent's user-level skill-discovery dir, mirroring the repo convention
+/// ([`link_skill_hosts`]) machine-wide: `~/.claude/skills`, `~/.cursor/skills`,
+/// `~/.codex/skills`, `~/.opencode/skills`, and the cross-agent `~/.agents/skills` (where
+/// modern codex looks) are each created as ONE symlink to the place the skills actually
+/// live, `$SCSH_HOME/.skills` — so every skill installed later is discovered with no
+/// re-link. All five are created unconditionally: planting an agent's skills dir ahead of
+/// the agent costs nothing and means the skills are found the moment the agent arrives. A
+/// skills dir that already exists as a REAL directory (the user's own skills live there) is
+/// never replaced — the installed skills are linked into it one by one (authoring-only
+/// `internal-*` excluded), and existing entries are left untouched. An existing symlink,
+/// wherever it points, is respected. Returns how many links it created.
 #[cfg(unix)]
 fn link_agent_global_skills(scsh_home: &Path) -> usize {
   const AGENT_DIRS: &[&str] = &[".claude", ".cursor", ".codex", ".opencode", ".agents"];
@@ -6403,8 +6409,9 @@ fn link_agent_global_skills(scsh_home: &Path) -> usize {
     hint("HOME is not set — skipped linking the skills into agent skills dirs");
     return 0;
   };
-  // The globally-installed skills, by directory (authoring-only `internal-*` never link).
-  let mut skills: Vec<(String, PathBuf)> = std::fs::read_dir(scsh_home.join(".skills"))
+  let target_dir = scsh_home.join(".skills");
+  // The per-skill set, for agents whose skills dir is a real directory we must not replace.
+  let mut skills: Vec<(String, PathBuf)> = std::fs::read_dir(&target_dir)
     .map(|entries| {
       entries
         .flatten()
@@ -6420,15 +6427,23 @@ fn link_agent_global_skills(scsh_home: &Path) -> usize {
   let mut made = 0usize;
   let mut linked_agents: Vec<String> = Vec::new();
   for agent in AGENT_DIRS {
-    let base = user_home.join(agent);
-    if !base.is_dir() {
-      continue; // this agent isn't on the machine — don't plant its dot-dir
-    }
-    let skills_dir = base.join("skills");
-    if std::fs::create_dir_all(&skills_dir).is_err() {
-      hint(&format!("could not create {} — skipped", skills_dir.display()));
+    let skills_dir = user_home.join(agent).join("skills");
+    let Ok(meta) = skills_dir.symlink_metadata() else {
+      // Nothing there yet: the whole dir becomes one symlink to $SCSH_HOME/.skills.
+      let linked = std::fs::create_dir_all(user_home.join(agent)).is_ok()
+        && std::os::unix::fs::symlink(&target_dir, &skills_dir).is_ok();
+      if linked {
+        made += 1;
+        linked_agents.push(format!("~/{agent}/skills"));
+      } else {
+        hint(&format!("could not link {} — skipped", skills_dir.display()));
+      }
       continue;
+    };
+    if meta.file_type().is_symlink() {
+      continue; // already a symlink (ours, or the user's own arrangement) — respected as-is
     }
+    // A real directory: the user's own skills live here. Link ours in one by one.
     let mut fresh = 0usize;
     for (name, target) in &skills {
       let link = skills_dir.join(name);
@@ -6450,7 +6465,7 @@ fn link_agent_global_skills(scsh_home: &Path) -> usize {
     }
   }
   if made > 0 {
-    ok(&format!("linked {made} skill{} into agent dirs: {}", plural(made), linked_agents.join(", ")));
+    ok(&format!("linked agent skills dirs → {}: {}", display_path(&target_dir), linked_agents.join(", ")));
   }
   made
 }
