@@ -600,22 +600,30 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .fleet-jump:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); }
   .fleet-jump-cell { width: 2.5rem; text-align: right; }
+  /* Chamfered status row: the outer layer paints the border ring plus a left accent
+     stripe wide enough to wrap the cut corners; the ::before surface insets past it. */
   details.proc {
+    --cut: 8px; --bw: 1px; --accent-w: 3px;
+    --accent: var(--border);
     position: relative;
-    background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--border);
-    border-radius: 6px; margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
+    background: linear-gradient(90deg,
+      var(--accent) 0 calc(var(--cut) + var(--accent-w)),
+      var(--proc-border, var(--border)) 0);
+    margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
   }
-  details.proc[open] {
-    border-top-color: #3a4558; border-right-color: #3a4558; border-bottom-color: #3a4558;
+  details.proc::before {
+    background: var(--surface);
+    inset: var(--bw) var(--bw) var(--bw) var(--accent-w);
   }
-  /* Status lives on the left accent bar (same language as the purple meta card). */
-  details.proc.ok { border-left-color: var(--green); }
-  details.proc.graceful { border-left-color: var(--orange); }
-  details.proc.fail { border-left-color: var(--red); }
-  details.proc.running { border-left-color: var(--orange); }
-  details.proc.terminating { border-left-color: var(--orange); }
-  details.proc.waiting { border-left-color: var(--cyan); }
-  details.proc.skipped { border-left-color: var(--text-muted); }
+  details.proc[open] { --proc-border: #3a4558; }
+  /* Status lives on the left accent stripe (same language as the purple meta card). */
+  details.proc.ok { --accent: var(--green); }
+  details.proc.graceful { --accent: var(--orange); }
+  details.proc.fail { --accent: var(--red); }
+  details.proc.running { --accent: var(--orange); }
+  details.proc.terminating { --accent: var(--orange); }
+  details.proc.waiting { --accent: var(--cyan); }
+  details.proc.skipped { --accent: var(--text-muted); }
   summary {
     cursor: pointer; list-style: none; display: flex; gap: 0.5rem;
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;

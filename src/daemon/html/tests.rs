@@ -235,7 +235,7 @@ fn skipped_workflow_step_renders_as_a_dim_slashed_row() {
   }
   let html = session_page(&store, "castab").expect("session renders");
   let procs = session_procs_html(&html);
-  assert!(procs.contains(r#"class="proc skipped""#), "got: {procs}");
+  assert!(procs.contains(r#"class="chamfer proc skipped""#), "got: {procs}");
   assert!(!procs.contains("class=\"glyph\""), "proc rows no longer carry a status glyph: {procs}");
   assert!(procs.contains(">skipped</span>"), "skipped elapsed phrase: {procs}");
   // A skipped step is FINISHED, so its collapsed row shows the outcome (the skip reason),
@@ -361,9 +361,12 @@ fn ui_review_fixes_hold() {
   assert!(!page.contains(r#"<span class="note dim">claude run…</span>"#), "the stale note does not");
   // 4. The meta island is purple and owns the action buttons (top-right corner).
   assert!(page.contains(r#"<div class="chamfer card card--accent-left-purple"><div class="session-actions">"#));
-  // 5. Proc islands wear status on the left accent bar (and tint the label).
-  assert!(html.contains("details.proc.ok { border-left-color: var(--green); }"));
-  assert!(html.contains("details.proc.running { border-left-color: var(--orange); }"));
+  // 5. Proc islands wear status on the left accent stripe (and tint the label). The
+  //    row is a chamfer: the stripe is painted by the outer layer, wrapping the cut
+  //    corners, and the ::before surface insets past it.
+  assert!(html.contains("details.proc.ok { --accent: var(--green); }"));
+  assert!(html.contains("details.proc.running { --accent: var(--orange); }"));
+  assert!(html.contains("var(--proc-border, var(--border)) 0);"));
   assert!(html.contains("details.proc.running summary .label { color: var(--orange); }"));
   assert!(
     html.contains(".wf-node.wf-running { border-left-color: var(--orange); }"),
@@ -482,7 +485,7 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   assert!(html.contains("Terminating all claude (1)…"), "harness strip acknowledges teardown: {html}");
   assert!(!html.contains(r#"data-harness-stop="claude""#), "a terminating harness cannot be stopped twice");
   let page = session_page(&live, "castab").expect("terminating session renders");
-  assert!(page.contains(r#"class="proc terminating""#), "proc island turns orange while stopping: {page}");
+  assert!(page.contains(r#"class="chamfer proc terminating""#), "proc island turns orange while stopping: {page}");
   assert!(!page.contains(r#"data-proc-stop="0""#), "a terminating proc cannot be stopped twice: {page}");
 }
 
@@ -1172,7 +1175,7 @@ fn offline_export_includes_workflow_graph() {
   assert!(html.contains(r#"data-workflow-step="add""#) && html.contains(r#"data-workflow-step="summarize""#));
   // The graph's jump links resolve offline: proc rows carry the same task anchors as live.
   assert!(html.contains("href=\"#task-add\""), "node links target task anchors");
-  assert!(html.contains(r#"<details open class="proc ok" data-index="0" id="task-add""#), "proc row anchors: {html}");
+  assert!(html.contains(r#"<details open class="chamfer proc ok" data-index="0" id="task-add""#), "proc row anchors: {html}");
   // The graph CSS rides in the shared stylesheet the export inlines.
   assert!(html.contains(".wf-bookend"), "bookend CSS is inlined in the export");
 }

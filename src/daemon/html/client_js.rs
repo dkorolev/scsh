@@ -614,7 +614,7 @@ function syncProcOutput(det, p) {
 }
 function updateProcFields(det, p, nowUnix) {
   const terminating = p.fail_reason === 'stop_requested';
-  det.className = 'proc ' + (terminating ? 'terminating' : p.status);
+  det.className = 'chamfer proc ' + (terminating ? 'terminating' : p.status);
   const labelEl = det.querySelector('summary .label');
   if (labelEl) labelEl.textContent = p.label || '';
   const stat = det.querySelector('[data-proc-stat="' + CSS.escape(String(p.index)) + '"]');
@@ -1069,7 +1069,7 @@ function procHtml(p, isOpen, nowUnix) {
         'Force-stop this container only — the rest of the job continues') + '"><span>' +
       (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span></button>'
     : '';
-  const summaryOpen = '<details class="proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
+  const summaryOpen = '<details class="chamfer proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
     ((diff || snap || kill) ? '<div class="proc-actions">' + diff + snap + kill + '</div>' : '') +
     '<summary>' +
