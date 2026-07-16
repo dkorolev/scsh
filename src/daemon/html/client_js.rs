@@ -3056,6 +3056,7 @@ let OPEN_REPO = null;
 let OPEN_REPO_RUNNABLE = false;
 const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
+const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh installskills --global)
 // ---- tabs ----
 // Explicit tab clicks push history (/jobs, /projects, /setup, /); Back/Forward restore (WEB-UI §1).
 // /project/… and /repo/… are filtered Projects views — keep the path, open the Projects tab.
@@ -3156,8 +3157,9 @@ const DEFS_BY_NAME = {};  // name -> definition
   activate(fromLoc || saved || 'run', 'sync');
 })();
 function defSourceBadge(src) {
-  // builtin wears purple (the setup color); repo/home keep the muted status hues.
+  // builtin wears purple (the setup color), global cyan; repo/home keep the muted status hues.
   if (src === 'builtin') return '<span class="chamfer badge badge--purple"><span>builtin</span></span>';
+  if (src === 'global') return '<span class="chamfer badge badge--cyan"><span>global</span></span>';
   const cls = src === 'repo' ? 'completed' : 'cancelled';
   return '<span class="chamfer session-status ' + cls + '"><span>' + esc(src) + '</span></span>';
 }
@@ -3265,7 +3267,7 @@ function handleRepoOpened(resp, note) {
     const verb = resp.created ? 'created' : 'opened';
     note.textContent = resp.runnable ? verb + ' — ready to run' : verb + ', but not ready to run (see below)';
   }
-  renderDefs(resp.defs || []);
+  renderDefs(resp.defs || [], resp.global || []);
   const form = document.getElementById('def-form');
   if (form) form.innerHTML = '';
   renderRepoJobs(liveSessions, Date.now() / 1000);
@@ -3281,16 +3283,17 @@ function handleRepoOpened(resp, note) {
     });
   }
 }
-function renderDefs(defs) {
+function renderDefs(defs, globals) {
   const list = document.getElementById('defs-list');
   if (!list) return;
   for (const k in DEFS_BY_NAME) delete DEFS_BY_NAME[k];
   defs.forEach(d => { DEFS_BY_NAME[d.name] = d; });
-  if (!defs.length) { list.innerHTML = '<p class="dim">no harness definitions found.</p>'; return; }
-  list.innerHTML = defs.map(d => {
-    const agents = (d.agents || []).map(a =>
-      '<span class="chamfer agent-badge"><span>' + esc(a.agent) +
-      (a.model ? ' · ' + esc(a.model) : '') + '</span></span>').join(' ');
+  for (const k in GLOBAL_PROFILES) delete GLOBAL_PROFILES[k];
+  (globals || []).forEach(g => { GLOBAL_PROFILES[g.name] = g; });
+  const agentBadges = (agents) => (agents || []).map(a =>
+    '<span class="chamfer agent-badge"><span>' + esc(a.agent) +
+    (a.model ? ' · ' + esc(a.model) : '') + '</span></span>').join(' ');
+  let html = defs.length ? defs.map(d => {
     const wf = d.workflow
       ? ' <span class="chamfer session-status completed"><span>workflow · ' + d.steps + ' steps</span></span>'
       : '';
@@ -3298,10 +3301,51 @@ function renderDefs(defs) {
       '<button type="button" class="chamfer btn btn--cyan btn--sm def-pick" data-def="' +
       esc(d.name) + '"><span>' + esc(d.name) + '</span></button> ' +
       defSourceBadge(d.source) + wf + ' <span class="dim">' + esc(d.description) + '</span>' +
-      '<div class="def-agents">' + agents + '</div></div>';
-  }).join('');
+      '<div class="def-agents">' + agentBadges(d.agents) + '</div></div>';
+  }).join('') : '<p class="dim">no harness definitions found.</p>';
+  // Globally installed skill profiles (scsh installskills --global) run in ANY opened
+  // repo, so they always ride below the repo's own definitions.
+  const globalNames = Object.keys(GLOBAL_PROFILES);
+  if (globalNames.length) {
+    html += '<p class="section-label">Global skills</p>' +
+      '<p class="dim">Installed machine-wide with <code>scsh installskills --global</code> — runnable in any repository.</p>' +
+      globalNames.map(name => {
+        const g = GLOBAL_PROFILES[name];
+        const n = (g.agents || []).length;
+        return '<div class="chamfer def-card">' +
+          '<button type="button" class="chamfer btn btn--cyan btn--sm global-pick" data-profile="' +
+          esc(name) + '"><span>' + esc(name) + '</span></button> ' +
+          defSourceBadge('global') +
+          ' <span class="dim">' + n + ' route' + (n === 1 ? '' : 's') + '</span>' +
+          '<div class="def-agents">' + agentBadges(g.agents) + '</div></div>';
+      }).join('');
+  }
+  list.innerHTML = html;
   list.querySelectorAll('.def-pick').forEach(b =>
     b.addEventListener('click', () => selectDef(b.dataset.def)));
+  list.querySelectorAll('.global-pick').forEach(b =>
+    b.addEventListener('click', () => selectGlobalProfile(b.dataset.profile)));
+}
+// Mirror of selectDef for a globally installed skill profile: no params to collect, so the
+// form is just the Start button; the daemon spawns `scsh run <profile>` in the open repo.
+function selectGlobalProfile(name) {
+  const form = document.getElementById('def-form');
+  if (!GLOBAL_PROFILES[name] || !form) return;
+  const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
+  const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
+  form.innerHTML = '<h4 class="form-title">run global skill profile <code>' + esc(name) + '</code></h4>' +
+    '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
+    disabled + '><span>Start job</span></button>' +
+    '<span id="def-note" class="dim">' + hint + '</span></div>';
+  document.getElementById('def-start')?.addEventListener('click', () => startGlobalJob(name));
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  form.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+}
+function startGlobalJob(name) {
+  const note = document.getElementById('def-note');
+  if (!GLOBAL_PROFILES[name] || !OPEN_REPO) return;
+  if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
+  postJobStart({ repo: OPEN_REPO, profile: name }, note);
 }
 function selectDef(name) {
   const def = DEFS_BY_NAME[name];
@@ -3367,7 +3411,9 @@ function startJob(name) {
     if (el) { el.focus(); el.reportValidity(); }
     return;
   }
-  const req = { repo: OPEN_REPO, def: name, params: collectParams(def) };
+  postJobStart({ repo: OPEN_REPO, def: name, params: collectParams(def) }, note);
+}
+function postJobStart(req, note) {
   if (note) note.textContent = 'starting…';
   fetch('/api/v1/jobs/start', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
