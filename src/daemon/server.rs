@@ -193,16 +193,22 @@ impl Server {
 
       if last_ws_tick.elapsed() >= WS_TICK {
         let now = now_unix_secs();
-        let include_sessions = self.ws_dirty.load(Ordering::Relaxed);
+        let mut include_sessions = self.ws_dirty.load(Ordering::Relaxed);
         // The snapshot of casts to probe is taken under the store lock; the file stats and
         // tail-parses below run with the lock released, and only when someone is listening.
         let probe_casts = self.ws_hub.client_count() > 0;
-        let (json, casts) = {
+        let (json, casts, dead_sessions) = {
           let mut store = lock_store(&self.store);
+          let dead_sessions = settle_dead_run_pids(&mut store, now);
+          include_sessions |= !dead_sessions.is_empty();
           store.reconcile(now);
           let json = if include_sessions { tick_json(&store, now) } else { tick_json_light(&store, now) };
-          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() })
+          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() }, dead_sessions)
         };
+        if !dead_sessions.is_empty() {
+          self.dirty.store(true, Ordering::Relaxed);
+          self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(dead_sessions);
+        }
         self.ws_hub.broadcast(json);
         if probe_casts {
           for msg in probe_growth_messages(&casts, &mut cast_probes) {
@@ -318,9 +324,6 @@ fn pending_browser_kill(fail_reason: Option<&str>) -> Option<PendingBrowserKill>
 fn settle_loaded_incomplete_procs(session: &mut Session) {
   let ended = session.ended_at.unwrap_or(session.last_seen_at);
   for proc in &mut session.procs {
-    if !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
-      continue;
-    }
     if let Some(pending) = pending_browser_kill(proc.fail_reason.as_deref()) {
       proc.status = ProcStatus::Fail;
       proc.fail_reason = Some(pending.settled_reason.into());
@@ -328,6 +331,9 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
       if proc.elapsed.is_none() {
         proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
       }
+      continue;
+    }
+    if !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
       continue;
     }
     proc.status = ProcStatus::Fail;
@@ -344,6 +350,29 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
       proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
     }
   }
+}
+
+/// End sessions whose owning process disappeared without deregistering. The exact child
+/// watcher covers jobs spawned by this daemon; this periodic check also covers CLI-started
+/// runs and a watcher lost to an earlier daemon build. A dead PID is stronger evidence than
+/// the heartbeat timeout, so the browser must not advertise the job as still running.
+fn settle_dead_run_pids(store: &mut Store, now: u64) -> Vec<String> {
+  let mut changed = Vec::new();
+  for (id, session) in &mut store.sessions {
+    if session.ended_at.is_some() {
+      continue;
+    }
+    let Some(pid) = session.run_pid else { continue };
+    if crate::daemon::paths::pid_alive(pid) {
+      continue;
+    }
+    session.ended_at = Some(now);
+    session.client_connected = false;
+    session.run_pid = None;
+    settle_loaded_incomplete_procs(session);
+    changed.push(id.clone());
+  }
+  changed
 }
 
 /// Handle one request. Returns `(mutated, session_id)`: `mutated` drives the persist + WS
@@ -1030,13 +1059,13 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
             s.ended_at = Some(now);
             s.run_pid = None;
             for p in &mut s.procs {
+              if let Some(pending) = pending_browser_kill(p.fail_reason.as_deref()) {
+                p.status = ProcStatus::Fail;
+                p.fail_reason = Some(pending.settled_reason.into());
+                p.detail = Some(pending.settled_detail.into());
+                continue;
+              }
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
-                if let Some(pending) = pending_browser_kill(p.fail_reason.as_deref()) {
-                  p.status = ProcStatus::Fail;
-                  p.fail_reason = Some(pending.settled_reason.into());
-                  p.detail = Some(pending.settled_detail.into());
-                  continue;
-                }
                 p.status = ProcStatus::Fail;
                 p.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
                 if p.detail.is_none() {
@@ -1078,7 +1107,20 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let skill_source = field_str(&obj, "skill_source");
       let route = field_str(&obj, "route");
       let annotate_target = field_str(&obj, "annotate_target");
+      let previous_attempt = field_num(&obj, "previous_attempt").map(|value| value as usize);
+      if let Some(previous) = previous_attempt {
+        let valid_predecessor = previous < proc_index
+          && s
+            .procs
+            .iter()
+            .any(|p| p.index == previous && p.kind == kind && p.skill_name.as_deref() == skill_name.as_deref());
+        let child_available = !s.procs.iter().any(|p| p.index != proc_index && p.previous_attempt == Some(previous));
+        if !valid_predecessor || !child_available {
+          return false;
+        }
+      }
       if let Some(p) = s.procs.iter_mut().find(|p| p.index == proc_index) {
+        p.previous_attempt = previous_attempt;
         p.label = label;
         p.kind = kind;
         p.skill_name = skill_name.clone();
@@ -1090,6 +1132,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       } else {
         s.procs.push(ProcRecord {
           index: proc_index,
+          previous_attempt,
           label,
           kind,
           status: ProcStatus::Waiting,
@@ -1111,6 +1154,15 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           annotate_target,
           lines: Vec::new(),
         });
+      }
+      if let Some(previous) = previous_attempt {
+        if let Some(p) = s.procs.iter_mut().find(|p| p.index == previous) {
+          if p.fail_reason.as_deref() == Some(crate::failure::reason::RESTART_REQUESTED) {
+            p.status = ProcStatus::Fail;
+            p.fail_reason = Some(crate::failure::reason::FORCE_RESTARTED.into());
+            p.detail = Some("restarted from the session browser; superseded by the linked attempt".into());
+          }
+        }
       }
       if let (Some(meta), Some(step_id)) = (s.workflow.as_mut(), skill_name.as_deref()) {
         crate::daemon::workflow::bind_workflow_proc(meta, step_id, proc_index, kind);
@@ -1224,15 +1276,19 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let fail_reason = field_str(&obj, "fail_reason");
       let elapsed = field_num(&obj, "elapsed");
       if let Some(p) = store.proc_mut(&session, proc_index) {
-        // A late client finish must not overwrite an accepted or completed browser stop
-        // or restart — the settled proc is the record; the respawn is a new proc row.
+        // A failed finish from the container being torn down must not overwrite an accepted
+        // browser restart. A valid result that won the race is different: the runner consumes
+        // the marker without respawning, so that successful attempt remains authoritative.
+        let restart_won_by_result = p.fail_reason.as_deref() == Some(crate::failure::reason::RESTART_REQUESTED)
+          && matches!(status, ProcStatus::Ok | ProcStatus::Graceful);
         if matches!(
           p.fail_reason.as_deref(),
           Some(crate::failure::reason::STOP_REQUESTED)
             | Some(crate::failure::reason::FORCE_STOPPED)
             | Some(crate::failure::reason::RESTART_REQUESTED)
             | Some(crate::failure::reason::FORCE_RESTARTED)
-        ) {
+        ) && !restart_won_by_result
+        {
           return true;
         }
         p.status = status;
@@ -1967,6 +2023,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       if s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) { "build failed to start" } else { "run failed to start" };
     s.procs.push(ProcRecord {
       index: 0,
+      previous_attempt: None,
       label: label.into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Fail,
@@ -2261,9 +2318,9 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
 
 /// `POST /api/v1/proc/restart` — body `{"session":"…","proc":N}`. Force-restart ONE skill run:
 /// record the request as a marker file for the owning `scsh run`, kill this attempt's container,
-/// and settle the proc as `force_restarted`; the runner consumes the marker when the attempt
-/// comes back failed and respawns the route as a fresh proc (the existing retry plumbing), so
-/// the new attempt supersedes this one. Builds and annotations have no respawn path and are
+/// and leave the proc in `restart_requested`; the runner consumes the marker when the attempt
+/// comes back failed and registers a fresh proc with an explicit `previous_attempt` edge. Only
+/// then does the old attempt settle as `force_restarted`. Builds and annotations have no respawn path and are
 /// refused. Requires the run client to still be attached — with no runner alive nothing could
 /// act on the marker, so the request is refused rather than degraded into a plain stop.
 #[cfg(test)]
@@ -2296,14 +2353,14 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
     if p.kind != ProcKind::Skill {
       return (400, err_body("only skill runs can be restarted — builds and annotations have no respawn path"), false);
     }
-    if p.status != ProcStatus::Running && p.status != ProcStatus::Waiting {
-      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
-    }
     if matches!(
       p.fail_reason.as_deref(),
       Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
     ) {
       return (200, "{\"ok\":true,\"already_requested\":true}".into(), false);
+    }
+    if p.status != ProcStatus::Running && p.status != ProcStatus::Waiting {
+      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
     }
     if !client_connected {
       return (409, err_body("the run client is gone — nothing is left to respawn this route"), false);
@@ -2330,7 +2387,7 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
   if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
     crate::ui::signals::stop_container(rt, name);
   }
-  let finalized = {
+  let replacement_pending = {
     let mut store = lock_store(store);
     let Some(p) = store.proc_mut(&session_id, index) else {
       return (404, err_body("proc disappeared during restart"), true);
@@ -2338,22 +2395,20 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
     if p.fail_reason.as_deref() != Some(crate::failure::reason::RESTART_REQUESTED) {
       false
     } else {
-      p.status = ProcStatus::Fail;
-      p.fail_reason = Some(crate::failure::reason::FORCE_RESTARTED.into());
-      p.detail = Some("restarted from the session browser; superseded by the fresh attempt".into());
+      p.detail = Some("restart requested; waiting for the replacement attempt to register".into());
       true
     }
   };
   notify();
-  if finalized {
+  if replacement_pending {
     crate::failure::log_session_proc(
       &session_id,
-      crate::failure::reason::FORCE_RESTARTED,
+      crate::failure::reason::RESTART_REQUESTED,
       &label,
-      "restarted from the session browser",
+      "restart requested from the session browser",
     );
   }
-  (200, "{\"ok\":true}".into(), true)
+  (200, "{\"ok\":true,\"replacement\":\"pending\"}".into(), true)
 }
 
 /// `POST /api/v1/harness/stop` — body `{"harness":"grok"}`. Stop EVERY still-running skill
@@ -2863,6 +2918,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -2932,6 +2988,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -2988,6 +3045,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -3064,6 +3122,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "skill".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -3126,6 +3185,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "opencode: doctor".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -3179,6 +3239,7 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let proc = |index: usize, name: &str| ProcRecord {
       index,
+      previous_attempt: None,
       label: format!("grok: {name}"),
       kind: ProcKind::Skill,
       status: ProcStatus::Running,
@@ -3280,6 +3341,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "annotate · source".into(),
             kind: ProcKind::Annotate,
             status: ProcStatus::Running,
@@ -3324,10 +3386,11 @@ mod tests {
   }
 
   #[test]
-  fn proc_restart_settles_the_attempt_and_leaves_a_marker_for_the_runner() {
+  fn proc_restart_records_pending_attempt_and_links_the_replacement() {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let proc = |index: usize, kind: ProcKind| ProcRecord {
       index,
+      previous_attempt: None,
       label: format!("claude: review-{index}"),
       kind,
       status: ProcStatus::Running,
@@ -3378,47 +3441,98 @@ mod tests {
     {
       let guard = store.lock().unwrap();
       let session = guard.sessions.get("rst01").unwrap();
-      // Only proc 1 was settled; the session and its sibling proc keep running.
+      // Only proc 1 was interrupted; the session and its sibling proc keep running. The
+      // attempt stays explicitly pending until the replacement registers.
       assert!(session.ended_at.is_none());
       assert_eq!(session.procs[0].status, ProcStatus::Running);
-      assert_eq!(session.procs[1].status, ProcStatus::Fail);
-      assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+      assert_eq!(session.procs[1].status, ProcStatus::Running);
+      assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::RESTART_REQUESTED));
     }
     // The marker the owning `scsh run` consumes to respawn the route was written.
     assert!(crate::daemon::paths::proc_restart_marker("rst01", 1).is_file());
     assert!(crate::daemon::consume_proc_restart("rst01", 1));
     assert!(!crate::daemon::consume_proc_restart("rst01", 1), "consume is once");
-    // A late client finish cannot resurrect the settled attempt.
+    // The teardown failure cannot turn a pending restart into an ordinary failed attempt.
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
     assert!(handle_api_post(
       "/api/v1/proc/finish",
-      r#"{"session":"rst01","proc":1,"status":"ok","fail_reason":null,"detail":"late success","elapsed":2}"#,
+      r#"{"session":"rst01","proc":1,"status":"fail","fail_reason":"container_run_failed","detail":"killed","elapsed":2}"#,
       &store,
       &prune,
     ));
     {
       let guard = store.lock().unwrap();
       let restarted = &guard.sessions.get("rst01").unwrap().procs[1];
-      assert_eq!(restarted.status, ProcStatus::Fail);
-      assert_eq!(restarted.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+      assert_eq!(restarted.status, ProcStatus::Running);
+      assert_eq!(restarted.fail_reason.as_deref(), Some(crate::failure::reason::RESTART_REQUESTED));
     }
-    // Idempotent on a proc that already settled; builds have no respawn path; unknown → 404.
+    // Idempotent while the replacement is pending.
     let (status2, body2, mutated2) = proc_restart_response(r#"{"session":"rst01","proc":1}"#, &store);
     assert_eq!(status2, 200);
     assert!(!mutated2);
-    assert!(body2.contains("already_ended"));
+    assert!(body2.contains("already_requested"));
+
+    // The runner registers the replacement with an explicit lineage edge. That one event
+    // finalizes the old attempt and makes both forward/backward navigation deterministic.
+    assert!(handle_api_post(
+      "/api/v1/proc/add",
+      r#"{"session":"rst01","proc":3,"label":"claude: review-1 (retry)","kind":"skill","skill_name":"review-1","harness":"claude","previous_attempt":1}"#,
+      &store,
+      &prune,
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get("rst01").unwrap();
+      let old = session.procs.iter().find(|p| p.index == 1).unwrap();
+      let replacement = session.procs.iter().find(|p| p.index == 3).unwrap();
+      assert_eq!(old.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+      assert_eq!(replacement.previous_attempt, Some(1));
+      assert_eq!(session.proc_next_attempt(old).map(|p| p.index), Some(3));
+      assert_eq!(session.proc_first_attempt(replacement).index, 1);
+    }
+    assert!(!handle_api_post(
+      "/api/v1/proc/add",
+      r#"{"session":"rst01","proc":4,"label":"claude: duplicate replacement","kind":"skill","skill_name":"review-1","harness":"claude","previous_attempt":1}"#,
+      &store,
+      &prune,
+    ));
+
+    // Idempotent once linked; builds have no respawn path; unknown → 404.
+    let (status_linked, body_linked, mutated_linked) = proc_restart_response(r#"{"session":"rst01","proc":1}"#, &store);
+    assert_eq!(status_linked, 200);
+    assert!(!mutated_linked);
+    assert!(body_linked.contains("already_ended"));
     let (status3, body3, _) = proc_restart_response(r#"{"session":"rst01","proc":2}"#, &store);
     assert_eq!(status3, 400, "got: {body3}");
     let (status4, _, _) = proc_restart_response(r#"{"session":"rst01","proc":9}"#, &store);
     assert_eq!(status4, 404);
+
+    // If a valid result wins the teardown race, the runner consumes the marker instead of
+    // spawning a replacement; the original attempt is therefore allowed to finish cleanly.
+    let (race_status, race_body, _) = proc_restart_response(r#"{"session":"rst01","proc":0}"#, &store);
+    assert_eq!(race_status, 200, "got: {race_body}");
+    assert!(handle_api_post(
+      "/api/v1/proc/finish",
+      r#"{"session":"rst01","proc":0,"status":"ok","detail":"valid result won","elapsed":3}"#,
+      &store,
+      &prune,
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let won = &guard.sessions.get("rst01").unwrap().procs[0];
+      assert_eq!(won.status, ProcStatus::Ok);
+      assert!(won.fail_reason.is_none());
+    }
+    assert!(crate::daemon::consume_proc_restart("rst01", 0));
+
     // A gone run client means nothing is left to act on the marker → refused.
     {
       let mut guard = store.lock().unwrap();
       guard.sessions.get_mut("rst01").unwrap().client_connected = false;
     }
-    let (status5, body5, _) = proc_restart_response(r#"{"session":"rst01","proc":0}"#, &store);
+    let (status5, body5, _) = proc_restart_response(r#"{"session":"rst01","proc":3}"#, &store);
     assert_eq!(status5, 409, "got: {body5}");
-    assert!(!crate::daemon::paths::proc_restart_marker("rst01", 0).exists(), "no marker without a runner");
+    assert!(!crate::daemon::paths::proc_restart_marker("rst01", 3).exists(), "no marker without a runner");
   }
 
   #[test]
@@ -3478,6 +3592,7 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let proc = |index: usize, harness: &str| ProcRecord {
       index,
+      previous_attempt: None,
       label: format!("{harness}: review"),
       kind: ProcKind::Skill,
       status: ProcStatus::Running,
@@ -3728,6 +3843,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "claude: add".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Running,
@@ -3834,6 +3950,7 @@ mod tests {
           skills: Vec::new(),
           procs: vec![ProcRecord {
             index: 0,
+            previous_attempt: None,
             label: "claude: add".into(),
             kind: ProcKind::Skill,
             status: ProcStatus::Ok,
@@ -3903,6 +4020,7 @@ mod tests {
   fn export_test_proc(index: usize, label: &str, cast_path: Option<String>) -> ProcRecord {
     ProcRecord {
       index,
+      previous_attempt: None,
       label: label.into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Ok,
@@ -3951,6 +4069,32 @@ mod tests {
   }
 
   #[test]
+  fn live_reconcile_ends_a_job_when_its_owner_pid_disappears() {
+    let mut restarted = export_test_proc(0, "cursor: prepare", None);
+    restarted.status = ProcStatus::Fail;
+    restarted.fail_reason = Some(crate::failure::reason::RESTART_REQUESTED.into());
+    let mut downstream = export_test_proc(1, "claude: review", None);
+    downstream.status = ProcStatus::Waiting;
+    downstream.started_at = None;
+    downstream.elapsed = None;
+    let store = store_with_export_session("deadlive", vec![restarted, downstream]);
+    let mut guard = store.lock().unwrap();
+    let session = guard.sessions.get_mut("deadlive").unwrap();
+    session.ended_at = None;
+    session.client_connected = true;
+    session.run_pid = Some(u32::MAX / 2);
+
+    assert_eq!(settle_dead_run_pids(&mut guard, 100), vec!["deadlive"]);
+    let session = &guard.sessions["deadlive"];
+    assert_eq!(session.ended_at, Some(100));
+    assert!(!session.client_connected);
+    assert!(session.run_pid.is_none());
+    assert_eq!(session.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+    assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::SESSION_END_INCOMPLETE));
+    assert_eq!(session.lifecycle_status(100), crate::daemon::model::SessionLifecycle::Cancelled);
+  }
+
+  #[test]
   fn chapters_response_names_the_live_summarizing_job_while_the_sidecar_is_pending() {
     let now = now_unix_secs();
     let dir = std::env::temp_dir().join(format!("scsh-chap-job-{}", crate::runtime::random_nonce_6()));
@@ -3992,7 +4136,7 @@ mod tests {
     assert_eq!(status, 200);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // Regression: the old model treated 30 seconds without a session event as a terminal
-    // failure even after the annotation proc had started. Running work gets the 20-minute
+    // failure even after the annotation proc had started. Running work gets the 30-minute
     // idle allowance, so a quiet annotator remains running here.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().last_seen_at = now - 31;
     let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
@@ -4212,6 +4356,7 @@ mod tests {
             skills: Vec::new(),
             procs: vec![ProcRecord {
               index: 0,
+              previous_attempt: None,
               label: "skill".into(),
               kind: ProcKind::Skill,
               status: ProcStatus::Waiting,
