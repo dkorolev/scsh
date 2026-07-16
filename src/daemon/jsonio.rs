@@ -156,6 +156,7 @@ fn format_f64_json(v: f64) -> String {
 }
 
 fn proc_json(p: &ProcRecord) -> String {
+  let previous_attempt = p.previous_attempt.map_or_else(|| "null".to_string(), |index| index.to_string());
   let note = opt_str(&p.note);
   let detail = opt_str(&p.detail);
   let elapsed = match p.elapsed {
@@ -173,7 +174,7 @@ fn proc_json(p: &ProcRecord) -> String {
     None => "null".to_string(),
   };
   format!(
-    "{{ \"index\": {}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
+    "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"lines\": [{}] }}",
@@ -265,6 +266,7 @@ fn parse_skills(v: Option<&Value>) -> Vec<SkillMeta> {
 fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   let obj = as_object(v)?;
   let index = field_num(obj, "index").unwrap_or(0.0) as usize;
+  let previous_attempt = field_num(obj, "previous_attempt").map(|value| value as usize);
   let label = field_str(obj, "label").unwrap_or_default();
   let kind = ProcKind::parse(field_str(obj, "kind").as_deref().unwrap_or("skill")).unwrap_or(ProcKind::Skill);
   let status =
@@ -286,6 +288,7 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
   };
   Ok(ProcRecord {
     index,
+    previous_attempt,
     label,
     kind,
     status,
@@ -359,6 +362,7 @@ mod tests {
   fn proc_json_serializes_non_finite_as_null() {
     let proc = ProcRecord {
       index: 0,
+      previous_attempt: None,
       label: "skill".into(),
       kind: ProcKind::Skill,
       status: ProcStatus::Ok,
@@ -400,6 +404,7 @@ mod tests {
       skills: vec![SkillMeta { name: "add".into(), harness: "opencode".into() }],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: Some(7),
         label: "build".into(),
         kind: ProcKind::Build,
         status: ProcStatus::Ok,
@@ -434,6 +439,7 @@ mod tests {
     assert_eq!(s.procs[0].cast_path.as_deref(), Some("/tmp/scsh-daemon/casts/abcdef-p0.cast"));
     assert_eq!(s.procs[0].diff_path.as_deref(), Some("/tmp/scsh-home/sessions/abcdef/diffs/add.html"));
     assert_eq!(s.procs[0].container_runtime.as_deref(), Some("container"));
+    assert_eq!(s.procs[0].previous_attempt, Some(7));
     assert_eq!(s.ended_at, Some(105));
     assert_eq!(s.skills[0].name, "add");
     assert_eq!(s.parent_session, None);

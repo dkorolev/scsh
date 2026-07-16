@@ -154,6 +154,7 @@ mod tests {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Running,

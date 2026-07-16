@@ -132,6 +132,7 @@ mod tests {
       skills: Vec::new(),
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         label: "s".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,

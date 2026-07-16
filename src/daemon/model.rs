@@ -157,6 +157,10 @@ pub struct OutputLine {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcRecord {
   pub index: usize,
+  /// The immediately preceding attempt of this same logical run. Retries form an explicit
+  /// chain; `None` means the first attempt (or a record written before attempt lineage was
+  /// introduced). The daemon validates this edge when the replacement proc registers.
+  pub previous_attempt: Option<usize>,
   pub label: String,
   pub kind: ProcKind,
   pub status: ProcStatus,
@@ -167,7 +171,8 @@ pub struct ProcRecord {
   pub started_at: Option<u64>,
   pub note: Option<String>,
   pub detail: Option<String>,
-  /// Stable reason code when `status == fail` (e.g. `container_timeout`).
+  /// Stable machine-readable state/reason code (e.g. `container_timeout`). Browser stop
+  /// and restart requests use their `*_requested` code while teardown/replacement is pending.
   pub fail_reason: Option<String>,
   pub elapsed: Option<f64>,
   pub lines: Vec<OutputLine>,
@@ -399,30 +404,103 @@ impl Session {
     }
   }
 
-  /// A failed attempt is superseded when a later proc re-ran the same route — scsh
-  /// retries transient container failures (`failure::is_transient`), registering the
-  /// retry as a new proc with the same skill name. The newest attempt is the
-  /// authoritative outcome for that route, so a recovered retry must not fail the job.
-  /// (Loop iterations and matrix routes carry unique generated names, so only genuine
-  /// retries ever share one.)
+  /// A failed attempt is superseded when its explicit replacement has registered. Older
+  /// persisted records have no lineage edge, so [`Self::proc_next_attempt`] retains the
+  /// former same-route inference strictly as a compatibility fallback.
   pub(crate) fn proc_is_superseded(&self, proc: &ProcRecord) -> bool {
     self.proc_next_attempt(proc).is_some()
   }
 
-  /// The proc that re-ran this one's route (the retry), if any — the earliest later
-  /// proc of the same kind and skill name.
+  /// The proc that explicitly replaced this attempt, if any. Sessions persisted before
+  /// `previous_attempt` use the earliest later proc of the same kind and skill name.
   pub(crate) fn proc_next_attempt(&self, proc: &ProcRecord) -> Option<&ProcRecord> {
+    if let Some(next) = self.procs.iter().find(|candidate| candidate.previous_attempt == Some(proc.index)) {
+      return Some(next);
+    }
+    if proc.previous_attempt.is_some() {
+      return None;
+    }
     let name = proc.skill_name.as_deref().filter(|n| !n.is_empty())?;
     self
       .procs
       .iter()
-      .filter(|later| later.index > proc.index && later.kind == proc.kind && later.skill_name.as_deref() == Some(name))
+      .filter(|later| {
+        later.previous_attempt.is_none()
+          && later.index > proc.index
+          && later.kind == proc.kind
+          && later.skill_name.as_deref() == Some(name)
+      })
       .min_by_key(|later| later.index)
+  }
+
+  /// The attempt immediately before this one. Explicit lineage is authoritative; the
+  /// same-route lookup exists only for records persisted before lineage was stored.
+  pub(crate) fn proc_previous_attempt(&self, proc: &ProcRecord) -> Option<&ProcRecord> {
+    if let Some(index) = proc.previous_attempt {
+      return self.procs.iter().find(|candidate| candidate.index == index);
+    }
+    if self.procs.iter().any(|candidate| candidate.previous_attempt == Some(proc.index)) {
+      return None;
+    }
+    let name = proc.skill_name.as_deref().filter(|name| !name.is_empty())?;
+    self
+      .procs
+      .iter()
+      .filter(|earlier| {
+        earlier.index < proc.index
+          && earlier.kind == proc.kind
+          && earlier.skill_name.as_deref() == Some(name)
+          && proc.previous_attempt.is_none()
+      })
+      .max_by_key(|earlier| earlier.index)
+  }
+
+  /// The immutable first attempt in this proc's lineage.
+  pub(crate) fn proc_first_attempt<'a>(&'a self, proc: &'a ProcRecord) -> &'a ProcRecord {
+    let mut first = proc;
+    let mut seen = std::collections::BTreeSet::from([first.index]);
+    while let Some(previous) = self.proc_previous_attempt(first) {
+      if !seen.insert(previous.index) {
+        break;
+      }
+      first = previous;
+    }
+    first
   }
 
   /// (ordinal, total) attempts for this proc's route: (2, 2) is the retry of a route
   /// attempted twice. (1, 1) — the overwhelmingly common case — means no retries.
   pub(crate) fn proc_attempt(&self, proc: &ProcRecord) -> (usize, usize) {
+    if proc.previous_attempt.is_some()
+      || self.procs.iter().any(|candidate| candidate.previous_attempt == Some(proc.index))
+    {
+      let mut root = proc;
+      let mut seen = std::collections::BTreeSet::new();
+      seen.insert(root.index);
+      while let Some(previous) =
+        root.previous_attempt.and_then(|index| self.procs.iter().find(|candidate| candidate.index == index))
+      {
+        if !seen.insert(previous.index) {
+          break;
+        }
+        root = previous;
+      }
+      let mut ordinal = 1;
+      let mut total = 1;
+      let mut current = root;
+      let mut forward_seen = std::collections::BTreeSet::from([root.index]);
+      while let Some(next) = self.procs.iter().find(|candidate| candidate.previous_attempt == Some(current.index)) {
+        if !forward_seen.insert(next.index) {
+          break;
+        }
+        total += 1;
+        if next.index <= proc.index {
+          ordinal += 1;
+        }
+        current = next;
+      }
+      return (ordinal, total);
+    }
     let Some(name) = proc.skill_name.as_deref().filter(|n| !n.is_empty()) else {
       return (1, 1);
     };
@@ -493,6 +571,7 @@ mod tests {
   fn test_proc(status: ProcStatus) -> ProcRecord {
     ProcRecord {
       index: 0,
+      previous_attempt: None,
       label: "skill".into(),
       kind: ProcKind::Skill,
       status,
@@ -529,6 +608,7 @@ mod tests {
       skills: Vec::new(),
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         label: "skill".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,
@@ -576,6 +656,7 @@ mod tests {
     first.fail_reason = Some(crate::failure::reason::CONTAINER_TIMEOUT.into());
     let mut retry = test_proc(ProcStatus::Ok);
     retry.index = 1;
+    retry.previous_attempt = Some(0);
     retry.skill_name = Some("conventions-reviewer-claude".into());
     let mut session = Session {
       id: "retry".into(),
@@ -601,8 +682,44 @@ mod tests {
     // A failed proc with no skill name (nothing can re-run it) still fails the job.
     session.procs[1].status = ProcStatus::Ok;
     session.procs[1].fail_reason = None;
+    session.procs[1].previous_attempt = None;
     session.procs[0].skill_name = None;
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn explicit_attempt_lineage_reaches_the_original_from_a_third_attempt() {
+    let mut first = test_proc(ProcStatus::Fail);
+    first.skill_name = Some("review".into());
+    let mut second = test_proc(ProcStatus::Fail);
+    second.index = 1;
+    second.previous_attempt = Some(0);
+    second.skill_name = Some("review".into());
+    let mut third = test_proc(ProcStatus::Running);
+    third.index = 2;
+    third.previous_attempt = Some(1);
+    third.skill_name = Some("review".into());
+    let session = Session {
+      id: "third".into(),
+      started_at: 100,
+      ended_at: None,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: vec![first, second, third],
+      last_seen_at: 200,
+      client_connected: true,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+    };
+
+    assert_eq!(session.proc_attempt(&session.procs[0]), (1, 3));
+    assert_eq!(session.proc_attempt(&session.procs[1]), (2, 3));
+    assert_eq!(session.proc_attempt(&session.procs[2]), (3, 3));
+    assert_eq!(session.proc_first_attempt(&session.procs[2]).index, 0);
   }
 
   #[test]
@@ -629,7 +746,7 @@ mod tests {
   }
 
   #[test]
-  fn lifecycle_allows_twenty_minutes_idle_after_work_starts() {
+  fn lifecycle_allows_thirty_minutes_idle_after_work_starts() {
     let mut session = Session {
       id: "idle".into(),
       started_at: 100,
@@ -651,7 +768,7 @@ mod tests {
     session.procs.push(proc);
     assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS), SessionLifecycle::Running);
     assert_eq!(session.lifecycle_status(150 + SESSION_IDLE_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
-    assert_eq!(session.duration_secs(150 + SESSION_IDLE_TIMEOUT_SECS + 1), Some(1250));
+    assert_eq!(session.duration_secs(150 + SESSION_IDLE_TIMEOUT_SECS + 1), Some(50 + SESSION_IDLE_TIMEOUT_SECS));
   }
 
   #[test]
@@ -667,6 +784,7 @@ mod tests {
       skills: Vec::new(),
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         label: "skill".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Running,
@@ -711,6 +829,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "done".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -734,6 +853,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "still going".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
