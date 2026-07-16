@@ -52,8 +52,8 @@ pub(crate) fn cast_embed_html(session_id: &str, proc: &ProcRecord) -> String {
 
 pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
   match status {
-    ProcStatus::Waiting => "○",
-    ProcStatus::Running => "◉",
+    ProcStatus::Waiting => "◇",
+    ProcStatus::Running => "◆",
     ProcStatus::Ok => "✓",
     ProcStatus::Graceful => "!",
     ProcStatus::Fail => "✗",
