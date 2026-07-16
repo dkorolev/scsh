@@ -6827,8 +6827,9 @@ fn install_from_manifest(
     }
   };
 
-  // The consumer's existing manifest (if any) tells us which skills are already declared,
-  // so we only append genuinely new entries and never clobber the user's edits.
+  // The consumer's existing manifest (if any) tells us which skills are already declared.
+  // `installskills` preserves those blocks as user-owned conflicts; `updateskills` refreshes
+  // them from the source alongside the skill files, which also carries profile migrations.
   let local_path = root.join(".scsh.yml");
   let local_text = std::fs::read_to_string(&local_path).unwrap_or_default();
   let existing: std::collections::BTreeSet<String> =
@@ -6838,8 +6839,10 @@ fn install_from_manifest(
   let mut installed: Vec<String> = Vec::new();
   let mut skipped: Vec<String> = Vec::new();
   let mut added: Vec<String> = Vec::new();
+  let mut refreshed: Vec<String> = Vec::new();
   let mut conflicts: Vec<String> = Vec::new();
   let mut append = String::new();
+  let mut merged = local_text.clone();
   for skill in &cfg.skills {
     // Authoring-only skills are not installed: either marked `autoinstall: false`, or named
     // with the `internal-` convention (a self-documenting "internal to this repo" marker).
@@ -6857,7 +6860,18 @@ fn install_from_manifest(
       installed.push(skill.name.clone());
     }
     if existing.contains(&skill.name) {
-      conflicts.push(skill.name.clone());
+      if overwrite {
+        if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
+          if let Some(replaced) = config::replace_skill_block(&merged, &skill.name, &block) {
+            if replaced != merged {
+              merged = replaced;
+              refreshed.push(skill.name.clone());
+            }
+          }
+        }
+      } else {
+        conflicts.push(skill.name.clone());
+      }
       continue;
     }
     if let Some(block) = config::extract_skill_block(&src_text, &skill.name) {
@@ -6880,30 +6894,40 @@ fn install_from_manifest(
     }
   }
 
-  // Merge the new entries into the consumer's .scsh.yml (append-only — existing entries
-  // are left untouched), but only if the result still validates.
-  if append.is_empty() {
-    if conflicts.is_empty() {
+  // Merge new entries and any explicitly refreshed entries into the consumer manifest, but
+  // only if the complete result still validates.
+  if !append.is_empty() {
+    merged = if merged.trim().is_empty() {
+      format!("{CONSUMER_MANIFEST_HEADER}{append}")
+    } else {
+      if !merged.ends_with('\n') {
+        merged.push('\n');
+      }
+      merged.push_str(&append);
+      merged
+    };
+  }
+  if merged == local_text {
+    if conflicts.is_empty() && refreshed.is_empty() {
       ok("the installed skills were already declared in .scsh.yml");
     }
   } else {
-    let merged = if local_text.trim().is_empty() {
-      format!("{CONSUMER_MANIFEST_HEADER}{append}")
-    } else {
-      let mut t = local_text.clone();
-      if !t.ends_with('\n') {
-        t.push('\n');
-      }
-      t.push_str(&append);
-      t
-    };
     if config::validate(&merged).is_ok() && write_file(&local_path, merged.as_bytes()) {
-      ok(&format!("added {} skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
+      if !refreshed.is_empty() {
+        ok(&format!(
+          "updated {} skill declaration{} in .scsh.yml: {}",
+          refreshed.len(),
+          plural(refreshed.len()),
+          refreshed.join(", ")
+        ));
+      }
+      if !added.is_empty() {
+        ok(&format!("added {} skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
+      }
     } else {
-      hint(
-        "installed the skill files, but merging them into .scsh.yml would make it invalid — left .scsh.yml unchanged",
-      );
-      hint(&format!("add by hand: {}", added.join(", ")));
+      hint("installed the skill files, but updating .scsh.yml would make it invalid — left the manifest unchanged");
+      let affected: Vec<&str> = refreshed.iter().chain(&added).map(String::as_str).collect();
+      hint(&format!("update by hand: {}", affected.join(", ")));
     }
   }
   Ok(c)
@@ -7294,9 +7318,12 @@ fn print_help_command(name: &str) {
       ],
     ),
     "updateskills" => (
-      "reinstall skills, overwriting",
+      "update skills and manifest blocks",
       "scsh updateskills [--global] [git-url…]",
-      &[("[git-url…]", "Like installskills, but overwrites local copies of each skill.")],
+      &[(
+        "[git-url…]",
+        "Like installskills, but overwrites each skill's local files and existing source manifest block.",
+      )],
     ),
     "daemon" => (
       "the session-browser daemon",

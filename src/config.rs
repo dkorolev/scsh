@@ -444,6 +444,41 @@ pub fn extract_skill_block(yaml: &str, name: &str) -> Option<String> {
   Some(out)
 }
 
+/// Replace one existing skill block while leaving the rest of a manifest byte-for-byte
+/// intact. The replacement is expected to come from [`extract_skill_block`], so source-only
+/// `autoinstall:` metadata does not leak into the installed manifest.
+pub fn replace_skill_block(yaml: &str, name: &str, replacement: &str) -> Option<String> {
+  let want = format!("{name}:");
+  let mut offset = 0usize;
+  let mut start = None;
+  let mut end = yaml.len();
+  for line in yaml.split_inclusive('\n') {
+    let body = line.strip_suffix('\n').unwrap_or(line);
+    let body = body.strip_suffix('\r').unwrap_or(body);
+    if start.is_none() {
+      if body.starts_with("  ") && !body[2..].starts_with(' ') && body[2..].trim_end() == want {
+        start = Some(offset);
+      }
+    } else if !body.trim().is_empty() {
+      let indent = body.len() - body.trim_start().len();
+      if indent < 4 {
+        end = offset;
+        break;
+      }
+    }
+    offset += line.len();
+  }
+  let start = start?;
+  let mut out = String::with_capacity(yaml.len() - (end - start) + replacement.len() + 1);
+  out.push_str(&yaml[..start]);
+  out.push_str(replacement);
+  if !replacement.ends_with('\n') && end < yaml.len() {
+    out.push('\n');
+  }
+  out.push_str(&yaml[end..]);
+  Some(out)
+}
+
 /// Parse and validate config source. Returns every problem found, not just the
 /// first, so a single run can point at all the things that need fixing.
 pub fn validate(src: &str) -> Result<Config, Vec<String>> {
@@ -1703,6 +1738,40 @@ mod tests {
     assert_eq!(cfg.skills[0].name, "alpha");
     assert!(cfg.skills[0].autoinstall, "the merged consumer entry has no autoinstall → defaults true");
     assert!(extract_skill_block(yaml, "missing").is_none());
+  }
+
+  #[test]
+  fn replace_skill_block_changes_only_the_named_declaration() {
+    const YAML_LF: &str = r#"# keep
+skills:
+  alpha:
+    harness: opencode
+    profile: code-review
+    result: tmp/a.json
+  # keep between
+  beta:
+    harness: claude
+    result: tmp/b.json
+"#;
+    const REPLACEMENT: &str = r#"  alpha:
+    harness: codex
+    profile: code-gorgeous-review
+    result: tmp/new.json
+"#;
+    const HEADER_LF: &str = r#"# keep
+skills:
+"#;
+    const FOLLOWING_LF: &str = r#"  # keep between
+  beta:
+"#;
+    let crlf = |text: &str| text.replace('\n', "\r\n");
+    let yaml = crlf(YAML_LF);
+    let replaced = replace_skill_block(&yaml, "alpha", REPLACEMENT).expect("alpha present");
+    assert!(replaced.starts_with(&crlf(HEADER_LF)), "header is untouched: {replaced:?}");
+    assert!(replaced.contains(REPLACEMENT), "new declaration is present: {replaced:?}");
+    assert!(replaced.contains(&crlf(FOLLOWING_LF)), "following content is untouched: {replaced:?}");
+    assert!(!replaced.contains("profile: code-review"), "old declaration is gone: {replaced:?}");
+    assert!(replace_skill_block(&yaml, "missing", REPLACEMENT).is_none());
   }
 
   #[test]

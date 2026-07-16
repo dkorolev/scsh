@@ -250,19 +250,19 @@ and scripts gate a fleet run on it instead of hand-rolling per-CLI auth checks.
 validates it first (and stops if it's malformed), then for every skill it lists — except
 the **authoring-only** ones (marked **`autoinstall: false`**, *or* named with the
 **`internal-`** prefix, e.g. a repo's own self-check skill) — it copies the skill folder
-*and* merges that skill's YAML block verbatim into **your** `.scsh.yml** (same schema,
-including `invocations:` matrix skills). Existing skill keys in the consumer are left
-untouched — scsh warns when a key would conflict. The skills are then runnable
+*and* merges that skill's YAML block verbatim into **your** `.scsh.yml` (same schema,
+including `invocations:` matrix skills). `installskills` leaves existing skill keys
+untouched and warns when one conflicts; the explicitly overwriting `updateskills` refreshes
+existing source blocks too, so profile and route changes migrate with the skill files. The skills are then runnable
 immediately: a default skill on `scsh run`, a profiled one on `scsh run --profile
 <name>`. Matrix skills expand to `{skill}-{route}` invocations at run time. Skills the manifest doesn't list are skipped
-(the manifest is the shipping list), and skills already in your `.scsh.yml` are left
-untouched. Without a source `.scsh.yml`, `scsh` simply installs every `.skills/<name>/`
+(the manifest is the shipping list). Without a source `.scsh.yml`, `scsh` simply installs every `.skills/<name>/`
 folder it finds (no manifest merge).
 
 Either way it wires up the five host symlinks (`.claude/skills`, `.codex/skills`,
 `.cursor/skills`, `.opencode/skills`, `.agents/skills` → `../.skills`), and never clobbers
 a file that differs from the source (an identical one is simply "already installed"). Use
-`scsh updateskills [url]` to overwrite skill files with the source's version.
+`scsh updateskills [url]` to overwrite skill files and their existing manifest blocks with the source's version.
 
 The legacy flags `--help`/`-h`, `--version`/`-V`, and `--init-demo-project` still work as
 aliases. (`ls` is an alias for `list`.)

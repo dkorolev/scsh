@@ -201,6 +201,10 @@ hard tabs, `max_width = 120`, `use_small_heuristics = "Max"`, compressed fn
 params. Run `cargo fmt` before you commit — diffs are expected to be
 already-formatted.
 
+### Multiline Rust string literals
+
+Write static text that spans multiple lines as a multiline Rust string literal, with the source line breaks visible in the code. Prefer a raw string literal when the text contains quotes, backslashes, YAML, JSON, Markdown, or other fixture syntax. Never flatten multiline text into one long quoted string full of `\n` escapes: it is needlessly hard to read and review. Escapes remain appropriate for individual control characters and for tests whose subject is the exact byte-level line ending; even then, derive special forms such as CRLF from a readable multiline fixture when practical.
+
 ### Markdown: always backtick `scsh`
 
 In **every** Markdown file in this repo, the tool name **`scsh` must be written in
