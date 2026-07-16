@@ -573,13 +573,13 @@ fn index_page_shows_colored_harness_chips_per_proc() {
   // A running chip's tip is just `harness · skill`; its start time rides in
   // data-tip-running, from which the tip module ticks a live "running for …" line.
   assert!(
-    html.contains(r#"<a class="hchip hchip--claude" href="/job/castab#task-"#)
+    html.contains(r#"<a class="chamfer hchip hchip--claude" href="/job/castab#task-"#)
       && html.contains(r#"data-tip="claude · add" data-tip-running="1">C</a>"#),
     "got: {html}"
   );
   // A finished chip's tip is two lines: `harness · skill`, then the plain status word.
   assert!(
-    html.contains(r#"<a class="hchip hchip--grok hchip--done" href="/job/castab#task-"#)
+    html.contains(r#"<a class="chamfer hchip hchip--grok hchip--done" href="/job/castab#task-"#)
       && html.contains("data-tip=\"grok · add\ndone\">G</a>"),
     "got: {html}"
   );
@@ -1307,8 +1307,8 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
   assert!(html.contains(r#"class="fleets""#), "fleet section present: {html}");
   assert!(html.contains(r#"class="fleet-compare""#), "comparison table present");
   assert!(html.contains(r#"data-skill-source="add""#), "grouped by skill_source");
-  assert!(html.contains(r#"class="fleet-jump" data-proc="0""#), "jump to first route");
-  assert!(html.contains(r#"class="fleet-jump" data-proc="1""#), "jump to second route");
+  assert!(html.contains(r#"class="chamfer fleet-jump" data-proc="0""#), "jump to first route");
+  assert!(html.contains(r#"class="chamfer fleet-jump" data-proc="1""#), "jump to second route");
   assert!(html.contains("· 2 routes"), "true route matrices keep route terminology");
   assert!(html.contains("<th>Route</th>"), "true route matrices keep the Route column");
   let fleets_at = html.find(r#"class="fleets""#).expect("fleets");

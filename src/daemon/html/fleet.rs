@@ -75,7 +75,7 @@ fn fleet_row_html(r: &FleetRoute) -> String {
 <td class="fleet-status"><span class="glyph">{glyph}</span> {status}</td>
 <td class="fleet-elapsed">{elapsed}</td>
 <td class="fleet-result">{result}</td>
-<td class="fleet-jump-cell"><button type="button" class="fleet-jump" data-proc="{idx}" title="Open this step">↗</button></td>
+<td class="fleet-jump-cell"><button type="button" class="chamfer fleet-jump" data-proc="{idx}" title="Open this step">↗</button></td>
 </tr>
 "#,
     status_class = status_class,

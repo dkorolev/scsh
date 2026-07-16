@@ -190,7 +190,7 @@ function harnessChipsHtml(jobId, session) {
     else if (p.status === 'graceful') tip = base + '\ngraceful shutdown';
     else if (p.status === 'fail') tip = base + '\nfailed';
     else tip = base + '\nskipped';
-    out += '<a class="hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" href="' +
+    out += '<a class="chamfer hchip hchip--' + esc(p.harness) + (done ? ' hchip--done' : '') + '" href="' +
       esc(procRunHref(jobId, session, p)) + '" data-tip="' + esc(tip) + '"' + runningAttr + '>' +
       esc(p.harness.charAt(0).toUpperCase()) + '</a>';
   });
@@ -2515,7 +2515,7 @@ function imageRowHtml(img) {
   const upToDate = !!(img.exists && img.up_to_date);
   const label = upToDate ? 'Rebuild' : 'Build';
   const title = upToDate ? 'Force-rebuild this image' : 'Build this image';
-  const action = '<button type="button" class="image-build-btn" data-image-build="' + esc(img.name) +
+  const action = '<button type="button" class="chamfer image-build-btn" data-image-build="' + esc(img.name) +
     '" data-uptodate="' + (upToDate ? '1' : '0') + '" title="' + title + '">' + label + '</button>';
   return '<tr data-image="' + esc(img.name) + '"><td class="image-select-cell">' + checkbox + '</td>' +
     '<td><code>' + esc(img.tag) + '</code></td>' +
