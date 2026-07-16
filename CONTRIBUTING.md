@@ -168,9 +168,8 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   standard-library only, so the binary stays self-contained.
 - **`git`** on `PATH` — required by `scsh` itself and by the integration tests.
 - **A container runtime** for real runs and for integration-test preflight:
-  **on macOS, Apple `container` ONLY** — scsh never auto-falls back to Docker/Podman there;
-  `docker` → `podman` elsewhere. To use Docker/Podman on macOS, ask explicitly with
-  `SCSH_RUNTIME=<docker|podman>` (which overrides detection on any OS).
+  Apple `container` → `docker` → `podman` on macOS; `docker` → `podman` elsewhere.
+  Override the detected runtime with `SCSH_RUNTIME=<docker|podman|container>`.
   **Apple Containers Dockerfile size:** Apple's builder rejects Dockerfiles ≥ 16 KB
   ([apple/container#735](https://github.com/apple/container/issues/735)). Keep
   [`src/Dockerfile`](src/Dockerfile) under **15 KB** (enforced at **compile time** by

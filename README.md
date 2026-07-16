@@ -365,7 +365,8 @@ the opaque `Stream unexpectedly closed` / `Transport became inactive`. `scsh` ke
 `src/Dockerfile` under 15 KB, **comment-strips** it before every Apple build, refuses to start
 a doomed build with a clear error, and rewrites those opaque failures into a builder-reset
 hint. Prefer a healthy BuildKit (`container builder start --cpus 6 --memory 8G`) for the
-large base image. Docker/Podman are opt-in on macOS via `SCSH_RUNTIME=docker`.
+large base image. If Apple Containers is unavailable, `scsh` automatically falls back to
+Docker and then Podman.
 
 The base is glibc Debian (not musl Alpine) precisely so these prebuilt toolchains install and
 run without friction. The image is large (a few GB) and **built once, then cached** and reused
@@ -375,8 +376,7 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 
 - A **Rust toolchain** (`cargo`) to build the binary.
 - **`git`** on your `PATH`.
-- A **container runtime**: **on macOS, Apple `container` only** (scsh does not auto-fall back to
-  Docker/Podman — set `SCSH_RUNTIME=docker` to opt in explicitly); Docker → Podman on Linux.
+- A **container runtime**: Apple `container` → Docker → Podman on macOS; Docker → Podman on Linux.
 - **Network** only for a real `scsh run` (it pulls the base image and installs
   opencode). `list` and `init-demo-project` need none.
 - For skills to do real work, the container's opencode needs a configured model;
