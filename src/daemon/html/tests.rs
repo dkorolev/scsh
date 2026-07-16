@@ -418,6 +418,22 @@ fn cards_are_chamfered_islands() {
 }
 
 #[test]
+fn overlays_are_chamfered() {
+  // The floating chrome — confirm dialog, toast, instant tooltip — shares the chamfer
+  // language, with drop-shadows (a clip-path swallows box-shadows) for depth.
+  let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
+  let js = live_client_js();
+  assert!(js.contains("panel.className = 'chamfer scsh-dialog';"), "confirm dialog is chamfered");
+  assert!(js.contains("el.className = 'chamfer toast';"), "toast is chamfered");
+  assert!(js.contains("tip.className = 'chamfer ui-tip';"), "tooltip is chamfered");
+  assert!(html.contains(".toast::before { background: #1c2128; }"));
+  assert!(html.contains(".ui-tip::before { background: #1c2128; }"));
+  let session = session_page(&store_with_cast_proc(ProcStatus::Running), "castab").expect("session renders");
+  assert!(session.contains(".scsh-dialog::before { background: var(--surface); }"));
+  assert!(session.contains("filter: drop-shadow(0 16px 40px rgba(0, 0, 0, 0.55));"));
+}
+
+#[test]
 fn session_header_carries_breadcrumbs_and_honest_kind() {
   // The top island: location path on the left (bold, plain text), daemon status right.
   let mut store = store_with_cast_proc(ProcStatus::Running);

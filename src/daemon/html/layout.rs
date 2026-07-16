@@ -850,13 +850,15 @@ pub(crate) const PAGE_CSS: &str = r#"
   .hchip:hover { transform: scale(1.3); opacity: 1; }
   .hchip:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; opacity: 1; }
   .ui-tip {
+    --cut: 5px; --bw: 1px;
     position: fixed; z-index: 100; pointer-events: none;
-    background: #1c2128; border: 1px solid var(--border); border-radius: 6px;
+    background: var(--border);
     color: var(--text); font-size: 0.75rem; line-height: 1.35;
     padding: 0.3rem 0.55rem; width: max-content; max-width: 44ch;
-    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.45);
+    filter: drop-shadow(0 4px 12px rgba(0, 0, 0, 0.45));
     white-space: pre-line;
   }
+  .ui-tip::before { background: #1c2128; }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .image-build-btn {
     font: inherit; font-size: 0.75rem; line-height: 1.5; cursor: pointer; white-space: nowrap;
@@ -887,15 +889,17 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   /* Bottom-center toast — brief, non-blocking feedback (e.g. invalid project name). */
   .toast {
+    --cut: 6px; --bw: 1px;
     position: fixed; left: 50%; bottom: 1.75rem; z-index: 2000;
     transform: translateX(-50%) translateY(0.6rem);
     max-width: min(28rem, calc(100vw - 2rem));
-    padding: 0.7rem 1.15rem; border-radius: 8px;
-    background: var(--surface); border: 1px solid var(--border); color: var(--text);
+    padding: 0.7rem 1.15rem;
+    background: var(--border); color: var(--text);
     font-size: 0.92rem; line-height: 1.35; text-align: center;
-    box-shadow: 0 10px 28px rgba(0, 0, 0, 0.4);
+    filter: drop-shadow(0 10px 28px rgba(0, 0, 0, 0.4));
     opacity: 0; pointer-events: none;
   }
+  .toast::before { background: #1c2128; }
   .toast.show {
     opacity: 1; transform: translateX(-50%) translateY(0);
   }
@@ -1036,11 +1040,14 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
     background: rgba(1, 4, 9, 0.72);
   }
   .scsh-dialog {
+    --cut: 16px; --bw: 1px;
     width: min(26rem, 100%);
-    background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+    background: var(--border);
     padding: 1.1rem 1.2rem 1rem;
-    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.55);
+    /* clip-path clips box-shadows; drop-shadow follows the chamfered outline */
+    filter: drop-shadow(0 16px 40px rgba(0, 0, 0, 0.55));
   }
+  .scsh-dialog::before { background: var(--surface); }
   .scsh-dialog-title {
     margin: 0 0 0.45rem; font-size: 1.05rem; font-weight: 600; color: var(--text);
   }
