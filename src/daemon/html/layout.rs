@@ -20,8 +20,9 @@ pub(crate) const PAGE_CSS: &str = r#"
     --red: #f85149;
     --magenta: #bc4dff;
     --purple: #8957e5;
-    /* Status bar padding (0.55*2) + crumbs line-box (1rem * 1.5) — tabs stick flush under it. */
-    --daemon-status-height: calc(1.1rem + 1.5rem);
+    /* Wrap padding (0.4*2) + island padding (0.55*2) + crumbs line-box (1rem * 1.5) —
+       tabs stick flush under the sticky wrap. */
+    --daemon-status-height: calc(0.8rem + 1.1rem + 1.5rem);
     color-scheme: dark;
   }
   html, body { width: 100%; margin: 0; }
@@ -240,15 +241,22 @@ pub(crate) const PAGE_CSS: &str = r#"
     max-width: 52rem;
   }
   .page-lede .dim { color: var(--text-muted); }
-  .daemon-status {
+  /* Sticky full-width backdrop; the visible bar is a chamfered island inside it. */
+  .daemon-status-wrap {
     position: sticky; top: 0; z-index: 40;
     width: 100%; box-sizing: border-box;
-    display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap;
     height: var(--daemon-status-height);
-    font-size: 0.85rem; margin: 0; padding: 0.55rem 24px;
-    background: var(--surface);
-    border: none; border-bottom: 1px solid var(--border); border-radius: 0;
+    padding: 0.4rem 16px;
+    background: var(--bg);
   }
+  .daemon-status {
+    --cut: 8px; --bw: 1px;
+    display: flex; gap: 0.55rem; align-items: center; flex-wrap: nowrap;
+    height: 100%; box-sizing: border-box;
+    font-size: 0.85rem; margin: 0; padding: 0.55rem 18px;
+    background: var(--border);
+  }
+  .daemon-status::before { background: var(--bg); }
   /* The bar is a fixed-height single row, so long breadcrumb paths must truncate with
      an ellipsis rather than push the status dot off a phone-width viewport (min-width: 0
      lets the flex child actually shrink below its content size). */
@@ -263,13 +271,18 @@ pub(crate) const PAGE_CSS: &str = r#"
   .session-kind { font-size: 1.05rem; margin: 0 0 0.75rem; color: var(--text-muted); }
   .session-kind strong { color: var(--text); }
   .chapters-pending { margin: 0.65rem 0 0; font-size: 0.9rem; }
+  /* Connection dot: a 45°-rotated square, on language with the chamfer diagonals. */
   .daemon-status .dot {
-    width: 0.55rem; height: 0.55rem; border-radius: 50%; background: var(--text-muted); flex-shrink: 0;
+    width: 0.5rem; height: 0.5rem; transform: rotate(45deg);
+    background: var(--text-muted); flex-shrink: 0;
   }
   .daemon-status.live .dot { background: var(--green); }
   .daemon-status.down .dot { background: var(--red); }
   .daemon-status.connecting .dot { background: var(--cyan); box-shadow: 0 0 0 3px rgba(88,166,255,0.25); }
   .daemon-status.connecting { color: var(--cyan); }
+  @keyframes dot-pulse {
+    50% { box-shadow: 0 0 0 6px rgba(88,166,255,0.1); }
+  }
 
   /* ── tabs (pinned flush under the status island — WEB-UI §1) ── */
   .tabs {
@@ -489,8 +502,9 @@ pub(crate) const PAGE_CSS: &str = r#"
       50% { box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.55); }
     }
     /* Decorative micro-motion lives behind the same gate: button press/hover, chip
-       pop, and the toast slide keep their end states but stop animating when the
-       user asked the OS for reduced motion. */
+       pop, the connecting-dot pulse, and the toast slide keep their end states but
+       stop animating when the user asked the OS for reduced motion. */
+    .daemon-status.connecting .dot { animation: dot-pulse 1.2s ease-in-out infinite; }
     .btn, button.btn { transition: transform 0.1s; }
     .btn::before { transition: background 0.2s; }
     .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
@@ -1004,9 +1018,10 @@ fn scsh_version_html() -> String {
   }
 }
 
-/// Inline SVG favicon — a `❯` prompt chevron on a dark rounded tile, as a `data:` URI so
-/// every page (the live dashboard AND the downloaded offline exports) stays request-free.
-pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%230d1117'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2358a6ff'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
+/// Inline SVG favicon — a `❯` prompt chevron on a dark chamfered (octagon) tile, as a
+/// `data:` URI so every page (the live dashboard AND the downloaded offline exports)
+/// stays request-free.
+pub(crate) const FAVICON_LINK: &str = "<link rel=\"icon\" href=\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Cpolygon points='3 0 13 0 16 3 16 13 13 16 3 16 0 13 0 3' fill='%230d1117'/%3E%3Ctext x='3.5' y='12.5' font-size='11' fill='%2358a6ff'%3E%E2%9D%AF%3C/text%3E%3C/svg%3E\">";
 
 pub(crate) fn wrap_page(
   title: &str, port: u16, session_id: Option<&str>, index_crumb: Option<(&str, &str)>, lede: &str, body: &str,
@@ -1039,10 +1054,12 @@ pub(crate) fn wrap_page(
 <style>{css}{live_css}</style>
 </head>
 <body>
-<div id="daemon-status" class="daemon-status connecting">
+<div class="daemon-status-wrap">
+<div id="daemon-status" class="chamfer daemon-status connecting">
 <span class="crumbs">{crumbs}</span>
 <span class="daemon-right"><span id="status-label">connecting…</span>
 <span id="status-uptime" class="dim"></span>{scsh_version}<span class="dot" aria-hidden="true"></span></span></div>
+</div>
 <div class="page-shell">
 {lede}{body}
 </div>
