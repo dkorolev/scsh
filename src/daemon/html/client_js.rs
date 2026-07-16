@@ -1091,7 +1091,7 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'○',ready:'○',running:'◉',terminating:'◉',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '○';
+  return ({waiting:'◇',ready:'◇',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '◇';
 }
 function wfStateLabel(state) {
   return ({waiting:'Waiting',ready:'Ready',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',

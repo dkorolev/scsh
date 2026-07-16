@@ -812,8 +812,8 @@ fn node_proc_for_tip<'a>(
 
 fn state_icon(state: WorkflowDisplayState) -> &'static str {
   match state {
-    WorkflowDisplayState::Waiting | WorkflowDisplayState::Ready => "○",
-    WorkflowDisplayState::Running | WorkflowDisplayState::Terminating => "◉",
+    WorkflowDisplayState::Waiting | WorkflowDisplayState::Ready => "◇",
+    WorkflowDisplayState::Running | WorkflowDisplayState::Terminating => "◆",
     WorkflowDisplayState::Done => "✓",
     WorkflowDisplayState::Graceful => "!",
     WorkflowDisplayState::Failed => "✗",

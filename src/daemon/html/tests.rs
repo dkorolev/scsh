@@ -378,6 +378,13 @@ fn ui_review_fixes_hold() {
     html.contains(".wf-node.wf-terminating { --accent: var(--orange);"),
     "terminating shares running orange"
   );
+  // Status glyphs speak the diamond language of the chamfered style (same 45° family
+  // as the connection dot): hollow diamond waiting, filled diamond running — no circles.
+  assert_eq!(super::proc::status_glyph(crate::daemon::model::ProcStatus::Running), "◆");
+  assert_eq!(super::proc::status_glyph(crate::daemon::model::ProcStatus::Waiting), "◇");
+  assert!(js.contains("running:'◆'"), "the JS graph mirror uses the filled diamond");
+  assert!(js.contains("waiting:'◇'"), "the JS graph mirror uses the hollow diamond");
+  assert!(!js.contains("◉") && !js.contains("○"), "no circle glyphs remain");
   // The running pulse is a brightness swell — the chamfer clip would swallow a
   // box-shadow halo — and the zoom cluster is chamfered like every other control.
   assert!(html.contains("50% { filter: brightness(1.45); }"), "running nodes pulse via brightness");
@@ -2487,7 +2494,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(!review.contains("probe_credentials.ok"), "no gate operand leakage");
   assert!(!review.contains("Runs only if"), "no authored when_summary in the page");
   assert!(!review.contains("Conditional task"), "no cryptic Conditional task label");
-  assert!(!review.contains('◇'), "no diamond glyph");
+  // (Waiting/ready node icons ARE diamonds now; the gate itself is pinned to the word
+  // "when" above, so no separate no-diamond check on the page.)
   assert!(review.contains(r#"wf-skipped"#));
   // 1 dependency edge + start → probe_credentials + review → finish.
   assert_eq!(
