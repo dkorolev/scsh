@@ -97,7 +97,7 @@ function scshConfirm(opts) {
     backdrop.id = 'scsh-dialog';
     backdrop.className = 'scsh-dialog-backdrop';
     const panel = document.createElement('div');
-    panel.className = 'scsh-dialog';
+    panel.className = 'chamfer scsh-dialog';
     panel.setAttribute('role', 'alertdialog');
     panel.setAttribute('aria-modal', 'true');
     panel.setAttribute('aria-labelledby', 'scsh-dialog-title');
@@ -2800,7 +2800,7 @@ function startImageBuildOne(name, upToDate) {
 // tooltip's hover delay (which live table re-renders kept resetting anyway).
 (function initTips() {
   const tip = document.createElement('div');
-  tip.className = 'ui-tip';
+  tip.className = 'chamfer ui-tip';
   tip.setAttribute('role', 'status');
   tip.setAttribute('aria-live', 'polite');
   tip.hidden = true;
@@ -3044,7 +3044,7 @@ function showToast(message) {
   if (!el) {
     el = document.createElement('div');
     el.id = 'scsh-toast';
-    el.className = 'toast';
+    el.className = 'chamfer toast';
     el.setAttribute('role', 'status');
     document.body.appendChild(el);
   }
