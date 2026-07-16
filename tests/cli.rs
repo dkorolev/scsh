@@ -340,6 +340,58 @@ fn installskills_global_installs_under_scsh_home_and_links_agents() {
 }
 
 #[test]
+fn updateskills_global_refreshes_existing_source_manifest_blocks() {
+  const OLD_SKILL: &str = r#"name: reviewer
+old
+"#;
+  const OLD_MANIFEST: &str = r#"skills:
+  reviewer:
+    harness: codex
+    profile: code-review
+    result: tmp/reviewer.json
+"#;
+  const NEW_SKILL: &str = r#"name: reviewer
+new
+"#;
+  const NEW_MANIFEST: &str = r#"skills:
+  reviewer:
+    harness: codex
+    profile: code-gorgeous-review
+    result: tmp/reviewer.json
+"#;
+  let src = unique_dir("gupdatesrc");
+  git_init(&src);
+  std::fs::create_dir_all(src.join(".skills/reviewer")).unwrap();
+  std::fs::write(src.join(".skills/reviewer/SKILL.md"), OLD_SKILL).unwrap();
+  std::fs::write(src.join(".scsh.yml"), OLD_MANIFEST).unwrap();
+  git(&src, &["add", "-A"]);
+  git(&src, &["commit", "-qm", "ship old profile"]);
+
+  let d = unique_dir("gupdatedir");
+  let home = unique_dir("gupdatehome");
+  let scsh_home = home.join(".scsh");
+  let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+  let source = src.to_string_lossy();
+  let installed = scsh_env(&d, &["installskills", "--global", &source], &envs);
+  assert_eq!(installed.code, 0, "got: {}", installed.out);
+  let manifest = std::fs::read_to_string(scsh_home.join(".scsh.yml")).unwrap();
+  assert!(manifest.contains("profile: code-review"), "old profile installed: {manifest}");
+
+  std::fs::write(src.join(".skills/reviewer/SKILL.md"), NEW_SKILL).unwrap();
+  std::fs::write(src.join(".scsh.yml"), NEW_MANIFEST).unwrap();
+  git(&src, &["add", "-A"]);
+  git(&src, &["commit", "-qm", "rename profile"]);
+
+  let updated = scsh_env(&d, &["updateskills", "--global", &source], &envs);
+  assert_eq!(updated.code, 0, "got: {}", updated.out);
+  assert!(updated.out.contains("updated 1 skill declaration"), "got: {}", updated.out);
+  let manifest = std::fs::read_to_string(scsh_home.join(".scsh.yml")).unwrap();
+  assert!(manifest.contains("profile: code-gorgeous-review"), "new profile installed: {manifest}");
+  assert!(!manifest.contains("profile: code-review\n"), "old profile removed: {manifest}");
+  assert_eq!(std::fs::read_to_string(scsh_home.join(".skills/reviewer/SKILL.md")).unwrap(), NEW_SKILL);
+}
+
+#[test]
 fn a_real_agent_skills_dir_is_linked_into_not_replaced() {
   // A user's own ~/.claude/skills (a REAL directory with their skills in it) is never
   // swapped for a symlink — the installed skills are linked into it one by one, and the
