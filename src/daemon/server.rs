@@ -859,12 +859,14 @@ fn route(
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
-    path if path == "/api/v1/images" || path.starts_with("/api/v1/images?") => {
-      let runtime = path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
+    // The match scrutinee is the query-stripped path, so query params must be read
+    // from `req.path` — a `path.split_once("runtime=")` here can never match.
+    "/api/v1/images" => {
+      let runtime = req.path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
       (200, images_json(runtime), "application/json", false)
     }
-    path if path == "/api/v1/setup" || path.starts_with("/api/v1/setup?") => {
-      let runtime = path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
+    "/api/v1/setup" => {
+      let runtime = req.path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
       (200, super::setup::setup_json(runtime), "application/json", false)
     }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
@@ -1659,7 +1661,7 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
 
   let discovery = crate::harness_def::discover(&root);
   let Some(def) = discovery.find(&def_name) else {
-    return (500, err_body("setup-batch definition was not discovered after write"), false);
+    return (500, err_body("smoketest definition was not discovered after write"), false);
   };
   let planned = planned_skills(def, &def_name);
 
@@ -2469,6 +2471,25 @@ mod tests {
   fn parse_content_length_is_case_insensitive() {
     let headers = b"POST / HTTP/1.1\r\ncontent-length: 9\r\n\r\n";
     assert_eq!(parse_content_length(headers), 9);
+  }
+
+  #[test]
+  fn setup_and_images_routes_honor_runtime_query_param() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    for api in ["/api/v1/setup", "/api/v1/images"] {
+      let req = HttpRequest {
+        method: "GET".into(),
+        path: format!("{api}?runtime=not-a-runtime-xyz"),
+        body: String::new(),
+        headers: Vec::new(),
+      };
+      let (status, body, _, _) = route(&req, &store, &prune, &ws_dirty);
+      assert_eq!(status, 200, "{api}");
+      assert!(body.contains("\"error\""), "{api} ignored its runtime query param: {body}");
+      assert!(body.contains("not-a-runtime-xyz"), "{api}: {body}");
+    }
   }
 
   #[test]

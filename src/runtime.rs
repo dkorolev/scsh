@@ -1374,10 +1374,26 @@ pub fn auth_forwarding_enabled(harness: Harness) -> bool {
 pub struct LoginPreflight {
   /// `found`, `expired`, `missing`, or `disabled`.
   pub status: &'static str,
-  /// Short browser-safe label (e.g. "Found via auth.json").
+  /// Short browser-safe label (e.g. "Found via ~/.codex/auth.json").
   pub label: String,
   /// Actionable next step when not found.
   pub hint: String,
+}
+
+/// Abbreviate a path under `$HOME` to `~/…` for display; other paths render as-is.
+/// Several harnesses store credentials in a file literally named `auth.json`, so labels
+/// must carry the owning directory to be distinguishable.
+pub fn display_path_with_home_tilde(path: &Path) -> String {
+  if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+    if let Ok(rest) = path.strip_prefix(&home) {
+      return format!("~/{}", rest.display());
+    }
+  }
+  path.display().to_string()
+}
+
+fn found_via_file_label(path: &Path) -> String {
+  format!("Found via {}", display_path_with_home_tilde(path))
 }
 
 /// Host credential detection for Setup: presence/expiry/opt-out only — not proof of model access.
@@ -1398,8 +1414,10 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
   }
   match harness {
     Harness::Opencode => {
-      if opencode_auth_ready() {
-        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      let auth = opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())
+        .filter(|p| p.is_file());
+      if let Some(path) = auth {
+        LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else {
         LoginPreflight {
           status: "missing",
@@ -1411,8 +1429,8 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
     Harness::Claude => {
       if claude_oauth_token().is_some() {
         LoginPreflight { status: "found", label: "Found via CLAUDE_CODE_OAUTH_TOKEN".into(), hint: String::new() }
-      } else if claude_credentials_file_on_host().is_some() {
-        LoginPreflight { status: "found", label: "Found via credentials file".into(), hint: String::new() }
+      } else if let Some(path) = claude_credentials_file_on_host() {
+        LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else if claude_keychain_credentials_json().is_some() {
         LoginPreflight { status: "found", label: "Found via keychain".into(), hint: String::new() }
       } else {
@@ -1424,8 +1442,8 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
       }
     }
     Harness::Codex => {
-      if codex_auth_file_on_host().is_some() {
-        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      if let Some(path) = codex_auth_file_on_host() {
+        LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else if std::env::var(OPENAI_API_KEY_ENV).map(|v| !v.is_empty()).unwrap_or(false) {
         LoginPreflight { status: "found", label: "Found via OPENAI_API_KEY".into(), hint: String::new() }
       } else {
@@ -1449,8 +1467,8 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
           label: "Expired".into(),
           hint: "Run `grok` on the host and sign in again".into(),
         }
-      } else if grok_auth_file_on_host().is_some() {
-        LoginPreflight { status: "found", label: "Found via auth.json".into(), hint: String::new() }
+      } else if let Some(path) = grok_auth_file_on_host() {
+        LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else {
         LoginPreflight { status: "found", label: "Found via XAI_API_KEY".into(), hint: String::new() }
       }
@@ -2114,6 +2132,15 @@ mod tests {
   use super::*;
   use std::ffi::OsString;
   use std::sync::atomic::{AtomicUsize, Ordering};
+
+  #[test]
+  fn display_path_with_home_tilde_abbreviates_home() {
+    if let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) {
+      let inside = PathBuf::from(&home).join(".codex").join("auth.json");
+      assert_eq!(display_path_with_home_tilde(&inside), "~/.codex/auth.json");
+    }
+    assert_eq!(display_path_with_home_tilde(Path::new("/etc/auth.json")), "/etc/auth.json");
+  }
 
   static COUNTER: AtomicUsize = AtomicUsize::new(0);
 

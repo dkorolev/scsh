@@ -3,20 +3,17 @@
 # the task itself just proves an agent can run to completion and write its result.
 description: "Verify the agent images are built and credentials work, then run a trivial confirm-task end to end."
 task: |
-  You are running inside an scsh container for the built-in `doctor` check.
-
-  Confirm you are executing inside the container, then write the JSON object
-  {"ok": true, "confirmed": "doctor end-to-end path works"} to the file named by
-  the `SCSH_RESULT` environment variable, and stop.
-
-  Do nothing else — no commits, no network, no other files.
+  Connectivity probe. Write the JSON object
+  {"ok": true, "model": "<the model id you are running as>",
+   "message": "connectivity ok - responding as <the model id you are running as>"}
+  to the file named by the `SCSH_RESULT` environment variable, then stop. Do nothing else.
 invocations:
-  opencode-gpt-5.6:
+  opencode-gpt-5.6-luna:
     harness: opencode
-    model: openai/gpt-5.6
-  claude-opus-4-8:
+    model: openai/gpt-5.6-luna
+  claude-sonnet:
     harness: claude
-    model: claude-opus-4-8
+    model: sonnet
   codex-luna:
     harness: codex
     model: gpt-5.6-luna
@@ -24,6 +21,6 @@ invocations:
   cursor-auto:
     harness: cursor
     model: auto
-  grok-4-5:
+  grok-build:
     harness: grok
-    model: grok-4.5
+    model: grok-build
