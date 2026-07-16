@@ -1473,12 +1473,13 @@ fn open_validated_repo(abs: &str, store: &Arc<Mutex<Store>>, created: bool) -> (
   }
   let blockers_arr: Vec<String> = blockers.iter().map(|b| quote(b)).collect();
   let body = format!(
-    "{{\"ok\":true,\"created\":{created},\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}]}}",
+    "{{\"ok\":true,\"created\":{created},\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}],\"global\":[{}]}}",
     quote(&repo),
     runnable,
     clean,
     blockers_arr.join(","),
-    defs_json(&discovery.defs).join(",")
+    defs_json(&discovery.defs).join(","),
+    global_profiles_json().join(",")
   );
   (200, body, true)
 }
@@ -1620,7 +1621,14 @@ fn harness_defs_response(body: &str) -> (u16, String) {
     _ => return (400, err_body("give a repository path")),
   };
   let discovery = crate::harness_def::discover(std::path::Path::new(&repo));
-  (200, format!("{{\"defs\":[{}]}}", defs_json(&discovery.defs).join(",")))
+  (
+    200,
+    format!(
+      "{{\"defs\":[{}],\"global\":[{}]}}",
+      defs_json(&discovery.defs).join(","),
+      global_profiles_json().join(",")
+    ),
+  )
 }
 
 /// `POST /api/v1/setup/tests` — body `{"runtime":"…","tests":[{"harness":"…","model":"…"}]}`.
@@ -1726,17 +1734,23 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
   }
 }
 
-/// `POST /api/v1/jobs/start` — body `{"repo":"…","def":"…","params":{…}}`. Enforce one job per
-/// repo, validate the definition + params, then spawn `scsh run --def <name>` in the repo with
-/// the params as environment and the pre-created session id. `{ok:true,session}`, or 409/400.
+/// `POST /api/v1/jobs/start` — body `{"repo":"…","def":"…","params":{…}}` for a harness
+/// definition, or `{"repo":"…","profile":"…"}` for a named skill profile (the repo's own, or
+/// one installed machine-wide via `scsh installskills --global`). Enforce one job per repo,
+/// validate what will run, then spawn `scsh run --def <name>` / `scsh run <profile>` in the
+/// repo with the params as environment and the pre-created session id. `{ok:true,session}`,
+/// or 409/400.
 fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
     _ => return (400, err_body("expected a JSON object"), false),
   };
-  let def_name = match field_str(&obj, "def") {
-    Some(d) if !d.trim().is_empty() => d.trim().to_string(),
-    _ => return (400, err_body("give a definition name"), false),
+  let def_name = field_str(&obj, "def").map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
+  let profile_name = field_str(&obj, "profile").map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
+  let run_name = match (&def_name, &profile_name) {
+    (Some(d), None) => d.clone(),
+    (None, Some(p)) => p.clone(),
+    _ => return (400, err_body("give a definition name or a profile name (exactly one)"), false),
   };
   let repo_in = match field_str(&obj, "repo") {
     Some(r) if !r.trim().is_empty() => r.trim().to_string(),
@@ -1756,17 +1770,42 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   }
   let repo = root.to_string_lossy().into_owned();
 
-  // The definition must exist and its params must validate.
-  let discovery = crate::harness_def::discover(&root);
-  let Some(def) = discovery.find(&def_name) else {
-    return (400, err_body(&format!("no harness definition named '{def_name}'")), false);
+  // Validate what will run, and pre-plan its tasks — pre-populated on the session so its
+  // page shows them immediately (no blank "limbo" while the spawned run starts up and
+  // registers).
+  let (planned, kind, workflow, run_args) = if let Some(profile) = &profile_name {
+    if profile == "default" {
+      return (
+        400,
+        err_body("the default profile is always the repo's own — start a NAMED profile, or a definition"),
+        false,
+      );
+    }
+    let routes = profile_routes_for(&root, profile);
+    if routes.is_empty() {
+      return (
+        400,
+        err_body(&format!(
+          "no skill profile named '{profile}' — neither this repo's .scsh.yml nor the global manifest (scsh installskills --global) declares it"
+        )),
+        false,
+      );
+    }
+    let planned: Vec<SkillMeta> =
+      routes.iter().map(|r| SkillMeta { name: r.name.clone(), harness: r.harness.as_str().to_string() }).collect();
+    (planned, None, None, vec!["run".to_string(), profile.clone()])
+  } else {
+    let discovery = crate::harness_def::discover(&root);
+    let Some(def) = discovery.find(&run_name) else {
+      return (400, err_body(&format!("no harness definition named '{run_name}'")), false);
+    };
+    if let Err(msg) = validate_job_params(def, &params) {
+      return (400, err_body(&msg), false);
+    }
+    let workflow = crate::daemon::workflow::workflow_meta_from_def(def);
+    let kind = if def.is_workflow() { Some("workflow".to_string()) } else { None };
+    (planned_skills(def, &run_name), kind, workflow, vec!["run".to_string(), "--def".to_string(), run_name.clone()])
   };
-  if let Err(msg) = validate_job_params(def, &params) {
-    return (400, err_body(&msg), false);
-  }
-  // The tasks this job will run — pre-populated on the session so its page shows them
-  // immediately (no blank "limbo" while the spawned run starts up and registers).
-  let planned = planned_skills(def, &def_name);
 
   // One job per directory.
   let now = now_unix_secs();
@@ -1785,7 +1824,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   let branch = crate::current_branch(&root);
   let session_id = crate::runtime::random_nonce_6();
   let mut cmd = std::process::Command::new(exe);
-  cmd.arg("run").args(["--def", &def_name]);
+  cmd.args(&run_args);
   cmd.current_dir(&root);
   for (k, v) in &params {
     cmd.env(k, v);
@@ -1815,15 +1854,13 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
       });
       let mut store = lock_store(store);
       store.touch(now);
-      let workflow = crate::daemon::workflow::workflow_meta_from_def(def);
-      let kind = if def.is_workflow() { Some("workflow".into()) } else { None };
       store.insert_session(
         session_id.clone(),
         Session {
           id: session_id.clone(),
           started_at: now,
           ended_at: None,
-          profile: Some(def_name.clone()),
+          profile: Some(run_name.clone()),
           kind,
           repo: repo.clone(),
           branch,
@@ -2249,6 +2286,57 @@ fn value_to_string(v: &Value) -> Option<String> {
 /// One JSON object per definition (name, description, source, params, agent routes).
 fn defs_json(defs: &[crate::harness_def::HarnessDef]) -> Vec<String> {
   defs.iter().map(def_json).collect()
+}
+
+/// The NAMED skill profiles the global manifest declares (`$SCSH_HOME/.scsh.yml`, written by
+/// `scsh installskills --global`), as JSON cards for the run page — so any opened repo can
+/// start them from the browser. "default" is excluded: the global manifest never serves a
+/// bare `scsh run` (mirroring `resolve_config_for_run`), so only named profiles are
+/// startable anywhere.
+fn global_profiles_json() -> Vec<String> {
+  let yml = crate::runtime::scsh_home().join(".scsh.yml");
+  let Ok(src) = std::fs::read_to_string(&yml) else { return Vec::new() };
+  let Ok(cfg) = crate::config::validate(&src) else { return Vec::new() };
+  let mut profiles: Vec<(String, Vec<String>)> = Vec::new();
+  for inv in crate::config::expand_invocations(&cfg) {
+    let profile = inv.profile.as_deref().unwrap_or("default");
+    if profile == "default" {
+      continue;
+    }
+    let agent = format!(
+      "{{\"route\":{},\"agent\":{},\"model\":{}}}",
+      quote(&inv.name),
+      quote(inv.harness.as_str()),
+      inv.model.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+    );
+    match profiles.iter_mut().find(|(name, _)| name == profile) {
+      Some((_, agents)) => agents.push(agent),
+      None => profiles.push((profile.to_string(), vec![agent])),
+    }
+  }
+  profiles
+    .into_iter()
+    .map(|(name, agents)| format!("{{\"name\":{},\"agents\":[{}]}}", quote(&name), agents.join(",")))
+    .collect()
+}
+
+/// The routes a named skill profile would run in `root`, mirroring `scsh run <profile>`'s
+/// config precedence: the repo's own `.scsh.yml` wins when it declares the profile;
+/// otherwise the global manifest serves it. Empty when neither declares the profile (or a
+/// manifest does not validate).
+fn profile_routes_for(root: &std::path::Path, profile: &str) -> Vec<crate::config::ResolvedInvocation> {
+  for yml in [root.join(".scsh.yml"), crate::runtime::scsh_home().join(".scsh.yml")] {
+    let Ok(src) = std::fs::read_to_string(&yml) else { continue };
+    let Ok(cfg) = crate::config::validate(&src) else { continue };
+    let routes: Vec<_> = crate::config::expand_invocations(&cfg)
+      .into_iter()
+      .filter(|inv| inv.profile.as_deref().unwrap_or("default") == profile)
+      .collect();
+    if !routes.is_empty() {
+      return routes;
+    }
+  }
+  Vec::new()
 }
 
 fn def_json(def: &crate::harness_def::HarnessDef) -> String {
@@ -3923,6 +4011,140 @@ mod tests {
 
     std::env::remove_var("SCSH_BIN");
     std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  /// An isolated `$SCSH_HOME` whose global manifest declares ONE named profile
+  /// (`hello-fleet`, two routes) plus a profile-less skill (i.e. "default" — which must
+  /// never surface as a globally startable profile).
+  fn global_home_with_profile(tag: &str) -> std::path::PathBuf {
+    let home = std::env::temp_dir().join(format!("scsh-ghome-{tag}-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap();
+    let yml = "skills:\n\
+      \x20 greeter:\n\
+      \x20   profile: hello-fleet\n\
+      \x20   result: tmp/greeter-{name}.json\n\
+      \x20   invocations:\n\
+      \x20     claude-sonnet:\n\
+      \x20       harness: claude\n\
+      \x20       model: sonnet\n\
+      \x20     codex-luna:\n\
+      \x20       harness: codex\n\
+      \x20       model: gpt-5.6-luna\n\
+      \x20 chore:\n\
+      \x20   harness: claude\n\
+      \x20   result: tmp/chore.json\n";
+    std::fs::write(home.join(".scsh.yml"), yml).unwrap();
+    home
+  }
+
+  /// Run `f` with `$SCSH_HOME` pointing at `home`, restoring the previous value after —
+  /// under the env lock, since Rust tests share one process.
+  fn with_scsh_home<T>(home: &std::path::Path, f: impl FnOnce() -> T) -> T {
+    let _guard = crate::runtime::test_env_lock();
+    let prev = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", home);
+    let out = f();
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+    out
+  }
+
+  #[test]
+  fn global_profiles_ride_the_defs_responses() {
+    let home = global_home_with_profile("list");
+    let dir = clean_repo("glist");
+    let body = format!(r#"{{"repo":{}}}"#, quote(&dir.to_string_lossy()));
+    let (status, out) = with_scsh_home(&home, || harness_defs_response(&body));
+    assert_eq!(status, 200, "got: {out}");
+    assert!(out.contains(r#""global":[{"name":"hello-fleet""#), "named global profiles are listed: {out}");
+    assert!(
+      out.contains(r#""route":"greeter-claude-sonnet","agent":"claude","model":"sonnet""#),
+      "each route rides with its agent and model: {out}"
+    );
+    assert!(out.contains(r#""agent":"codex","model":"gpt-5.6-luna""#), "all routes listed: {out}");
+    assert!(
+      !out.contains(r#"{"name":"default""#),
+      "the default profile is never a global card — it is always the repo's own: {out}"
+    );
+
+    // The open-repo reply carries the same list, so the run page needs no second fetch.
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let open_body = format!(r#"{{"path":{}}}"#, quote(&dir.to_string_lossy()));
+    let (status, out, _) = with_scsh_home(&home, || repos_open_response(&open_body, &store));
+    assert_eq!(status, 200, "got: {out}");
+    assert!(out.contains(r#""global":[{"name":"hello-fleet""#), "repos/open lists global profiles: {out}");
+
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_runs_a_global_profile() {
+    let home = global_home_with_profile("start");
+    let dir = clean_repo("gstart");
+    let repo = dir.to_string_lossy().into_owned();
+    let stub = std::env::temp_dir().join(format!("scsh-sleeper-{}.sh", crate::runtime::random_nonce_6()));
+    std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let body = format!(r#"{{"repo":{},"profile":"hello-fleet"}}"#, quote(&repo));
+    let (status, out, mutated) = with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      let out = jobs_start_response(&body, &store);
+      std::env::remove_var("SCSH_BIN");
+      out
+    });
+    assert_eq!(status, 200, "got: {out}");
+    assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
+    let session_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get(&session_id).expect("session pre-created");
+      assert_eq!(session.profile.as_deref(), Some("hello-fleet"), "session labeled with the profile name");
+      assert!(session.kind.is_none(), "a profile run is kind 'profile' (the default)");
+      // No limbo: the profile's routes are the planned tasks, named {skill}-{route}.
+      let names: Vec<&str> = session.skills.iter().map(|s| s.name.as_str()).collect();
+      assert_eq!(names, ["greeter-claude-sonnet", "greeter-codex-luna"], "planned tasks are the profile's routes");
+    }
+    std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_start_rejects_bad_profile_requests() {
+    let home = std::env::temp_dir().join(format!("scsh-ghome-empty-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap(); // no global manifest at all
+    let dir = clean_repo("gbad");
+    let repo = dir.to_string_lossy().into_owned();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+
+    // Unknown profile: nothing declares it, and the error teaches the install command.
+    let body = format!(r#"{{"repo":{},"profile":"nope"}}"#, quote(&repo));
+    let (status, out, mutated) = with_scsh_home(&home, || jobs_start_response(&body, &store));
+    assert_eq!(status, 400, "got: {out}");
+    assert!(!mutated && out.contains("installskills --global"), "the fix rides in the error: {out}");
+
+    // "default" is always the repo's own — never startable as a global profile.
+    let body = format!(r#"{{"repo":{},"profile":"default"}}"#, quote(&repo));
+    let (status, out, _) = with_scsh_home(&home, || jobs_start_response(&body, &store));
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("default profile"), "got: {out}");
+
+    // A definition AND a profile (or neither) is ambiguous.
+    let body = format!(r#"{{"repo":{},"def":"add","profile":"hello-fleet"}}"#, quote(&repo));
+    let (status, out, _) = jobs_start_response(&body, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("exactly one"), "got: {out}");
+    let body = format!(r#"{{"repo":{}}}"#, quote(&repo));
+    let (status, out, _) = jobs_start_response(&body, &store);
+    assert_eq!(status, 400, "got: {out}");
+
+    assert!(store.lock().unwrap().sessions.is_empty(), "nothing spawned");
+    std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }
 

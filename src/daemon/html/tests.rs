@@ -1099,6 +1099,17 @@ fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
 }
 
 #[test]
+fn global_skills_are_startable_from_the_run_page() {
+  let js = live_client_js();
+  assert!(js.contains("function selectGlobalProfile"), "picking a global profile opens a start form");
+  assert!(js.contains("function startGlobalJob"), "…and its Start button starts a job");
+  assert!(js.contains("profile: name"), "the start request posts a profile, not a def");
+  assert!(js.contains("scsh installskills --global"), "the section says where global skills come from");
+  assert!(js.contains(r#"badge--cyan"><span>global"#), "global cards wear the cyan source badge");
+  assert!(js.contains("renderDefs(resp.defs || [], resp.global || [])"), "open replies feed the global list");
+}
+
+#[test]
 fn the_job_lede_ticks_live() {
   let js = live_client_js();
   assert!(js.contains("function syncSessionLede"), "the lede has a live tick mirror");
