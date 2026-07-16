@@ -217,7 +217,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
           text = esc(&line.text)
         ));
       }
-      format!("<div class=\"output\">{lines_html}</div>\n{}", diff_embed_html(diff))
+      format!("<div class=\"chamfer output\">{lines_html}</div>\n{}", diff_embed_html(diff))
     }
     CastExport::Note { text, .. } => {
       format!("<div class=\"detail dim\">{}</div>\n{}", esc(text), diff_embed_html(diff))

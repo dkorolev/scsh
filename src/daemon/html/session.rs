@@ -46,7 +46,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
           text = esc(&line.text)
         ));
       }
-      format!("<div class=\"output\">{lines_html}</div>")
+      format!("<div class=\"chamfer output\">{lines_html}</div>")
     };
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     let diff_btn = proc_diff_btn_html(&session.id, proc);

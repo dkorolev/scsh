@@ -351,10 +351,13 @@ pub(crate) const PAGE_CSS: &str = r#"
      end one gap short of the New Project button's right edge on the row below. */
   #repo-note:empty { display: none; }
   .image-select-cell { width: 1.5rem; }
+  /* Danger banner: red chamfer ring, red-tinted fill. */
   .blockers {
-    border: 1px solid var(--red); border-radius: 6px; padding: 0.65rem 0.9rem;
-    margin: 0.75rem 0 1rem; background: rgba(248,81,73,0.08); color: var(--text);
+    --cut: 8px; --bw: 1px;
+    padding: 0.65rem 0.9rem;
+    margin: 0.75rem 0 1rem; background: var(--red); color: var(--text);
   }
+  .blockers::before { background: color-mix(in srgb, var(--red) 8%, var(--bg)); }
   .blockers ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
   .def-card {
     background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
@@ -722,11 +725,14 @@ pub(crate) const PAGE_CSS: &str = r#"
     color: inherit; text-decoration: none; direction: rtl;
   }
   a.repo-filter-link:hover { color: var(--cyan); text-decoration: underline; }
+  /* Info banner: cyan chamfer ring, cyan-tinted fill. */
   .filter-banner {
+    --cut: 8px; --bw: 1px;
     margin: 0 0 0.65rem; padding: 0.45rem 0.65rem;
-    background: rgba(88, 166, 255, 0.08); border: 1px solid rgba(88, 166, 255, 0.35);
-    border-radius: 6px; font-size: 0.9rem;
+    background: rgba(88, 166, 255, 0.35);
+    font-size: 0.9rem;
   }
+  .filter-banner::before { background: color-mix(in srgb, var(--cyan) 8%, var(--bg)); }
   .filter-banner a.filter-clear { color: var(--cyan); }
   /* Setup tab: runtime switcher + harness readiness cards; image inventory is a separate island. */
   .images-runtimes { display: block; margin: 0; }
@@ -896,10 +902,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   #repo-path.flash-open, #repo-open.flash-open {
     box-shadow: 0 0 0 2px var(--cyan);
   }
+  /* The log panel scrolls its own content, so the chamfer is clip-only (--bw: 0 —
+     an inset ::before surface would scroll away) and the hairline ring is an inset
+     box-shadow, which stays attached to the visible box. */
   .output {
+    --cut: 8px; --bw: 0px;
     font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
     max-height: 24rem; overflow: auto; margin: 0.5rem 0; padding: 0.65rem;
-    background: #0a0e14; border: 1px solid var(--border); border-radius: 4px;
+    background: #0a0e14; box-shadow: inset 0 0 0 1px var(--border);
     width: 100%; box-sizing: border-box;
   }
   .line { white-space: pre; }
