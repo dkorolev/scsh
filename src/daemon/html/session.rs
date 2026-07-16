@@ -3,9 +3,7 @@
 use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
-use super::proc::{
-  cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html, summary_stats_html,
-};
+use super::proc::{cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, summary_stats_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
@@ -18,7 +16,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
   let mut fleet_sections = fleet_sections_by_anchor(session);
   for proc in &session.procs {
     let detail = proc.detail.as_deref().unwrap_or("");
-    let elapsed = elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref());
+    let elapsed = proc_elapsed_phrase(proc, now);
     // The collapsed row's trailing text: once the proc FINISHED we know its answer (the
     // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
     // "<harness> run…" note is only for rows still working. A bare artifact path is SYSTEM

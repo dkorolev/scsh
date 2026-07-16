@@ -20,6 +20,17 @@ pub(crate) fn proc_has_cast(proc: &ProcRecord) -> bool {
   proc.cast_path.is_some()
 }
 
+/// Cache hits written before attempt clocks were corrected copied the source run's duration into
+/// `elapsed`. Their detail still identifies them unambiguously. New records additionally label
+/// that duration as `source run took …`, so their own elapsed value is safe to display.
+pub(crate) fn proc_is_cache_hit(proc: &ProcRecord) -> bool {
+  proc.detail.as_deref().is_some_and(|detail| detail.contains("(cached"))
+}
+
+fn proc_has_separate_cache_provenance(proc: &ProcRecord) -> bool {
+  proc.detail.as_deref().is_some_and(|detail| detail.contains("source run took "))
+}
+
 /// Inline beecast-player embed for a proc's recording: a toolbar (`.cast` download) above
 /// an empty `.cast-player` box the client JS mounts the player into. Playback chrome —
 /// play, chapters, speed, fullscreen, and **● Live** for still-running casts — is the
@@ -122,6 +133,9 @@ fn last_line_at(proc: &ProcRecord) -> f64 {
 }
 
 pub(crate) fn proc_elapsed_secs(proc: &ProcRecord, now: u64) -> Option<f64> {
+  if proc_is_cache_hit(proc) && !proc_has_separate_cache_provenance(proc) {
+    return None;
+  }
   if let Some(e) = proc.elapsed {
     return Some(e);
   }
@@ -132,8 +146,21 @@ pub(crate) fn proc_elapsed_secs(proc: &ProcRecord, now: u64) -> Option<f64> {
 }
 
 fn idle_since_line(proc: &ProcRecord, now: u64) -> Option<f64> {
+  if proc_is_cache_hit(proc) {
+    return None;
+  }
   let elapsed = proc_elapsed_secs(proc, now)?;
   Some((elapsed - last_line_at(proc)).max(0.0))
+}
+
+pub(crate) fn proc_elapsed_phrase(proc: &ProcRecord, now: u64) -> String {
+  if proc_is_cache_hit(proc) {
+    return match proc_elapsed_secs(proc, now).map(format_elapsed_clock) {
+      Some(clock) => format!("cache hit in {clock}"),
+      None => "cache hit".into(),
+    };
+  }
+  elapsed_phrase(proc.status, proc_elapsed_secs(proc, now), proc.fail_reason.as_deref())
 }
 
 pub(crate) fn summary_stats_html(proc: &ProcRecord, now: u64) -> String {

@@ -4093,7 +4093,8 @@ fn run_one_skill(
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
-  // Wall clock for this run, cached on success so a future hit shows the real duration.
+  // Wall clock for this run. On success its duration is stored with the cached artifact as
+  // provenance, but a future cache-hit attempt keeps its own (near-zero) elapsed clock.
   let run_started = Instant::now();
   // Resolve forwarded env first: a missing required (${VAR:?…}) variable refuses
   // the skill before any work — no clone, no container.
@@ -4117,13 +4118,13 @@ fn run_one_skill(
       let workflow_outputs = result_contract.and_then(|contract| extract_step_outputs(&entry.result, contract).ok());
       let valid = result_contract.is_none() || workflow_outputs.is_some();
       if valid && restore_cached_result(root, &skill.result, &entry.result).is_ok() {
-        let when = entry.cached_at.map(|t| format!(" · {}", format_cached_at(t))).unwrap_or_default();
+        let provenance = cache_hit_provenance(entry.cached_at, entry.elapsed);
         let line = match json::message(&entry.result) {
-          Some(m) => format!("{}  (cached{when})", first_line(&m)),
-          None => format!("(cached{when})"),
+          Some(m) => format!("{}  ({provenance})", first_line(&m)),
+          None => format!("({provenance})"),
         };
-        // Replay the original recording and show the original duration, so a hit reads the same
-        // as the run that produced it — not a bare "(cached) · 0s · no output".
+        // Replay the original recording as provenance. Its duration belongs to the source run
+        // and is labeled in `line`; this cache-hit attempt's own elapsed clock stays near zero.
         if let (Some(c), Some(cast)) = (&daemon_client, &entry.cast) {
           // Restore chapters next to the cached cast so the session browser finds them the
           // same way it finds a live run's sidecar (`<stem>.chapters.json`).
@@ -4141,10 +4142,7 @@ fn run_one_skill(
             c.proc_result(spinner.index(), &path);
           }
         }
-        match entry.elapsed {
-          Some(e) => spinner.finish_ok_elapsed(Some(&line), e),
-          None => spinner.finish_ok(Some(&line)),
-        }
+        spinner.finish_ok(Some(&line));
         // Carry any journaled commits so they're replayed onto the caller's branch — a hit
         // for a commit-enabled skill reproduces the commit, not just the result file.
         // Also carry the result JSON so a workflow can feed this step's outputs into later
@@ -5576,12 +5574,12 @@ fn collect_files(base: &Path, dir: &Path, out: &mut Vec<(String, PathBuf)>) {
 /// A cached run — everything needed to reproduce the original observation, not just the answer:
 /// the result-file content, any commits it made (a `format-patch` mbox, for a commit-enabled
 /// skill), how long the original run took, when it was cached, its terminal recording, and
-/// (when annotation has finished) the chapters sidecar. So a hit shows the same duration,
-/// replayable video, and chapters as the first run — not a bare "(cached) · 0s".
+/// (when annotation has finished) the chapters sidecar. A hit restores the replayable video and
+/// chapters while labeling their source duration separately from the cache-hit attempt's clock.
 struct CacheEntry {
   result: String,
   commits: Option<String>,
-  /// The original run's wall-clock seconds, so the board shows the real duration on a hit.
+  /// The original run's wall-clock seconds, shown as provenance for its restored recording.
   elapsed: Option<f64>,
   /// Unix seconds when this entry was written (the original run's finish time).
   cached_at: Option<u64>,
@@ -5682,6 +5680,20 @@ fn format_cached_at(epoch_secs: u64) -> String {
   } else {
     raw
   }
+}
+
+/// Human-readable provenance attached to a cache-hit result. The cache-hit proc's `elapsed`
+/// remains its own lookup/restore duration; this text explains why its restored recording can
+/// legitimately be much longer.
+fn cache_hit_provenance(cached_at: Option<u64>, source_elapsed: Option<f64>) -> String {
+  let mut parts = vec!["cached".to_string()];
+  if let Some(at) = cached_at {
+    parts.push(format_cached_at(at));
+  }
+  if let Some(elapsed) = source_elapsed {
+    parts.push(format!("source run took {}", ui::clock::format_elapsed(elapsed)));
+  }
+  parts.join(" · ")
 }
 
 /// A commit-enabled skill's new commits in its clone (`base..HEAD`) as a git `format-patch`
@@ -8725,6 +8737,15 @@ Subject: [PATCH] add: 2 + 3 = 5
   fn format_cached_at_is_human_utc() {
     assert_eq!(format_cached_at(0), "1970-01-01 00:00 UTC");
     assert_eq!(format_cached_at(1_700_000_000), "2023-11-14 22:13 UTC");
+  }
+
+  #[test]
+  fn cache_hit_labels_source_duration_as_provenance() {
+    assert_eq!(
+      cache_hit_provenance(Some(1_700_000_000), Some(480.946)),
+      "cached · 2023-11-14 22:13 UTC · source run took 8m 0s"
+    );
+    assert_eq!(cache_hit_provenance(None, None), "cached");
   }
 
   #[test]

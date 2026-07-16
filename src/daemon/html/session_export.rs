@@ -22,10 +22,11 @@ use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
-use super::proc::{elapsed_phrase, proc_meta_html};
+use super::proc::{proc_elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcRecord, Session};
+use crate::daemon::paths::now_unix_secs;
 use crate::json::quote;
 
 /// What the export gathered for one proc (aligned 1:1 with `session.procs`): the raw
@@ -186,7 +187,7 @@ fn diff_chip_html(has_diff: bool) -> String {
 /// the cast box carrying only the keys hint — no live controls.
 fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> String {
   let note = proc.detail.as_deref().or(proc.note.as_deref()).unwrap_or("");
-  let elapsed = elapsed_phrase(proc.status, proc.elapsed, proc.fail_reason.as_deref());
+  let elapsed = proc_elapsed_phrase(proc, now_unix_secs());
   let diff = export.diff_html();
   let body = match export {
     CastExport::Cast { summary, chapters, .. } => {
