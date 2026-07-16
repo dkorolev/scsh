@@ -340,7 +340,7 @@ gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job
 <input class="input" type="text" id="project-name" placeholder="project name (letters, digits, - or _; no dots/slashes)" autocomplete="off" spellcheck="false">
 </div>
 <div class="start-actions">
-<button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New project</span></button>
+<button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New Project</span></button>
 </div>
 </div>
 <div id="repo-blockers" class="blockers" hidden></div>

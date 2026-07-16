@@ -639,6 +639,8 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   {
     assert!(html.contains(&format!("id=\"{id}\"")), "index page should contain #{id}");
   }
+  assert!(html.contains("<span>New Project</span>"), "create button is title-cased");
+  assert!(html.contains("#repo-note:empty { display: none; }"), "empty note must not push Open off the shared right edge");
   // The four tabs, and their panels — Run is leftmost and the default landing tab.
   for (tab, panel) in [("run", "tab-run"), ("jobs", "tab-jobs"), ("projects", "tab-projects"), ("setup", "tab-setup")] {
     assert!(html.contains(&format!("data-tab=\"{tab}\"")), "index page should have the {tab} tab");

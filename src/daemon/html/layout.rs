@@ -297,6 +297,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .start-actions {
     display: flex; gap: 0.75rem; margin-left: auto; flex-shrink: 0;
   }
+  /* An empty trailing note must not consume a flex gap, or the Open/Pick… buttons
+     end one gap short of the New Project button's right edge on the row below. */
+  #repo-note:empty { display: none; }
   .image-select-cell { width: 1.5rem; }
   .blockers {
     border: 1px solid var(--red); border-radius: 6px; padding: 0.65rem 0.9rem;
