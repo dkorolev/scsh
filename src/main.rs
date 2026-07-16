@@ -188,6 +188,7 @@ fn annotate_casts_cmd(paths: &[String], json_flag: bool) -> i32 {
           None,
           None,
           Some(path.as_str()),
+          None,
         );
         c.proc_start(idx);
         c.proc_note(idx, "summarizing…");
@@ -448,6 +449,7 @@ fn annotate_run_casts(
           None,
           None,
           Some(cast.to_string_lossy().as_ref()),
+          None,
         );
         client.proc_start(idx);
         client.proc_note(idx, "summarizing…");
@@ -1643,6 +1645,147 @@ fn schema_repair_invocation(invocation: &ResolvedInvocation, error: &str) -> Res
   repaired
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkflowRetryDecision {
+  Stop,
+  Browser,
+  Schema,
+  Automatic,
+}
+
+fn workflow_retry_decision(
+  fail_reason: Option<&str>, restart_requested: bool, schema_retry_used: bool, auto_retry_used: bool,
+  retry_enabled: bool, tui: bool,
+) -> WorkflowRetryDecision {
+  if restart_requested {
+    return WorkflowRetryDecision::Browser;
+  }
+  if !retry_enabled {
+    return WorkflowRetryDecision::Stop;
+  }
+  if fail_reason == Some(failure::reason::RESULT_INVALID) && !schema_retry_used {
+    return WorkflowRetryDecision::Schema;
+  }
+  let transient = fail_reason
+    .is_some_and(|reason| failure::is_transient(reason) || (reason == failure::reason::RESULT_MISSING && tui));
+  if transient && !auto_retry_used {
+    WorkflowRetryDecision::Automatic
+  } else {
+    WorkflowRetryDecision::Stop
+  }
+}
+
+/// Run one workflow route with the same retry contract as a flat run. Every fresh harness
+/// execution gets a fresh proc row linked to its predecessor: one automatic retry for transient
+/// infrastructure failure, one schema-correction retry, and unlimited explicit browser restarts.
+#[allow(clippy::too_many_arguments)]
+fn run_workflow_step_with_retries(
+  invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
+  initial_proc: ui::screen::Proc, ui: &ui::screen::LiveUi, base: Option<&str>,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
+) -> SkillRun {
+  let contract = WorkflowResultContract {
+    outputs: &step.outputs,
+    require_do_while_repeat: step.do_while.is_some()
+      && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+  };
+  let mut proc = initial_proc;
+  let mut proc_index = proc.index();
+  let mut attempts = 0u64;
+  let mut auto_retry_used = false;
+  let mut schema_retry_used = false;
+  let mut repaired_invocation: Option<ResolvedInvocation> = None;
+  loop {
+    attempts += 1;
+    let attempt_started = Instant::now();
+    let current_invocation = repaired_invocation.as_ref().unwrap_or(invocation);
+    let mut run = run_one_skill(
+      current_invocation,
+      rt,
+      root,
+      secs,
+      proc.clone(),
+      base,
+      base,
+      Some(contract),
+      daemon_client.clone(),
+      session_id,
+    );
+    run.duration_secs = attempt_started.elapsed().as_secs_f64();
+    run.proc_index = proc_index;
+    run.attempts = attempts;
+    if run.ok {
+      daemon::consume_proc_restart(session_id, proc_index);
+      return run;
+    }
+
+    let restart_requested = daemon::consume_proc_restart(session_id, proc_index);
+    let invalid_result = run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID);
+    let decision = workflow_retry_decision(
+      run.fail_reason.as_deref(),
+      restart_requested,
+      schema_retry_used,
+      auto_retry_used,
+      failure::retry_enabled(),
+      invocation.harness.is_tui(),
+    );
+    if decision == WorkflowRetryDecision::Stop {
+      if invalid_result {
+        let why = format!(
+          "invalid workflow result: {}",
+          run.fail_detail.as_deref().unwrap_or("result did not match the declared schema")
+        );
+        let detail = skill_fail_detail(&why, invocation.harness, run.run_dir.as_deref(), run.log.as_deref());
+        proc.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
+      }
+      return run;
+    }
+
+    let reason = match decision {
+      WorkflowRetryDecision::Browser => failure::reason::RESTART_REQUESTED,
+      WorkflowRetryDecision::Schema => failure::reason::RESULT_INVALID,
+      WorkflowRetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
+      WorkflowRetryDecision::Stop => unreachable!("stop returned above"),
+    };
+    failure::log_retry(session_id, &invocation.name, invocation.harness.as_str(), invocation.model.as_deref(), reason);
+    if decision == WorkflowRetryDecision::Schema {
+      schema_retry_used = true;
+      let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
+      repaired_invocation = Some(schema_repair_invocation(invocation, error));
+      let why = format!("invalid workflow result: {error}");
+      let detail = skill_fail_detail(&why, invocation.harness, run.run_dir.as_deref(), run.log.as_deref());
+      proc.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
+      if !keep_run_dirs() {
+        if let Some(clone) = &run.clone_dir {
+          let _ = std::fs::remove_dir_all(clone);
+        }
+      }
+    } else if decision == WorkflowRetryDecision::Automatic {
+      auto_retry_used = true;
+    }
+
+    let label = format!("{}: {} (retry)", invocation.harness.as_str(), invocation.name);
+    let next = ui.proc(label.clone(), false);
+    if let Some(client) = &daemon_client {
+      client.proc_add(
+        next.index(),
+        &label,
+        daemon::ProcKind::Skill,
+        Some(&invocation.name),
+        Some(invocation.harness.as_str()),
+        invocation.model.as_deref(),
+        Some(&step.id),
+        None,
+        None,
+        Some(proc_index),
+      );
+    }
+    next.note(&format!("retrying after {reason}"));
+    proc_index = next.index();
+    proc = next;
+  }
+}
+
 /// Build (or reuse) the base + per-harness images a workflow's steps need, reporting each as a
 /// build proc row. Returns the first build failure, if any.
 fn ensure_workflow_images(
@@ -1655,30 +1798,37 @@ fn ensure_workflow_images(
     return Err((runtime::apple_dockerfile_too_large_message(df.len()), 1));
   }
   let tz = runtime::host_timezone();
-  let build_one = |label: String,
-                   tag: &str,
-                   target: &str,
-                   fp: &str,
-                   harness: Option<config::Harness>|
-   -> Result<(), (String, i32)> {
-    // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
-    let p = ui.proc(label.clone(), false);
-    if let Some(c) = daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, harness.map(|h| h.as_str()), None, None, None, None);
-    }
-    p.start();
-    let stem = harness.map(|h| h.as_str()).unwrap_or("base");
-    match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
-      Ok(()) => {
-        p.finish_ok(None);
-        Ok(())
+  let build_one =
+    |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
+      // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
+      let p = ui.proc(label.clone(), false);
+      if let Some(c) = daemon_client {
+        c.proc_add(
+          p.index(),
+          &label,
+          daemon::ProcKind::Build,
+          None,
+          harness.map(|h| h.as_str()),
+          None,
+          None,
+          None,
+          None,
+          None,
+        );
       }
-      Err(e) => {
-        p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
-        Err(e)
+      p.start();
+      let stem = harness.map(|h| h.as_str()).unwrap_or("base");
+      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
+        Ok(()) => {
+          p.finish_ok(None);
+          Ok(())
+        }
+        Err(e) => {
+          p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+          Err(e)
+        }
       }
-    }
-  };
+    };
   let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
   if !runtime::image_is_up_to_date(&rt.name, runtime::BASE_IMAGE_TAG, &base_fp) {
     build_one(
@@ -1803,6 +1953,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         Some(&s.id),
         None,
         None,
+        None,
       );
     }
     p.note(&note);
@@ -1887,6 +2038,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
             Some(&s.id),
             None,
             None,
+            None,
           );
         }
         p.note(&format!(
@@ -1902,6 +2054,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
 
     // Run the wave in parallel — independent steps proceed at once.
     let results: Vec<(String, SkillRun)> = std::thread::scope(|scope| {
+      let ui_ref = &ui;
       let handles: Vec<_> = invs
         .iter()
         .zip(procs)
@@ -1911,41 +2064,8 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           let base_ref = base.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
-          let contract = WorkflowResultContract {
-            outputs: &step.outputs,
-            require_do_while_repeat: step.do_while.is_some()
-              && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
-          };
           scope.spawn(move || {
-            let proc_index = p.index();
-            let mut run =
-              run_one_skill(inv, rt, root, secs, p.clone(), base_ref, base_ref, Some(contract), dc.clone(), sid);
-            if run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID) && failure::retry_enabled() {
-              let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
-              failure::log_retry(
-                sid,
-                &inv.name,
-                inv.harness.as_str(),
-                inv.model.as_deref(),
-                failure::reason::RESULT_INVALID,
-              );
-              let repaired = schema_repair_invocation(inv, error);
-              if !keep_run_dirs() {
-                if let Some(clone) = &run.clone_dir {
-                  let _ = std::fs::remove_dir_all(clone);
-                }
-              }
-              run = run_one_skill(&repaired, rt, root, secs, p.clone(), base_ref, base_ref, Some(contract), dc, sid);
-            }
-            if run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID) {
-              let why = format!(
-                "invalid workflow result: {}",
-                run.fail_detail.as_deref().unwrap_or("result did not match the declared schema")
-              );
-              let detail = skill_fail_detail(&why, inv.harness, run.run_dir.as_deref(), run.log.as_deref());
-              p.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
-            }
-            run.proc_index = proc_index;
+            let run = run_workflow_step_with_retries(inv, step, rt, root, secs, p, ui_ref, base_ref, dc, sid);
             (id, run)
           })
         })
@@ -2013,6 +2133,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
                     Some(skipped.agent.harness.as_str()),
                     skipped.agent.model.as_deref(),
                     Some(&skipped.id),
+                    None,
                     None,
                     None,
                   );
@@ -2090,6 +2211,12 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     }
   }
 
+  if let Some(reason) = failure.as_deref() {
+    for (_, proc) in step_procs.drain() {
+      proc.finish_skipped(&format!("not run — workflow stopped after {reason}"));
+      skipped_count += 1;
+    }
+  }
   ui.finish();
   if let Some(msg) = failure {
     fail(&msg);
@@ -3318,7 +3445,7 @@ fn build_and_run(
     let base_label = format!("using {} · build base", backend_name(&rt.name));
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -3327,7 +3454,18 @@ fn build_and_run(
     let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None, None);
+      c.proc_add(
+        p.index(),
+        &label,
+        daemon::ProcKind::Build,
+        None,
+        Some(spec.harness.as_str()),
+        None,
+        None,
+        None,
+        None,
+        None,
+      );
     }
     harness_build_procs.push(p);
   }
@@ -3345,6 +3483,7 @@ fn build_and_run(
         skill.model.as_deref(),
         Some(skill.skill_source.as_str()),
         fleet_route_name(skill),
+        None,
         None,
       );
     }
@@ -3506,6 +3645,7 @@ fn build_and_run(
                 Some(skill.skill_source.as_str()),
                 fleet_route_name(skill),
                 None,
+                Some(proc_index),
               );
             }
             proc_index = next.index();
@@ -3546,6 +3686,7 @@ fn build_and_run(
       let result_path = result_path.is_file().then(|| result_path.to_string_lossy().into_owned());
       fake_procs.push(ProcRecord {
         index: o.proc_index,
+        previous_attempt: None,
         label: format!("{}: {}", skill.harness.as_str(), skill.name),
         kind: ProcKind::Skill,
         status: if o.graceful_shutdown {
@@ -3755,8 +3896,8 @@ struct SkillRun {
   proc_index: usize,
   /// Stable reason code when `ok == false`.
   fail_reason: Option<String>,
-  /// Human diagnostic associated with `fail_reason`, retained when finalization is deferred
-  /// for one workflow result-schema repair attempt.
+  /// Human diagnostic associated with `fail_reason`, retained so the workflow orchestrator can
+  /// explain and link its one fresh result-schema repair attempt.
   fail_detail: Option<String>,
   /// Served from the content-addressed cache (no clone, no container).
   cached: bool,
@@ -3908,9 +4049,9 @@ fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool)
     .is_some_and(|refs| !refs.trim().is_empty())
 }
 
-/// Whether an inactivity-stopped harness crossed its durable result boundary first.
+/// Whether an interrupted or non-cleanly-exited harness crossed its durable result boundary first.
 ///
-/// Beyond confirming the stop reason, this intentionally asks only "is the declared file
+/// This intentionally asks only "is the declared file
 /// present?" It does *not* pronounce the task successful. The common result path below still
 /// copies the file, parses the workflow schema when one exists, rejects missing/extra/wrongly
 /// typed fields, and performs the bounded schema-correction retry. Keeping those checks in one
@@ -3918,11 +4059,11 @@ fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool)
 /// reliable data contract must not be discarded merely because the TUI failed to close after
 /// writing it.
 ///
-/// The ordering is safe because the inactivity watchdog has already stopped the container when
-/// this is called. The file is therefore no longer being written. A partial file can be present,
+/// The ordering is safe because the harness exited or a watchdog already stopped its container
+/// when this is called. The file is therefore no longer being written. A partial file can be present,
 /// but it will fail the same downstream parsing/schema validation as any other malformed result.
-fn inactive_harness_result_is_recoverable(killed: ui::screen::Killed, run_dir: &Path, result_rel: &str) -> bool {
-  killed == ui::screen::Killed::Inactive && run_dir.join(result_rel).is_file()
+fn interrupted_harness_result_is_recoverable(run_dir: &Path, result_rel: &str) -> bool {
+  run_dir.join(result_rel).is_file()
 }
 
 /// Apple Container can lose the outer `container run` response while leaving the container
@@ -4190,15 +4331,15 @@ fn run_one_skill(
         Ok((false, ui::screen::Killed::No, last))
       }
     }
-    Ok((false, killed, last)) if inactive_harness_result_is_recoverable(killed, &run_dir, &skill.result) => {
-      // The inactivity watchdog kills a screen that has shown no novel content for its full
-      // allowance. That proves the *process* is stalled; it does not erase work already committed
-      // to the declared output file. Treat the stopped process as a teardown defect and let the
-      // normal collector + schema validator below decide whether the task result is acceptable.
-      // If collection or validation fails, the proc still fails (or receives its one schema
-      // correction attempt). Only a result that survives those checks becomes graceful success.
-      graceful_shutdown_reason =
-        Some("accepted the valid result after the inactivity watchdog stopped a stalled harness exit");
+    Ok((false, killed, last)) if interrupted_harness_result_is_recoverable(&run_dir, &skill.result) => {
+      // The durable result is the task boundary. A timeout, inactivity kill, or later non-zero
+      // TUI exit does not erase work already written there; collection and schema validation below
+      // remain authoritative, and only a result that survives them becomes graceful success.
+      graceful_shutdown_reason = Some(match killed {
+        ui::screen::Killed::Inactive => "accepted the valid result after the inactivity watchdog stopped the harness",
+        ui::screen::Killed::Timeout => "accepted the valid result after the wall-clock watchdog stopped the harness",
+        ui::screen::Killed::No => "accepted the valid result despite the harness exiting non-zero during teardown",
+      });
       Ok((true, killed, last))
     }
     other => other,
@@ -4258,8 +4399,13 @@ fn run_one_skill(
       let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
       let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      spinner.finish_fail(failure::reason::HARNESS_NONZERO, Some(&detail));
-      return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir);
+      let reason = if failure::harness_reported_overload(&why) {
+        failure::reason::HARNESS_OVERLOADED
+      } else {
+        failure::reason::HARNESS_NONZERO
+      };
+      spinner.finish_fail(reason, Some(&detail));
+      return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir);
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -4306,9 +4452,8 @@ fn run_one_skill(
               c.proc_result(spinner.index(), &path);
             }
           }
-          // Do not publish a terminal transition yet. The workflow owns one bounded correction
-          // attempt and keeps this same logical proc running across it; only the corrected result
-          // or the final validation error becomes observable as terminal state.
+          // The workflow owns one bounded correction attempt. Return the validation error so its
+          // orchestrator can settle this attempt and register a fresh, explicitly linked proc.
           spinner.note("result schema invalid; preparing one correction retry…");
           return SkillRun::invalid_result(error, run_dir_str, log, clone_dir, content);
         }
@@ -5862,7 +6007,7 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build base", backend_name(&rt_name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None, None, None);
     }
     base_build = Some(p);
   }
@@ -5871,7 +6016,18 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
     let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(spec.harness.as_str()), None, None, None, None);
+      c.proc_add(
+        p.index(),
+        &label,
+        daemon::ProcKind::Build,
+        None,
+        Some(spec.harness.as_str()),
+        None,
+        None,
+        None,
+        None,
+        None,
+      );
     }
     harness_build_procs.push(p);
   }
@@ -7423,8 +7579,8 @@ fn print_help_config() {
                           #       invocations: a default routes may override; harnesses
                           #       without an effort knob ignore it
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
-      inactivity_timeout: 1200 # optional; seconds the recorded screen may show nothing new
-                          #       before the run is killed as stuck. Default 1200 (20 minutes).
+      inactivity_timeout: 1800 # optional; seconds the recorded screen may show nothing new
+                          #       before the run is killed as stuck. Default 1800 (30 minutes).
                           #       Per-route override
                           #       under invocations: is allowed too.
       env:                #     optional; host vars to forward (-e) into the container
@@ -7576,7 +7732,7 @@ fn print_help_internals() {
   Codex RUST_LOG tracing + its final message appended to the log; Grok --debug + its debug
   log appended; Cursor --output-format stream-json);
   every line is teed to tmp/scsh-run.log and the session browser daemon (opt out: SCSH_QUIET=1).
-  A transient infra failure (timeout, container/clone error) is retried once on a fresh
+  A transient infra failure (timeout, provider overload, container/clone error) is retried once on a fresh
   clone (opt out: SCSH_NO_RETRY=1); failures land in `scsh failures` with stable reason codes.
   Every skill outcome is also recorded durably in ~/.scsh/stats.jsonl — route, duration,
   attempts, and the branch workload (commits + LOC over main) — browse with `scsh stats`.
@@ -7783,18 +7939,16 @@ mod tests {
   }
 
   #[test]
-  fn inactive_harness_with_a_result_rejoins_the_normal_validation_path() {
+  fn interrupted_harness_with_a_result_rejoins_the_normal_validation_path() {
     let dir = std::env::temp_dir().join(format!("scsh-inactive-result-{}", runtime::random_nonce_6()));
     let result = "tmp/scsh/job/result.json";
     std::fs::create_dir_all(dir.join("tmp/scsh/job")).unwrap();
 
-    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::Inactive, &dir, result));
+    assert!(!interrupted_harness_result_is_recoverable(&dir, result));
     // Even a malformed file crosses the durable-output boundary here: this helper must not
     // duplicate or weaken the workflow schema validator that runs after collection.
     std::fs::write(dir.join(result), "not valid JSON yet").unwrap();
-    assert!(inactive_harness_result_is_recoverable(ui::screen::Killed::Inactive, &dir, result));
-    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::Timeout, &dir, result));
-    assert!(!inactive_harness_result_is_recoverable(ui::screen::Killed::No, &dir, result));
+    assert!(interrupted_harness_result_is_recoverable(&dir, result));
     let _ = std::fs::remove_dir_all(dir);
   }
 
@@ -7852,6 +8006,28 @@ mod tests {
       }
       _ => panic!("workflow steps always use a direct prompt"),
     }
+  }
+
+  #[test]
+  fn workflow_retries_transient_failures_once_and_browser_restarts_without_a_cap() {
+    use WorkflowRetryDecision::{Automatic, Browser, Schema, Stop};
+
+    assert_eq!(
+      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, false, true, true),
+      Automatic
+    );
+    assert_eq!(
+      workflow_retry_decision(Some(failure::reason::CONTAINER_INACTIVE), false, false, true, true, true),
+      Stop
+    );
+    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, false, false, true, true), Schema);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, true, false, true, true), Stop);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), false, false, false, true, true), Stop);
+    assert_eq!(
+      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, false, false, true),
+      Stop
+    );
+    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), true, true, true, false, true), Browser);
   }
   use std::ffi::OsString;
 

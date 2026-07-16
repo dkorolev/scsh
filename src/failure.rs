@@ -19,6 +19,7 @@ pub mod reason {
   pub const CONTAINER_TIMEOUT: &str = "container_timeout";
   pub const CONTAINER_INACTIVE: &str = "container_inactive";
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
+  pub const HARNESS_OVERLOADED: &str = "harness_overloaded";
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
   pub const RESULT_INVALID: &str = "result_schema_invalid";
@@ -46,8 +47,34 @@ const LOG_NAME: &str = "failures.log";
 pub fn is_transient(reason: &str) -> bool {
   matches!(
     reason,
-    reason::CONTAINER_TIMEOUT | reason::CONTAINER_INACTIVE | reason::CONTAINER_RUN | reason::CLONE | reason::GIT_DAEMON
+    reason::CONTAINER_TIMEOUT
+      | reason::CONTAINER_INACTIVE
+      | reason::CONTAINER_RUN
+      | reason::HARNESS_OVERLOADED
+      | reason::CLONE
+      | reason::GIT_DAEMON
   )
+}
+
+/// Provider-capacity messages are transient even when the harness exits cleanly enough to
+/// return a non-zero status instead of waiting for the watchdog. Keep this deliberately narrow:
+/// ordinary command/model failures remain deterministic and do not earn a retry.
+pub fn harness_reported_overload(text: &str) -> bool {
+  let lower = text.to_ascii_lowercase();
+  [
+    "overloaded",
+    "try again later",
+    "rate limit",
+    "rate_limit",
+    "too many requests",
+    "temporarily unavailable",
+    "status 529",
+    "error 529",
+    "status 503",
+    "503 service unavailable",
+  ]
+  .iter()
+  .any(|needle| lower.contains(needle))
 }
 
 pub fn retry_enabled() -> bool {
@@ -395,11 +422,16 @@ mod tests {
     assert!(is_transient(reason::CONTAINER_TIMEOUT));
     assert!(is_transient(reason::CONTAINER_INACTIVE));
     assert!(is_transient(reason::CONTAINER_RUN));
+    assert!(is_transient(reason::HARNESS_OVERLOADED));
     assert!(is_transient(reason::CLONE));
     assert!(is_transient(reason::GIT_DAEMON));
     assert!(!is_transient(reason::ENV_UNRESOLVED));
     assert!(!is_transient(reason::RESULT_MISSING));
     assert!(!is_transient(reason::HARNESS_NONZERO));
     assert!(!is_transient(reason::BUILD_FAILED));
+    assert!(harness_reported_overload("API Error: service overloaded; try again later"));
+    assert!(harness_reported_overload("HTTP 429: Too Many Requests"));
+    assert!(harness_reported_overload("status 529"));
+    assert!(!harness_reported_overload("tool exited with status 1"));
   }
 }

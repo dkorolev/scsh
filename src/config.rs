@@ -34,9 +34,9 @@ pub const DEFAULT_TERMINAL_ROWS: u16 = 50;
 /// Default seconds of screen inactivity (the recorded cast gaining no NOVEL frame — pure
 /// spinner repaints do not count, see `ui::screen::ActivityWatch`) before a running skill is
 /// killed as stuck. Agents can think silently for several minutes, so the harness watchdog and
-/// daemon job-idle watchdog deliberately share this 20-minute allowance. Override it with
+/// daemon job-idle watchdog deliberately share this 30-minute allowance. Override it with
 /// `inactivity_timeout:` on a skill or an `invocations:` route in `.scsh.yml`.
-pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 20 * 60;
+pub const DEFAULT_INACTIVITY_TIMEOUT_SECS: u64 = 30 * 60;
 
 /// Resolve the inactivity watchdog limit: YAML override (route or skill) wins, else the
 /// harness default ([`Harness::default_inactivity_timeout_secs`]).
@@ -1973,8 +1973,8 @@ mod tests {
     assert_eq!(Harness::Grok.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
     assert_eq!(Harness::Codex.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
     assert_eq!(Harness::Claude.default_inactivity_timeout_secs(), DEFAULT_INACTIVITY_TIMEOUT_SECS);
-    assert_eq!(effective_inactivity_timeout(Harness::Grok, None), 1200);
-    assert_eq!(effective_inactivity_timeout(Harness::Codex, None), 1200);
+    assert_eq!(effective_inactivity_timeout(Harness::Grok, None), 1800);
+    assert_eq!(effective_inactivity_timeout(Harness::Codex, None), 1800);
     assert_eq!(effective_inactivity_timeout(Harness::Grok, Some(900)), 900);
 
     // Direct run with no YAML → ResolvedInvocation keeps None; effective uses harness default.
@@ -1986,7 +1986,7 @@ mod tests {
     );
     let inv = expand_invocations(&validate(&grok).unwrap());
     assert_eq!(inv[0].inactivity_timeout, None);
-    assert_eq!(effective_inactivity_timeout(inv[0].harness, inv[0].inactivity_timeout), 1200);
+    assert_eq!(effective_inactivity_timeout(inv[0].harness, inv[0].inactivity_timeout), 1800);
 
     // Skill-level override applies to every route.
     let yaml = r#"skills:
