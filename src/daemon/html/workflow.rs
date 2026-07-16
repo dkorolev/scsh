@@ -90,11 +90,11 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 <h2 class="workflow-title">Job graph</h2>
 {outcome}
 <p class="workflow-summary dim">{summary}</p>
-<div class="workflow-zoom" aria-label="Graph view controls"><button type="button" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" data-wf-zoom-reset>100%</button><button type="button" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" data-wf-zoom-fit>Fit</button><button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
+<div class="workflow-zoom" aria-label="Graph view controls"><button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button><button type="button" class="chamfer" data-wf-zoom-reset>100%</button><button type="button" class="chamfer" data-wf-zoom-in aria-label="Zoom in">+</button><button type="button" class="chamfer" data-wf-zoom-fit>Fit</button><button type="button" class="chamfer" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button></div>
 </div>
 <div class="workflow-visual">
 {legend}
-<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
+<div class="chamfer workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">
 <div class="workflow-stage" style="width:{w:.0}px;height:{h:.0}px">
 {loop_islands}
 <svg class="workflow-edges" width="{w:.0}" height="{h:.0}" viewBox="0 0 {w:.1} {h:.1}" aria-hidden="true">
@@ -138,7 +138,7 @@ fn job_outcome_html(session: &Session, lifecycle: SessionLifecycle) -> String {
     }
   };
   format!(
-    r#"<span class="workflow-outcome workflow-outcome--{class}" data-workflow-outcome>{text}</span>"#,
+    r#"<span class="chamfer workflow-outcome workflow-outcome--{class}" data-workflow-outcome>{text}</span>"#,
     class = lifecycle.css_class(),
   )
 }
@@ -192,7 +192,7 @@ fn loop_islands_html(layout: &[LaidOut], plans: &[WorkflowLoopPlan], lifecycle: 
     let plan = plans.iter().find(|plan| plan.id == end);
     let progress = loop_progress_text(plan, shown, lifecycle);
     html.push_str(&format!(
-      r#"<div class="wf-loop-island" data-loop-id="{loop_id}" data-loop-shown="{shown}" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span class="wf-loop-title">{kind} · {name}</span><span class="wf-loop-progress">{progress}</span></div>"#,
+      r#"<div class="chamfer wf-loop-island" data-loop-id="{loop_id}" data-loop-shown="{shown}" style="left:{left:.1}px;top:{top:.1}px;width:{width:.1}px;height:{height:.1}px"><span class="wf-loop-title">{kind} · {name}</span><span class="chamfer wf-loop-progress">{progress}</span></div>"#,
       width = right - left,
       height = bottom - top,
       loop_id = esc(end),
@@ -515,7 +515,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
   if items.is_empty() {
     return String::new();
   }
-  format!(r#"<ul class="workflow-legend" aria-label="Status legend">{items}</ul>"#)
+  format!(r#"<ul class="chamfer workflow-legend" aria-label="Status legend">{items}</ul>"#)
 }
 
 fn layout_nodes(session: &Session, meta: &WorkflowMeta, now: u64) -> Vec<LaidOut> {
@@ -594,7 +594,7 @@ fn layout_with_bookends(session: &Session, meta: &WorkflowMeta, now: u64) -> (Ve
 fn bookend_html(pos: &LaidOut, is_start: bool) -> String {
   if is_start {
     format!(
-      r#"<div class="wf-bookend wf-start" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Start" aria-hidden="true">
+      r#"<div class="chamfer wf-bookend wf-start" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Start" aria-hidden="true">
 <span class="wf-start-play" aria-hidden="true"></span>
 </div>"#,
       id = START_ID,
@@ -605,7 +605,7 @@ fn bookend_html(pos: &LaidOut, is_start: bool) -> String {
     )
   } else {
     format!(
-      r#"<div class="wf-bookend wf-finish" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Finish" aria-hidden="true">
+      r#"<div class="chamfer wf-bookend wf-finish" id="wf-node-{id}" style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" title="Finish" aria-hidden="true">
 <span class="wf-finish-flag" aria-hidden="true"></span>
 </div>"#,
       id = FINISH_ID,
@@ -682,7 +682,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
   let gate = if node.conditional {
     // Generic copy only — never surface gate literals in the browser (REMAINS-TO-DO §3).
     let tip = "Runs only when its gate passes";
-    format!(r#"<span class="wf-gate" data-tip="{t}" aria-label="{t}">when</span>"#, t = esc(tip))
+    format!(r#"<span class="chamfer wf-gate" data-tip="{t}" aria-label="{t}">when</span>"#, t = esc(tip))
   } else {
     String::new()
   };
@@ -697,7 +697,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
     _ => String::new(),
   };
   format!(
-    r#"<a class="wf-node wf-{state}{build_class}" href="{href}" id="wf-node-{id}" data-workflow-step="{id}" data-wf-state="{state}"{proc_attr} style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" data-tip="{tip}"{tip_running} aria-label="{aria}">
+    r#"<a class="chamfer wf-node wf-{state}{build_class}" href="{href}" id="wf-node-{id}" data-workflow-step="{id}" data-wf-state="{state}"{proc_attr} style="left:{x:.1}px;top:{y:.1}px;width:{w:.0}px;min-height:{h:.0}px" data-tip="{tip}"{tip_running} aria-label="{aria}">
 <span class="wf-state"><span class="wf-ico" aria-hidden="true">{ico}</span><span class="wf-state-label">{label}</span><span class="wf-state-elapsed">{state_elapsed}</span></span>
 <span class="wf-id">{title_esc}{gate}</span>
 <span class="wf-meta dim">{meta}</span>

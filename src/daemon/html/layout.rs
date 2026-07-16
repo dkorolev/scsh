@@ -83,10 +83,13 @@ pub(crate) const PAGE_CSS: &str = r#"
       calc(100% - var(--inner)) 100%, var(--inner) 100%,
       0% calc(100% - var(--inner)), 0% var(--inner)
     );
-    z-index: 0;
+    /* The clip-path forces a stacking context, so -1 keeps the surface above the
+       element's own ring background yet under in-flow content — bare text nodes
+       (chip labels the JS sets via textContent) stay visible without span wrappers. */
+    z-index: -1;
   }
-  /* the ::before surface paints above in-flow text; lift all children over it
-     (absolutely positioned children re-assert their own position later in the sheet) */
+  /* Belt and braces for element children: lift them over the surface anyway
+     (absolutely positioned children re-assert their own position later in the sheet). */
   .chamfer > * { position: relative; z-index: 1; }
 
   /* ── cards (chamfered islands: outer border/accent layer + ::before surface) ── */
@@ -380,14 +383,21 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-head { display: flex; flex-wrap: wrap; gap: 0.5rem 1.25rem; align-items: baseline; margin-bottom: 0.75rem; }
   .workflow-title { margin: 0; font-size: 1.05rem; }
   .workflow-outcome {
+    --cut: 4px; --bw: 1.5px;
     display: inline-flex; align-items: center; min-height: 1.55rem; padding: 0.05rem 0.55rem;
-    border: 1px solid currentColor; border-radius: 999px; font-size: 0.75rem; font-weight: 700;
+    font-size: 0.75rem; font-weight: 700;
     letter-spacing: 0.01em;
   }
-  .workflow-outcome--running { color: var(--orange); background: rgba(210,153,34,0.09); }
-  .workflow-outcome--completed { color: var(--green); background: rgba(63,185,80,0.09); }
-  .workflow-outcome--failed, .workflow-outcome--cancelled { color: var(--red); background: rgba(248,81,73,0.09); }
-  .workflow-outcome--terminated { color: var(--purple); background: rgba(163,113,247,0.09); }
+  .workflow-outcome--running { color: var(--orange); background: var(--orange); }
+  .workflow-outcome--running::before { background: color-mix(in srgb, var(--orange) 12%, var(--surface)); }
+  .workflow-outcome--completed { color: var(--green); background: var(--green); }
+  .workflow-outcome--completed::before { background: color-mix(in srgb, var(--green) 12%, var(--surface)); }
+  .workflow-outcome--failed, .workflow-outcome--cancelled { color: var(--red); background: var(--red); }
+  .workflow-outcome--failed::before, .workflow-outcome--cancelled::before {
+    background: color-mix(in srgb, var(--red) 12%, var(--surface));
+  }
+  .workflow-outcome--terminated { color: var(--purple); background: var(--purple); }
+  .workflow-outcome--terminated::before { background: color-mix(in srgb, var(--purple) 12%, var(--surface)); }
   .workflow-summary { margin: 0; }
   .workflow-summary a.wf-jump {
     color: inherit; text-decoration: underline; text-decoration-color: transparent;
@@ -399,12 +409,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-summary a.wf-jump:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
   .workflow-visual { position: relative; min-height: 0; }
   .workflow-legend {
+    --cut: 5px; --bw: 1px;
     position: absolute; z-index: 4; top: 0.75rem; right: 0.75rem;
     list-style: none; margin: 0; padding: 0.35rem 0.55rem; display: flex; flex-wrap: wrap;
     justify-content: flex-end; gap: 0.35rem 0.85rem; max-width: calc(100% - 1.5rem);
-    color: var(--text-muted); background: rgba(22,27,34,0.92); border: 1px solid var(--border);
-    border-radius: 5px; font-size: 0.78rem;
+    color: var(--text-muted); background: var(--border);
+    font-size: 0.78rem;
   }
+  .workflow-legend::before { background: rgba(22,27,34,0.92); }
   .workflow-legend .wf-ico { margin-right: 0.2rem; }
   .wf-leg-running { color: var(--orange); }
   .wf-leg-terminating { color: var(--orange); }
@@ -415,11 +427,11 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-stalled { color: var(--purple); }
   .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
   .workflow-scroll {
+    --cut: 8px; --bw: 0px; /* clip only — same corner language as the enclosing island */
     overflow: auto; max-width: 100%; height: 29rem; padding: 0.5rem;
     display: flex;
     overscroll-behavior: contain; touch-action: pan-x pan-y;
     scrollbar-width: none;
-    border-radius: 6px; /* same as the enclosing .card island */
     /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
     background:
       linear-gradient(90deg, var(--bg) 30%, transparent) left center / 1.25rem 100% no-repeat,
@@ -430,19 +442,22 @@ pub(crate) const PAGE_CSS: &str = r#"
     background-attachment: local, local, scroll, scroll, local;
   }
   .workflow-scroll::-webkit-scrollbar { display: none; }
-  .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  /* Inset outline: the chamfer clip would swallow one drawn outside the box. */
+  .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
   /* Auto margins center each axis independently, and collapse to zero on an overflowing axis.
      The stage must remain exactly as tall as its graph: a synthetic minimum would center the
      stage while leaving a small graph visibly above the viewport's vertical midpoint. */
   .workflow-stage { position: relative; flex: 0 0 auto; margin: auto; }
   .workflow-zoom { margin-left: auto; display: inline-flex; flex: 0 0 auto; gap: 0.25rem; }
   .workflow-zoom button {
+    --cut: 4px; --bw: 1px;
     min-width: 2.2rem; min-height: 2rem; padding: 0.2rem 0.5rem; color: var(--text-muted);
-    background: transparent; border: 1px solid var(--border); border-radius: 4px; cursor: pointer;
+    background: var(--border); border: none; cursor: pointer;
   }
-  .workflow-zoom button:hover { color: var(--text); border-color: #3a4558; }
-  .workflow-zoom button:disabled { color: #545d69; border-color: var(--border); cursor: default; opacity: 0.62; }
-  .workflow-zoom button:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+  .workflow-zoom button::before { background: var(--surface); }
+  .workflow-zoom button:hover:not(:disabled) { color: var(--text); background: #3a4558; }
+  .workflow-zoom button:disabled { color: #545d69; cursor: default; opacity: 0.62; }
+  .workflow-zoom button:focus-visible { filter: brightness(1.3); outline: none; }
   .workflow-zoom [data-wf-zoom-reset] { width: 4.6rem; }
   .workflow-zoom [data-wf-zoom-fit] { width: 3rem; }
   .workflow-zoom [data-wf-expand] { width: 6.4rem; }
@@ -458,21 +473,27 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; min-height: 0; }
   .workflow-card.wf-expanded .workflow-scroll { flex: 1 1 auto; height: auto; min-height: 0; }
+  /* Loop island: dashed ring via 45° stripes on the outer chamfer layer. */
   .wf-loop-island {
+    --cut: 12px; --bw: 1.5px;
     position: absolute; z-index: 0; box-sizing: border-box; pointer-events: none;
-    border: 1px solid rgba(139, 148, 158, 0.42); border-radius: 9px;
-    background: rgba(139, 148, 158, 0.07);
+    background: repeating-linear-gradient(45deg,
+      rgba(137,87,229,0.55) 0 5px, transparent 5px 9px);
   }
+  .wf-loop-island::before { background: color-mix(in srgb, var(--purple) 4%, var(--bg)); }
   .wf-loop-island > .wf-loop-title {
-    position: absolute; top: 4px; left: 10px; color: var(--text-muted);
-    font-size: 0.72rem; font-weight: 600; letter-spacing: 0.03em;
+    position: absolute; top: 6px; left: 12px; color: var(--purple);
+    font-size: 0.68rem; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase;
   }
   .wf-loop-island > .wf-loop-progress {
-    position: absolute; right: 10px; bottom: 7px; padding: 0.14rem 0.42rem;
-    color: var(--cyan); border: 1px dashed rgba(88,166,255,0.52); border-radius: 999px;
-    background: rgba(88,166,255,0.08); font-size: 0.68rem; font-weight: 600;
+    --cut: 3px; --bw: 1px;
+    position: absolute; right: 10px; bottom: 7px; padding: 0.14rem 0.5rem;
+    color: var(--cyan);
+    background: repeating-linear-gradient(45deg, var(--cyan) 0 4px, transparent 4px 7px);
+    font-size: 0.68rem; font-weight: 600;
     letter-spacing: 0.02em; white-space: nowrap;
   }
+  .wf-loop-island > .wf-loop-progress::before { background: var(--bg); }
   .workflow-edges { position: absolute; inset: 0; color: #8b949e; pointer-events: none; }
   .wf-edge {
     fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round;
@@ -480,35 +501,49 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .wf-arrowhead { stroke: currentColor; }
   .workflow-nodes { position: relative; z-index: 1; width: 100%; height: 100%; }
+  /* Chamfered task card: outer layer = ring + status accent stripe (wraps the cut
+     corners), ::before = the fill. States recolor --accent; running also tints the ring. */
   .wf-node {
+    --cut: 7px; --bw: 1px; --accent-w: 3px;
+    --accent: var(--border);
     position: absolute; box-sizing: border-box; display: flex; flex-direction: column; justify-content: center;
     gap: 0.15rem; padding: 0.45rem 0.65rem; min-width: 44px; min-height: 44px;
-    text-decoration: none; color: var(--text); background: var(--bg); border: 1px solid var(--border);
-    border-left: 3px solid var(--border); border-radius: 6px; font-size: 0.85rem; line-height: 1.25;
+    text-decoration: none; color: var(--text);
+    background: linear-gradient(90deg,
+      var(--accent) 0 calc(var(--cut) + var(--accent-w)),
+      var(--node-border, var(--border)) 0);
+    font-size: 0.85rem; line-height: 1.25;
   }
-  .wf-node:hover { border-color: #3a4558; background: var(--surface); }
-  .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
-  .wf-node.wf-flash { box-shadow: 0 0 0 2px var(--cyan); }
+  .wf-node::before {
+    background: var(--bg);
+    inset: var(--bw) var(--bw) var(--bw) var(--accent-w);
+  }
+  .wf-node:hover { --node-border: #3a4558; }
+  .wf-node:hover::before { background: var(--surface); }
+  .wf-node:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
   .wf-state { display: flex; align-items: center; gap: 0.35rem; font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
   .wf-state-elapsed { color: var(--text-muted); font-weight: 500; letter-spacing: 0; text-transform: none; }
   .wf-state-elapsed:empty { display: none; }
   .wf-id { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-meta { font-size: 0.75rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .wf-gate {
-    margin-left: 0.4rem; padding: 0.05rem 0.35rem; border: 1px solid rgba(137, 87, 229, 0.55);
-    border-radius: 3px; color: var(--purple); font-weight: 600; font-size: 0.68rem;
+    --cut: 2px; --bw: 1px;
+    display: inline-block;
+    margin-left: 0.4rem; padding: 0.05rem 0.35rem;
+    background: rgba(137, 87, 229, 0.55);
+    color: var(--purple); font-weight: 600; font-size: 0.68rem;
     letter-spacing: 0.02em; vertical-align: middle; white-space: nowrap;
   }
-  .wf-node.wf-running { border-left-color: var(--orange); }
+  .wf-gate::before { background: var(--surface); }
+  .wf-node.wf-running { --accent: var(--orange); --node-border: rgba(210, 153, 34, 0.55); }
   .wf-node.wf-running .wf-state { color: var(--orange); }
-  .wf-node.wf-running { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.45); }
-  .wf-node.wf-terminating { border-left-color: var(--orange); box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.45); }
+  .wf-node.wf-terminating { --accent: var(--orange); --node-border: rgba(210, 153, 34, 0.55); }
   .wf-node.wf-terminating .wf-state, .wf-node.wf-terminating .wf-id { color: var(--orange); }
   @media (prefers-reduced-motion: no-preference) {
-    .wf-node.wf-running, .wf-node.wf-terminating { animation: wf-pulse 1.6s ease-in-out infinite; }
+    .wf-node.wf-running, .wf-node.wf-terminating { animation: wf-pulse 2s ease-in-out infinite; }
+    /* Brightness, not box-shadow: the chamfer clip would swallow a halo. */
     @keyframes wf-pulse {
-      0%, 100% { box-shadow: 0 0 0 1px rgba(210, 153, 34, 0.35); }
-      50% { box-shadow: 0 0 0 3px rgba(210, 153, 34, 0.55); }
+      50% { filter: brightness(1.45); }
     }
     /* Decorative micro-motion lives behind the same gate: button press/hover, chip
        pop, the connecting-dot pulse, and the toast slide keep their end states but
@@ -519,29 +554,31 @@ pub(crate) const PAGE_CSS: &str = r#"
     .hchip { transition: transform 0.1s ease, opacity 0.1s ease; }
     .toast { transition: opacity 0.22s ease, transform 0.22s ease; }
   }
-  .wf-node.wf-done { border-left-color: var(--green); }
-  .wf-node.wf-graceful { border-left-color: var(--orange); }
+  .wf-node.wf-done { --accent: var(--green); }
+  .wf-node.wf-graceful { --accent: var(--orange); }
   .wf-node.wf-graceful .wf-state { color: var(--orange); }
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
-  .wf-node.wf-failed { border-left-color: var(--red); }
+  .wf-node.wf-failed { --accent: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
-  .wf-node.wf-stopped { border-left-color: var(--red); }
+  .wf-node.wf-stopped { --accent: var(--red); }
   .wf-node.wf-stopped .wf-state, .wf-node.wf-stopped .wf-id { color: var(--red); }
-  .wf-node.wf-stalled { border-left-color: var(--purple); }
+  .wf-node.wf-stalled { --accent: var(--purple); }
   .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--purple); }
-  .wf-node.wf-waiting, .wf-node.wf-ready { border-left-color: var(--text-muted); }
+  .wf-node.wf-waiting, .wf-node.wf-ready { --accent: var(--text-muted); }
   .wf-node.wf-waiting .wf-state, .wf-node.wf-ready .wf-state { color: var(--text-muted); }
-  .wf-node.wf-skipped { border-left-color: var(--text-muted); opacity: 0.75; }
+  .wf-node.wf-skipped { --accent: var(--text-muted); opacity: 0.75; }
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
-  .wf-node.wf-build { border-left-color: var(--cyan); }
+  .wf-node.wf-build { --accent: var(--cyan); }
   .wf-node.wf-build .wf-id { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.88rem; }
   /* Start / Finish bookends — small icon cards (play / checkered flag), not task cards. */
   .wf-bookend {
+    --cut: 6px; --bw: 1px;
     position: absolute; box-sizing: border-box;
     display: flex; align-items: center; justify-content: center;
-    background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+    background: var(--border);
     pointer-events: none; user-select: none;
   }
+  .wf-bookend::before { background: var(--bg); }
   /* Solid play triangle — matches the start marker in the preferred graph mock. */
   .wf-start-play {
     display: block; width: 0; height: 0;

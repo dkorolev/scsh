@@ -369,15 +369,20 @@ fn ui_review_fixes_hold() {
   assert!(html.contains("var(--proc-border, var(--border)) 0);"));
   assert!(html.contains("details.proc.running summary .label { color: var(--orange); }"));
   assert!(
-    html.contains(".wf-node.wf-running { border-left-color: var(--orange); }"),
+    html.contains(".wf-node.wf-running { --accent: var(--orange); --node-border: rgba(210, 153, 34, 0.55); }"),
     "graph running matches proc orange"
   );
-  assert!(html.contains(".wf-node.wf-stalled { border-left-color: var(--purple); }"), "abandoned/stalled is purple");
-  assert!(html.contains(".wf-node.wf-stopped { border-left-color: var(--red); }"), "stopped shares fail red");
+  assert!(html.contains(".wf-node.wf-stalled { --accent: var(--purple); }"), "abandoned/stalled is purple");
+  assert!(html.contains(".wf-node.wf-stopped { --accent: var(--red); }"), "stopped shares fail red");
   assert!(
-    html.contains(".wf-node.wf-terminating { border-left-color: var(--orange);"),
+    html.contains(".wf-node.wf-terminating { --accent: var(--orange);"),
     "terminating shares running orange"
   );
+  // The running pulse is a brightness swell — the chamfer clip would swallow a
+  // box-shadow halo — and the zoom cluster is chamfered like every other control.
+  assert!(html.contains("50% { filter: brightness(1.45); }"), "running nodes pulse via brightness");
+  assert!(!html.contains(".wf-node.wf-flash"), "the dead box-shadow flash rule is gone");
+  assert!(html.contains(r#"class="chamfer" data-wf-zoom-fit"#), "zoom buttons are chamfered");
   assert!(js.contains("stalled:'Abandoned'"), "legend label is Abandoned");
   assert!(js.contains("done:'Succeeded'"), "successful graph tasks are called Succeeded, not Done");
   assert!(js.contains("failed:'Job failed'"), "graph carries an explicit overall failure verdict");
@@ -1170,8 +1175,8 @@ fn offline_export_includes_workflow_graph() {
   ];
   let html = session_export_page(&session, &exports, 100);
   assert!(html.contains(r#"id="workflow-graph""#), "export carries the workflow card: {html}");
-  assert!(html.contains(r#"class="wf-bookend wf-start""#), "graph keeps its start bookend");
-  assert!(html.contains(r#"class="wf-bookend wf-finish""#), "graph keeps its finish bookend");
+  assert!(html.contains(r#"class="chamfer wf-bookend wf-start""#), "graph keeps its start bookend");
+  assert!(html.contains(r#"class="chamfer wf-bookend wf-finish""#), "graph keeps its finish bookend");
   assert!(html.contains(r#"data-workflow-step="add""#) && html.contains(r#"data-workflow-step="summarize""#));
   // The graph's jump links resolve offline: proc rows carry the same task anchors as live.
   assert!(html.contains("href=\"#task-add\""), "node links target task anchors");
@@ -2267,8 +2272,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(html.contains(r#"data-workflow-step="summarize""#));
   assert!(html.contains(r#"id="task-add""#));
   assert!(html.contains("href=\"#task-summarize\""));
-  assert!(html.contains(r#"class="wf-bookend wf-start""#), "Start bookend on multi-node graphs too");
-  assert!(html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
+  assert!(html.contains(r#"class="chamfer wf-bookend wf-start""#), "Start bookend on multi-node graphs too");
+  assert!(html.contains(r#"class="chamfer wf-bookend wf-finish""#), "Finish bookend");
   // Two DAG fan-in edges + Start→add + Start→multiply + summarize→Finish.
   let graph = html.split(r#"id="workflow-graph""#).nth(1).expect("graph card");
   let graph = graph.split("</svg>").next().expect("svg");
@@ -2456,7 +2461,7 @@ fn workflow_graph_renders_builtin_shapes() {
     },
   );
   let review = session_page(&store, "rev001").expect("review");
-  assert!(review.contains(r#"class="wf-gate""#), "gate marker");
+  assert!(review.contains(r#"class="chamfer wf-gate""#), "gate marker");
   assert!(review.contains(">when</span>"), "gate label is the word when, not a diamond");
   assert!(
     review.contains("Runs only when its gate passes"),
@@ -2615,8 +2620,8 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(flat_html.contains("card--accent-left-orange workflow-card"), "graph island uses the orange accent");
   assert!(!flat_html.contains("card--accent-left-cyan workflow-card"), "graph no longer competes with cyan summaries");
   assert!(flat_html.contains(r#"data-workflow-step="add""#) || flat_html.contains("wf-node"), "skill node present");
-  assert!(flat_html.contains(r#"class="wf-bookend wf-start""#), "Start bookend");
-  assert!(flat_html.contains(r#"class="wf-bookend wf-finish""#), "Finish bookend");
+  assert!(flat_html.contains(r#"class="chamfer wf-bookend wf-start""#), "Start bookend");
+  assert!(flat_html.contains(r#"class="chamfer wf-bookend wf-finish""#), "Finish bookend");
   assert!(flat_html.contains("wf-start-play"), "play-triangle start glyph");
   assert!(flat_html.contains("wf-finish-flag"), "checkered finish flag");
   assert!(flat_html.contains("scrollbar-width: none"), "graph remains scrollable without visible scrollbar chrome");
@@ -2738,7 +2743,7 @@ fn workflow_loop_island_advertises_future_iterations() {
   assert!(api.contains(r#""workflow_loops": [{ "id": "compare", "max_iterations": 25, "exact": false }]"#));
   store.sessions.insert("loopmore".into(), do_while);
   let open_ended = session_page(&store, "loopmore").expect("do-while page");
-  assert!(open_ended.contains(r#"class="wf-loop-progress""#));
+  assert!(open_ended.contains(r#"class="chamfer wf-loop-progress""#));
   assert!(open_ended.contains("↻ may continue · up to 24 more"));
 
   let mut fixed = session_for("demo-loop-repeat");
@@ -2808,8 +2813,8 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
   let svg = graph.split("</svg>").next().expect("svg");
 
   // Play-triangle Start and checkered-flag Finish bookends are present and decorative.
-  assert!(graph.contains(r#"class="wf-bookend wf-start""#), "start bookend markup");
-  assert!(graph.contains(r#"class="wf-bookend wf-finish""#), "finish bookend markup");
+  assert!(graph.contains(r#"class="chamfer wf-bookend wf-start""#), "start bookend markup");
+  assert!(graph.contains(r#"class="chamfer wf-bookend wf-finish""#), "finish bookend markup");
   assert!(graph.contains("wf-start-play"), "play-triangle start glyph");
   assert!(graph.contains("wf-finish-flag"), "checkered finish flag");
   // Bookends are divs, not links — they must never read (or click) as runs.

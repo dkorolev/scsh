@@ -1109,7 +1109,7 @@ function wfJobOutcome(session, nowUnix) {
 }
 function wfJobOutcomeHtml(session, nowUnix) {
   const outcome = wfJobOutcome(session, nowUnix);
-  return '<span class="workflow-outcome workflow-outcome--' + outcome.className +
+  return '<span class="chamfer workflow-outcome workflow-outcome--' + outcome.className +
     '" data-workflow-outcome>' + outcome.text + '</span>';
 }
 function wfUnmetNeedIds(session, node) {
@@ -1197,7 +1197,7 @@ function wfLegendHtml(present) {
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
   ).join('');
-  return items ? '<ul class="workflow-legend" aria-label="Status legend">' + items + '</ul>' : '';
+  return items ? '<ul class="chamfer workflow-legend" aria-label="Status legend">' + items + '</ul>' : '';
 }
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
@@ -1364,7 +1364,7 @@ function wfEdgesSvg(nodes, layout, start, finish) {
   }).join('');
 }
 function wfBookendHtml(pos, isStart) {
-  const cls = isStart ? 'wf-bookend wf-start' : 'wf-bookend wf-finish';
+  const cls = isStart ? 'chamfer wf-bookend wf-start' : 'chamfer wf-bookend wf-finish';
   const id = isStart ? WF_START_ID : WF_FINISH_ID;
   const title = isStart ? 'Start' : 'Finish';
   const glyph = isStart
@@ -1426,10 +1426,10 @@ function wfLoopIslandsHtml(session, layout) {
     const top = Math.min(...items.map(p => p.y)) - pad - labelH;
     const right = Math.max(...items.map(p => p.x + (p.w || WF_NODE_W))) + pad;
     const bottom = Math.max(...items.map(p => p.y + (p.h || WF_NODE_H))) + bottomPad;
-    return '<div class="wf-loop-island" data-loop-id="' + esc(loopId) + '" data-loop-shown="' + shown +
+    return '<div class="chamfer wf-loop-island" data-loop-id="' + esc(loopId) + '" data-loop-shown="' + shown +
       '" style="left:' + left.toFixed(1) + 'px;top:' + top.toFixed(1) +
       'px;width:' + (right - left).toFixed(1) + 'px;height:' + (bottom - top).toFixed(1) +
-      'px"><span class="wf-loop-title">' + esc(label) + '</span><span class="wf-loop-progress">' +
+      'px"><span class="wf-loop-title">' + esc(label) + '</span><span class="chamfer wf-loop-progress">' +
       esc(progress) + '</span></div>';
   }).join('');
 }
@@ -1497,7 +1497,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     } else if (state === 'waiting' && unmetIds.length > 3) bits.push('waiting on ' + unmetIds.length + ' tasks');
     if (state === 'ready') bits.push('ready');
     const gate = node.conditional
-      ? '<span class="wf-gate" data-tip="Runs only when its gate passes" aria-label="Runs only when its gate passes">when</span>'
+      ? '<span class="chamfer wf-gate" data-tip="Runs only when its gate passes" aria-label="Runs only when its gate passes">when</span>'
       : '';
     const procAttr = node.proc_index != null ? ' data-proc-index="' + esc(String(node.proc_index)) + '"' : '';
     const tipRunning = (state === 'running' && p && p.started_at)
@@ -1505,7 +1505,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     const elapsed = p ? procElapsed(p, nowUnix) : null;
     const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
     const stateElapsed = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
-    return '<a class="wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
+    return '<a class="chamfer wf-node wf-' + state + (isBuild ? ' wf-build' : '') +
       '" href="' + '#task-' + encodeURIComponent(node.id) + '" id="wf-node-' + esc(node.id) +
       '" data-workflow-step="' + esc(node.id) + '" data-wf-state="' + state + '"' + procAttr +
       ' style="left:' + pos.x.toFixed(1) + 'px;top:' + pos.y.toFixed(1) + 'px;width:' + (pos.w || WF_NODE_W) +
@@ -1522,13 +1522,13 @@ function wfBuildGraphHtml(session, nowUnix) {
     wfJobOutcomeHtml(session, nowUnix) +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
     '<div class="workflow-zoom" aria-label="Graph view controls">' +
-    '<button type="button" data-wf-zoom-out aria-label="Zoom out">−</button>' +
-    '<button type="button" data-wf-zoom-reset>100%</button>' +
-    '<button type="button" data-wf-zoom-in aria-label="Zoom in">+</button>' +
-    '<button type="button" data-wf-zoom-fit>Fit</button>' +
-    '<button type="button" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button>' +
+    '<button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button>' +
+    '<button type="button" class="chamfer" data-wf-zoom-reset>100%</button>' +
+    '<button type="button" class="chamfer" data-wf-zoom-in aria-label="Zoom in">+</button>' +
+    '<button type="button" class="chamfer" data-wf-zoom-fit>Fit</button>' +
+    '<button type="button" class="chamfer" data-wf-expand aria-label="Open graph in large view" aria-pressed="false">Full screen</button>' +
     '</div></div><div class="workflow-visual">' + wfLegendHtml(present) +
-    '<div class="workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
+    '<div class="chamfer workflow-scroll" role="region" aria-label="Job dependency graph" tabindex="0">' +
     '<div class="workflow-stage" style="width:' + w.toFixed(0) + 'px;height:' + h.toFixed(0) + 'px">' +
     wfLoopIslandsHtml(session, layout) +
     '<svg class="workflow-edges" width="' + w.toFixed(0) + '" height="' + h.toFixed(0) +
@@ -1623,7 +1623,7 @@ function updateWorkflowGraph(session, nowUnix) {
     const prev = el.dataset.wfState;
     if (prev !== state) {
       const build = el.classList.contains('wf-build') ? ' wf-build' : '';
-      el.className = 'wf-node wf-' + state + build;
+      el.className = 'chamfer wf-node wf-' + state + build;
       el.dataset.wfState = state;
       const ico = el.querySelector('.wf-ico');
       const lab = el.querySelector('.wf-state-label');
@@ -1681,7 +1681,7 @@ function updateWorkflowGraph(session, nowUnix) {
       outcomeEl = head.querySelector('[data-workflow-outcome]');
     }
     if (outcomeEl) {
-      outcomeEl.className = 'workflow-outcome workflow-outcome--' + outcome.className;
+      outcomeEl.className = 'chamfer workflow-outcome workflow-outcome--' + outcome.className;
       outcomeEl.textContent = outcome.text;
     }
     const summary = head.querySelector('.workflow-summary');
