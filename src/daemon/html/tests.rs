@@ -2687,8 +2687,12 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("data-wf-zoom-fit"), "graph has a Fit control");
   assert!(js.contains("function wfFitZoom"), "Fit has one shared two-axis calculation");
   assert!(js.contains("return Math.min(widthZoom, heightZoom);"), "Fit uses the tighter bound and scales up as well as down");
-  assert!(js.contains("Math.max(minimum, Math.min(2, next))"), "zoom-out stops at the fitted lower bound");
-  assert!(js.contains("Math.min(1, wfFitZoom(scroller, stage))"), "the zoom-out floor never exceeds 100%");
+  assert!(js.contains("Math.max(minimum, Math.min(maximum, next))"), "zoom-out stops at the fitted lower bound");
+  assert!(js.contains("const minimum = Math.min(1, fit);"), "the zoom-out floor never exceeds 100%");
+  // Fit fits the viewport AS IT IS NOW: the manual 2x ceiling lifts when the live fit
+  // factor exceeds it (window resized, full screen toggled) — never a remembered size.
+  assert!(js.contains("const maximum = Math.max(2, fit);"), "the ceiling follows the live fit factor");
+  assert!(js.contains("const fit = wfFitZoom(scroller, stage);"), "bounds recompute from the live viewport");
   assert!(js.contains("zoomOut.disabled"), "the zoom-out control advertises when Fit is the lower bound");
   assert!(js.contains("scroller.scrollTop = 0"), "Fit resets both scroll axes before CSS centers the graph");
   assert!(flat_html.contains("display: flex"), "the graph viewport can center spare space on either axis");

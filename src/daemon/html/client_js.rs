@@ -1836,8 +1836,13 @@ function initWorkflowGraph() {
     requestAnimationFrame(() => applyZoom(workflowZoom));
   };
   const applyZoom = next => {
-    const minimum = Math.min(1, wfFitZoom(scroller, stage));
-    workflowZoom = Math.max(minimum, Math.min(2, next));
+    const fit = wfFitZoom(scroller, stage);
+    const minimum = Math.min(1, fit);
+    // Fit must be able to FILL the viewport as it is right now: when the live fit
+    // factor exceeds the manual 2x ceiling (window grown, full screen toggled), the
+    // ceiling lifts with it — a fixed cap silently re-fit to the original viewport.
+    const maximum = Math.max(2, fit);
+    workflowZoom = Math.max(minimum, Math.min(maximum, next));
     // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
     // so zooming (like graph growth) can never reflow the page around it.
     if (stage) stage.style.zoom = String(workflowZoom);
