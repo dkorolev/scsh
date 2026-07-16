@@ -52,7 +52,6 @@ pub(crate) const PAGE_CSS: &str = r#"
     font-size: 0.85em;
     background: rgba(255,255,255,0.06);
     padding: 1px 6px;
-    border-radius: 3px;
   }
   .section-label {
     font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em;
@@ -182,7 +181,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .input::placeholder, #repo-path::placeholder { color: var(--text-muted); }
   .param-row input[type=text], .param-row input[type=number], .param-row select, .param-row textarea {
     background: rgba(255,255,255,0.06); border: 1px solid var(--border);
-    border-radius: 4px; padding: 6px 10px; flex: 1 1 16rem; min-width: 16rem; max-width: 100%;
+    padding: 6px 10px; flex: 1 1 16rem; min-width: 16rem; max-width: 100%;
   }
   .param-row textarea { min-height: 12rem; resize: vertical; line-height: 1.45; }
   .param-row input:focus, .param-row select:focus, .param-row textarea:focus { border-color: var(--purple); outline: none; }
@@ -360,9 +359,11 @@ pub(crate) const PAGE_CSS: &str = r#"
   .blockers::before { background: color-mix(in srgb, var(--red) 8%, var(--bg)); }
   .blockers ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
   .def-card {
-    background: var(--surface); border: 1px solid var(--border); border-radius: 6px;
+    --cut: 10px; --bw: 1px;
+    background: var(--border);
     padding: 0.75rem 0.9rem; margin-bottom: 0.6rem;
   }
+  .def-card::before { background: var(--surface); }
   /* Auto-scroll lands on this box, not the preceding explanatory copy. Its padding is
      deliberate blank breathing room above the first actionable definition control. */
   #defs-list { padding-top: 1.25rem; }
@@ -404,7 +405,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-summary { margin: 0; }
   .workflow-summary a.wf-jump {
     color: inherit; text-decoration: underline; text-decoration-color: transparent;
-    text-underline-offset: 0.15em; border-radius: 2px;
+    text-underline-offset: 0.15em;
   }
   .workflow-summary a.wf-jump:hover {
     color: var(--cyan); text-decoration-color: var(--cyan);
@@ -613,10 +614,18 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   /* Fleet/cycle summaries sit immediately after the last proc they summarize. */
   .fleets { margin: 1rem 0 0.25rem; width: 100%; }
+  /* Chamfered island with the cyan accent stripe; the surface keeps its cyan wash. */
   .fleet {
-    background: linear-gradient(90deg, rgba(88,166,255,0.09), rgba(88,166,255,0.025) 42%, var(--surface));
-    border: 1px solid rgba(88,166,255,0.42); border-left: 3px solid var(--cyan); border-radius: 6px;
+    --cut: 10px; --bw: 1px; --accent-w: 3px;
+    background: linear-gradient(90deg,
+      var(--cyan) 0 calc(var(--cut) + var(--accent-w)),
+      rgba(88,166,255,0.42) 0);
     margin-bottom: 0.75rem; padding: 0.65rem 0.85rem;
+  }
+  .fleet::before {
+    background: linear-gradient(90deg, rgba(88,166,255,0.09), rgba(88,166,255,0.025) 42%, var(--surface)),
+      var(--surface);
+    inset: var(--bw) var(--bw) var(--bw) var(--accent-w);
   }
   .fleet-title { margin: 0 0 0.35rem; font-size: 0.95rem; font-weight: 600; }
   .fleet-summary { margin: 0 0 0.55rem; font-size: 0.85rem; }
@@ -751,9 +760,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     margin: 0 0 1rem;
   }
   .setup-card {
-    border: 1px solid var(--border); border-radius: 8px;
-    background: var(--surface); padding: 0.75rem 0.9rem;
+    --cut: 10px; --bw: 1px;
+    background: var(--border);
+    padding: 0.75rem 0.9rem;
   }
+  .setup-card::before { background: var(--surface); }
   .setup-card-head {
     display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;
     margin: 0 0 0.55rem;
@@ -786,7 +797,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .setup-add-input {
     flex: 1 1 10rem; min-width: 0; padding: 6px 10px;
-    background: rgba(255,255,255,0.06); border: 1px solid var(--border); border-radius: 4px;
+    background: rgba(255,255,255,0.06); border: 1px solid var(--border);
     color: var(--text); font: inherit; font-size: 0.8rem;
   }
   .setup-card-actions {
@@ -884,14 +895,16 @@ pub(crate) const PAGE_CSS: &str = r#"
   a.proc-diff:hover { text-decoration: none; }
   /* Offline export: packed commits-diff embedded as a sandboxed iframe (not the live chip). */
   details.proc-diff {
-    margin: 0.5rem 0; border: 1px solid var(--border); border-radius: 6px;
-    background: var(--surface); padding: 0.25rem 0.55rem;
+    --cut: 8px; --bw: 1px;
+    margin: 0.5rem 0;
+    background: var(--border); padding: 0.25rem 0.55rem;
   }
+  details.proc-diff::before { background: var(--surface); }
   details.proc-diff > summary {
     cursor: pointer; list-style: none; color: var(--cyan); font-size: 0.85rem;
   }
   details.proc-diff iframe {
-    width: 100%; min-height: 28rem; border: 1px solid var(--border); border-radius: 4px;
+    width: 100%; min-height: 28rem; border: 1px solid var(--border);
     margin: 0.4rem 0 0.25rem; background: #fff;
   }
   /* Bottom-center toast — brief, non-blocking feedback (e.g. invalid project name). */
@@ -1030,7 +1043,7 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
     flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
     color: var(--text); background: var(--red); border: none;
-    border-radius: 4px; padding: 0 0.45rem; opacity: 1;
+    padding: 0 0.45rem; opacity: 1;
   }
   button.proc-kill:hover:not(:disabled) { background: var(--red); }
   button.proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); background: var(--border); }

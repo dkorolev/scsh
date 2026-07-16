@@ -277,7 +277,7 @@ selected runtime.</p>
 
 fn setup_skeleton_card(h: crate::config::Harness) -> String {
   format!(
-    r#"<article class="setup-card" data-harness="{id}" data-pending="1">
+    r#"<article class="chamfer setup-card" data-harness="{id}" data-pending="1">
 <header class="setup-card-head">
 <strong class="setup-card-name">{name}</strong>
 <span class="chamfer session-status checking"><span>checking…</span></span>

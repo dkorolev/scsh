@@ -44,7 +44,7 @@ fn fleet_group_html(g: &FleetGroup) -> String {
     rows.push_str(&fleet_row_html(r));
   }
   format!(
-    r#"<section class="fleet" data-skill-source="{src}">
+    r#"<section class="chamfer fleet" data-skill-source="{src}">
 <h3 class="fleet-title"><code>{src}</code> <span class="dim">· {n} {count_label}</span></h3>
 <p class="fleet-summary dim">{summary}</p>
 <table class="fleet-compare">

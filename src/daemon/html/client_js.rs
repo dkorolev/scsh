@@ -2458,7 +2458,7 @@ function setupCardActions(h) {
   return bits.join(' ');
 }
 function setupCardHtml(h) {
-  return '<article class="setup-card" data-harness="' + esc(h.id) + '">' +
+  return '<article class="chamfer setup-card" data-harness="' + esc(h.id) + '">' +
     '<header class="setup-card-head">' +
     '<strong class="setup-card-name">' + esc(h.name || h.id) + '</strong>' +
     setupOverallBadge(h.overall, h.overall_label) +
@@ -3136,7 +3136,7 @@ function renderDefs(defs) {
     const wf = d.workflow
       ? ' <span class="chamfer session-status completed"><span>workflow · ' + d.steps + ' steps</span></span>'
       : '';
-    return '<div class="def-card">' +
+    return '<div class="chamfer def-card">' +
       '<button type="button" class="chamfer btn btn--cyan btn--sm def-pick" data-def="' +
       esc(d.name) + '"><span>' + esc(d.name) + '</span></button> ' +
       defSourceBadge(d.source) + wf + ' <span class="dim">' + esc(d.description) + '</span>' +

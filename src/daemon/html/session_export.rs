@@ -167,7 +167,7 @@ fn diff_embed_html(diff_html: Option<&str>) -> String {
     return String::new();
   };
   format!(
-    r#"<details class="proc-diff"><summary>⇄ commits diff</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
+    r#"<details class="chamfer proc-diff"><summary>⇄ commits diff</summary><iframe sandbox="allow-scripts allow-same-origin" srcdoc="{srcdoc}"></iframe></details>
 "#,
     srcdoc = srcdoc_attr(html),
   )

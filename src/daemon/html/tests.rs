@@ -1019,7 +1019,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
   let html = session_export_page(&session, &exports, 100);
   assert!(html.contains(r#"<span class="proc-diff""#), "summary carries static commits-diff chip");
-  assert!(html.contains(r#"<details class="proc-diff">"#), "body embeds the packed diff");
+  assert!(html.contains(r#"<details class="chamfer proc-diff">"#), "body embeds the packed diff");
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
   assert!(
     html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
