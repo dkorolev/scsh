@@ -572,6 +572,9 @@ pub(crate) const PAGE_CSS: &str = r#"
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;
   }
   summary::-webkit-details-marker { display: none; }
+  /* The answer/note always sits alone on the summary's last line (order pushes it past the
+     annotation chip), so collapsed rows keep roughly equal heights however long the text is. */
+  summary .note { order: 9; flex-basis: 100%; min-width: 0; }
   summary .triangle {
     flex-shrink: 0; width: 0.85rem; text-align: center; font-size: 0.65rem;
     line-height: 1; opacity: 0.75; align-self: center; color: var(--text-muted);
