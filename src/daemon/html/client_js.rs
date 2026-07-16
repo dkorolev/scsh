@@ -2043,7 +2043,64 @@ function renderSession(session, nowUnix) {
     }
   });
   initCasts(root);
+  syncFleetSections(session, nowUnix);
   updateWorkflowGraph(session, nowUnix);
+}
+// Fleet comparison tables are server-rendered on page load; keep any that are on the
+// page current from tick snapshots — row status, glyph, duration, and the result
+// message once a route finishes, plus the one-line rollup. Grade parsing needs the
+// daemon's result files, so a section that already shows grade/issue text keeps that
+// richer server-rendered copy and only its status/duration columns tick.
+function fleetGlyph(status) {
+  return ({ok:'✓',graceful:'!',fail:'✗',skipped:'⊘',running:'◆',waiting:'◇'})[status] || '◇';
+}
+function fleetProcFinished(status) {
+  return status === 'ok' || status === 'graceful' || status === 'fail' || status === 'skipped';
+}
+function syncFleetSections(session, nowUnix) {
+  const sections = document.querySelectorAll('section.fleet[data-skill-source]');
+  if (!sections.length) return;
+  const procs = (session && session.procs) || [];
+  sections.forEach(sec => {
+    const source = sec.getAttribute('data-skill-source') || '';
+    const rich = !!sec.querySelector('.fleet-grade, .fleet-issues');
+    const members = [];
+    sec.querySelectorAll('tr.fleet-row').forEach(row => {
+      const jump = row.querySelector('.fleet-jump[data-proc]');
+      const p = jump && procs.find(q => String(q.index) === jump.getAttribute('data-proc'));
+      if (!p) return;
+      members.push(p);
+      row.className = 'fleet-row ' + (p.status || '');
+      const statusCell = row.querySelector('.fleet-status');
+      if (statusCell) {
+        const next = '<span class="glyph">' + fleetGlyph(p.status) + '</span> ' + esc(p.status || '');
+        if (statusCell.innerHTML !== next) statusCell.innerHTML = next;
+      }
+      const elapsedCell = row.querySelector('.fleet-elapsed');
+      const elapsed = procElapsed(p, nowUnix);
+      if (elapsedCell) setTextUnlessSelecting(elapsedCell, elapsed != null ? formatElapsedClock(elapsed) : '—');
+      const resultCell = row.querySelector('.fleet-result');
+      if (resultCell && !resultCell.querySelector('.fleet-grade, .fleet-issues')) {
+        const msg = fleetProcFinished(p.status) && p.detail ? p.detail : '';
+        const next = msg ? '<span class="fleet-msg">' + esc(msg) + '</span>' : '<span class="dim">—</span>';
+        if (resultCell.innerHTML !== next) resultCell.innerHTML = next;
+      }
+    });
+    const summaryEl = sec.querySelector('.fleet-summary');
+    if (!summaryEl || !members.length || rich) return;
+    // Mirrors fleet::summarize_group with tick data (detail stands in for the result
+    // message); do-while groups keep their cycle-iteration wording (fleet.rs).
+    const cycle = (sec.querySelector('.fleet-compare th')?.textContent || '') === 'Cycle iteration';
+    const noun = cycle ? 'cycle iterations' : 'routes';
+    const ok = members.filter(p => p.status === 'ok' || p.status === 'graceful').length;
+    const fail = members.filter(p => p.status === 'fail').length;
+    const msgs = members.filter(p => fleetProcFinished(p.status) && p.detail).map(p => p.detail);
+    const agree = msgs.length > 0 && msgs.every(m => m === msgs[0]);
+    const text = agree
+      ? source + ': ' + ok + ' ok, ' + fail + ' fail — all ' + noun + ' agree: ' + msgs[0]
+      : source + ': ' + ok + ' ok, ' + fail + ' fail · ' + members.length + ' ' + noun;
+    setTextUnlessSelecting(summaryEl, text);
+  });
 }
 function onWsMessage(msg) {
   if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }

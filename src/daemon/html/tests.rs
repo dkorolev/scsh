@@ -402,7 +402,8 @@ fn ui_review_fixes_hold() {
     page_with_elapsed.contains(r#"data-proc-elapsed="0">done in 18s</span>"#),
     "ok rows say done in N: {page_with_elapsed}"
   );
-  assert!(!page_with_elapsed.contains(r#"class="glyph""#), "no status glyph on proc rows");
+  // Scoped to the proc markup: the client JS legitimately writes glyph spans (fleet sync).
+  assert!(!session_procs_html(&page_with_elapsed).contains(r#"class="glyph""#), "no status glyph on proc rows");
   // 6. The builtin source badge wears purple.
   assert!(html.contains(".badge--purple"), "purple badge class ships");
   assert!(live_client_js().contains(r#"chamfer badge badge--purple"><span>builtin"#), "builtin badge is purple");
@@ -1318,6 +1319,13 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
   assert!(html.contains(r#"class="chamfer fleet-jump" data-proc="1""#), "jump to second route");
   assert!(html.contains("· 2 routes"), "true route matrices keep route terminology");
   assert!(html.contains("<th>Route</th>"), "true route matrices keep the Route column");
+  // The table is live: tick snapshots re-sync each row's status/glyph/duration/result and
+  // the rollup line in place (server-rendered grade/issue text is richer and is kept).
+  let js = live_client_js();
+  assert!(js.contains("function syncFleetSections"), "fleet sections sync from ticks");
+  assert!(js.contains("syncFleetSections(session, nowUnix);"), "renderSession keeps fleets current");
+  assert!(js.contains("running:'◆',waiting:'◇'"), "fleet glyphs share the diamond language");
+  assert!(js.contains(".fleet-grade, .fleet-issues"), "richer server-rendered results are preserved");
   let fleets_at = html.find(r#"class="fleets""#).expect("fleets");
   let first_proc_at = html.find(r#"data-index="0""#).expect("first proc");
   let last_proc_at = html.find(r#"data-index="1""#).expect("last proc");
