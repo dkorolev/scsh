@@ -399,12 +399,29 @@ impl Session {
     }
   }
 
+  /// A failed attempt is superseded when a later proc re-ran the same route — scsh
+  /// retries transient container failures (`failure::is_transient`), registering the
+  /// retry as a new proc with the same skill name. The newest attempt is the
+  /// authoritative outcome for that route, so a recovered retry must not fail the job.
+  /// (Loop iterations and matrix routes carry unique generated names, so only genuine
+  /// retries ever share one.)
+  fn proc_is_superseded(&self, proc: &ProcRecord) -> bool {
+    let Some(name) = proc.skill_name.as_deref().filter(|n| !n.is_empty()) else {
+      return false;
+    };
+    self
+      .procs
+      .iter()
+      .any(|later| later.index > proc.index && later.kind == proc.kind && later.skill_name.as_deref() == Some(name))
+  }
+
   pub fn lifecycle_status(&self, now: u64) -> SessionLifecycle {
     if self.ended_at.is_some() {
       if self.has_incomplete_procs() {
         return SessionLifecycle::Cancelled;
       }
-      let failed: Vec<&ProcRecord> = self.procs.iter().filter(|p| p.status == ProcStatus::Fail).collect();
+      let failed: Vec<&ProcRecord> =
+        self.procs.iter().filter(|p| p.status == ProcStatus::Fail && !self.proc_is_superseded(p)).collect();
       let interrupted = !failed.is_empty()
         && failed.iter().all(|p| {
           matches!(
@@ -518,6 +535,46 @@ mod tests {
     invalid_result.procs[0].status = ProcStatus::Fail;
     invalid_result.procs[0].fail_reason = Some(crate::failure::reason::RESULT_INVALID.into());
     assert_eq!(invalid_result.lifecycle_status(200), SessionLifecycle::Failed);
+  }
+
+  #[test]
+  fn a_recovered_retry_supersedes_its_failed_attempt() {
+    // A transient container failure gets retried as a NEW proc with the same skill
+    // name; the newest attempt is the route's authoritative outcome. A job whose only
+    // failure was retried into success is a success — not "Job failed" over a route
+    // that visibly succeeded.
+    let mut first = test_proc(ProcStatus::Fail);
+    first.skill_name = Some("conventions-reviewer-claude".into());
+    first.fail_reason = Some(crate::failure::reason::CONTAINER_TIMEOUT.into());
+    let mut retry = test_proc(ProcStatus::Ok);
+    retry.index = 1;
+    retry.skill_name = Some("conventions-reviewer-claude".into());
+    let mut session = Session {
+      id: "retry".into(),
+      started_at: 100,
+      ended_at: Some(200),
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: vec![first, retry],
+      last_seen_at: 200,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+    };
+    assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
+    // If the retry ALSO failed, the newest attempt is a real failure: job failed.
+    session.procs[1].status = ProcStatus::Fail;
+    session.procs[1].fail_reason = Some(crate::failure::reason::CONTAINER_TIMEOUT.into());
+    assert_eq!(session.lifecycle_status(200), SessionLifecycle::Failed);
+    // A failed proc with no skill name (nothing can re-run it) still fails the job.
+    session.procs[1].status = ProcStatus::Ok;
+    session.procs[1].fail_reason = None;
+    session.procs[0].skill_name = None;
+    assert_eq!(session.lifecycle_status(200), SessionLifecycle::Failed);
   }
 
   #[test]

@@ -426,6 +426,18 @@ fn cards_are_chamfered_islands() {
 }
 
 #[test]
+fn client_lifecycle_ignores_superseded_retry_failures() {
+  // The JS fallback derivation mirrors Session::proc_is_superseded: a failed attempt
+  // whose route was re-run by a later proc must not turn the job badge red.
+  let js = live_client_js();
+  assert!(js.contains("function procIsSuperseded"), "supersession helper ships");
+  assert!(
+    js.contains("p.status === 'fail' && !procIsSuperseded(session, p)"),
+    "the failed set excludes superseded attempts"
+  );
+}
+
+#[test]
 fn overlays_are_chamfered() {
   // The floating chrome — confirm dialog, toast, instant tooltip — shares the chamfer
   // language, with drop-shadows (a clip-path swallows box-shadows) for depth.

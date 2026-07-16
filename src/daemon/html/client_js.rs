@@ -20,6 +20,13 @@ function sessionHasIncompleteProcs(session) {
   const procs = session.procs || [];
   return procs.some(p => p.status === 'running' || p.status === 'waiting');
 }
+// Mirrors Session::proc_is_superseded: a failed attempt whose route was re-run by a
+// later proc (scsh's transient-failure retry) is not the route's authoritative outcome.
+function procIsSuperseded(session, p) {
+  if (!p.skill_name) return false;
+  return (session.procs || []).some(q =>
+    q.index > p.index && (q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name);
+}
 function sessionLifecycle(session, nowUnix) {
   // The daemon owns lifecycle. Browser-side derivation exists only for an old persisted
   // snapshot or the brief server-rendered interval before the first live API snapshot.
@@ -28,7 +35,7 @@ function sessionLifecycle(session, nowUnix) {
   }
   if (session.ended_at) {
     if (sessionHasIncompleteProcs(session)) return { label: 'cancelled', class: 'cancelled' };
-    const failed = (session.procs || []).filter(p => p.status === 'fail');
+    const failed = (session.procs || []).filter(p => p.status === 'fail' && !procIsSuperseded(session, p));
     const interrupted = failed.length > 0 && failed.every(p =>
       p.fail_reason === 'force_stopped' || p.fail_reason === 'session_end_before_proc_finish');
     if (interrupted) return { label: 'cancelled', class: 'cancelled' };
