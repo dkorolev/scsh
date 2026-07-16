@@ -561,12 +561,20 @@ function lineCountLabel(n) {
 function lastLineAt(p) {
   return (p.lines || []).reduce((m, l) => Math.max(m, Number(l.at) || 0), 0);
 }
+function isCacheHit(p) {
+  return typeof p.detail === 'string' && p.detail.includes('(cached');
+}
+function hasSeparateCacheProvenance(p) {
+  return typeof p.detail === 'string' && p.detail.includes('source run took ');
+}
 function procElapsed(p, nowUnix) {
+  if (isCacheHit(p) && !hasSeparateCacheProvenance(p)) return null;
   if (p.elapsed != null) return Number(p.elapsed);
   if (p.status === 'running' && p.started_at != null) return Math.max(0, nowUnix - p.started_at);
   return null;
 }
 function idleSinceLine(p, nowUnix) {
+  if (isCacheHit(p)) return null;
   const elapsed = procElapsed(p, nowUnix);
   if (elapsed == null) return null;
   return Math.max(0, elapsed - lastLineAt(p));
@@ -591,7 +599,12 @@ function syncProcStat(stat, p, nowUnix, skipIdle) {
 function syncProcElapsed(meta, p, nowUnix, liveClock) {
   if (!meta) return;
   if (liveClock && p.status === 'running') return;
-  setTextUnlessSelecting(meta, elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason));
+  setTextUnlessSelecting(meta, procElapsedPhrase(p, nowUnix));
+}
+function procElapsedPhrase(p, nowUnix) {
+  const elapsed = procElapsed(p, nowUnix);
+  if (isCacheHit(p)) return elapsed == null ? 'cache hit' : 'cache hit in ' + formatElapsedClock(elapsed);
+  return elapsedPhrase(p.status, elapsed, p.fail_reason);
 }
 function updateProcClocks(nowUnixSec) {
   if (nowUnixSec === lastProcClockSec) return;
@@ -608,7 +621,7 @@ function updateProcClocks(nowUnixSec) {
     syncProcStat(stat, p, nowUnixSec, false);
     setTextUnlessSelecting(stat && stat.querySelector('.idle'), formatIdleClock(idleSinceLine(p, nowUnixSec)));
     const meta = det.querySelector('[data-proc-elapsed="' + CSS.escape(String(p.index)) + '"]');
-    setTextUnlessSelecting(meta, elapsedPhrase(p.status, procElapsed(p, nowUnixSec), p.fail_reason));
+    setTextUnlessSelecting(meta, procElapsedPhrase(p, nowUnixSec));
   });
 }
 function startProcClock() {
@@ -1188,7 +1201,7 @@ function procHtml(p, isOpen, nowUnix) {
   const body = hasCast(p)
     ? castEmbedHtml(p)
     : (lines.length ? '<div class="chamfer output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
-  const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
+  const elapsedText = procElapsedPhrase(p, nowUnix);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' data-workflow-step="' + esc(step) + '"' : '';
   const taskAnchor = step ? '<span class="proc-task-anchor" id="task-' + esc(step) + '" aria-hidden="true"></span>' : '';

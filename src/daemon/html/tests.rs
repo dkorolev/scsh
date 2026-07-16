@@ -414,6 +414,32 @@ fn ui_review_fixes_hold() {
 }
 
 #[test]
+fn cached_recording_duration_is_not_presented_as_attempt_runtime() {
+  let mut legacy = store_with_cast_proc(ProcStatus::Ok);
+  {
+    let proc = &mut legacy.sessions.get_mut("castab").unwrap().procs[0];
+    proc.elapsed = Some(480.946);
+    proc.detail = Some("grade: good  (cached · 2026-07-16 16:28 UTC)".into());
+  }
+  let legacy_page = session_page(&legacy, "castab").expect("legacy cache hit renders");
+  let legacy_procs = session_procs_html(&legacy_page);
+  assert!(legacy_procs.contains(r#"data-proc-elapsed="0">cache hit</span>"#), "got: {legacy_procs}");
+  assert!(!legacy_procs.contains("done in 8m") && !legacy_procs.contains("idle 8m"), "got: {legacy_procs}");
+
+  let mut current = legacy;
+  {
+    let proc = &mut current.sessions.get_mut("castab").unwrap().procs[0];
+    proc.elapsed = Some(0.25);
+    proc.detail =
+      Some("grade: good  (cached · 2026-07-16 16:28 UTC · source run took 8m 0s)".into());
+  }
+  let current_page = session_page(&current, "castab").expect("current cache hit renders");
+  let current_procs = session_procs_html(&current_page);
+  assert!(current_procs.contains(r#"data-proc-elapsed="0">cache hit in 0s</span>"#), "got: {current_procs}");
+  assert!(current_procs.contains(r#"<span class="idle"></span>"#), "cache hit has no idle clock: {current_procs}");
+}
+
+#[test]
 fn cards_are_chamfered_islands() {
   let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
   // Every island card is a chamfered surface: the outer layer is the border (or the
