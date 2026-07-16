@@ -3626,7 +3626,7 @@ mod tests {
     assert!(!page.contains("fullscreenEl: box"), "fullscreen contains only the player, like live");
     assert!(!page.contains("@license"), "no third-party attribution anywhere in the assembled page");
     // Every proc section is the live page's details.proc row, open by default.
-    assert_eq!(page.matches("<details open class=\"proc").count(), 3, "one collapsible row per proc");
+    assert_eq!(page.matches("<details open class=\"chamfer proc").count(), 3, "one collapsible row per proc");
     assert_eq!(page.matches("<span class=\"triangle\"").count(), 3, "live-page row chrome");
     assert!(page.contains("data:image/svg+xml"), "inline favicon");
     // The annotated cast contributes its chapter chip and its one-sentence summary.

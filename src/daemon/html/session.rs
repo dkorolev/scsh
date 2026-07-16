@@ -52,7 +52,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let diff_btn = proc_diff_btn_html(&session.id, proc);
     let annotation_target = annotation_target_link_html(session, proc);
     procs_html.push_str(&format!(
-      r#"<details class="proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
+      r#"<details class="chamfer proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
 <div class="proc-actions">{diff_btn}{snapshot_btn}{kill_btn}</div>
 <summary>
 <span class="triangle" aria-hidden="true"></span>

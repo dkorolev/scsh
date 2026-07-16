@@ -224,7 +224,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     }
   };
   format!(
-    r#"<details open class="proc {status}" data-index="{idx}"{task_attrs}>
+    r#"<details open class="chamfer proc {status}" data-index="{idx}"{task_attrs}>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>
