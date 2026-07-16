@@ -1793,8 +1793,11 @@ function wfFitZoom(scroller, stage) {
   const gutter = 16;
   const widthZoom = Math.max(1, scroller.clientWidth - gutter) / naturalWidth;
   const heightZoom = Math.max(1, scroller.clientHeight - gutter) / naturalHeight;
-  // Fit only shrinks: a graph that already fits remains at a readable 100%.
-  return Math.min(1, widthZoom, heightZoom);
+  // The tighter axis wins, in both directions: a small graph in a large viewport fits
+  // UP (>1), a large graph fits down (<1). Callers bound it — Fit at the 2x zoom
+  // ceiling, and the zoom-out floor at 100% so fitting up never forbids zooming back
+  // to natural size.
+  return Math.min(widthZoom, heightZoom);
 }
 function initWorkflowGraph() {
   const root = document.querySelector('[data-workflow-graph]');
@@ -1833,7 +1836,7 @@ function initWorkflowGraph() {
     requestAnimationFrame(() => applyZoom(workflowZoom));
   };
   const applyZoom = next => {
-    const minimum = wfFitZoom(scroller, stage);
+    const minimum = Math.min(1, wfFitZoom(scroller, stage));
     workflowZoom = Math.max(minimum, Math.min(2, next));
     // Zoom scales the stage INSIDE the fixed viewport; the card itself never changes size,
     // so zooming (like graph growth) can never reflow the page around it.
