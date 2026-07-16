@@ -60,8 +60,8 @@ fn run(args: &[String]) -> i32 {
     }
     Mode::InitDemo => init_demo(),
     Mode::InitBeautifulDemo => init_beautiful_demo(),
-    Mode::InstallSkills => install_skills(false, &cli.sources),
-    Mode::UpdateSkills => install_skills(true, &cli.sources),
+    Mode::InstallSkills => install_skills(false, &cli.sources, cli.global),
+    Mode::UpdateSkills => install_skills(true, &cli.sources, cli.global),
     Mode::List => {
       // `--json` is a runtime-free, machine-readable listing (just git + a valid .scsh.yml);
       // the human listing goes through the full preflight like a run does. NOTE: unlike the
@@ -742,6 +742,10 @@ struct Cli {
   /// (invocable as `/<name>`); the rest get `tmp/.scsh-skills/` referenced by path. The
   /// target repo's checkout never contains the skill.
   override_dot_scsh_yml: Option<PathBuf>,
+  /// `installskills`/`updateskills --global`: install machine-wide under `$SCSH_HOME`
+  /// (default `~/.scsh`) instead of into the current repo — no git repo required. See
+  /// [`install_skills_global`].
+  global: bool,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -785,6 +789,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_rebuild_base = false;
   let mut def: Option<String> = None;
   let mut override_dot_scsh_yml: Option<PathBuf> = None;
+  let mut global = false;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -1037,6 +1042,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         json = true;
         None
       }
+      // Machine-wide install target for `installskills`/`updateskills`.
+      "--global" => {
+        global = true;
+        None
+      }
       // After `run`, a bare token is a profile name: `scsh run a b` == `scsh run --profile a,b`.
       // (A `-`-prefixed token is still an unknown flag, and bare tokens before a command — or
       // after any non-`run` command — remain errors.)
@@ -1092,6 +1102,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   }
   if !sources.is_empty() && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
     return Err("a skills source (git URL) only applies to 'installskills' or 'updateskills'".into());
+  }
+  if global && !matches!(mode, Mode::InstallSkills | Mode::UpdateSkills) {
+    return Err("--global only applies to 'installskills' or 'updateskills'".into());
   }
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
@@ -1161,6 +1174,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_rebuild_base,
     def,
     override_dot_scsh_yml,
+    global,
   })
 }
 
@@ -2121,9 +2135,10 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
     Err(code) => return code,
   };
 
-  // Resolve the config: either the repo's `.scsh.yml`, or an external override bundle
-  // (`--override-dot-scsh-yml`) whose sibling `.skills/` supplies the skill bodies.
-  let (cfg, override_skills_root) = match resolve_config_for_run(&root, override_yml) {
+  // Resolve the config: the repo's `.scsh.yml`, an external override bundle
+  // (`--override-dot-scsh-yml`), or the global manifest under $SCSH_HOME — the latter two
+  // supply skill bodies from their sibling `.skills/`.
+  let (cfg, override_skills_root) = match resolve_config_for_run(&root, override_yml, profile) {
     Ok(v) => v,
     Err(code) => return code,
   };
@@ -2208,28 +2223,79 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
 }
 
 /// Load the config for a normal or override-driven run/list.
-/// Returns `(config, Some(override_bundle_root))` when `--override-dot-scsh-yml` is set —
-/// the bundle root is the parent of the yml (sibling `.skills/` lives there).
-fn resolve_config_for_run(root: &Path, override_yml: Option<&Path>) -> Result<(config::Config, Option<PathBuf>), i32> {
-  let Some(override_path) = override_yml else {
-    let cfg_path = root.join(".scsh.yml");
-    if !cfg_path.is_file() {
+/// Returns `(config, Some(override_bundle_root))` when the config comes from outside the
+/// repo — the bundle root is the parent of the yml (sibling `.skills/` lives there).
+///
+/// Resolution order: an explicit `--override-dot-scsh-yml` wins; otherwise the repo's own
+/// `.scsh.yml` when it declares every requested profile; otherwise the GLOBAL manifest at
+/// `$SCSH_HOME/.scsh.yml` (installed by `scsh installskills --global`) when it does. So a
+/// repo's config always beats the global one for the profiles it declares, and any git repo
+/// can run a globally-installed profile without a local install.
+fn resolve_config_for_run(
+  root: &Path, override_yml: Option<&Path>, profile: Option<&str>,
+) -> Result<(config::Config, Option<PathBuf>), i32> {
+  if let Some(override_path) = override_yml {
+    let yml = match resolve_override_yml(override_path) {
+      Ok(p) => p,
+      Err(e) => {
+        fail(&e);
+        return Err(1);
+      }
+    };
+    let bundle = yml.parent().unwrap_or(Path::new(".")).to_path_buf();
+    return Ok((load_validated_yml(&yml)?, Some(bundle)));
+  }
+
+  let cfg_path = root.join(".scsh.yml");
+  let repo_cfg = if cfg_path.is_file() { Some(load_validated_yml(&cfg_path)?) } else { None };
+  // The named profiles the repo config would have to declare ("default" is always the
+  // repo's own — the global manifest never hijacks a bare `scsh run`/`scsh list`).
+  let wanted: Vec<String> = requested_profiles(profile).into_iter().filter(|p| p != "default").collect();
+  if let Some(cfg) = &repo_cfg {
+    let declared = declared_profiles(cfg);
+    if wanted.is_empty() || wanted.iter().all(|w| declared.contains(w)) {
+      return Ok((repo_cfg.unwrap(), None));
+    }
+  }
+
+  // Global fallback: adopt $SCSH_HOME/.scsh.yml when it declares every requested profile
+  // (or when the repo has no .scsh.yml at all). It acts exactly like an override bundle:
+  // skill bodies come from its sibling .skills/, and the target repo stays untouched.
+  let global_yml = runtime::scsh_home().join(".scsh.yml");
+  if global_yml.is_file() {
+    let global_cfg = load_validated_yml(&global_yml)?;
+    let declared = declared_profiles(&global_cfg);
+    if (!wanted.is_empty() && wanted.iter().all(|w| declared.contains(w))) || repo_cfg.is_none() {
+      let what = if repo_cfg.is_none() {
+        "no .scsh.yml in this repo".to_string()
+      } else {
+        format!(
+          "profile{} {} not in this repo's .scsh.yml",
+          plural(wanted.len()),
+          wanted.iter().map(|w| format!("'{w}'")).collect::<Vec<_>>().join(", ")
+        )
+      };
+      ok(&format!("{what} — using the global manifest {}", display_path(&global_yml)));
+      let bundle = global_yml.parent().unwrap_or(Path::new(".")).to_path_buf();
+      return Ok((global_cfg, Some(bundle)));
+    }
+  }
+
+  match repo_cfg {
+    // The repo config lacks a requested profile and the global manifest can't serve it
+    // either — return the repo's so the caller's unknown-profile report lists what exists.
+    Some(cfg) => Ok((cfg, None)),
+    None => {
       fail(".scsh.yml not found — this repository isn't set up for scsh yet");
       hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
       hint("(writes .scsh.yml, gitignores /tmp, scaffolds example skills, and commits)");
-      return Err(1);
+      hint(&format!(
+        "or install the skills once, machine-wide: {} (then any repo can run their profiles)",
+        bold("scsh installskills --global")
+      ));
+      Err(1)
     }
-    return Ok((load_validated_yml(&cfg_path)?, None));
-  };
-  let yml = match resolve_override_yml(override_path) {
-    Ok(p) => p,
-    Err(e) => {
-      fail(&e);
-      return Err(1);
-    }
-  };
-  let bundle = yml.parent().unwrap_or(Path::new(".")).to_path_buf();
-  Ok((load_validated_yml(&yml)?, Some(bundle)))
+  }
 }
 
 /// Absolute path to an existing override `.scsh.yml`.
@@ -2520,7 +2586,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
 /// the same git → repo → present → valid chain as a run's preflight, but WITHOUT the
 /// container-runtime/engine checks, so profiles can be queried on any machine. On failure it
 /// reports the problem and returns the process exit code; stdout is left untouched.
-fn load_config_for_inspection(override_yml: Option<&Path>) -> Result<config::Config, i32> {
+fn load_config_for_inspection(override_yml: Option<&Path>, profile: Option<&str>) -> Result<config::Config, i32> {
   if runtime::which("git").is_none() {
     fail("git is not installed or not on PATH");
     hint(install_git_hint());
@@ -2534,7 +2600,7 @@ fn load_config_for_inspection(override_yml: Option<&Path>) -> Result<config::Con
       return Err(1);
     }
   };
-  let (cfg, _) = resolve_config_for_run(&root, override_yml)?;
+  let (cfg, _) = resolve_config_for_run(&root, override_yml, profile)?;
   Ok(cfg)
 }
 
@@ -2561,7 +2627,7 @@ fn profile_groups(cfg: &config::Config) -> Vec<(String, Vec<String>)> {
 /// listed has at least one skill. Stable shape:
 /// `{"profiles":[{"name":"default","skills":["add"]}, …]}`.
 fn list_profiles_json(override_yml: Option<&Path>) -> i32 {
-  let cfg = match load_config_for_inspection(override_yml) {
+  let cfg = match load_config_for_inspection(override_yml, None) {
     Ok(c) => c,
     Err(code) => return code,
   };
@@ -2589,7 +2655,7 @@ fn check_profile_cmd(profile: Option<&str>, override_yml: Option<&Path>) -> i32 
       return 2;
     }
   };
-  let cfg = match load_config_for_inspection(override_yml) {
+  let cfg = match load_config_for_inspection(override_yml, Some(name)) {
     Ok(c) => c,
     Err(code) => return code,
   };
@@ -6078,7 +6144,10 @@ impl InstallCounts {
 /// file is "already installed", and a differing one is kept untouched. Like a real run, this
 /// requires a clean working tree (so the install is a reviewable diff) and ensures `/tmp` is
 /// gitignored before writing anything.
-fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
+fn install_skills(overwrite: bool, sources: &[String], global: bool) -> i32 {
+  if global {
+    return install_skills_global(overwrite, sources);
+  }
   if runtime::which("git").is_none() {
     fail("git is not installed or not on PATH");
     hint(install_git_hint());
@@ -6133,27 +6202,7 @@ fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
     }
   }
 
-  let InstallCounts { installed, updated, already, differing } = counts;
-  if installed > 0 {
-    ok(&format!("installed {installed} skill file{} under .skills/", plural(installed as usize)));
-  }
-  if updated > 0 {
-    ok(&format!("updated {updated} skill file{}", plural(updated as usize)));
-  }
-  if already > 0 {
-    ok(&format!("{already} skill file{} already installed (identical)", plural(already as usize)));
-  }
-  for rel in &differing {
-    hint(&format!("kept your modified {rel} (it differs from the source)"));
-  }
-  if !differing.is_empty() {
-    let cmd = if sources.is_empty() {
-      "scsh updateskills".to_string()
-    } else {
-      format!("scsh updateskills {}", sources.join(" "))
-    };
-    hint(&format!("to replace them with the source's version, run: {}", bold(&cmd)));
-  }
+  let any = report_install_counts(&counts, sources, false);
 
   // Wire up the harness discovery dirs (.opencode/.claude/.cursor/.agents/.codex →
   // ../.skills), exactly as --init-demo-project does; existing ones are left alone.
@@ -6161,7 +6210,7 @@ fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
   if !links.is_empty() {
     ok(&format!("linked {} harness skill dir{} → .skills", links.len(), if links.len() == 1 { "" } else { "s" }));
   }
-  if installed == 0 && updated == 0 && already == 0 && differing.is_empty() && links.is_empty() {
+  if !any && links.is_empty() {
     ok("skills already installed; nothing to do");
   }
   // The no-URL install is self-contained: it includes the beautiful family, its reviewer
@@ -6170,6 +6219,153 @@ fn install_skills(overwrite: bool, sources: &[String]) -> i32 {
     hint("installed the beautiful delivery family and all five code-review specialties");
     hint("run /scsh-harness-demo-and-selftest for the basic harness demo, or `scsh run --def demo-beautiful-loop` for the review loop");
   }
+  0
+}
+
+/// Print the per-file install tallies and the `updateskills` suggestion for kept files.
+/// Returns true when any file was installed, updated, already present, or kept.
+fn report_install_counts(counts: &InstallCounts, sources: &[String], global: bool) -> bool {
+  let InstallCounts { installed, updated, already, differing } = counts;
+  if *installed > 0 {
+    ok(&format!("installed {installed} skill file{} under .skills/", plural(*installed as usize)));
+  }
+  if *updated > 0 {
+    ok(&format!("updated {updated} skill file{}", plural(*updated as usize)));
+  }
+  if *already > 0 {
+    ok(&format!("{already} skill file{} already installed (identical)", plural(*already as usize)));
+  }
+  for rel in differing {
+    hint(&format!("kept your modified {rel} (it differs from the source)"));
+  }
+  if !differing.is_empty() {
+    let mut cmd = String::from("scsh updateskills");
+    if global {
+      cmd.push_str(" --global");
+    }
+    if !sources.is_empty() {
+      cmd.push(' ');
+      cmd.push_str(&sources.join(" "));
+    }
+    hint(&format!("to replace them with the source's version, run: {}", bold(&cmd)));
+  }
+  *installed > 0 || *updated > 0 || *already > 0 || !differing.is_empty()
+}
+
+/// `installskills --global`: install machine-wide instead of into a repo. Skills land under
+/// `$SCSH_HOME/.skills/` (default `~/.scsh/.skills/`) and their profile blocks merge into the
+/// GLOBAL manifest `$SCSH_HOME/.scsh.yml` — the one `run`/`list`/`check-profile` fall back to
+/// when the current repo's `.scsh.yml` does not declare a requested profile. Each installed
+/// skill is then symlinked into the user-level skills dir of every coding agent present on
+/// this machine (`~/.claude/skills`, `~/.cursor/skills`, ...), so agents discover the skills
+/// in every project. No git repo and no clean tree are required — nothing is written outside
+/// `$SCSH_HOME` and the agents' own skills dirs.
+fn install_skills_global(overwrite: bool, sources: &[String]) -> i32 {
+  let home = runtime::scsh_home();
+  if let Err(e) = std::fs::create_dir_all(&home) {
+    fail(&format!("could not create {}: {e}", home.display()));
+    return 1;
+  }
+  // git is only needed to clone URL sources; the bundled no-URL install is git-free.
+  if !sources.is_empty() && runtime::which("git").is_none() {
+    fail("git is not installed or not on PATH (needed to clone the skills source)");
+    hint(install_git_hint());
+    return 1;
+  }
+
+  let mut counts = InstallCounts::default();
+  if sources.is_empty() {
+    counts.merge(install_bundled(&home, overwrite));
+  } else {
+    for url in sources {
+      match install_from_repo(&home, overwrite, url) {
+        Ok(c) => counts.merge(c),
+        Err(code) => return code,
+      }
+    }
+  }
+
+  let any = report_install_counts(&counts, sources, true);
+  let links = link_agent_global_skills(&home);
+  if !any && links == 0 {
+    ok("skills already installed; nothing to do");
+  }
+  ok(&format!("global install: {} (manifest + .skills/)", display_path(&home)));
+  hint("any git repo can now run these profiles — a repo's own .scsh.yml still wins for the profiles it declares");
+  if sources.is_empty() {
+    hint("installed the beautiful delivery family and all five code-review specialties");
+    hint("try it from any repo: scsh check-profile code-review && scsh run code-review");
+  }
+  0
+}
+
+/// Symlink every globally-installed skill (`$SCSH_HOME/.skills/<name>`, minus `internal-*`)
+/// into the user-level skills dir of each coding agent PRESENT on this machine — an agent is
+/// "present" when its home dot-dir (`~/.claude`, `~/.cursor`, `~/.codex`, `~/.opencode`,
+/// `~/.agents`) already exists; scsh never plants dot-dirs for agents the user does not have.
+/// Existing entries are left untouched (a symlink already pointing at the skill counts as
+/// done; anything else gets a keep-hint). Returns how many links it created.
+#[cfg(unix)]
+fn link_agent_global_skills(scsh_home: &Path) -> usize {
+  const AGENT_DIRS: &[&str] = &[".claude", ".cursor", ".codex", ".opencode", ".agents"];
+  let Some(user_home) = std::env::var_os("HOME").filter(|s| !s.is_empty()).map(PathBuf::from) else {
+    hint("HOME is not set — skipped linking the skills into agent skills dirs");
+    return 0;
+  };
+  // The globally-installed skills, by directory (authoring-only `internal-*` never link).
+  let mut skills: Vec<(String, PathBuf)> = std::fs::read_dir(scsh_home.join(".skills"))
+    .map(|entries| {
+      entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.join("SKILL.md").is_file())
+        .filter_map(|p| p.file_name().map(|n| (n.to_string_lossy().into_owned(), p.clone())))
+        .filter(|(name, _)| !name.starts_with(INTERNAL_PREFIX))
+        .collect()
+    })
+    .unwrap_or_default();
+  skills.sort();
+
+  let mut made = 0usize;
+  let mut linked_agents: Vec<String> = Vec::new();
+  for agent in AGENT_DIRS {
+    let base = user_home.join(agent);
+    if !base.is_dir() {
+      continue; // this agent isn't on the machine — don't plant its dot-dir
+    }
+    let skills_dir = base.join("skills");
+    if std::fs::create_dir_all(&skills_dir).is_err() {
+      hint(&format!("could not create {} — skipped", skills_dir.display()));
+      continue;
+    }
+    let mut fresh = 0usize;
+    for (name, target) in &skills {
+      let link = skills_dir.join(name);
+      match std::fs::read_link(&link) {
+        Ok(existing) if &existing == target => continue, // already ours
+        Ok(_) | Err(_) if link.symlink_metadata().is_ok() => {
+          hint(&format!("kept the existing {} (not touching it)", display_path(&link)));
+          continue;
+        }
+        _ => {}
+      }
+      if std::os::unix::fs::symlink(target, &link).is_ok() {
+        fresh += 1;
+      }
+    }
+    if fresh > 0 {
+      made += fresh;
+      linked_agents.push(format!("~/{agent}/skills ({fresh})"));
+    }
+  }
+  if made > 0 {
+    ok(&format!("linked {made} skill{} into agent dirs: {}", plural(made), linked_agents.join(", ")));
+  }
+  made
+}
+
+#[cfg(not(unix))]
+fn link_agent_global_skills(_scsh_home: &Path) -> usize {
   0
 }
 
@@ -6781,13 +6977,19 @@ fn print_help_command(name: &str) {
       &[("(no flags)", "Write and commit the tiny word-counting project used by demo-beautiful-loop.")],
     ),
     "installskills" => (
-      "install skills into this repo",
-      "scsh installskills [git-url…]",
-      &[("[git-url…]", "Install from the bundled skills, or from one or more source repos in order.")],
+      "install skills into this repo (or machine-wide)",
+      "scsh installskills [--global] [git-url…]",
+      &[
+        ("[git-url…]", "Install from the bundled skills, or from one or more source repos in order."),
+        (
+          "--global",
+          "Install under $SCSH_HOME (~/.scsh) instead: skills + a global manifest that run/list/check-profile fall back to when the repo's .scsh.yml lacks the profile, plus symlinks into each present agent's ~/.<agent>/skills. No git repo needed.",
+        ),
+      ],
     ),
     "updateskills" => (
       "reinstall skills, overwriting",
-      "scsh updateskills [git-url…]",
+      "scsh updateskills [--global] [git-url…]",
       &[("[git-url…]", "Like installskills, but overwrites local copies of each skill.")],
     ),
     "daemon" => (
@@ -6922,8 +7124,8 @@ fn print_help_overview() {
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
   help_row("init-beautiful-demo", "Scaffold and commit the code-review loop demo.");
-  help_row("installskills [url…]", "Install skills (bundled or from git URLs).");
-  help_row("updateskills [url…]", "Reinstall skills, overwriting local copies.");
+  help_row("installskills [url…]", "Install skills (bundled or from git URLs); --global installs machine-wide.");
+  help_row("updateskills [url…]", "Reinstall skills, overwriting local copies (--global for the machine-wide set).");
   help_row("daemon", "start | stop | restart | status");
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
@@ -6976,6 +7178,9 @@ fn print_help_run() {
   help_row("--override-dot-scsh-yml <path>", "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.");
   println!("{}", h_dim("  The target tree stays clean: skill bodies are injected into the run clone only."));
   println!("{}", h_dim("  Works with `run`, `list`, and `check-profile`. Mutually exclusive with `--def`."));
+  println!("{}", h_dim("  Without the flag, a profile the repo's .scsh.yml does not declare falls back to the"));
+  println!("{}", h_dim("  global manifest $SCSH_HOME/.scsh.yml (installed by `scsh installskills --global`);"));
+  println!("{}", h_dim("  the repo's own config always wins for the profiles it declares."));
   println!();
   println!("{}", h_head("Profile selection"));
   println!("{}", h_dim("  Skills with no `profile:` belong to the reserved `default` profile."));
@@ -7659,6 +7864,27 @@ mod tests {
     assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
     assert!(cli(&["run", "--def", "add", "--override-dot-scsh-yml", "/x.yml"]).is_err());
     assert!(cli(&["version", "--override-dot-scsh-yml", "/x.yml"]).is_err());
+  }
+
+  #[test]
+  fn global_flag_parses_on_installskills_and_updateskills_only() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["installskills", "--global"]).unwrap();
+    assert!(matches!(c.mode, Mode::InstallSkills));
+    assert!(c.global);
+    // Flag order doesn't matter, and sources still parse alongside it.
+    let c = cli(&["installskills", "--global", "https://example.com/skills.git"]).unwrap();
+    assert!(c.global);
+    assert_eq!(c.sources, vec!["https://example.com/skills.git".to_string()]);
+    let c = cli(&["updateskills", "--global"]).unwrap();
+    assert!(matches!(c.mode, Mode::UpdateSkills));
+    assert!(c.global);
+    // Without the flag, both commands stay repo-scoped.
+    assert!(!cli(&["installskills"]).unwrap().global);
+    // `--global` belongs to installskills/updateskills alone.
+    assert!(cli(&["run", "--global"]).is_err());
+    assert!(cli(&["list", "--global"]).is_err());
+    assert!(cli(&["version", "--global"]).is_err());
   }
 
   #[test]

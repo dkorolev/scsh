@@ -48,7 +48,18 @@ struct Run {
 }
 
 fn scsh(dir: &Path, args: &[&str]) -> Run {
-  let output = Command::new(bin()).args(args).current_dir(dir).output().expect("run scsh");
+  scsh_env(dir, args, &[])
+}
+
+/// Like [`scsh`], with extra environment variables — the global-install tests pin `HOME`
+/// and `SCSH_HOME` to throwaway dirs so they never touch the developer's real ~/.scsh.
+fn scsh_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
+  let mut cmd = Command::new(bin());
+  cmd.args(args).current_dir(dir);
+  for (k, v) in envs {
+    cmd.env(k, v);
+  }
+  let output = cmd.output().expect("run scsh");
   let mut out = String::from_utf8_lossy(&output.stdout).into_owned();
   out.push_str(&String::from_utf8_lossy(&output.stderr));
   Run { code: output.status.code().unwrap_or(-1), out }
@@ -294,6 +305,73 @@ fn installskills_is_idempotent_and_updateskills_overwrites() {
     std::fs::read_to_string(&p).unwrap().contains("name: scsh-harness-demo-and-selftest"),
     "updateskills should restore the bundled skill"
   );
+}
+
+#[test]
+fn installskills_global_installs_under_scsh_home_and_links_agents() {
+  // Global install needs NO git repo — run it from a plain directory.
+  let d = unique_dir("ginstall");
+  let home = unique_dir("ghome");
+  // Two agents are "present" (their home dot-dirs exist); codex is not.
+  std::fs::create_dir_all(home.join(".claude")).unwrap();
+  std::fs::create_dir_all(home.join(".cursor")).unwrap();
+  let scsh_home = home.join(".scsh");
+  let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+
+  let r = scsh_env(&d, &["installskills", "--global"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  // Skills and the global manifest land under $SCSH_HOME.
+  assert!(scsh_home.join(".skills/the-beautiful-loop/SKILL.md").is_file(), "got: {}", r.out);
+  let manifest = std::fs::read_to_string(scsh_home.join(".scsh.yml")).expect("global manifest");
+  assert!(manifest.contains("  the-beautiful-loop:") && manifest.contains("  sanity-reviewer:"), "got: {manifest}");
+  // Present agents get per-skill symlinks into their user-level skills dirs...
+  for agent in [".claude", ".cursor"] {
+    let link = home.join(agent).join("skills/the-beautiful-loop");
+    assert!(link.symlink_metadata().expect("link meta").file_type().is_symlink(), "{agent} should be linked");
+    assert!(link.join("SKILL.md").is_file(), "{agent} link should resolve");
+  }
+  // ...and absent agents' dot-dirs are never planted.
+  assert!(!home.join(".codex").exists(), "must not create dot-dirs for agents the user does not have");
+
+  // Re-running is idempotent: identical files count as already installed, links stay.
+  let again = scsh_env(&d, &["installskills", "--global"], &envs);
+  assert_eq!(again.code, 0, "got: {}", again.out);
+  assert!(again.out.contains("already installed"), "got: {}", again.out);
+}
+
+#[test]
+fn profiles_fall_back_to_the_global_manifest() {
+  let home = unique_dir("gfbhome");
+  let scsh_home = home.join(".scsh");
+  let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+  let staging = unique_dir("gfbstage");
+  assert_eq!(scsh_env(&staging, &["installskills", "--global"], &envs).code, 0);
+
+  // A repo with NO .scsh.yml: named profiles and `list --json` resolve from the global manifest.
+  let repo = unique_dir("gfbrepo");
+  git_init(&repo);
+  let r = scsh_env(&repo, &["check-profile", "code-review"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("global manifest"), "should say where the profile came from; got: {}", r.out);
+  let r = scsh_env(&repo, &["list", "--json"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("\"code-review\""), "global profiles should list; got: {}", r.out);
+
+  // A repo with its own .scsh.yml: its declared profiles win (no fallback), profiles it
+  // lacks still resolve globally, and a profile in neither place remains an error.
+  std::fs::write(
+    repo.join(".scsh.yml"),
+    "skills:\n  mine:\n    harness: claude\n    model: claude-opus-4-8\n    timeout: 60\n    profile: mine\n    result: tmp/mine.md\n",
+  )
+  .unwrap();
+  let r = scsh_env(&repo, &["check-profile", "mine"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(!r.out.contains("global manifest"), "repo-declared profiles must not fall back; got: {}", r.out);
+  let r = scsh_env(&repo, &["check-profile", "code-review"], &envs);
+  assert_eq!(r.code, 0, "got: {}", r.out);
+  assert!(r.out.contains("global manifest"), "got: {}", r.out);
+  let r = scsh_env(&repo, &["check-profile", "nope"], &envs);
+  assert_eq!(r.code, 1, "unknown profile stays an error; got: {}", r.out);
 }
 
 #[test]
