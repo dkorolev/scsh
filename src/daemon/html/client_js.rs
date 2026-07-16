@@ -2269,6 +2269,7 @@ startProcClock();
   });
   initCasts(root);
   initSessionStop();
+  initSessionRestart();
   initProcKills(root);
   initProcDiffs(root);
   initHarnessStops();
@@ -2294,7 +2295,13 @@ function syncSessionStopButton(session) {
   const lifecycle = sessionLifecycle(session, Date.now() / 1000);
   const running = lifecycle.class === 'running';
   let btn = document.getElementById('session-stop');
-  // Force stop only while running — remove it when the job settles (no grayed stub).
+  // Force restart / Force stop only while running — remove them when the job settles (no
+  // grayed stubs). Restart is server-rendered only (a settled job never resurrects, so
+  // there is no add-it-back path).
+  if (!running) {
+    const restart = document.getElementById('session-restart');
+    if (restart) restart.remove();
+  }
   if (!running) {
     if (btn) btn.remove();
   } else if (!btn) {
@@ -2407,6 +2414,44 @@ function initSessionStop() {
   const btn = document.getElementById('session-stop');
   if (!btn) return;
   btn.addEventListener('click', () => forceStopSession(btn));
+}
+// ---- force restart (session page) ----
+async function forceRestartSession(btn) {
+  const id = btn.getAttribute('data-session');
+  if (!id) return;
+  const ok = await scshConfirm({
+    title: 'Force restart this job?',
+    body: 'The current run is stopped — running containers are killed — and the same job starts fresh.',
+    confirmLabel: 'Force restart',
+    danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  setBtnLabel(btn, 'Restarting…');
+  try {
+    const resp = await fetch('/api/v1/jobs/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: id }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false || !data.session) {
+      btn.disabled = false;
+      setBtnLabel(btn, 'Force restart');
+      showToast(data.error || ('restart failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    window.location.href = '/job/' + data.session;
+  } catch (e) {
+    btn.disabled = false;
+    setBtnLabel(btn, 'Force restart');
+    showToast(String(e));
+  }
+}
+function initSessionRestart() {
+  const btn = document.getElementById('session-restart');
+  if (!btn) return;
+  btn.addEventListener('click', () => forceRestartSession(btn));
 }
 // ---- per-proc kill (session page) ----
 async function killProc(btn) {

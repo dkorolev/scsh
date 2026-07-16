@@ -1099,6 +1099,42 @@ fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
 }
 
 #[test]
+fn force_restart_rides_beside_force_stop_only_where_it_can_act() {
+  let mut live = store_with_cast_proc(ProcStatus::Running);
+  live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
+  let page = session_page(&live, "castab").expect("session renders");
+  assert!(page.contains(r#"id="session-restart""#), "a live repository job offers Force restart: {page}");
+  let restart = page.find(r#"id="session-restart""#).unwrap();
+  let stop = page.find(r#"id="session-stop""#).expect("Force stop still rides");
+  assert!(restart < stop, "restart (orange) rides before stop (red)");
+  let button_open = page[..restart].rfind("<button").unwrap();
+  assert!(page[button_open..restart].contains("btn--orange"), "Force restart is the orange action");
+
+  // An image build has no start recipe to replay — Force stop only.
+  live.sessions.get_mut("castab").unwrap().repo = crate::daemon::server::IMAGE_BUILDS_REPO.into();
+  let page = session_page(&live, "castab").expect("build session renders");
+  assert!(!page.contains(r#"id="session-restart""#), "builds cannot be force-restarted: {page}");
+  assert!(page.contains(r#"id="session-stop""#), "…but can still be force-stopped");
+
+  // A settled job offers neither — controls that can never act again are noise.
+  let mut done = store_with_cast_proc(ProcStatus::Ok);
+  done.sessions.get_mut("castab").unwrap().ended_at = Some(2);
+  let page = session_page(&done, "castab").expect("settled session renders");
+  assert!(!page.contains(r#"id="session-restart""#), "no restart on a settled job: {page}");
+  assert!(!page.contains(r#"id="session-stop""#), "no stop on a settled job: {page}");
+}
+
+#[test]
+fn force_restart_is_wired_live() {
+  let js = live_client_js();
+  assert!(js.contains("function forceRestartSession"), "the button has a handler");
+  assert!(js.contains("'/api/v1/jobs/restart'"), "it calls the restart endpoint");
+  assert!(js.contains("Force restart this job?"), "a confirm gate rides in front of the kill");
+  assert!(js.contains("initSessionRestart();"), "the handler is wired on page load");
+  assert!(js.contains("window.location.href = '/job/' + data.session"), "success lands on the NEW job's page");
+}
+
+#[test]
 fn global_skills_are_startable_from_the_run_page() {
   let js = live_client_js();
   assert!(js.contains("function selectGlobalProfile"), "picking a global profile opens a start form");
