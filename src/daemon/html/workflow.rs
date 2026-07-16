@@ -761,7 +761,9 @@ fn node_tip(
       }
     }
     WorkflowDisplayState::Waiting => lines.push("Waiting to start".into()),
-    WorkflowDisplayState::Ready => lines.push("Ready — dependencies finished; not started yet".into()),
+    WorkflowDisplayState::Ready => {
+      lines.push("Queued — dependencies finished; waiting for the scheduler to start this task".into())
+    }
     WorkflowDisplayState::Running => {
       if node.id == "build_base" || node.id.starts_with("build_") {
         lines.push("Image build running".into());
@@ -769,7 +771,17 @@ fn node_tip(
         lines.push("Running".into());
       }
     }
-    WorkflowDisplayState::Terminating => lines.push("Terminating — stop requested".into()),
+    WorkflowDisplayState::Terminating => {
+      let restarting = node
+        .proc_index
+        .and_then(|index| session.procs.iter().find(|proc| proc.index == index))
+        .is_some_and(|proc| proc.fail_reason.as_deref() == Some(crate::failure::reason::RESTART_REQUESTED));
+      lines.push(if restarting {
+        "Restarting — replacement attempt is starting".into()
+      } else {
+        "Terminating — stop requested".into()
+      });
+    }
     WorkflowDisplayState::Done => lines.push("Succeeded".into()),
     WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result survived a teardown issue".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
@@ -798,7 +810,7 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
         WorkflowDisplayState::Running => "running",
         WorkflowDisplayState::Terminating => "terminating",
         WorkflowDisplayState::Waiting => "waiting",
-        WorkflowDisplayState::Ready => "ready",
+        WorkflowDisplayState::Ready => "queued",
         WorkflowDisplayState::Stalled => "stalled",
         WorkflowDisplayState::Done => "done",
         WorkflowDisplayState::Graceful => "graceful",
@@ -840,19 +852,20 @@ pub(crate) fn proc_task_id(session: &Session, proc: &ProcRecord) -> Option<Strin
   if let Some(node) = meta.nodes.iter().find(|n| n.proc_index == Some(proc.index)) {
     return Some(node.id.clone());
   }
-  // Fallbacks before proc_index binding lands.
+  // Fallbacks only before proc_index binding lands. Once a node points at a replacement,
+  // the superseded attempt must not also own the task anchor.
   if proc.kind == crate::daemon::model::ProcKind::Build {
     let id = match proc.harness.as_deref() {
       Some(h) => format!("build_{h}"),
       None => "build_base".into(),
     };
-    if meta.nodes.iter().any(|n| n.id == id) {
+    if meta.nodes.iter().any(|n| n.id == id && n.proc_index.is_none()) {
       return Some(id);
     }
   }
   let step = proc.skill_name.as_deref().or(proc.skill_source.as_deref());
   let step = step?;
-  if !meta.nodes.iter().any(|n| n.id == step) {
+  if !meta.nodes.iter().any(|n| n.id == step && n.proc_index.is_none()) {
     return None;
   }
   Some(step.to_string())
@@ -863,5 +876,15 @@ pub(crate) fn proc_task_attrs(session: &Session, proc: &ProcRecord) -> String {
   let Some(id) = proc_task_id(session, proc) else {
     return String::new();
   };
-  format!(r#" id="task-{id}" data-workflow-step="{id}""#, id = esc(&id))
+  format!(r#" data-workflow-step="{id}""#, id = esc(&id))
+}
+
+/// A task alias separate from the proc's permanent `#proc-N` id. Keeping the two anchors
+/// on distinct elements avoids duplicate `id` attributes and lets attempt links stay stable
+/// while the graph's task alias moves to the newest attempt.
+pub(crate) fn proc_task_anchor_html(session: &Session, proc: &ProcRecord) -> String {
+  let Some(id) = proc_task_id(session, proc) else {
+    return String::new();
+  };
+  format!(r#"<span class="proc-task-anchor" id="task-{id}" aria-hidden="true"></span>"#, id = esc(&id))
 }

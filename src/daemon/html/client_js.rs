@@ -15,19 +15,43 @@ function fmtUptime(secs) {
   return 'up ' + h + 'h ' + (Math.floor((secs % 3600) / 60)) + 'm';
 }
 const SESSION_START_TIMEOUT_SECS = 30;
-const SESSION_IDLE_TIMEOUT_SECS = 20 * 60;
+const SESSION_IDLE_TIMEOUT_SECS = 30 * 60;
 function sessionHasIncompleteProcs(session) {
   const procs = session.procs || [];
   return procs.some(p => p.status === 'running' || p.status === 'waiting');
 }
-// Mirrors Session::proc_next_attempt: the proc that re-ran this one's route (scsh's
-// transient-failure retry), if any — the earliest later proc of the same kind and name.
+// Mirrors Session::proc_next_attempt: explicit attempt lineage first; same-name inference
+// exists only for persisted records written before `previous_attempt`.
 function procNextAttempt(session, p) {
+  const linked = (session.procs || []).find(q => q.previous_attempt === p.index);
+  if (linked) return linked;
+  if (p.previous_attempt != null) return null;
   if (!p.skill_name) return null;
   const later = (session.procs || []).filter(q =>
-    q.index > p.index && (q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name);
+    q.previous_attempt == null && q.index > p.index &&
+    (q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name);
   later.sort((a, b) => a.index - b.index);
   return later[0] || null;
+}
+function procPreviousAttempt(session, p) {
+  const procs = session.procs || [];
+  if (p.previous_attempt != null) return procs.find(q => q.index === p.previous_attempt) || null;
+  if (procs.some(q => q.previous_attempt === p.index)) return null;
+  if (!p.skill_name) return null;
+  const earlier = procs.filter(q => q.index < p.index &&
+    (q.kind || 'skill') === (p.kind || 'skill') && q.skill_name === p.skill_name);
+  earlier.sort((a, b) => b.index - a.index);
+  return earlier[0] || null;
+}
+function procFirstAttempt(session, p) {
+  let first = p;
+  const seen = new Set([first.index]);
+  while (true) {
+    const previous = procPreviousAttempt(session, first);
+    if (!previous || seen.has(previous.index)) return first;
+    seen.add(previous.index);
+    first = previous;
+  }
 }
 // Mirrors Session::proc_is_superseded: a failed attempt whose route was re-run by a
 // later proc is not the route's authoritative outcome.
@@ -36,6 +60,28 @@ function procIsSuperseded(session, p) {
 }
 // Mirrors Session::proc_attempt: [ordinal, total] attempts for this proc's route.
 function procAttempt(session, p) {
+  const procs = session.procs || [];
+  if (p.previous_attempt != null || procs.some(q => q.previous_attempt === p.index)) {
+    let root = p;
+    const seen = new Set([root.index]);
+    while (root.previous_attempt != null) {
+      const previous = procs.find(q => q.index === root.previous_attempt);
+      if (!previous || seen.has(previous.index)) break;
+      seen.add(previous.index);
+      root = previous;
+    }
+    let ordinal = 1, total = 1, current = root;
+    const forwardSeen = new Set([root.index]);
+    while (true) {
+      const next = procs.find(q => q.previous_attempt === current.index);
+      if (!next || forwardSeen.has(next.index)) break;
+      forwardSeen.add(next.index);
+      total += 1;
+      if (next.index <= p.index) ordinal += 1;
+      current = next;
+    }
+    return [ordinal, total];
+  }
   if (!p.skill_name) return [1, 1];
   let ordinal = 0, total = 0;
   (session.procs || []).forEach(q => {
@@ -54,12 +100,21 @@ function attemptChipHtml(session, p) {
 }
 // Mirror of retry_link_html in session.rs: a failed attempt cross-links its retry.
 function retryLinkHtml(session, p) {
+  if (p.fail_reason === 'restart_requested') {
+    return ' <span class="proc-retry-pending">replacement starting…</span>';
+  }
   if (p.status !== 'fail') return '';
   const next = procNextAttempt(session, p);
   if (!next) return '';
   return ' <a class="proc-retry-link" href="' + '#proc-' + esc(String(next.index)) +
     '" title="This attempt failed and was retried; the newest attempt is authoritative">superseded — see attempt ' +
     procAttempt(session, next)[0] + ' ↓</a>';
+}
+function originalAttemptLinkHtml(session, p) {
+  const original = procFirstAttempt(session, p);
+  if (!original || original.index === p.index) return '';
+  return ' <a class="proc-original-link" href="' + '#proc-' + esc(String(original.index)) +
+    '" title="Jump to the original run in this attempt chain">original attempt ↑</a>';
 }
 function sessionLifecycle(session, nowUnix) {
   // The daemon owns lifecycle. Browser-side derivation exists only for an old persisted
@@ -337,8 +392,11 @@ function formatElapsedClock(elapsed) {
 // Mirrors elapsed_phrase in proc.rs — status-aware text before the timer.
 function elapsedPhrase(status, elapsed, failReason) {
   const clock = elapsed == null ? null : formatElapsedClock(elapsed);
+  if (failReason === 'restart_requested') {
+    return clock ? 'restarting · ' + clock : 'restarting';
+  }
   if ((status === 'running' || status === 'waiting') &&
-      (failReason === 'stop_requested' || failReason === 'restart_requested')) {
+      failReason === 'stop_requested') {
     return clock ? 'terminating · ' + clock : 'terminating';
   }
   if (status === 'waiting') return clock ? 'waiting · ' + clock : 'waiting';
@@ -673,9 +731,17 @@ function updateProcFields(det, p, nowUnix) {
     const chip = attemptChipHtml(session, p);
     if (chip) labelEl.insertAdjacentHTML('afterend', chip);
   }
-  if (meta && !det.querySelector('summary .proc-retry-link')) {
+  if (meta) {
+    const current = det.querySelector('summary .proc-retry-link, summary .proc-retry-pending');
     const link = retryLinkHtml(session, p);
-    if (link) meta.insertAdjacentHTML('afterend', link);
+    if (current && !link) current.remove();
+    else if (link) {
+      const wrap = document.createElement('span');
+      wrap.innerHTML = link.trim();
+      const replacement = wrap.firstElementChild;
+      if (current && replacement) current.replaceWith(replacement);
+      else if (!current && replacement) meta.insertAdjacentElement('afterend', replacement);
+    }
   }
   const noteEl = det.querySelector('summary .note');
   // Finished rows show their ANSWER (the finish detail) in the collapsed summary; only
@@ -1124,7 +1190,8 @@ function procHtml(p, isOpen, nowUnix) {
     : (lines.length ? '<div class="chamfer output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
-  const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
+  const taskAttrs = step ? ' data-workflow-step="' + esc(step) + '"' : '';
+  const taskAnchor = step ? '<span class="proc-task-anchor" id="task-' + esc(step) + '" aria-hidden="true"></span>' : '';
   const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
   const snapLabel = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
@@ -1147,13 +1214,13 @@ function procHtml(p, isOpen, nowUnix) {
       (p.kind === 'annotate' ? 'Stop annotation' : 'Force stop') + '</span></button>'
     : '';
   const session = (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null) || { procs: [] };
-  const summaryOpen = '<details class="chamfer proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
+  const summaryOpen = '<details class="chamfer proc ' + esc(terminating ? 'terminating' : p.status) + '" id="proc-' + esc(String(p.index)) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
     ((diff || snap || restart || kill) ? '<div class="proc-actions">' + diff + snap + restart + kill + '</div>' : '') +
-    '<summary>' +
+    '<summary>' + taskAnchor +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span>' + attemptChipHtml(session, p) + ' ' + procStatHtml(p, nowUnix) +
-    ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + ' ' +
+    ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + originalAttemptLinkHtml(session, p) + ' ' +
     '<span class="note dim">' + esc(p.note || '') + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
     container + body + '</details>';
@@ -1164,6 +1231,10 @@ function workflowStepIdForProc(p) {
   if (nodes) {
     const hit = nodes.find(n => n.proc_index === p.index);
     if (hit) return hit.id;
+    const step = p.kind === 'build' ? (p.harness ? ('build_' + p.harness) : 'build_base') :
+      (p.skill_name || p.skill_source || null);
+    const unbound = step && nodes.find(n => n.id === step && n.proc_index == null);
+    return unbound ? unbound.id : null;
   }
   if (p.kind === 'build') return p.harness ? ('build_' + p.harness) : 'build_base';
   return p.skill_name || p.skill_source || null;
@@ -1172,7 +1243,7 @@ function wfStateIcon(state) {
   return ({waiting:'◇',ready:'◇',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '◇';
 }
 function wfStateLabel(state) {
-  return ({waiting:'Waiting',ready:'Ready',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
+  return ({waiting:'Waiting',ready:'Queued',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
     stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
 }
 function wfJobOutcome(session, nowUnix) {
@@ -1230,14 +1301,17 @@ function wfBlockerLine(session, id, nowUnix) {
 function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   const title = wfNodeTitle(node.id);
   const lines = [title];
+  const p = node.proc_index != null ? (session.procs || []).find(x => x.index === node.proc_index) : null;
   if (state === 'waiting' && unmetIds.length) {
     lines.push('Waiting on:');
     unmetIds.forEach(id => lines.push('• ' + wfBlockerLine(session, id, nowUnix)));
   } else if (state === 'waiting') lines.push('Waiting to start');
-  else if (state === 'ready') lines.push('Ready — dependencies finished; not started yet');
+  else if (state === 'ready') lines.push('Queued — dependencies finished; waiting for the scheduler to start this task');
   else if (state === 'running') {
     lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
-  } else if (state === 'terminating') lines.push('Terminating — stop requested');
+  } else if (state === 'terminating') lines.push(p && p.fail_reason === 'restart_requested'
+    ? 'Restarting — replacement attempt is starting'
+    : 'Terminating — stop requested');
   else if (state === 'done') lines.push('Succeeded');
   else if (state === 'graceful') lines.push('Graceful shutdown — valid result survived a teardown issue');
   else if (state === 'failed') lines.push('Failed');
@@ -1246,7 +1320,6 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
   if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
   // Mirrors node_html in workflow.rs: the node is bound to the route's newest attempt.
-  const p = node.proc_index != null ? (session.procs || []).find(x => x.index === node.proc_index) : null;
   if (p) {
     const attempt = procAttempt(session, p);
     if (attempt[1] > 1) {
@@ -1257,8 +1330,8 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
 }
 function wfDisplayState(session, node, nowUnix) {
   const life = sessionLifecycle(session, nowUnix).class;
-  // Ready/Running only while the job is live — cancelled/terminated/failed must not keep a
-  // waiting step looking like it is about to start ("ready — not started yet").
+  // Queued/Running only while the job is live — cancelled/terminated/failed must not keep a
+  // waiting step looking like it is about to start ("queued — not started yet").
   const live = life === 'running';
   const procs = session.procs || [];
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
@@ -1289,7 +1362,7 @@ function wfLegendHtml(present) {
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
-    (key === 'graceful' ? 'graceful shutdown' : key));
+    (key === 'ready' ? 'queued' : (key === 'graceful' ? 'graceful shutdown' : key)));
   for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
     [counts.ready,'ready'],[counts.failed,'failed'],[counts.stopped,'stopped'],
     [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
@@ -1801,8 +1874,7 @@ function updateWorkflowGraph(session, nowUnix) {
   }
   // Resolve a pending pre-registration selection exactly once when its panel appears.
   if (pendingWorkflowStep) {
-    const det = document.getElementById('task-' + pendingWorkflowStep) ||
-      document.querySelector('details.proc[data-workflow-step="' + CSS.escape(pendingWorkflowStep) + '"]');
+    const det = procPanelForWorkflowStep(pendingWorkflowStep);
     if (det) {
       const step = pendingWorkflowStep;
       pendingWorkflowStep = null;
@@ -1854,13 +1926,17 @@ function activateProcPanel(det, hash, pushHistory, scroll) {
   persistOpenProcs();
   return true;
 }
+function procPanelForWorkflowStep(stepId) {
+  const alias = document.getElementById('task-' + stepId);
+  return (alias && alias.closest('details.proc')) ||
+    document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
+}
 function activateWorkflowTask(stepId, opts) {
   if (!stepId) return;
   opts = opts || {};
   const pushHistory = opts.pushHistory !== false && !opts.fromHistory;
   const hash = '#task-' + encodeURIComponent(stepId);
-  const det = document.getElementById('task-' + stepId) ||
-    document.querySelector('details.proc[data-workflow-step="' + CSS.escape(stepId) + '"]');
+  const det = procPanelForWorkflowStep(stepId);
   if (det) {
     pendingWorkflowStep = null;
     setWorkflowPendingStatus('');
@@ -2138,9 +2214,20 @@ function renderSession(session, nowUnix) {
       updateProcFields(det, p, nowUnix);
       syncProcOutput(det, p);
       const step = workflowStepIdForProc(p);
-      if (step && !det.id) {
-        det.id = 'task-' + step;
+      let taskAnchor = det.querySelector('.proc-task-anchor');
+      if (taskAnchor && (!step || taskAnchor.id !== 'task-' + step)) {
+        taskAnchor.remove();
+        taskAnchor = null;
+      }
+      if (step) {
         det.setAttribute('data-workflow-step', step);
+        if (!taskAnchor) {
+          const summary = det.querySelector('summary');
+          if (summary) summary.insertAdjacentHTML('afterbegin',
+            '<span class="proc-task-anchor" id="task-' + esc(step) + '" aria-hidden="true"></span>');
+        }
+      } else {
+        det.removeAttribute('data-workflow-step');
       }
     }
   });

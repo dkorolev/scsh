@@ -66,11 +66,12 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
 pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reason: Option<&str>) -> String {
   let clock = elapsed.map(format_elapsed_clock);
   match status {
+    _ if fail_reason == Some(crate::failure::reason::RESTART_REQUESTED) => match clock {
+      Some(c) => format!("restarting · {c}"),
+      None => "restarting".into(),
+    },
     ProcStatus::Waiting | ProcStatus::Running
-      if matches!(
-        fail_reason,
-        Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
-      ) =>
+      if matches!(fail_reason, Some(crate::failure::reason::STOP_REQUESTED)) =>
     {
       match clock {
         Some(c) => format!("terminating · {c}"),

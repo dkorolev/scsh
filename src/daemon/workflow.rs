@@ -79,7 +79,7 @@ impl WorkflowDisplayState {
   pub fn label(self) -> &'static str {
     match self {
       Self::Waiting => "Waiting",
-      Self::Ready => "Ready",
+      Self::Ready => "Queued",
       Self::Running => "Running",
       Self::Terminating => "Terminating",
       Self::Done => "Succeeded",
@@ -693,8 +693,8 @@ pub fn display_state(
   session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, now: u64,
 ) -> WorkflowDisplayState {
   let life = session.lifecycle_status(now);
-  // Ready / Running are live-only. A cancelled, failed, completed, or abruptly terminated job
-  // must not keep advertising "ready — not started yet" for waiting steps (that reads as the
+  // Queued / Running are live-only. A cancelled, failed, completed, or abruptly terminated job
+  // must not keep advertising "queued — not started yet" for waiting steps (that reads as the
   // next task still being about to launch).
   let live = life == SessionLifecycle::Running;
   match node_proc(session, node) {
@@ -840,6 +840,7 @@ mod tests {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         label: "claude: add".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Running,
@@ -861,7 +862,7 @@ mod tests {
         result_path: None,
         annotate_target: None,
       }],
-      last_seen_at: 60, // running-idle timeout elapses at 60 + 20 minutes
+      last_seen_at: 60, // running-idle timeout elapses at 60 + 30 minutes
       client_connected: true,
       run_pid: Some(1),
       workflow: Some(arith_meta()),
@@ -873,7 +874,10 @@ mod tests {
     store.sessions.insert("abcdef".into(), session.clone());
     let meta = session.workflow.as_ref().unwrap();
     let node = &meta.nodes[0];
-    assert_eq!(display_state(&session, meta, node, 1261), WorkflowDisplayState::Stalled);
+    assert_eq!(
+      display_state(&session, meta, node, 60 + crate::config::DEFAULT_INACTIVITY_TIMEOUT_SECS + 1),
+      WorkflowDisplayState::Stalled
+    );
   }
 
   #[test]
@@ -892,6 +896,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "build grok".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Ok,
@@ -915,6 +920,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "grok: smoke".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -984,6 +990,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "using Apple Containers · build base".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Running,
@@ -1007,6 +1014,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "using Apple Containers · build claude".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Waiting,
@@ -1030,6 +1038,7 @@ mod tests {
         },
         ProcRecord {
           index: 2,
+          previous_attempt: None,
           label: "using Apple Containers · build cursor".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Waiting,
@@ -1053,6 +1062,7 @@ mod tests {
         },
         ProcRecord {
           index: 3,
+          previous_attempt: None,
           label: "claude: demo-pr-claude-sonnet".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1076,6 +1086,7 @@ mod tests {
         },
         ProcRecord {
           index: 4,
+          previous_attempt: None,
           label: "cursor: demo-pr-cursor-composer-2.5-fast".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1131,6 +1142,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "using Apple Containers · build claude".into(),
           kind: ProcKind::Build,
           status: ProcStatus::Ok,
@@ -1154,6 +1166,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1177,6 +1190,7 @@ mod tests {
         },
         ProcRecord {
           index: 2,
+          previous_attempt: None,
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1200,6 +1214,7 @@ mod tests {
         },
         ProcRecord {
           index: 3,
+          previous_attempt: None,
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Waiting,
@@ -1255,6 +1270,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1278,6 +1294,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1301,6 +1318,7 @@ mod tests {
         },
         ProcRecord {
           index: 2,
+          previous_attempt: None,
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1379,6 +1397,7 @@ mod tests {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           label: "claude: add".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1402,6 +1421,7 @@ mod tests {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           label: "codex: multiply".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,
@@ -1425,6 +1445,7 @@ mod tests {
         },
         ProcRecord {
           index: 2,
+          previous_attempt: None,
           label: "grok: summarize".into(),
           kind: ProcKind::Skill,
           status: ProcStatus::Ok,

@@ -349,6 +349,7 @@ mod tests {
     let procs = vec![
       ProcRecord {
         index: 0,
+        previous_attempt: None,
         label: "opencode: add-opencode".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,
@@ -372,6 +373,7 @@ mod tests {
       },
       ProcRecord {
         index: 1,
+        previous_attempt: None,
         label: "claude: add-claude".into(),
         kind: ProcKind::Skill,
         status: ProcStatus::Ok,

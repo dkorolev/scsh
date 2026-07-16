@@ -25,6 +25,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status,
@@ -434,6 +435,7 @@ fn a_retried_route_is_visibly_a_retry() {
   fn skill(index: usize, name: &str, route: &str, status: ProcStatus, fail: Option<&str>) -> ProcRecord {
     ProcRecord {
       index,
+      previous_attempt: None,
       kind: ProcKind::Skill,
       label: format!("claude: {name}"),
       status,
@@ -456,6 +458,8 @@ fn a_retried_route_is_visibly_a_retry() {
       lines: vec![],
     }
   }
+  let mut retry = skill(2, "add-claude", "claude", ProcStatus::Ok, None);
+  retry.previous_attempt = Some(0);
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
     "retryv".into(),
@@ -474,7 +478,7 @@ fn a_retried_route_is_visibly_a_retry() {
       procs: vec![
         skill(0, "add-claude", "claude", ProcStatus::Fail, Some(crate::failure::reason::CONTAINER_TIMEOUT)),
         skill(1, "add-opencode", "opencode", ProcStatus::Ok, None),
-        skill(2, "add-claude", "claude", ProcStatus::Ok, None),
+        retry,
       ],
       workflow: Some(WorkflowMeta {
         nodes: vec![
@@ -507,6 +511,16 @@ fn a_retried_route_is_visibly_a_retry() {
   );
   assert!(html.contains("superseded — see attempt 2 ↓"), "link names the retry's ordinal");
   assert!(html.contains(r#"attempt-chip"><span>attempt 2</span>"#), "retry row wears an attempt chip");
+  assert!(
+    html.contains(r##"<a class="proc-original-link" href="#proc-0""##),
+    "replacement links directly back to the original attempt"
+  );
+  assert_eq!(html.matches(r#"id="task-add-claude""#).count(), 1, "only the authoritative attempt owns task id");
+  assert!(html.contains(r#"id="proc-2" data-index="2" data-workflow-step="add-claude""#));
+  assert!(
+    html.contains("alias.closest('details.proc')") && html.contains("taskAnchor.remove()"),
+    "live task aliases move to the replacement while navigation still opens its proc panel"
+  );
   // The graph node (bound to the newest attempt) says it is a second attempt.
   assert!(html.contains(r#"<span class="wf-attempt"> · attempt 2</span>"#), "node state line shows the attempt");
   assert!(html.contains("Attempt 2 of 2 — an earlier attempt failed and was retried"), "tooltip explains");
@@ -653,8 +667,8 @@ fn session_meta_agrees_with_lifecycle_badge() {
   assert!(page.contains(r#"data-session-ended>"#), "Ended present: {page}");
   assert!(!page.contains(r#"data-session-ended>still running</dd>"#), "Ended must not contradict: {page}");
   assert!(
-    page.contains(r#"data-session-ended>19700101-002001 UTC</dd>"#),
-    "a started job uses the 20-minute idle deadline: {page}"
+    page.contains(r#"data-session-ended>19700101-003001 UTC</dd>"#),
+    "a started job uses the 30-minute idle deadline: {page}"
   );
   // Repo above Branch.
   let repo = page.find("<dt>Repo</dt>").expect("Repo");
@@ -700,14 +714,15 @@ fn index_page_shows_colored_harness_chips_per_proc() {
   let html = super::index_page(&store);
   // A running chip's tip is just `harness · skill`; its start time rides in
   // data-tip-running, from which the tip module ticks a live "running for …" line.
+  // Flat jobs have no workflow task aliases, so each chip uses its permanent proc anchor.
   assert!(
-    html.contains(r#"<a class="chamfer hchip hchip--claude" href="/job/castab#task-"#)
+    html.contains(r#"<a class="chamfer hchip hchip--claude" href="/job/castab#proc-0"#)
       && html.contains(r#"data-tip="claude · add" data-tip-running="1">C</a>"#),
     "got: {html}"
   );
   // A finished chip's tip is two lines: `harness · skill`, then the plain status word.
   assert!(
-    html.contains(r#"<a class="chamfer hchip hchip--grok hchip--done" href="/job/castab#task-"#)
+    html.contains(r#"<a class="chamfer hchip hchip--grok hchip--done" href="/job/castab#proc-1"#)
       && html.contains("data-tip=\"grok · add\ndone\">G</a>"),
     "got: {html}"
   );
@@ -846,7 +861,7 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
     "pollForChapters must not index null liveSessions (TypeError reading session id)"
   );
   assert!(!js.contains("SESSION_ID && liveSessions[SESSION_ID]"), "no bare liveSessions[SESSION_ID] without null check");
-  assert!(js.contains("const live = life === 'running'"), "Ready only while the job is live");
+  assert!(js.contains("const live = life === 'running'"), "Queued only while the job is live");
   assert!(js.contains("OPEN_REPO_RUNNABLE"), "client js gates Start on the repo being runnable");
   assert!(js.contains("p.type === 'text'"), "multiline definition params render distinctly");
   assert!(js.contains("<textarea"), "feature briefs use a text area rather than a one-line input");
@@ -881,6 +896,7 @@ fn session_proc_html_has_no_stray_backslashes() {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "opencode: add".into(),
         status: ProcStatus::Running,
@@ -936,6 +952,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "opencode: add".into(),
           status: ProcStatus::Ok,
@@ -959,6 +976,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "claude: add".into(),
           status: ProcStatus::Ok,
@@ -1210,6 +1228,7 @@ fn offline_export_embeds_commits_diff_when_present() {
     skills: vec![],
     procs: vec![ProcRecord {
       index: 0,
+      previous_attempt: None,
       kind: ProcKind::Skill,
       label: "opencode: add".into(),
       status: ProcStatus::Ok,
@@ -1269,6 +1288,7 @@ fn offline_export_keeps_text_log_lines() {
     skills: vec![],
     procs: vec![ProcRecord {
       index: 0,
+      previous_attempt: None,
       kind: ProcKind::Build,
       label: "build: claude".into(),
       status: ProcStatus::Ok,
@@ -1337,6 +1357,7 @@ fn offline_export_includes_workflow_graph() {
     procs: vec![
       ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,
@@ -1360,6 +1381,7 @@ fn offline_export_includes_workflow_graph() {
       },
       ProcRecord {
         index: 1,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "codex: summarize".into(),
         status: ProcStatus::Ok,
@@ -1415,7 +1437,8 @@ fn offline_export_includes_workflow_graph() {
   assert!(html.contains(r#"data-workflow-step="add""#) && html.contains(r#"data-workflow-step="summarize""#));
   // The graph's jump links resolve offline: proc rows carry the same task anchors as live.
   assert!(html.contains("href=\"#task-add\""), "node links target task anchors");
-  assert!(html.contains(r#"<details open class="chamfer proc ok" data-index="0" id="task-add""#), "proc row anchors: {html}");
+  assert!(html.contains(r#"<details open class="chamfer proc ok" id="proc-0" data-index="0" data-workflow-step="add""#));
+  assert!(html.contains(r#"<span class="proc-task-anchor" id="task-add" aria-hidden="true"></span>"#), "proc task alias: {html}");
   // The graph CSS rides in the shared stylesheet the export inlines.
   assert!(html.contains(".wf-bookend"), "bookend CSS is inlined in the export");
 }
@@ -1473,6 +1496,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "opencode: add-opencode".into(),
           status: ProcStatus::Ok,
@@ -1496,6 +1520,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "claude: add-claude".into(),
           status: ProcStatus::Ok,
@@ -1587,6 +1612,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
       procs: vec![
         ProcRecord {
           index: 0,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "claude: add-waiting".into(),
           status: ProcStatus::Waiting,
@@ -1610,6 +1636,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         },
         ProcRecord {
           index: 1,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "claude: add-done".into(),
           status: ProcStatus::Ok,
@@ -1633,6 +1660,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
         },
         ProcRecord {
           index: 2,
+          previous_attempt: None,
           kind: ProcKind::Skill,
           label: "claude: add-running".into(),
           status: ProcStatus::Running,
@@ -1762,6 +1790,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 2,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,
@@ -1847,6 +1876,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "opencode: add".into(),
         status: ProcStatus::Running,
@@ -1905,6 +1935,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Annotate,
         label: "annotate · add-20260711-114749-utc-ufakca".into(),
         status,
@@ -1972,8 +2003,8 @@ fn annotation_control_links_to_the_job_and_persists_its_state() {
   assert!(js.contains("annotation-dots"), "running annotation gets animated dots");
   assert!(js.contains("SESSION_START_TIMEOUT_SECS = 30"), "startup has one short deadline");
   assert!(
-    js.contains("SESSION_IDLE_TIMEOUT_SECS = 20 * 60"),
-    "started work gets a 20-minute idle allowance"
+    js.contains("SESSION_IDLE_TIMEOUT_SECS = 30 * 60"),
+    "started work gets a 30-minute idle allowance"
   );
   assert_eq!(
     crate::daemon::model::SESSION_IDLE_TIMEOUT_SECS,
@@ -2426,6 +2457,7 @@ fn workflow_graph_renders_builtin_shapes() {
   fn skill_proc(index: usize, id: &str, harness: &str, status: ProcStatus) -> ProcRecord {
     ProcRecord {
       index,
+      previous_attempt: None,
       kind: ProcKind::Skill,
       label: format!("{harness}: {id}"),
       status,
@@ -2590,7 +2622,7 @@ fn workflow_graph_renders_builtin_shapes() {
   let finalizing = session_page(&store, "arith1").expect("finalizing page");
   assert!(finalizing.contains(">Finalizing recordings</span>"), "all tasks done while casts settle is explicit");
 
-  // fruits fan-out — live session so Waiting→Ready (deps met) is not collapsed to Stalled
+  // fruits fan-out — live session so Waiting→Queued (deps met) is not collapsed to Stalled
   let now = crate::daemon::paths::now_unix_secs();
   store.sessions.insert(
     "fruit1".into(),
@@ -2644,11 +2676,14 @@ fn workflow_graph_renders_builtin_shapes() {
   );
   let fruits = session_page(&store, "fruit1").expect("fruits");
   assert!(
-    fruits.contains(r#">1 succeeded</a>"#) && fruits.contains(r#">2 ready</a>"#),
+    fruits.contains(r#">1 succeeded</a>"#) && fruits.contains(r#">2 queued</a>"#),
     "ready stays separate from waiting in the headline"
   );
   assert!(fruits.contains("data-tip="), "nodes carry instant tooltips");
-  assert!(fruits.contains("Ready — dependencies finished; not started yet"), "ready tip explains why the node is idle");
+  assert!(
+    fruits.contains("Queued — dependencies finished; waiting for the scheduler to start this task"),
+    "queued tip explains why the node is idle"
+  );
   // 2 dependency edges + start → categorize + both sorts → finish.
   assert_eq!(
     fruits
@@ -3022,6 +3057,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
       skills: vec![],
       procs: vec![ProcRecord {
         index: 0,
+        previous_attempt: None,
         kind: ProcKind::Skill,
         label: "claude: add".into(),
         status: ProcStatus::Ok,

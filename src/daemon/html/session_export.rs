@@ -24,7 +24,7 @@ use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
-use super::workflow::{proc_task_attrs, workflow_graph_html};
+use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcRecord, Session};
 use crate::json::quote;
 
@@ -224,11 +224,12 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     }
   };
   format!(
-    r#"<details open class="chamfer proc {status}" data-index="{idx}"{task_attrs}>
+    r#"<details open class="chamfer proc {status}" id="proc-{idx}" data-index="{idx}"{task_attrs}>
 <summary>
+{task_anchor}
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>{attempt_chip}
-<span class="meta">{elapsed}</span>
+<span class="meta">{elapsed}</span>{retry_link}{original_link}
 <span class="note dim">{note}</span>
 {diff_chip}</summary>
 {meta}
@@ -237,8 +238,11 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     status = proc.status.as_str(),
     idx = proc.index,
     task_attrs = proc_task_attrs(session, proc),
+    task_anchor = proc_task_anchor_html(session, proc),
     label = esc(&proc.label),
     attempt_chip = super::session::attempt_chip_html(session, proc),
+    retry_link = super::session::retry_link_html(session, proc),
+    original_link = super::session::original_attempt_link_html(session, proc),
     elapsed = esc(&elapsed),
     note = esc(note),
     diff_chip = diff_chip_html(diff.is_some()),

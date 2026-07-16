@@ -6,7 +6,7 @@ use super::layout::wrap_page;
 use super::proc::{
   cast_embed_html, elapsed_phrase, proc_elapsed_secs, proc_has_cast, proc_meta_html, summary_stats_html,
 };
-use super::workflow::{proc_task_attrs, workflow_graph_html};
+use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
 use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
@@ -56,13 +56,16 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let annotation_target = annotation_target_link_html(session, proc);
     let attempt_chip = attempt_chip_html(session, proc);
     let retry_link = retry_link_html(session, proc);
+    let original_link = original_attempt_link_html(session, proc);
+    let task_anchor = proc_task_anchor_html(session, proc);
     procs_html.push_str(&format!(
       r#"<details class="chamfer proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
 <div class="proc-actions">{diff_btn}{snapshot_btn}{restart_btn}{kill_btn}</div>
 <summary>
+{task_anchor}
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>{attempt_chip} {proc_stat}
-<span class="meta" data-proc-elapsed="{index}">{elapsed}</span>{retry_link}
+<span class="meta" data-proc-elapsed="{index}">{elapsed}</span>{retry_link}{original_link}
 <span class="note dim">{note}</span>
 {annotation_target}
 </summary>
@@ -75,6 +78,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       status_class = if terminating { "terminating" } else { proc.status.as_str() },
       index = proc.index,
       task_attrs = proc_task_attrs(session, proc),
+      task_anchor = task_anchor,
       label = esc(&proc.label),
       proc_stat = summary_stats_html(proc, now),
       diff_btn = diff_btn,
@@ -88,6 +92,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       detail = esc(detail),
       container_line = container_line_html(proc),
       attempt_chip = attempt_chip,
+      original_link = original_link,
       retry_link = retry_link,
       body_html = body_html
     ));
@@ -294,6 +299,9 @@ pub(crate) fn attempt_chip_html(session: &Session, proc: &crate::daemon::model::
 /// the running/green node it contradicts visibly belong to the same route. Mirrored by
 /// `retryLinkHtml` in the client JS.
 pub(crate) fn retry_link_html(session: &Session, proc: &crate::daemon::model::ProcRecord) -> String {
+  if proc.fail_reason.as_deref() == Some(crate::failure::reason::RESTART_REQUESTED) {
+    return r#" <span class="proc-retry-pending">replacement starting…</span>"#.into();
+  }
   if proc.status != ProcStatus::Fail {
     return String::new();
   }
@@ -304,6 +312,19 @@ pub(crate) fn retry_link_html(session: &Session, proc: &crate::daemon::model::Pr
     r##" <a class="proc-retry-link" href="#proc-{idx}" title="This attempt failed and was retried; the newest attempt is authoritative">superseded — see attempt {ord} ↓</a>"##,
     idx = next.index,
     ord = session.proc_attempt(next).0,
+  )
+}
+
+/// Every replacement links directly to the immutable first attempt, so attempt 3 does not
+/// make the user walk backward through attempt 2. Mirrored by `originalAttemptLinkHtml`.
+pub(crate) fn original_attempt_link_html(session: &Session, proc: &crate::daemon::model::ProcRecord) -> String {
+  let original = session.proc_first_attempt(proc);
+  if original.index == proc.index {
+    return String::new();
+  }
+  format!(
+    r##" <a class="proc-original-link" href="#proc-{idx}" title="Jump to the original run in this attempt chain">original attempt ↑</a>"##,
+    idx = original.index,
   )
 }
 
