@@ -325,7 +325,8 @@ pub struct SetupTestRequest {
   pub effort: Option<String>,
 }
 
-const SETUP_TESTS_PROJECT: &str = "setup-tests";
+// Prefix only — each probe run scaffolds `smoketest-<nonce>` under ~/.scsh/projects.
+const SETUP_TESTS_PROJECT: &str = "smoketest";
 // Runs and their result files are named `smoketest-<harness>-<model>` after this def.
 const SETUP_BATCH_DEF: &str = "smoketest";
 const MAX_SETUP_TESTS: usize = 10;
@@ -385,7 +386,7 @@ pub fn parse_setup_tests(obj: &[(String, crate::json::Value)]) -> Result<Vec<Set
   Ok(out)
 }
 
-/// Ensure `~/.scsh/projects/setup-tests` exists and is runnable; write the batch def YAML.
+/// Scaffold a fresh `~/.scsh/projects/smoketest-<nonce>` project; write the batch def YAML.
 pub fn prepare_setup_batch(tests: &[SetupTestRequest]) -> Result<std::path::PathBuf, String> {
   let root = ensure_setup_tests_project()?;
   let harness_dir = root.join(".harness");
@@ -399,18 +400,14 @@ pub fn prepare_setup_batch(tests: &[SetupTestRequest]) -> Result<std::path::Path
 fn ensure_setup_tests_project() -> Result<std::path::PathBuf, String> {
   let projects = crate::daemon::paths::projects_dir();
   std::fs::create_dir_all(&projects).map_err(|e| format!("could not create {}: {e}", projects.display()))?;
-  let path = projects.join(SETUP_TESTS_PROJECT);
-  if path.join(".git").exists() {
-    // Keep the repo clean for the next run: drop untracked leftovers except .harness/smoketest.yml
-    // which we overwrite. Soft reset is unnecessary — blockers only care about committed+clean.
-    let _ = std::process::Command::new("git").args(["-C"]).arg(&path).args(["checkout", "--", "."]).status();
-    let _ = std::process::Command::new("git").args(["-C"]).arg(&path).args(["clean", "-fd", "-e", ".harness"]).status();
-    return Ok(path);
-  }
-  // Reuse the same scaffold as Projects → New project.
+  // One fresh project per probe run. A fixed directory name could collide with a real
+  // project the user created, and the one-job-per-repository guard would serialize
+  // concurrent Setup probes behind it. The scaffolds are tiny (one gitignore commit).
+  let path = projects.join(format!("{SETUP_TESTS_PROJECT}-{}", crate::runtime::random_nonce_6()));
   if path.exists() {
     let _ = std::fs::remove_dir_all(&path);
   }
+  // Reuse the same scaffold as Projects → New project.
   scaffold_setup_tests_project(&path)?;
   Ok(path)
 }
@@ -442,7 +439,7 @@ fn scaffold_setup_tests_project(path: &std::path::Path) -> Result<(), String> {
     &format!("user.email={}", crate::SCSH_COMMIT_EMAIL),
     "commit",
     "-qm",
-    "Init setup-tests project.",
+    "Init smoketest project.",
   ])
 }
 
