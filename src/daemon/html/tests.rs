@@ -2151,6 +2151,15 @@ fn review_round_six_fixes_hold() {
   // in the action strip; tips are multi-line and can tick a live running-for line.
   assert!(html.contains(r#"<div id="images-runtimes" class="images-runtimes"></div>"#), "got: {html}");
   assert!(html.contains(".seg-opt"), "segmented-control CSS ships");
+  // The group is a chamfered ring: the outer layer shows through the padding/gaps, and
+  // the corner options clip their own inner chamfer so the ring survives the diagonals.
+  assert!(html.contains(r#"'<span class="chamfer seg" data-tip="#), "runtime switcher group is chamfered");
+  assert!(html.contains("--seg-inner: calc(var(--cut) - var(--bw) * 0.5858);"));
+  assert!(html.contains(".seg-opt:first-child {"), "corner options carry their own clip");
+  // Active tabs are underlined by a trapezoid (45° ends), not a plain border.
+  assert!(html.contains(".tab.active::after {"));
+  assert!(html.contains("clip-path: polygon(3px 0%, calc(100% - 3px) 0%, 100% 100%, 0% 100%);"));
+  assert!(!html.contains("border-bottom: 2px solid transparent"), "no rounded-era tab underline");
   assert!(html.contains("data-tip-running"), "live-ticking tip support ships");
   assert!(html.contains("white-space: pre-line"), "multi-line tip CSS ships");
   // Both JS chip-count writers share one renderer, so live re-syncs keep the tooltip.
