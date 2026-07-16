@@ -111,7 +111,8 @@ pub struct StatRecord {
   /// `ok` | `fail` | `cached`; skill rows only.
   pub outcome: Option<String>,
   pub fail_reason: Option<String>,
-  /// 1, or 2 when the transient-failure retry ran; skill rows only.
+  /// How many times the route ran: 1, plus the automatic transient-failure retry, plus
+  /// one per browser Force restart; skill rows only.
   pub attempts: u64,
   /// Wall-clock seconds of the (final) attempt, or of the whole run for run rows.
   pub duration_secs: f64,

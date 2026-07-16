@@ -71,7 +71,8 @@ function sessionLifecycle(session, nowUnix) {
     if (sessionHasIncompleteProcs(session)) return { label: 'cancelled', class: 'cancelled' };
     const failed = (session.procs || []).filter(p => p.status === 'fail' && !procIsSuperseded(session, p));
     const interrupted = failed.length > 0 && failed.every(p =>
-      p.fail_reason === 'force_stopped' || p.fail_reason === 'session_end_before_proc_finish');
+      p.fail_reason === 'force_stopped' || p.fail_reason === 'force_restarted' ||
+      p.fail_reason === 'session_end_before_proc_finish');
     if (interrupted) return { label: 'cancelled', class: 'cancelled' };
     if (failed.length) return { label: 'failed', class: 'failed' };
     return { label: 'completed', class: 'completed' };
@@ -336,7 +337,8 @@ function formatElapsedClock(elapsed) {
 // Mirrors elapsed_phrase in proc.rs — status-aware text before the timer.
 function elapsedPhrase(status, elapsed, failReason) {
   const clock = elapsed == null ? null : formatElapsedClock(elapsed);
-  if ((status === 'running' || status === 'waiting') && failReason === 'stop_requested') {
+  if ((status === 'running' || status === 'waiting') &&
+      (failReason === 'stop_requested' || failReason === 'restart_requested')) {
     return clock ? 'terminating · ' + clock : 'terminating';
   }
   if (status === 'waiting') return clock ? 'waiting · ' + clock : 'waiting';
@@ -346,6 +348,7 @@ function elapsedPhrase(status, elapsed, failReason) {
   if (status === 'skipped') return 'skipped';
   if (status === 'fail') {
     if (failReason === 'force_stopped') return clock ? 'stopped after ' + clock : 'stopped';
+    if (failReason === 'force_restarted') return clock ? 'restarted after ' + clock : 'restarted';
     if (failReason === 'container_inactive') return clock ? 'stalled after ' + clock : 'stalled';
     if (failReason === 'container_timeout') return clock ? 'timed out after ' + clock : 'timed out';
     return clock ? 'failed in ' + clock : 'failed';
@@ -654,7 +657,7 @@ function syncProcOutput(det, p) {
   }
 }
 function updateProcFields(det, p, nowUnix) {
-  const terminating = p.fail_reason === 'stop_requested';
+  const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
   det.className = 'chamfer proc ' + (terminating ? 'terminating' : p.status);
   const labelEl = det.querySelector('summary .label');
   if (labelEl) labelEl.textContent = p.label || '';
@@ -684,19 +687,30 @@ function updateProcFields(det, p, nowUnix) {
     if (finished && looksLikeArtifactPath(text)) noteEl.innerHTML = '<code>' + esc(text) + '</code>';
     else noteEl.textContent = text;
   }
-  // Per-proc Force stop: show only while the step is live; remove once it finishes.
+  // Per-proc Force restart / Force stop: show only while the step is live; remove once it
+  // finishes (or once a stop/restart request is in flight). Restart is skill runs only.
   const killEl = det.querySelector('button[data-proc-stop]');
+  const restartEl = det.querySelector('button[data-proc-restart]');
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
+  const wantRestart = live && (p.kind || 'skill') === 'skill';
+  if (restartEl && !wantRestart) restartEl.remove();
+  else if (!restartEl && wantRestart) {
+    const actions = ensureProcActions(det);
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'chamfer btn btn--orange btn--sm proc-restart';
+    btn.setAttribute('data-proc-restart', String(p.index));
+    btn.setAttribute('data-session', SESSION_ID);
+    btn.title = 'Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues';
+    btn.innerHTML = '<span>Force restart</span>';
+    const kill = det.querySelector('button[data-proc-stop]');
+    if (kill && kill.parentElement === actions) actions.insertBefore(btn, kill);
+    else actions.appendChild(btn);
+    btn.addEventListener('click', () => restartProc(btn));
+  }
   if (killEl && !live) killEl.remove();
   else if (!killEl && live) {
-    let actions = det.querySelector('.proc-actions');
-    if (!actions) {
-      actions = document.createElement('div');
-      actions.className = 'proc-actions';
-      const summary = det.querySelector('summary');
-      if (summary) det.insertBefore(actions, summary);
-      else det.prepend(actions);
-    }
+    const actions = ensureProcActions(det);
     const btn = document.createElement('button');
     btn.type = 'button';
     btn.className = 'chamfer btn btn--red btn--sm proc-kill';
@@ -721,14 +735,7 @@ function updateProcFields(det, p, nowUnix) {
   // A step whose commits were integrated gains its "⇄ commits diff" chip. Integration
   // (and the packdiff pack) happens after the step finished, so this lands on a late tick.
   if (p.diff_path && !det.querySelector('a[data-proc-diff]')) {
-    let actions = det.querySelector('.proc-actions');
-    if (!actions) {
-      actions = document.createElement('div');
-      actions.className = 'proc-actions';
-      const summary = det.querySelector('summary');
-      if (summary) det.insertBefore(actions, summary);
-      else det.prepend(actions);
-    }
+    const actions = ensureProcActions(det);
     actions.insertAdjacentHTML('afterbegin', procDiffBtnHtml(p));
     wireProcDiff(actions.querySelector('a[data-proc-diff]'));
   }
@@ -779,6 +786,18 @@ function updateProcFields(det, p, nowUnix) {
   } else if (metaBlock) metaBlock.remove();
 }
 function hasCast(p) { return !!p.cast_path && SESSION_ID != null; }
+// The per-proc top-right action stack, created on first need.
+function ensureProcActions(det) {
+  let actions = det.querySelector('.proc-actions');
+  if (!actions) {
+    actions = document.createElement('div');
+    actions.className = 'proc-actions';
+    const summary = det.querySelector('summary');
+    if (summary) det.insertBefore(actions, summary);
+    else det.prepend(actions);
+  }
+  return actions;
+}
 // Insert the run-snapshot link above Force stop when a cast appears mid-job.
 function ensureProcSnapshot(det, p) {
   if (det.querySelector('a[data-cast-export]')) return;
@@ -1106,7 +1125,7 @@ function procHtml(p, isOpen, nowUnix) {
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';
-  const terminating = p.fail_reason === 'stop_requested';
+  const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
   const snapLabel = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
   const snap = hasCast(p)
@@ -1115,6 +1134,11 @@ function procHtml(p, isOpen, nowUnix) {
       snapLabel + '</span></a>'
     : '';
   const diff = p.diff_path ? procDiffBtnHtml(p) : '';
+  const restart = live && (p.kind || 'skill') === 'skill'
+    ? '<button type="button" class="chamfer btn btn--orange btn--sm proc-restart" data-proc-restart="' +
+      esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) +
+      '" title="Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues"><span>Force restart</span></button>'
+    : '';
   const kill = live
     ? '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
       esc(String(p.index)) + '" data-proc-kind="' + esc(p.kind || 'skill') + '" data-session="' + esc(SESSION_ID) +
@@ -1125,7 +1149,7 @@ function procHtml(p, isOpen, nowUnix) {
   const session = (SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null) || { procs: [] };
   const summaryOpen = '<details class="chamfer proc ' + esc(terminating ? 'terminating' : p.status) + '" data-index="' + esc(String(p.index)) + '"' + taskAttrs +
     (isOpen ? ' open' : '') + '>' +
-    ((diff || snap || kill) ? '<div class="proc-actions">' + diff + snap + kill + '</div>' : '') +
+    ((diff || snap || restart || kill) ? '<div class="proc-actions">' + diff + snap + restart + kill + '</div>' : '') +
     '<summary>' +
     '<span class="triangle" aria-hidden="true"></span> ' +
     '<span class="label">' + esc(p.label) + '</span>' + attemptChipHtml(session, p) + ' ' + procStatHtml(p, nowUnix) +
@@ -1239,11 +1263,12 @@ function wfDisplayState(session, node, nowUnix) {
   const procs = session.procs || [];
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
   if (!p) return live ? 'waiting' : 'stalled';
-  if (p.fail_reason === 'stop_requested') return 'terminating';
+  if (p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested') return 'terminating';
   if (p.status === 'ok') return 'done';
   if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
-    return (p.fail_reason === 'force_stopped' || p.fail_reason === 'session_end_before_proc_finish') ? 'stopped' : 'failed';
+    return (p.fail_reason === 'force_stopped' || p.fail_reason === 'force_restarted' ||
+      p.fail_reason === 'session_end_before_proc_finish') ? 'stopped' : 'failed';
   }
   if (p.status === 'skipped') return 'skipped';
   if (p.status === 'running') return live ? 'running' : 'stalled';
@@ -2105,6 +2130,7 @@ function renderSession(session, nowUnix) {
       det = wrap.firstElementChild;
       root.appendChild(det);
       initProcDiffs(det);
+      initProcKills(det);
       setupOutputScroll(det.querySelector('.output'));
       if (procIsLive(p.status)) scrollOutputToBottom(det.querySelector('.output'));
     } else {
@@ -2453,6 +2479,40 @@ function initSessionRestart() {
   if (!btn) return;
   btn.addEventListener('click', () => forceRestartSession(btn));
 }
+// ---- per-proc restart (session page) ----
+async function restartProc(btn) {
+  const session = btn.getAttribute('data-session');
+  const proc = parseInt(btn.getAttribute('data-proc-restart'), 10);
+  if (!session || Number.isNaN(proc)) return;
+  const ok = await scshConfirm({
+    title: 'Force restart this run?',
+    body: 'The container is killed and a fresh attempt of the same route starts; the rest of the job continues.',
+    confirmLabel: 'Force restart',
+    danger: true,
+  });
+  if (!ok) return;
+  btn.disabled = true;
+  setBtnLabel(btn, 'Restarting…');
+  try {
+    const resp = await fetch('/api/v1/proc/restart', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session: session, proc: proc }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok !== true) {
+      btn.disabled = false;
+      setBtnLabel(btn, 'Force restart');
+      showToast(data.error || ('restart failed (HTTP ' + resp.status + ')'));
+      return;
+    }
+    btn.remove();
+  } catch (e) {
+    btn.disabled = false;
+    setBtnLabel(btn, 'Force restart');
+    showToast(String(e));
+  }
+}
 // ---- per-proc kill (session page) ----
 async function killProc(btn) {
   const session = btn.getAttribute('data-session');
@@ -2545,6 +2605,13 @@ function initProcKills(root) {
       ev.preventDefault();
       ev.stopPropagation();
       killProc(btn);
+    });
+  });
+  (root || document).querySelectorAll('button[data-proc-restart]').forEach((btn) => {
+    btn.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      restartProc(btn);
     });
   });
 }

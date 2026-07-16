@@ -3455,47 +3455,63 @@ fn build_and_run(
         let dc = dc.clone();
         let first_index = p.index();
         scope.spawn(move || {
-          let attempt_started = std::time::Instant::now();
-          let mut first = run_one_skill(skill, rt, root, secs, p, base_ref, None, None, dc.clone(), session_ref);
-          first.duration_secs = attempt_started.elapsed().as_secs_f64();
-          first.proc_index = first_index;
-          if first.ok {
-            return first;
+          let mut proc = p;
+          let mut proc_index = first_index;
+          let mut attempts = 0u64;
+          let mut auto_retry_used = false;
+          loop {
+            attempts += 1;
+            let attempt_started = std::time::Instant::now();
+            let mut run = run_one_skill(skill, rt, root, secs, proc, base_ref, None, None, dc.clone(), session_ref);
+            run.duration_secs = attempt_started.elapsed().as_secs_f64();
+            run.proc_index = proc_index;
+            run.attempts = attempts;
+            if run.ok {
+              // A browser restart that lost the race against this attempt's own finish
+              // must not linger and respawn some future proc of the same index.
+              daemon::consume_proc_restart(session_ref, proc_index);
+              return run;
+            }
+            // A browser Force restart always respawns — each extra attempt costs the user an
+            // explicit click, so no cap and no SCSH_NO_RETRY gate. Otherwise ONE automatic
+            // retry for transient infrastructure failures (fresh clone, fresh container, new
+            // live-board row). Deterministic failures return as-is. A missing result from a
+            // TUI harness also earns the automatic retry: its pane can be killed by a stray
+            // signal or teardown before it writes the file, which a fresh run usually clears.
+            let restart_requested = daemon::consume_proc_restart(session_ref, proc_index);
+            let transient = run.fail_reason.as_deref().is_some_and(|r| {
+              failure::is_transient(r) || (r == failure::reason::RESULT_MISSING && skill.harness.is_tui())
+            });
+            if !restart_requested && !(!auto_retry_used && transient && failure::retry_enabled()) {
+              return run;
+            }
+            if !restart_requested {
+              auto_retry_used = true;
+            }
+            let reason = if restart_requested {
+              failure::reason::RESTART_REQUESTED
+            } else {
+              run.fail_reason.as_deref().unwrap_or("unknown")
+            };
+            failure::log_retry(session_ref, &skill.name, skill.harness.as_str(), skill.model.as_deref(), reason);
+            let label = format!("{}: {} (retry)", skill.harness.as_str(), skill.name);
+            let next = ui_ref.proc(label.clone(), false);
+            if let Some(c) = &dc {
+              c.proc_add(
+                next.index(),
+                &label,
+                daemon::ProcKind::Skill,
+                Some(skill.name.as_str()),
+                Some(skill.harness.as_str()),
+                skill.model.as_deref(),
+                Some(skill.skill_source.as_str()),
+                fleet_route_name(skill),
+                None,
+              );
+            }
+            proc_index = next.index();
+            proc = next;
           }
-          // One automatic retry for transient infrastructure failures (fresh clone, fresh
-          // container, new live-board row). Deterministic failures return as-is. A missing result
-          // from a TUI harness also earns a retry: its pane can be killed by a stray signal or
-          // teardown before it writes the file, which a fresh run usually clears.
-          let transient = first.fail_reason.as_deref().is_some_and(|r| {
-            failure::is_transient(r) || (r == failure::reason::RESULT_MISSING && skill.harness.is_tui())
-          });
-          if !transient || !failure::retry_enabled() {
-            return first;
-          }
-          let reason = first.fail_reason.as_deref().unwrap_or("unknown");
-          failure::log_retry(session_ref, &skill.name, skill.harness.as_str(), skill.model.as_deref(), reason);
-          let label = format!("{}: {} (retry)", skill.harness.as_str(), skill.name);
-          let p2 = ui_ref.proc(label.clone(), false);
-          if let Some(c) = &dc {
-            c.proc_add(
-              p2.index(),
-              &label,
-              daemon::ProcKind::Skill,
-              Some(skill.name.as_str()),
-              Some(skill.harness.as_str()),
-              skill.model.as_deref(),
-              Some(skill.skill_source.as_str()),
-              fleet_route_name(skill),
-              None,
-            );
-          }
-          let retry_started = std::time::Instant::now();
-          let second_index = p2.index();
-          let mut second = run_one_skill(skill, rt, root, secs, p2, base_ref, None, None, dc, session_ref);
-          second.duration_secs = retry_started.elapsed().as_secs_f64();
-          second.attempts = 2;
-          second.proc_index = second_index;
-          second
         })
       })
       .collect();
@@ -3747,7 +3763,8 @@ struct SkillRun {
   cached: bool,
   /// Wall-clock seconds of the (final) attempt — set by the orchestrator, for stats.
   duration_secs: f64,
-  /// 1, or 2 when the transient-failure retry ran — set by the orchestrator.
+  /// How many times this route ran: 1, plus one for the automatic transient-failure
+  /// retry, plus one per browser Force restart — set by the orchestrator.
   attempts: u64,
   /// The `/tmp` run dir, kept for inspection when the skill failed.
   run_dir: Option<String>,

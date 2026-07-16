@@ -278,6 +278,13 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   session page: stop every still-named container, SIGTERM (then SIGKILL) the `scsh run`
   process when its PID is known, and mark incomplete procs failed with `force_stopped`.
   Idempotent on an already-ended session.
+- `POST /api/v1/proc/stop` — body `{"session":"…","proc":N}`. Force-stop ONE run's container;
+  the rest of the job continues. The proc settles failed with `force_stopped`.
+- `POST /api/v1/proc/restart` — body `{"session":"…","proc":N}`. Force-restart ONE skill run:
+  record a restart marker for the owning `scsh run`, kill this attempt's container, and settle
+  the proc failed with `force_restarted`; the runner consumes the marker and respawns the route
+  as a fresh attempt (a new proc row that supersedes this one). Builds and annotations are
+  refused (400), as is a session whose run client is gone (409).
 - `POST /api/v1/repos/open` — body `{"path": "…"}`. Validate the path is a git repo, report
   whether it is clean, discover the harness definitions available to it, and remember it as an
   open repo. `{"ok":true,"repo":…,"clean":bool,"dirty":[…],"defs":[…]}`, or `{"ok":false,"error":…}`

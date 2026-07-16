@@ -64,6 +64,28 @@ pub fn mode_file(port: u16) -> PathBuf {
   daemon_dir().join(format!("daemon-{port}.mode"))
 }
 
+/// A tiny cross-process marker asking the owning `scsh run` to respawn one route: the
+/// daemon writes it BEFORE killing the proc's container, and the runner consumes it when
+/// that attempt comes back failed — marker present means "spawn a fresh attempt", absent
+/// means the failure stands. A plain file (like [`mode_file`]) because the run client only
+/// posts to the daemon; there is no daemon→runner channel to carry the request.
+pub fn proc_restart_marker(session_id: &str, proc_index: usize) -> PathBuf {
+  daemon_dir().join("restart-requests").join(format!("{session_id}-{proc_index}"))
+}
+
+/// Daemon side: record that the browser asked to restart this proc. Best-effort; returns
+/// whether the marker landed (a failed write degrades the restart into a plain force stop).
+pub fn request_proc_restart(session_id: &str, proc_index: usize) -> bool {
+  let path = proc_restart_marker(session_id, proc_index);
+  path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && std::fs::write(&path, b"").is_ok()
+}
+
+/// Runner side: take the restart request for this proc, if one was posted. Removing the
+/// marker is the consume — a second reader (or a later attempt) finds nothing.
+pub fn consume_proc_restart(session_id: &str, proc_index: usize) -> bool {
+  std::fs::remove_file(proc_restart_marker(session_id, proc_index)).is_ok()
+}
+
 /// True when TCP connects to the daemon's localhost port within a short timeout.
 pub fn daemon_port_reachable(port: u16) -> bool {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid localhost address");

@@ -450,7 +450,11 @@ impl Session {
         && failed.iter().all(|p| {
           matches!(
             p.fail_reason.as_deref(),
-            Some(crate::failure::reason::FORCE_STOPPED | crate::failure::reason::SESSION_END_INCOMPLETE)
+            Some(
+              crate::failure::reason::FORCE_STOPPED
+                | crate::failure::reason::FORCE_RESTARTED
+                | crate::failure::reason::SESSION_END_INCOMPLETE
+            )
           )
         });
       if interrupted {

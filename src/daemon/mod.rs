@@ -25,7 +25,8 @@ pub fn new_session_id() -> String {
 
 pub use model::{DaemonMode, ProcKind, ProcRecord, ProcStatus};
 pub use paths::{
-  absolutize_repo_path, base_url, daemon_dir, daemon_port, daemon_port_reachable, now_unix_secs, read_live_pid,
+  absolutize_repo_path, base_url, consume_proc_restart, daemon_dir, daemon_port, daemon_port_reachable, now_unix_secs,
+  read_live_pid, request_proc_restart,
 };
 pub(crate) use server::INTERNAL_REPO;
 pub use server::{chapters_sidecar_path, Server};

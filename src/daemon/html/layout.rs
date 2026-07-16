@@ -1039,6 +1039,7 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
     display: grid; grid-template-columns: repeat(2, 10.5rem); gap: 0.35rem;
   }
   .proc-actions .proc-kill,
+  .proc-actions .proc-restart,
   .proc-actions .proc-snapshot,
   .proc-actions .proc-diff {
     margin-left: 0; align-self: stretch; width: 100%;
@@ -1046,18 +1047,25 @@ pub(crate) const LIVE_ONLY_CSS: &str = r#"
   }
   .proc-actions .proc-diff { grid-column: 1; grid-row: 1; }
   .proc-actions .proc-snapshot { grid-column: 2; grid-row: 1; }
+  .proc-actions .proc-restart { grid-column: 2; grid-row: 2; }
   .proc-actions .proc-kill { grid-column: 2; grid-row: 2; }
+  .proc-actions:has(.proc-restart) .proc-kill { grid-column: 2; grid-row: 3; }
   /* Keep the summary text clear of the absolute top-right action stack. */
   details.proc:has(.proc-actions) > summary { padding-right: 11.5rem; }
   details.proc:has(.proc-actions .proc-diff) > summary { padding-right: 22.35rem; }
-  button.proc-kill {
+  button.proc-kill,
+  button.proc-restart {
     flex-shrink: 0;
     font: inherit; font-size: 0.75rem; line-height: 1.4; cursor: pointer;
-    color: var(--text); background: var(--red); border: none;
+    color: var(--text); border: none;
     padding: 0 0.45rem; opacity: 1;
   }
+  button.proc-kill { background: var(--red); }
   button.proc-kill:hover:not(:disabled) { background: var(--red); }
-  button.proc-kill:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); background: var(--border); }
+  button.proc-restart { background: var(--orange); }
+  button.proc-restart:hover:not(:disabled) { background: var(--orange); }
+  button.proc-kill:disabled,
+  button.proc-restart:disabled { cursor: default; opacity: 0.45; color: var(--text-muted); background: var(--border); }
   /* In-app confirm — replaces browser confirm() for destructive Force stop actions. */
   .scsh-dialog-backdrop {
     position: fixed; inset: 0; z-index: 3000;

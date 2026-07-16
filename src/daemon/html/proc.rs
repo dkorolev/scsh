@@ -66,7 +66,12 @@ pub(crate) fn status_glyph(status: ProcStatus) -> &'static str {
 pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reason: Option<&str>) -> String {
   let clock = elapsed.map(format_elapsed_clock);
   match status {
-    ProcStatus::Waiting | ProcStatus::Running if fail_reason == Some(crate::failure::reason::STOP_REQUESTED) => {
+    ProcStatus::Waiting | ProcStatus::Running
+      if matches!(
+        fail_reason,
+        Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+      ) =>
+    {
       match clock {
         Some(c) => format!("terminating · {c}"),
         None => "terminating".into(),
@@ -91,6 +96,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
     ProcStatus::Fail => {
       let prefix = match fail_reason {
         Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped after",
+        Some(r) if r == crate::failure::reason::FORCE_RESTARTED => "restarted after",
         Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled after",
         Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out after",
         _ => "failed in",
@@ -99,6 +105,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
         Some(c) => format!("{prefix} {c}"),
         None => match fail_reason {
           Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped".into(),
+          Some(r) if r == crate::failure::reason::FORCE_RESTARTED => "restarted".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out".into(),
           _ => "failed".into(),

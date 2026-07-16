@@ -23,7 +23,10 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     // finish detail — a result message like "2 + 3 = 5"), so show that; the transient
     // "<harness> run…" note is only for rows still working. A bare artifact path is SYSTEM
     // info and renders as code, so the eye can tell it from an agent's prose answer.
-    let terminating = proc.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED);
+    let terminating = matches!(
+      proc.fail_reason.as_deref(),
+      Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+    );
     let finished = !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting);
     let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
     let note_html =
@@ -55,7 +58,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let retry_link = retry_link_html(session, proc);
     procs_html.push_str(&format!(
       r#"<details class="chamfer proc {status_class}" id="proc-{index}" data-index="{index}"{task_attrs}>
-<div class="proc-actions">{diff_btn}{snapshot_btn}{kill_btn}</div>
+<div class="proc-actions">{diff_btn}{snapshot_btn}{restart_btn}{kill_btn}</div>
 <summary>
 <span class="triangle" aria-hidden="true"></span>
 <span class="label">{label}</span>{attempt_chip} {proc_stat}
@@ -77,6 +80,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       diff_btn = diff_btn,
       annotation_target = annotation_target,
       snapshot_btn = snapshot_btn,
+      restart_btn = proc_restart_btn_html(session, now, proc),
       kill_btn = proc_kill_btn_html(session, now, proc),
       proc_meta = proc_meta_html(proc),
       elapsed = esc(&elapsed),
@@ -344,14 +348,37 @@ fn proc_snapshot_btn_html(session_id: &str, proc: &crate::daemon::model::ProcRec
   )
 }
 
+/// True while a proc is still running with no browser stop or restart pending — the only
+/// state in which its Force stop / Force restart buttons can act.
+fn proc_accepts_kill(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> bool {
+  use crate::daemon::model::{ProcStatus, SessionLifecycle};
+  session.lifecycle_status(now) == SessionLifecycle::Running
+    && matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting)
+    && !matches!(
+      proc.fail_reason.as_deref(),
+      Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+    )
+}
+
+/// A small per-proc "Force restart" button, above Force stop. Skill runs only — builds and
+/// annotations have no respawn path — and only while the run can still be acted on.
+fn proc_restart_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
+  use crate::daemon::model::ProcKind;
+  if proc.kind != ProcKind::Skill || !proc_accepts_kill(session, now, proc) {
+    return String::new();
+  }
+  format!(
+    "<button type=\"button\" class=\"chamfer btn btn--orange btn--sm proc-restart\" data-proc-restart=\"{index}\" data-session=\"{id}\" title=\"Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues\"><span>Force restart</span></button>",
+    index = proc.index,
+    id = esc(&session.id),
+  )
+}
+
 /// A small per-proc "Force stop" button. Only rendered while that proc still runs on a
 /// live session — finished/zombie steps omit it (no grayed-out stub).
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
-  use crate::daemon::model::{ProcKind, ProcStatus, SessionLifecycle};
-  let live_session = session.lifecycle_status(now) == SessionLifecycle::Running;
-  let live_proc = matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting)
-    && proc.fail_reason.as_deref() != Some(crate::failure::reason::STOP_REQUESTED);
-  if !(live_session && live_proc) {
+  use crate::daemon::model::ProcKind;
+  if !proc_accepts_kill(session, now, proc) {
     return String::new();
   }
   format!(

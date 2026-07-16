@@ -25,9 +25,15 @@ pub mod reason {
   pub const THREAD_PANICKED: &str = "skill_thread_panicked";
   /// A browser stop request was accepted and container teardown is still in progress.
   pub const STOP_REQUESTED: &str = "stop_requested";
+  /// A browser restart request was accepted and container teardown is still in progress;
+  /// the owning `scsh run` respawns the route as a fresh attempt once this one settles.
+  pub const RESTART_REQUESTED: &str = "restart_requested";
   pub const SESSION_END_INCOMPLETE: &str = "session_end_before_proc_finish";
   pub const ANNOTATION_TIMED_OUT: &str = "annotation_timed_out";
   pub const FORCE_STOPPED: &str = "force_stopped";
+  /// Settled counterpart of [`RESTART_REQUESTED`]: this attempt was stopped from the
+  /// session browser to make room for the fresh attempt that supersedes it.
+  pub const FORCE_RESTARTED: &str = "force_restarted";
   pub const DAEMON_DRAIN_TIMEOUT: &str = "daemon_poster_drain_timeout";
   pub const DAEMON_POST_FAILED: &str = "daemon_post_failed";
 }

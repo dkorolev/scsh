@@ -603,9 +603,10 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   assert!(!html.contains(r#"data-harness-stop=""#), "zombie sessions must not raise stop-all buttons");
   let page = session_page(&store, "castab").expect("session renders");
   assert!(!page.contains(r#"data-proc-stop="0""#), "zombie omits per-proc Force stop: {page}");
+  assert!(!page.contains(r#"data-proc-restart="0""#), "zombie omits per-proc Force restart: {page}");
   assert!(!page.contains(r#"id="session-stop""#), "zombie omits job Force stop: {page}");
 
-  // The same session, seen moments ago, gets an enabled kill.
+  // The same session, seen moments ago, gets an enabled kill and a restart.
   let mut live = store_with_cast_proc(ProcStatus::Running);
   live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
   let html = super::index_page(&live);
@@ -613,6 +614,7 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   let page = session_page(&live, "castab").expect("session renders");
   assert!(page.contains(r#"data-proc-stop="0""#), "live sessions offer per-proc kill");
   assert!(!page.contains(r#"data-proc-stop="0" disabled"#), "live kill is enabled: {page}");
+  assert!(page.contains(r#"data-proc-restart="0""#), "live skill runs offer per-proc Force restart: {page}");
   assert!(page.contains(r#"id="session-stop""#), "live job offers Force stop");
 
   let proc = &mut live.sessions.get_mut("castab").unwrap().procs[0];
@@ -624,6 +626,16 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   let page = session_page(&live, "castab").expect("terminating session renders");
   assert!(page.contains(r#"class="chamfer proc terminating""#), "proc island turns orange while stopping: {page}");
   assert!(!page.contains(r#"data-proc-stop="0""#), "a terminating proc cannot be stopped twice: {page}");
+  assert!(!page.contains(r#"data-proc-restart="0""#), "a terminating proc cannot be restarted: {page}");
+
+  // A pending browser restart also parks both buttons and turns the island orange.
+  let proc = &mut live.sessions.get_mut("castab").unwrap().procs[0];
+  proc.fail_reason = Some(crate::failure::reason::RESTART_REQUESTED.into());
+  proc.detail = Some("terminating container from the session browser; a fresh attempt follows".into());
+  let page = session_page(&live, "castab").expect("restarting session renders");
+  assert!(page.contains(r#"class="chamfer proc terminating""#), "proc island turns orange while restarting: {page}");
+  assert!(!page.contains(r#"data-proc-stop="0""#), "a restarting proc cannot be stopped: {page}");
+  assert!(!page.contains(r#"data-proc-restart="0""#), "a restarting proc cannot be restarted twice: {page}");
 }
 
 #[test]
@@ -1063,6 +1075,7 @@ fn offline_export_carries_lede_and_full_meta() {
   assert!(!html.contains("Force stop"), "export must not mention Force stop: {html}");
   assert!(!html.contains("session-stop"), "export must not ship #session-stop: {html}");
   assert!(!html.contains("proc-kill"), "export must not ship .proc-kill: {html}");
+  assert!(!html.contains("proc-restart"), "export must not ship .proc-restart: {html}");
   assert!(!html.contains("scsh-dialog"), "export must not ship the Force stop dialog: {html}");
 }
 
@@ -2336,8 +2349,12 @@ fn review_round_five_fixes_hold() {
   assert!(!shtml.contains("fullscreenEl: box"), "fullscreen must contain only the player, not the scsh cast card");
   assert!(!shtml.contains(".cast:fullscreen"), "the outer cast card is never the fullscreen element");
   assert!(
-    shtml.contains("button.proc-kill") && shtml.contains("color: var(--text); background: var(--red); border: none;"),
+    shtml.contains("button.proc-kill { background: var(--red); }") && shtml.contains("color: var(--text); border: none;"),
     "Force stop must keep its red chamfered border despite button.btn specificity: {shtml}"
+  );
+  assert!(
+    shtml.contains("button.proc-restart { background: var(--orange); }"),
+    "Force restart must keep its orange chamfered border despite button.btn specificity: {shtml}"
   );
 }
 

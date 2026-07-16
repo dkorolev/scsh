@@ -290,6 +290,27 @@ impl Server {
   }
 }
 
+/// A browser kill request (Force stop or Force restart) that was accepted but never
+/// finalized, with the terminal reason/detail it settles to when the session ends first.
+struct PendingBrowserKill {
+  settled_reason: &'static str,
+  settled_detail: &'static str,
+}
+
+fn pending_browser_kill(fail_reason: Option<&str>) -> Option<PendingBrowserKill> {
+  match fail_reason {
+    Some(crate::failure::reason::STOP_REQUESTED) => Some(PendingBrowserKill {
+      settled_reason: crate::failure::reason::FORCE_STOPPED,
+      settled_detail: "stopped from the session browser",
+    }),
+    Some(crate::failure::reason::RESTART_REQUESTED) => Some(PendingBrowserKill {
+      settled_reason: crate::failure::reason::FORCE_RESTARTED,
+      settled_detail: "restarted from the session browser",
+    }),
+    _ => None,
+  }
+}
+
 /// Persisted sessions must never claim work is still running after the owning process or
 /// session ended. Annotation is bounded by its watchdog, so an orphaned annotation row is
 /// represented as a terminal timeout; other proc kinds retain the generic incomplete-session
@@ -300,10 +321,10 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
     if !matches!(proc.status, ProcStatus::Running | ProcStatus::Waiting) {
       continue;
     }
-    if proc.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+    if let Some(pending) = pending_browser_kill(proc.fail_reason.as_deref()) {
       proc.status = ProcStatus::Fail;
-      proc.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
-      proc.detail = Some("stopped from the session browser".into());
+      proc.fail_reason = Some(pending.settled_reason.into());
+      proc.detail = Some(pending.settled_detail.into());
       if proc.elapsed.is_none() {
         proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
       }
@@ -797,6 +818,11 @@ fn route(
       proc_stop_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/proc/restart" {
+    let (status, body, mutated) =
+      proc_restart_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/harness/stop" {
     let (status, body, mutated) =
       harness_stop_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
@@ -1005,10 +1031,10 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
             s.run_pid = None;
             for p in &mut s.procs {
               if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
-                if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+                if let Some(pending) = pending_browser_kill(p.fail_reason.as_deref()) {
                   p.status = ProcStatus::Fail;
-                  p.fail_reason = Some(crate::failure::reason::FORCE_STOPPED.into());
-                  p.detail = Some("stopped from the session browser".into());
+                  p.fail_reason = Some(pending.settled_reason.into());
+                  p.detail = Some(pending.settled_detail.into());
                   continue;
                 }
                 p.status = ProcStatus::Fail;
@@ -1124,7 +1150,11 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let path = field_str(&obj, "path").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
         p.cast_path = if path.is_empty() { None } else { Some(path.clone()) };
-        if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) && !path.is_empty() {
+        if matches!(
+          p.fail_reason.as_deref(),
+          Some(crate::failure::reason::FORCE_STOPPED) | Some(crate::failure::reason::FORCE_RESTARTED)
+        ) && !path.is_empty()
+        {
           crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
         }
         true
@@ -1194,10 +1224,14 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let fail_reason = field_str(&obj, "fail_reason");
       let elapsed = field_num(&obj, "elapsed");
       if let Some(p) = store.proc_mut(&session, proc_index) {
-        // A late client finish must not overwrite an accepted or completed browser stop.
+        // A late client finish must not overwrite an accepted or completed browser stop
+        // or restart — the settled proc is the record; the respawn is a new proc row.
         if matches!(
           p.fail_reason.as_deref(),
-          Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::FORCE_STOPPED)
+          Some(crate::failure::reason::STOP_REQUESTED)
+            | Some(crate::failure::reason::FORCE_STOPPED)
+            | Some(crate::failure::reason::RESTART_REQUESTED)
+            | Some(crate::failure::reason::FORCE_RESTARTED)
         ) {
           return true;
         }
@@ -2225,6 +2259,103 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
   (200, "{\"ok\":true}".into(), true)
 }
 
+/// `POST /api/v1/proc/restart` — body `{"session":"…","proc":N}`. Force-restart ONE skill run:
+/// record the request as a marker file for the owning `scsh run`, kill this attempt's container,
+/// and settle the proc as `force_restarted`; the runner consumes the marker when the attempt
+/// comes back failed and respawns the route as a fresh proc (the existing retry plumbing), so
+/// the new attempt supersedes this one. Builds and annotations have no respawn path and are
+/// refused. Requires the run client to still be attached — with no runner alive nothing could
+/// act on the marker, so the request is refused rather than degraded into a plain stop.
+#[cfg(test)]
+fn proc_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  proc_restart_response_notifying(body, store, || {})
+}
+
+fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, notify: F) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let session_id = match field_str(&obj, "session") {
+    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+    _ => return (400, err_body("give a session id"), false),
+  };
+  let Some(index) = field_num(&obj, "proc").map(|n| n as usize) else {
+    return (400, err_body("give a proc index"), false);
+  };
+  let runtime = crate::runtime::detect_runtime().map(|r| r.name);
+  let (container, label, suppress) = {
+    let mut store = lock_store(store);
+    let Some(s) = store.sessions.get_mut(&session_id) else {
+      return (404, err_body("session not found"), false);
+    };
+    let client_connected = s.client_connected;
+    let Some(p) = s.procs.iter_mut().find(|p| p.index == index) else {
+      return (404, err_body("proc not found"), false);
+    };
+    if p.kind != ProcKind::Skill {
+      return (400, err_body("only skill runs can be restarted — builds and annotations have no respawn path"), false);
+    }
+    if p.status != ProcStatus::Running && p.status != ProcStatus::Waiting {
+      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
+    }
+    if matches!(
+      p.fail_reason.as_deref(),
+      Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+    ) {
+      return (200, "{\"ok\":true,\"already_requested\":true}".into(), false);
+    }
+    if !client_connected {
+      return (409, err_body("the run client is gone — nothing is left to respawn this route"), false);
+    }
+    // The marker is the whole daemon→runner channel: without it this would be a plain
+    // force stop wearing a restart label, so a failed write refuses the request instead.
+    if !crate::daemon::request_proc_restart(&session_id, index) {
+      return (500, err_body("could not record the restart request"), false);
+    }
+    let container = p.container_name.take();
+    p.fail_reason = Some(crate::failure::reason::RESTART_REQUESTED.into());
+    p.detail = Some("terminating container from the session browser; a fresh attempt follows".into());
+    let label = p.label.clone();
+    s.last_seen_at = now_unix_secs();
+    (container, label, p.cast_path.clone())
+  };
+  // Publish the accepted request before teardown, which may take a second or more.
+  notify();
+  // This attempt's recording ends mid-scene; the fresh attempt gets its own annotation.
+  if let Some(path) = suppress {
+    crate::annotate::suppress_automatic_annotation(std::path::Path::new(&path));
+  }
+  // Tear down outside the store lock: container stop sleeps up to ~1s.
+  if let (Some(rt), Some(name)) = (runtime.as_deref(), container.as_deref()) {
+    crate::ui::signals::stop_container(rt, name);
+  }
+  let finalized = {
+    let mut store = lock_store(store);
+    let Some(p) = store.proc_mut(&session_id, index) else {
+      return (404, err_body("proc disappeared during restart"), true);
+    };
+    if p.fail_reason.as_deref() != Some(crate::failure::reason::RESTART_REQUESTED) {
+      false
+    } else {
+      p.status = ProcStatus::Fail;
+      p.fail_reason = Some(crate::failure::reason::FORCE_RESTARTED.into());
+      p.detail = Some("restarted from the session browser; superseded by the fresh attempt".into());
+      true
+    }
+  };
+  notify();
+  if finalized {
+    crate::failure::log_session_proc(
+      &session_id,
+      crate::failure::reason::FORCE_RESTARTED,
+      &label,
+      "restarted from the session browser",
+    );
+  }
+  (200, "{\"ok\":true}".into(), true)
+}
+
 /// `POST /api/v1/harness/stop` — body `{"harness":"grok"}`. Stop EVERY still-running skill
 /// container of one harness across all live sessions (the "grok is out of quota" button) and
 /// expose each proc as `stop_requested` while teardown runs, then settle it as stopped.
@@ -3190,6 +3321,104 @@ mod tests {
     assert!(crate::annotate::automatic_annotation_suppressed(&cast));
     assert!(!dir.join("source.chapters.json").exists());
     let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[test]
+  fn proc_restart_settles_the_attempt_and_leaves_a_marker_for_the_runner() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let proc = |index: usize, kind: ProcKind| ProcRecord {
+      index,
+      label: format!("claude: review-{index}"),
+      kind,
+      status: ProcStatus::Running,
+      skill_name: Some(format!("review-{index}")),
+      harness: Some("claude".into()),
+      model: None,
+      started_at: Some(50),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None, // no live container — avoid a 2s stop_container sleep in the unit test
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+    };
+    {
+      let mut s = store.lock().unwrap();
+      s.insert_session(
+        "rst01".into(),
+        Session {
+          id: "rst01".into(),
+          started_at: 50,
+          ended_at: None,
+          profile: None,
+          kind: None,
+          repo: "/r".into(),
+          branch: "main".into(),
+          skills: Vec::new(),
+          procs: vec![proc(0, ProcKind::Skill), proc(1, ProcKind::Skill), proc(2, ProcKind::Build)],
+          last_seen_at: 50,
+          client_connected: true,
+          run_pid: None,
+          workflow: None,
+          parent_session: None,
+        },
+      );
+    }
+    let (status, body, mutated) = proc_restart_response(r#"{"session":"rst01","proc":1}"#, &store);
+    assert_eq!(status, 200, "got: {body}");
+    assert!(mutated);
+    assert!(body.contains(r#""ok":true"#));
+    {
+      let guard = store.lock().unwrap();
+      let session = guard.sessions.get("rst01").unwrap();
+      // Only proc 1 was settled; the session and its sibling proc keep running.
+      assert!(session.ended_at.is_none());
+      assert_eq!(session.procs[0].status, ProcStatus::Running);
+      assert_eq!(session.procs[1].status, ProcStatus::Fail);
+      assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+    }
+    // The marker the owning `scsh run` consumes to respawn the route was written.
+    assert!(crate::daemon::paths::proc_restart_marker("rst01", 1).is_file());
+    assert!(crate::daemon::consume_proc_restart("rst01", 1));
+    assert!(!crate::daemon::consume_proc_restart("rst01", 1), "consume is once");
+    // A late client finish cannot resurrect the settled attempt.
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    assert!(handle_api_post(
+      "/api/v1/proc/finish",
+      r#"{"session":"rst01","proc":1,"status":"ok","fail_reason":null,"detail":"late success","elapsed":2}"#,
+      &store,
+      &prune,
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let restarted = &guard.sessions.get("rst01").unwrap().procs[1];
+      assert_eq!(restarted.status, ProcStatus::Fail);
+      assert_eq!(restarted.fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
+    }
+    // Idempotent on a proc that already settled; builds have no respawn path; unknown → 404.
+    let (status2, body2, mutated2) = proc_restart_response(r#"{"session":"rst01","proc":1}"#, &store);
+    assert_eq!(status2, 200);
+    assert!(!mutated2);
+    assert!(body2.contains("already_ended"));
+    let (status3, body3, _) = proc_restart_response(r#"{"session":"rst01","proc":2}"#, &store);
+    assert_eq!(status3, 400, "got: {body3}");
+    let (status4, _, _) = proc_restart_response(r#"{"session":"rst01","proc":9}"#, &store);
+    assert_eq!(status4, 404);
+    // A gone run client means nothing is left to act on the marker → refused.
+    {
+      let mut guard = store.lock().unwrap();
+      guard.sessions.get_mut("rst01").unwrap().client_connected = false;
+    }
+    let (status5, body5, _) = proc_restart_response(r#"{"session":"rst01","proc":0}"#, &store);
+    assert_eq!(status5, 409, "got: {body5}");
+    assert!(!crate::daemon::paths::proc_restart_marker("rst01", 0).exists(), "no marker without a runner");
   }
 
   #[test]

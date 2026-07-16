@@ -705,14 +705,22 @@ pub fn display_state(
         WorkflowDisplayState::Stalled
       }
     }
-    Some(p) if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) => {
+    Some(p)
+      if matches!(
+        p.fail_reason.as_deref(),
+        Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+      ) =>
+    {
       WorkflowDisplayState::Terminating
     }
     Some(p) => match p.status {
       ProcStatus::Ok => WorkflowDisplayState::Done,
       ProcStatus::Graceful => WorkflowDisplayState::Graceful,
       ProcStatus::Fail => {
-        if p.fail_reason.as_deref() == Some(crate::failure::reason::FORCE_STOPPED) {
+        if matches!(
+          p.fail_reason.as_deref(),
+          Some(crate::failure::reason::FORCE_STOPPED) | Some(crate::failure::reason::FORCE_RESTARTED)
+        ) {
           WorkflowDisplayState::ForceStopped
         } else {
           WorkflowDisplayState::Failed

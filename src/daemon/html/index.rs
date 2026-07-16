@@ -191,7 +191,10 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
       let live = p.status == ProcStatus::Running || p.status == ProcStatus::Waiting;
       if live && p.kind == ProcKind::Skill {
         if let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) {
-          let target = if p.fail_reason.as_deref() == Some(crate::failure::reason::STOP_REQUESTED) {
+          let target = if matches!(
+            p.fail_reason.as_deref(),
+            Some(crate::failure::reason::STOP_REQUESTED) | Some(crate::failure::reason::RESTART_REQUESTED)
+          ) {
             &mut terminating
           } else {
             &mut counts
