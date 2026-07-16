@@ -703,7 +703,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
   .graceful .glyph { color: var(--orange); }
-  .running .glyph { color: var(--cyan); }
+  /* Running is ORANGE everywhere (nodes, rows, legend); cyan stays for waiting. */
+  .running .glyph { color: var(--orange); }
+  .waiting .glyph { color: var(--cyan); }
   .skipped .glyph, details.proc.skipped summary .label { color: var(--text-muted); }
   .proc-meta {
     font-size: 0.85rem; margin: 0.35rem 0 0.5rem; display: flex; flex-wrap: wrap; gap: 0.35rem 0.75rem;
