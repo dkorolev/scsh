@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
 /// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 17] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 18] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -36,6 +36,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 17] {
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
     ("demo-loop-break", include_str!("harness_defs/demo-loop-break.yml")),
     ("demo-beautiful-loop", include_str!("harness_defs/demo-beautiful-loop.yml")),
+    ("gorgeous-pipeline", include_str!("harness_defs/gorgeous-pipeline.yml")),
     ("big-beautiful-build", include_str!("harness_defs/big-beautiful-build.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
@@ -1511,6 +1512,61 @@ mod tests {
     assert_eq!(carry.do_while.as_deref(), Some("check"));
     assert_eq!(do_while_body(&def.steps, carry), ["check", "increment", "carry"]);
     assert!(check.render_skill_body().contains("exits this do-while immediately"));
+  }
+
+  #[test]
+  fn builtin_gorgeous_pipeline_reviews_the_current_branch_in_a_loop() {
+    let def = builtin("gorgeous-pipeline");
+    // demo-beautiful-loop minus the scaffolded `implement` step: the branch already
+    // carries the work, so the pipeline starts at `prepare`.
+    assert_eq!(def.steps.len(), 34);
+    assert!(def.steps.iter().all(|s| s.id != "implement"), "no scaffolding step");
+
+    let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
+    assert!(prepare.needs.is_empty(), "prepare is the first step");
+    assert!(prepare.commits, "the PR description lands as a commit on the caller's branch");
+    let prepare_words = prepare.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(prepare_words.contains("Write or update `PR-DESCRIPTION.md`"), "updates an existing description too");
+
+    let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
+    assert_eq!(fix.needs, vec!["decide".to_string()]);
+    assert!(fix.commits, "fixes come back as commits");
+
+    // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
+    let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
+    assert!(decide.break_loop);
+    assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
+    let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
+    assert_eq!(collect.do_while.as_deref(), Some("decide"));
+    assert!(collect.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT" && o.ty == OutputType::Bool));
+
+    // The bundled route standard, both batches: 5 profiles × (Opus 4.8, Codex Terra, Cursor Auto).
+    let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
+    let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
+    assert_eq!((initial.len(), reviewers.len()), (15, 15));
+    for batch in [&initial, &reviewers] {
+      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_opus")).count(), 5);
+      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_terra")).count(), 5);
+      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_cursor")).count(), 5);
+    }
+    for r in initial.iter().chain(&reviewers) {
+      assert!(!r.commits, "reviewers are read-only");
+      let words = r.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+      assert!(
+        words.contains("the commits since the current branch diverged from the repository's default branch"),
+        "{} reviews THIS branch's change set, not the whole tree",
+        r.id
+      );
+      assert!(
+        words.contains("Never request, recommend, or create any additional PR-description section"),
+        "{} enforces the PR-description policy",
+        r.id
+      );
+      if r.id.ends_with("_terra") {
+        assert_eq!(r.agent.harness, crate::config::Harness::Codex);
+        assert_eq!(r.agent.effort.as_deref(), Some("high"));
+      }
+    }
   }
 
   #[test]

@@ -7680,6 +7680,8 @@ fn print_help_defs() {
   help_row("demo-beautiful-loop", "Review loop: initial panel -> decide -> fix -> fresh panel; decide can break");
   help_cont("before any fix. Feedback rides the loop-carried channel, so review comments never");
   help_cont("enter git history.");
+  help_row("gorgeous-pipeline", "The review loop on YOUR branch: prepare PR-DESCRIPTION.md, then the 15-route");
+  help_cont("Opus/Codex/Cursor fleet loops decide -> fix -> review until the approval bar is met.");
   println!();
 }
 
