@@ -385,6 +385,9 @@ fn ui_review_fixes_hold() {
   assert!(js.contains("running:'◆'"), "the JS graph mirror uses the filled diamond");
   assert!(js.contains("waiting:'◇'"), "the JS graph mirror uses the hollow diamond");
   assert!(!js.contains("◉") && !js.contains("○"), "no circle glyphs remain");
+  // Running is orange EVERYWHERE — the fleet-row glyph included; cyan stays for waiting.
+  assert!(html.contains(".running .glyph { color: var(--orange); }"), "fleet running diamond is orange");
+  assert!(html.contains(".waiting .glyph { color: var(--cyan); }"), "waiting keeps cyan");
   // The running pulse is a brightness swell — the chamfer clip would swallow a
   // box-shadow halo — and the zoom cluster is chamfered like every other control.
   assert!(html.contains("50% { filter: brightness(1.45); }"), "running nodes pulse via brightness");
