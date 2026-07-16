@@ -634,11 +634,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fleet-row.fail .glyph { color: var(--red); }
   .fleet-harness { font-size: 0.75rem; margin-top: 0.1rem; }
   .fleet-jump {
+    --cut: 3px; --bw: 1px;
     font: inherit; font-size: 0.8rem; line-height: 1.3; cursor: pointer;
-    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
-    border-radius: 4px; padding: 0 0.4rem; opacity: 0.85;
+    color: var(--cyan); background: var(--cyan); border: none;
+    padding: 0 0.4rem; opacity: 0.85;
   }
-  .fleet-jump:hover { opacity: 1; background: rgba(88, 166, 255, 0.12); }
+  .fleet-jump::before { background: var(--surface); }
+  .fleet-jump:hover { opacity: 1; }
+  .fleet-jump:hover::before { background: rgba(88, 166, 255, 0.12); }
   .fleet-jump-cell { width: 2.5rem; text-align: right; }
   /* Chamfered status row: the outer layer paints the border ring plus a left accent
      stripe wide enough to wrap the cut corners; the ::before surface insets past it. */
@@ -836,8 +839,9 @@ pub(crate) const PAGE_CSS: &str = r#"
      underline) covers exactly those six letters — never the badge or the age stamp. */
   .job-id { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
   .hchip {
+    --cut: 3px; --bw: 0px;
     display: inline-flex; align-items: center; justify-content: center;
-    width: 1.15rem; height: 1.15rem; border-radius: 4px; margin-right: 0.2rem;
+    width: 1.15rem; height: 1.15rem; margin-right: 0.2rem;
     font-size: 0.7rem; font-weight: 700; color: #0d1117; background: var(--hchip-bg, #8b949e);
     vertical-align: middle; cursor: pointer; text-decoration: none;
   }
@@ -847,8 +851,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .hchip--grok { --hchip-bg: #d4a72c; }
   .hchip--cursor { --hchip-bg: #a371f7; }
   .hchip--done { opacity: 0.35; }
-  .hchip:hover { transform: scale(1.3); opacity: 1; }
-  .hchip:focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; opacity: 1; }
+  .hchip:hover { transform: scale(1.25); opacity: 1; }
+  /* Brightness, not an outline ring: the chamfer clip would swallow the outline. */
+  .hchip:focus-visible { filter: brightness(1.35); outline: none; opacity: 1; }
   .ui-tip {
     --cut: 5px; --bw: 1px;
     position: fixed; z-index: 100; pointer-events: none;
@@ -861,11 +866,13 @@ pub(crate) const PAGE_CSS: &str = r#"
   .ui-tip::before { background: #1c2128; }
   .chip-count { color: var(--text-muted); margin-left: 0.25rem; font-size: 0.85rem; }
   .image-build-btn {
+    --cut: 3px; --bw: 1px;
     font: inherit; font-size: 0.75rem; line-height: 1.5; cursor: pointer; white-space: nowrap;
-    color: var(--cyan); background: transparent; border: 1px solid var(--cyan);
-    border-radius: 4px; padding: 0 0.5rem;
+    color: var(--cyan); background: var(--cyan); border: none;
+    padding: 0 0.5rem;
   }
-  .image-build-btn:hover:not(:disabled) { background: rgba(88, 166, 255, 0.12); }
+  .image-build-btn::before { background: var(--surface); }
+  .image-build-btn:hover:not(:disabled)::before { background: rgba(88, 166, 255, 0.12); }
   .image-build-btn:disabled { cursor: default; opacity: 0.55; }
   /* Diff chip stays on the summary row (right edge). */
   a.proc-diff, span.proc-diff {
@@ -926,7 +933,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* ── cast player embed ── */
   .cast {
     position: relative; margin: 0.5rem 0; border: 1px solid var(--border);
-    border-radius: 6px; overflow: hidden; background: #000;
+    overflow: hidden; background: #000;
     width: 100%; min-width: 0; max-width: 100%; box-sizing: border-box;
   }
   .cast-toolbar {
@@ -934,9 +941,11 @@ pub(crate) const PAGE_CSS: &str = r#"
     padding: 0.4rem 0.55rem; background: var(--surface); font-size: 0.8rem;
     border-bottom: 1px solid var(--border);
   }
+  /* Square chips — the toolbar's state tints override border-color, so these keep a
+     real border (no chamfer overlay) and just drop the rounding. */
   .cast-toolbar button, .cast-toolbar a {
     font: inherit; color: var(--text); background: none; border: 1px solid var(--border);
-    border-radius: 4px; padding: 0.15rem 0.55rem; cursor: pointer; text-decoration: none;
+    padding: 0.15rem 0.55rem; cursor: pointer; text-decoration: none;
   }
   .cast-toolbar button:hover, .cast-toolbar a:hover { border-color: var(--cyan); color: var(--cyan); }
   .cast-toolbar button.on { border-color: var(--red); color: var(--red); }
@@ -960,13 +969,6 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-annotation--running { color: var(--orange); }
   .wf-annotation--ok { color: var(--green); }
   .wf-annotation--fail { color: var(--red); }
-  /* The job-level snapshot download wears the SAME style — one download family. */
-  .dl-snap {
-    display: inline-block; font: inherit; font-size: 0.8rem; line-height: 1.5;
-    color: var(--cyan); background: none; border: 1px solid var(--cyan);
-    border-radius: 4px; padding: 0.15rem 0.55rem; text-decoration: none; cursor: pointer;
-  }
-  .dl-snap:hover { background: rgba(88, 166, 255, 0.12); }
   .cast-keys { margin-left: auto; font-size: 0.72rem; color: var(--text-muted); }
   .cast-summary {
     padding: 0.45rem 0.65rem; font-size: 0.9rem; line-height: 1.4;

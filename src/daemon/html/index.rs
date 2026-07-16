@@ -639,7 +639,7 @@ fn harness_chips_html(session: &Session) -> String {
       None => format!("#proc-{}", p.index),
     };
     chips.push_str(&format!(
-      "<a class=\"hchip hchip--{h}{done}\" href=\"/job/{session_id}{fragment}\" data-tip=\"{tip}\"{running_attr}>{letter}</a>",
+      "<a class=\"chamfer hchip hchip--{h}{done}\" href=\"/job/{session_id}{fragment}\" data-tip=\"{tip}\"{running_attr}>{letter}</a>",
       h = esc(h),
       done = if done { " hchip--done" } else { "" },
       session_id = esc(&session.id),
