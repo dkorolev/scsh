@@ -362,16 +362,12 @@ pub fn demo_yaml() -> &'static str {
 
 /// `scsh`'s own skills, embedded at build time, that `scsh installskills` and
 /// `scsh updateskills` install into a user's repo as `(repo-relative path, contents)` pairs.
-/// The bundle contains the complete beautiful delivery family, all five reviewer specialties,
-/// and the original harness demo/self-test.
-pub fn bundled_skills() -> [(&'static str, &'static str); 12] {
+/// The bundle contains the five reviewer specialties and the original harness
+/// demo/self-test — and deliberately nothing else: the delivery-pipeline skill families
+/// live in their own repositories (dkorolev/beautiful-skills and friends) and install from
+/// source (`scsh installskills --global <url>`), so the bundle can never drift from them.
+pub fn bundled_skills() -> [(&'static str, &'static str); 6] {
   [
-    (".skills/big-beautiful-build/SKILL.md", include_str!("../.skills/big-beautiful-build/SKILL.md")),
-    (".skills/fast-beautiful-forward/SKILL.md", include_str!("../.skills/fast-beautiful-forward/SKILL.md")),
-    (".skills/code-beautiful-review/SKILL.md", include_str!("../.skills/code-beautiful-review/SKILL.md")),
-    (".skills/the-beautiful-loop/SKILL.md", include_str!("../.skills/the-beautiful-loop/SKILL.md")),
-    (".skills/prepare-beautiful-pr/SKILL.md", include_str!("../.skills/prepare-beautiful-pr/SKILL.md")),
-    (".skills/send-beautiful-pr/SKILL.md", include_str!("../.skills/send-beautiful-pr/SKILL.md")),
     (".skills/conventions-reviewer/SKILL.md", include_str!("../.skills/conventions-reviewer/SKILL.md")),
     (".skills/justification-reviewer/SKILL.md", include_str!("../.skills/justification-reviewer/SKILL.md")),
     (".skills/reviewability-reviewer/SKILL.md", include_str!("../.skills/reviewability-reviewer/SKILL.md")),
@@ -1549,16 +1545,10 @@ mod tests {
   }
 
   #[test]
-  fn bundled_skills_ship_the_beautiful_family_and_reviewers() {
+  fn bundled_skills_ship_the_reviewers_and_nothing_that_can_drift() {
     let skills = bundled_skills();
-    assert_eq!(skills.len(), 12);
+    assert_eq!(skills.len(), 6);
     for name in [
-      "big-beautiful-build",
-      "fast-beautiful-forward",
-      "code-beautiful-review",
-      "the-beautiful-loop",
-      "prepare-beautiful-pr",
-      "send-beautiful-pr",
       "conventions-reviewer",
       "justification-reviewer",
       "reviewability-reviewer",
@@ -1573,12 +1563,6 @@ mod tests {
     }
     let manifest = validate(bundled_skills_manifest()).expect("bundled manifest should validate");
     for name in [
-      "big-beautiful-build",
-      "fast-beautiful-forward",
-      "code-beautiful-review",
-      "the-beautiful-loop",
-      "prepare-beautiful-pr",
-      "send-beautiful-pr",
       "conventions-reviewer",
       "justification-reviewer",
       "reviewability-reviewer",
@@ -1587,14 +1571,15 @@ mod tests {
     ] {
       assert!(manifest.skills.iter().any(|skill| skill.name == name), "bundled manifest is missing {name}");
     }
-    let feature_factory = manifest
-      .skills
-      .iter()
-      .find(|skill| skill.name == "big-beautiful-build")
-      .expect("bundled manifest should contain big-beautiful-build");
-    assert_eq!(feature_factory.harness, Some(Harness::Cursor));
-    assert_eq!(feature_factory.model.as_deref(), Some("auto"));
-    assert_eq!(feature_factory.effort, None);
+    // The delivery-pipeline families live in their own repositories and install from
+    // source — the bundle carries NO copy of them, so it can never drift from them.
+    for (path, _) in &skills {
+      assert!(!path.contains("beautiful") && !path.contains("gorgeous"), "drift-prone copy bundled: {path}");
+    }
+    assert!(
+      !manifest.skills.iter().any(|s| s.name.contains("beautiful") || s.name.contains("gorgeous")),
+      "the bundled manifest must not declare delivery-family profiles"
+    );
   }
 
   #[test]
@@ -1613,8 +1598,6 @@ mod tests {
       );
     }
     for name in [
-      "code-beautiful-review",
-      "the-beautiful-loop",
       "conventions-reviewer",
       "justification-reviewer",
       "reviewability-reviewer",

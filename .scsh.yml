@@ -77,47 +77,6 @@ skills:
       cursor-auto:
         harness: cursor
         model: auto
-  big-beautiful-build:
-    harness: cursor
-    model: auto
-    timeout: 1200
-    profile: big-beautiful-build
-    result: tmp/big-beautiful-build.md
-  fast-beautiful-forward:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
-    timeout: 1200
-    profile: fast-beautiful-forward
-    result: tmp/fast-beautiful-forward.md
-  code-beautiful-review:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
-    timeout: 1200
-    profile: code-beautiful-review
-    result: tmp/code-beautiful-review.md
-  prepare-beautiful-pr:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
-    timeout: 1200
-    profile: prepare-beautiful-pr
-    result: tmp/prepare-beautiful-pr.md
-  the-beautiful-loop:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
-    timeout: 7200
-    profile: the-beautiful-loop
-    result: tmp/the-beautiful-loop.md
-  send-beautiful-pr:
-    harness: codex
-    model: gpt-5.6-terra
-    effort: high
-    timeout: 1200
-    profile: send-beautiful-pr
-    result: tmp/send-beautiful-pr.md
   harness-smoke:
     profile: harness-smoke
     timeout: 600

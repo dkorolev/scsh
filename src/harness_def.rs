@@ -309,17 +309,19 @@ pub struct StepAgent {
   pub effort: Option<String>,
 }
 
-/// The authored work for a workflow step. Inline prompts suit small jobs; a bundled skill keeps
-/// a substantial reusable contract in its canonical `.skills/<name>/SKILL.md` source.
+/// The authored work for a workflow step. Inline prompts suit small jobs; a skill reference
+/// keeps a substantial reusable contract in its canonical `.skills/<name>/SKILL.md` source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepTask {
   /// Prose written directly in the harness definition's `prompt:` block.
   Prompt(String),
-  /// A named skill from [`config::bundled_skills`], resolved while the definition is parsed.
-  BundledSkill {
+  /// A named skill, resolved while the definition is parsed: the bundle
+  /// ([`config::bundled_skills`]), then the enclosing repository's `.skills/`, then the
+  /// machine-wide install (`$SCSH_HOME/.skills/`, written by `scsh installskills --global`).
+  Skill {
     /// Stable skill name shown in the definition and errors.
     name: String,
-    /// Canonical embedded `SKILL.md` body delivered to the agent.
+    /// The resolved `SKILL.md` body delivered to the agent.
     body: String,
   },
 }
@@ -328,7 +330,7 @@ impl StepTask {
   /// The exact prose delivered before `scsh` appends the workflow I/O contract.
   pub fn body(&self) -> &str {
     match self {
-      StepTask::Prompt(body) | StepTask::BundledSkill { body, .. } => body,
+      StepTask::Prompt(body) | StepTask::Skill { body, .. } => body,
     }
   }
 }
@@ -591,9 +593,12 @@ pub fn discover(repo_root: &Path) -> Discovery {
   let mut warnings = Vec::new();
 
   // Built-ins are embedded and covered by tests; a parse error here is a build-time bug, so
-  // surface it as a warning rather than panicking a running daemon.
+  // surface it as a warning rather than panicking a running daemon. One legitimate runtime
+  // case: a built-in whose step references a NON-bundled skill (e.g. big-beautiful-build,
+  // whose canonical skill lives in dkorolev/beautiful-skills) simply is not available until
+  // that skill is installed into the repo or machine-wide — the warning says how.
   for (name, src) in builtin_defs() {
-    match validate(name, src, DefSource::Builtin) {
+    match validate_in(name, src, DefSource::Builtin, Some(repo_root)) {
       Ok(def) => {
         map.insert(def.name.clone(), def);
       }
@@ -602,9 +607,9 @@ pub fn discover(repo_root: &Path) -> Discovery {
   }
 
   if let Some(dir) = home_harness_dir() {
-    load_dir(&dir, DefSource::Home, &mut map, &mut warnings);
+    load_dir(&dir, DefSource::Home, &mut map, &mut warnings, repo_root);
   }
-  load_dir(&repo_root.join(".harness"), DefSource::Repo, &mut map, &mut warnings);
+  load_dir(&repo_root.join(".harness"), DefSource::Repo, &mut map, &mut warnings, repo_root);
 
   Discovery { defs: map.into_values().collect(), warnings }
 }
@@ -621,7 +626,9 @@ fn home_harness_dir() -> Option<PathBuf> {
 /// Load every `*.yml` file in `dir` (if it exists) into `map`, keyed by file stem, replacing
 /// any existing entry (so a later source shadows an earlier one). Files that fail to parse
 /// add a warning and are skipped. Non-`.yml` entries and subdirectories are ignored.
-fn load_dir(dir: &Path, source: DefSource, map: &mut BTreeMap<String, HarnessDef>, warnings: &mut Vec<String>) {
+fn load_dir(
+  dir: &Path, source: DefSource, map: &mut BTreeMap<String, HarnessDef>, warnings: &mut Vec<String>, repo_root: &Path,
+) {
   let entries = match std::fs::read_dir(dir) {
     Ok(e) => e,
     Err(_) => return, // absent directory is normal, not an error
@@ -645,7 +652,7 @@ fn load_dir(dir: &Path, source: DefSource, map: &mut BTreeMap<String, HarnessDef
         continue;
       }
     };
-    match validate(stem, &src, source) {
+    match validate_in(stem, &src, source, Some(repo_root)) {
       Ok(def) => {
         map.insert(def.name.clone(), def);
       }
@@ -660,9 +667,22 @@ fn is_def_name(s: &str) -> bool {
   !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Parse and validate one `.harness/<name>.yml` source, collecting every problem found (like
-/// `config::validate`). `source` records where it came from for the UI.
+/// Parse and validate one `.harness/<name>.yml` source with no enclosing repository (test
+/// convenience — production goes through [`discover`], which passes the repo root so
+/// `skill:` references can resolve from the repo's `.skills/` too).
+#[cfg(test)]
 pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, Vec<String>> {
+  validate_in(name, src, source, None)
+}
+
+/// Parse and validate one `.harness/<name>.yml` source, collecting every problem found (like
+/// `config::validate`). `source` records where it came from for the UI, and `repo_root` is
+/// the enclosing repository when there is one: a step's `skill:` reference then also
+/// resolves against `<repo>/.skills/<name>/SKILL.md` (after the bundle, before the
+/// machine-wide install).
+pub fn validate_in(
+  name: &str, src: &str, source: DefSource, repo_root: Option<&Path>,
+) -> Result<HarnessDef, Vec<String>> {
   let entries = match config::parse_yaml(src) {
     Ok(e) => e,
     Err(e) => return Err(vec![format!("invalid YAML: {e}")]),
@@ -703,7 +723,7 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
     errors
       .push("a definition uses either 'steps:' (a workflow) or 'task:'+'invocations:' (a one-shot), not both".into());
   } else if stepped {
-    steps = validate_steps(top.get("steps").copied(), &params, &mut errors);
+    steps = validate_steps(top.get("steps").copied(), &params, &mut errors, repo_root);
   } else {
     task = required_scalar(top.get("task").copied(), "task", &mut errors);
     invocations = match top.get("invocations").copied() {
@@ -738,7 +758,9 @@ pub fn validate(name: &str, src: &str, source: DefSource) -> Result<HarnessDef, 
 /// an upstream step's output field; `needs` names other steps; and the graph is acyclic. The
 /// minimal YAML reader has no flow collections, so `steps:` is a block map (not a sequence),
 /// `needs:` is a comma-separated scalar, and `when:` is a plain block map (AND of its entries).
-fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String>) -> Vec<Step> {
+fn validate_steps(
+  node: Option<&Node>, params: &[Param], errors: &mut Vec<String>, repo_root: Option<&Path>,
+) -> Vec<Step> {
   let entries = match node {
     Some(Node::Map(m)) if !m.is_empty() => m,
     Some(Node::Map(_)) => {
@@ -800,7 +822,7 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
     }
 
     let agent = validate_step_agent(id, fm.get("agent").copied(), errors);
-    let task = validate_step_task(id, fm.get("prompt").copied(), fm.get("skill").copied(), errors);
+    let task = validate_step_task(id, fm.get("prompt").copied(), fm.get("skill").copied(), errors, repo_root);
     let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
     let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
     let when = validate_step_cond_block(id, "when", fm.get("when").copied(), errors);
@@ -901,7 +923,7 @@ fn validate_steps(node: Option<&Node>, params: &[Param], errors: &mut Vec<String
 /// deliberately strict: a typo fails definition discovery instead of becoming an agent prompt
 /// that only fails after an expensive container starts.
 fn validate_step_task(
-  id: &str, prompt: Option<&Node>, skill: Option<&Node>, errors: &mut Vec<String>,
+  id: &str, prompt: Option<&Node>, skill: Option<&Node>, errors: &mut Vec<String>, repo_root: Option<&Path>,
 ) -> Option<StepTask> {
   match (prompt, skill) {
     (Some(_), Some(_)) => {
@@ -915,10 +937,12 @@ fn validate_step_task(
     (Some(node), None) => required_scalar(Some(node), &format!("steps.{id}.prompt"), errors).map(StepTask::Prompt),
     (None, Some(Node::Scalar(name))) if !name.trim().is_empty() => {
       let name = name.trim();
-      match config::bundled_skill_body(name) {
-        Some(body) => Some(StepTask::BundledSkill { name: name.to_string(), body: body.to_string() }),
+      match resolve_skill_body(name, repo_root) {
+        Some(body) => Some(StepTask::Skill { name: name.to_string(), body }),
         None => {
-          errors.push(format!("'steps.{id}.skill' names '{name}', which is not a bundled skill"));
+          errors.push(format!(
+            "'steps.{id}.skill' names '{name}', which is neither bundled nor installed — install it into this repo's .skills/ (scsh installskills <url>) or machine-wide (scsh installskills --global <url>)"
+          ));
           None
         }
       }
@@ -928,10 +952,28 @@ fn validate_step_task(
       None
     }
     (None, Some(Node::Map(_))) => {
-      errors.push(format!("'steps.{id}.skill' must be a bundled skill name"));
+      errors.push(format!("'steps.{id}.skill' must be a skill name"));
       None
     }
   }
+}
+
+/// Resolve a step's `skill:` reference to its `SKILL.md` body: the bundle first, then the
+/// enclosing repository's `.skills/`, then the machine-wide install
+/// (`$SCSH_HOME/.skills/`, written by `scsh installskills --global`). The delivery-pipeline
+/// skill families deliberately live OUTSIDE the bundle — their source repositories are
+/// canonical and the bundle must never drift from them — so a definition referencing one
+/// resolves wherever the user actually installed it.
+fn resolve_skill_body(name: &str, repo_root: Option<&Path>) -> Option<String> {
+  if let Some(body) = config::bundled_skill_body(name) {
+    return Some(body.to_string());
+  }
+  let mut candidates: Vec<PathBuf> = Vec::new();
+  if let Some(root) = repo_root {
+    candidates.push(root.join(".skills").join(name).join("SKILL.md"));
+  }
+  candidates.push(crate::runtime::scsh_home().join(".skills").join(name).join("SKILL.md"));
+  candidates.into_iter().find_map(|p| std::fs::read_to_string(p).ok())
 }
 
 /// Validate a step's `agent:` block into a [`StepAgent`] (harness required; model/effort optional).
@@ -1908,8 +1950,29 @@ steps:
     assert_eq!(doctor.invocations.len(), 5);
     let doc_agents: std::collections::BTreeSet<&str> = doctor.invocations.iter().map(|r| r.harness.as_str()).collect();
     assert_eq!(doc_agents, ["claude", "codex", "cursor", "grok", "opencode"].into_iter().collect());
+  }
 
-    let build = builtin("big-beautiful-build");
+  /// A throwaway repo root whose `.skills/<name>/SKILL.md` is `body` — how a def's
+  /// `skill:` reference resolves once the skill is installed from its source repository.
+  fn root_with_skill(name: &str, body: &str) -> PathBuf {
+    let root = std::env::temp_dir().join(format!("scsh-skillroot-{}", crate::runtime::random_nonce_6()));
+    let dir = root.join(".skills").join(name);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("SKILL.md"), body).unwrap();
+    root
+  }
+
+  #[test]
+  fn builtin_big_beautiful_build_resolves_its_skill_from_the_install() {
+    // The canonical big-beautiful-build skill lives in dkorolev/beautiful-skills, NOT in
+    // the bundle (the bundle must never drift from the source repositories). The built-in
+    // def resolves it from wherever the user installed it — here, the repo's .skills/.
+    assert!(crate::config::bundled_skill_body("big-beautiful-build").is_none(), "the bundle carries no copy");
+    let stub = "# big-beautiful-build\n\nDeliver the FEATURE completely.\n";
+    let root = root_with_skill("big-beautiful-build", stub);
+    let (_, src) = builtin_defs().into_iter().find(|(n, _)| *n == "big-beautiful-build").unwrap();
+    let build = validate_in("big-beautiful-build", src, DefSource::Builtin, Some(&root))
+      .unwrap_or_else(|e| panic!("{}", e.join("; ")));
     assert!(build.is_workflow());
     assert_eq!(build.params.len(), 1);
     assert_eq!(build.params[0].name, "FEATURE");
@@ -1921,14 +1984,40 @@ steps:
     assert!(step.commits);
     assert_eq!(step.artifacts, ["big-beautiful-build.md"]);
     match &step.task {
-      StepTask::BundledSkill { name, body } => {
+      StepTask::Skill { name, body } => {
         assert_eq!(name, "big-beautiful-build");
-        assert_eq!(body, crate::config::bundled_skill_body(name).expect("canonical bundled body"));
+        assert_eq!(body, stub, "the INSTALLED body is what the agent gets");
       }
       StepTask::Prompt(_) => panic!("the built-in must execute the canonical skill, not a copied prompt"),
     }
     assert!(step.render_skill_body().contains("FEATURE"));
     assert!(step.render_skill_body().contains("big-beautiful-build.md"));
+    std::fs::remove_dir_all(&root).ok();
+  }
+
+  #[test]
+  fn a_def_referencing_an_uninstalled_skill_is_unavailable_with_the_fix_in_the_error() {
+    // Deterministic absence: pin SCSH_HOME to an empty dir so the machine-wide install of
+    // the developer running this suite cannot resolve the reference.
+    let _guard = crate::runtime::test_env_lock();
+    let empty_home = std::env::temp_dir().join(format!("scsh-nohome-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&empty_home).unwrap();
+    let prev = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", &empty_home);
+    let bare = std::env::temp_dir().join(format!("scsh-bareroot-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&bare).unwrap();
+    let (_, src) = builtin_defs().into_iter().find(|(n, _)| *n == "big-beautiful-build").unwrap();
+    let err = validate_in("big-beautiful-build", src, DefSource::Builtin, Some(&bare)).unwrap_err();
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+    assert!(
+      err.iter().any(|e| e.contains("neither bundled nor installed") && e.contains("installskills")),
+      "the error teaches the install: {err:?}"
+    );
+    std::fs::remove_dir_all(&empty_home).ok();
+    std::fs::remove_dir_all(&bare).ok();
   }
 
   #[test]
@@ -1939,7 +2028,7 @@ steps:
 
     let unknown = "description: x\nsteps:\n  s:\n    agent:\n      harness: cursor\n    skill: typo\n    output:\n      ok:\n        type: bool\n";
     let err = validate("t", unknown, DefSource::Repo).unwrap_err();
-    assert!(err.iter().any(|e| e.contains("not a bundled skill")), "{err:?}");
+    assert!(err.iter().any(|e| e.contains("neither bundled nor installed")), "{err:?}");
   }
 
   #[test]
@@ -2155,7 +2244,7 @@ steps:
     .unwrap();
 
     let mut warnings = Vec::new();
-    load_dir(&hdir, DefSource::Repo, &mut map, &mut warnings);
+    load_dir(&hdir, DefSource::Repo, &mut map, &mut warnings, &base);
     assert!(warnings.is_empty(), "warnings: {warnings:?}");
     assert_eq!(map["add"].source, DefSource::Repo);
     assert_eq!(map["add"].description, "Repo add.");
@@ -2175,12 +2264,19 @@ steps:
       "description: \"Mine.\"\ntask: |\n  go\ninvocations:\n  c:\n    harness: claude\n    model: sonnet\n",
     )
     .unwrap();
+    // The big-beautiful-build built-in resolves its (deliberately unbundled) skill from the
+    // repo's .skills/ — installed here so discovery stays warning-free and deterministic
+    // regardless of the developer machine's machine-wide install.
+    let bbb = repo.join(".skills/big-beautiful-build");
+    std::fs::create_dir_all(&bbb).unwrap();
+    std::fs::write(bbb.join("SKILL.md"), "# big-beautiful-build\n").unwrap();
 
     std::env::set_var(HARNESS_HOME_ENV, &home);
     let d = discover(&repo);
     std::env::remove_var(HARNESS_HOME_ENV);
 
     assert!(d.find("doctor").is_some() && d.find("add").is_some() && d.find("research").is_some());
+    assert!(d.find("big-beautiful-build").is_some(), "resolved from the repo's .skills/");
     let mine = d.find("mine").expect("repo def discovered");
     assert_eq!(mine.source, DefSource::Repo);
     assert!(d.warnings.is_empty(), "warnings: {:?}", d.warnings);

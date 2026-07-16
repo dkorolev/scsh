@@ -1032,9 +1032,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // global Cursor skill can drive `scsh run code-review` without polluting the target tree.
       "--override-dot-scsh-yml" => {
         i += 1;
-        let path = args.get(i).ok_or(
-          "--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/code-beautiful-review/.scsh.yml",
-        )?;
+        let path =
+          args.get(i).ok_or("--override-dot-scsh-yml needs a path, e.g. --override-dot-scsh-yml ~/.scsh/.scsh.yml")?;
         if path.trim().is_empty() {
           return Err("--override-dot-scsh-yml path must not be empty".into());
         }
@@ -6321,10 +6320,14 @@ fn install_skills(overwrite: bool, sources: &[String], global: bool) -> i32 {
   if !any && links.is_empty() {
     ok("skills already installed; nothing to do");
   }
-  // The no-URL install is self-contained: it includes the beautiful family, its reviewer
-  // fleet, and the original harness demo/self-test.
+  // The no-URL install is the reviewer fleet and the original harness demo/self-test —
+  // deliberately nothing more: the delivery-pipeline skill families live in their own
+  // repositories and install from source, so the bundle can never drift from them.
   if sources.is_empty() {
-    hint("installed the beautiful delivery family and all five code-review specialties");
+    hint("installed all five code-review reviewer specialties");
+    hint(
+      "delivery-pipeline skills install from source: scsh installskills https://github.com/dkorolev/beautiful-skills",
+    );
     hint("run /scsh-harness-demo-and-selftest for the basic harness demo, or `scsh run --def demo-beautiful-loop` for the review loop");
   }
   0
@@ -6401,8 +6404,9 @@ fn install_skills_global(overwrite: bool, sources: &[String]) -> i32 {
   ok(&format!("global install: {} (manifest + .skills/)", display_path(&home)));
   hint("any git repo can now run these profiles — a repo's own .scsh.yml still wins for the profiles it declares");
   if sources.is_empty() {
-    hint("installed the beautiful delivery family and all five code-review specialties");
+    hint("installed all five code-review reviewer specialties");
     hint("try it from any repo: scsh check-profile code-review && scsh run code-review");
+    hint("delivery-pipeline skills install from source: scsh installskills --global https://github.com/dkorolev/beautiful-skills");
   }
   0
 }

@@ -150,7 +150,7 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   injected by `scsh`), and `multiply` multiplies `X`·`Y` with **no defaults** —
   it lives in the `multiply` profile and `scsh` refuses it if either `X` or `Y`
   is unset. `scsh-harness-demo-and-selftest` is the agent-followed walkthrough of
-  [`DEMO.md`](DEMO.md). A no-URL `scsh installskills` bundles it together with the complete beautiful delivery family and the five-specialty code-review fleet documented in [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md).
+  [`DEMO.md`](DEMO.md). A no-URL `scsh installskills` bundles it together with the five-specialty code-review fleet documented in [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md); the delivery-pipeline skill families install from their own source repositories (e.g. `scsh installskills https://github.com/dkorolev/beautiful-skills`), never from the bundle.
 
 - **Prefer a shipped script over harness-authored code.** When a skill needs a
   deterministic computation or a fixed multi-step operation, write a small script (e.g.
@@ -273,7 +273,7 @@ terminal**. Do not hide progress behind a pipe or a file-only redirect:
   leave the run half-started with no completion line and no result JSON.
 
 Same rule for agents following [`DEMO.md`](DEMO.md) or
-[`code-beautiful-review`](.skills/code-beautiful-review/SKILL.md): never
+the code-review skills: never
 substitute `| tail` (or any output truncator) for watching the run — not for
 `scsh`, not for `cargo test`, not for anything else you execute on the user's behalf.
 

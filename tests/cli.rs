@@ -250,12 +250,6 @@ fn installskills_installs_skill_and_symlinks() {
   let r = scsh(&d, &["installskills"]);
   assert_eq!(r.code, 0, "got: {}", r.out);
   for name in [
-    "big-beautiful-build",
-    "fast-beautiful-forward",
-    "code-beautiful-review",
-    "the-beautiful-loop",
-    "prepare-beautiful-pr",
-    "send-beautiful-pr",
     "conventions-reviewer",
     "justification-reviewer",
     "reviewability-reviewer",
@@ -268,16 +262,18 @@ fn installskills_installs_skill_and_symlinks() {
     assert!(std::fs::read_to_string(&p).unwrap().contains(&format!("name: {name}")));
   }
   let manifest = std::fs::read_to_string(d.join(".scsh.yml")).expect("bundled profiles should be installed");
-  assert!(manifest.contains("  the-beautiful-loop:") && manifest.contains("  send-beautiful-pr:"), "got: {manifest}");
   assert_eq!(manifest.matches("      codex-terra:").count(), 5, "one Terra route per reviewer; got: {manifest}");
   assert_eq!(manifest.matches("      claude-opus-4-8:").count(), 5, "one Opus route per reviewer; got: {manifest}");
   assert_eq!(manifest.matches("      cursor-auto:").count(), 5, "one Cursor route per reviewer; got: {manifest}");
-  assert!(r.out.contains("beautiful delivery family"), "no-URL install should explain the bundle; got: {}", r.out);
+  // The bundle carries NO copy of the delivery-pipeline skill families — they live in
+  // their own repositories and install from source, so the bundle can never drift.
+  assert!(!manifest.contains("beautiful") && !manifest.contains("gorgeous"), "got: {manifest}");
+  assert!(r.out.contains("install from source"), "no-URL install should say where the pipeline lives; got: {}", r.out);
   // The five harness discovery dirs are symlinks resolving to the skill.
   for host in [".claude/skills", ".codex/skills", ".cursor/skills", ".opencode/skills", ".agents/skills"] {
     let link = d.join(host);
     assert!(link.symlink_metadata().expect("symlink meta").file_type().is_symlink(), "{host} should be a symlink");
-    assert!(link.join("the-beautiful-loop/SKILL.md").is_file(), "{host} should resolve to the skills");
+    assert!(link.join("sanity-reviewer/SKILL.md").is_file(), "{host} should resolve to the skills");
   }
 }
 
@@ -325,16 +321,16 @@ fn installskills_global_installs_under_scsh_home_and_links_agents() {
   let r = scsh_env(&d, &["installskills", "--global"], &envs);
   assert_eq!(r.code, 0, "got: {}", r.out);
   // Skills and the global manifest land under $SCSH_HOME.
-  assert!(scsh_home.join(".skills/the-beautiful-loop/SKILL.md").is_file(), "got: {}", r.out);
+  assert!(scsh_home.join(".skills/sanity-reviewer/SKILL.md").is_file(), "got: {}", r.out);
   let manifest = std::fs::read_to_string(scsh_home.join(".scsh.yml")).expect("global manifest");
-  assert!(manifest.contains("  the-beautiful-loop:") && manifest.contains("  sanity-reviewer:"), "got: {manifest}");
+  assert!(manifest.contains("  conventions-reviewer:") && manifest.contains("  sanity-reviewer:"), "got: {manifest}");
   // EVERY agent's user-level skills dir is created — mirroring the repo convention — as
   // ONE symlink to $SCSH_HOME/.skills, whether or not the agent is on the machine yet
   // (modern codex reads the cross-agent ~/.agents/skills, so that one rides along too).
   for agent in [".claude", ".cursor", ".codex", ".opencode", ".agents"] {
     let dir = home.join(agent).join("skills");
     assert!(dir.symlink_metadata().expect("skills dir").file_type().is_symlink(), "{agent}/skills is one symlink");
-    assert!(dir.join("the-beautiful-loop/SKILL.md").is_file(), "{agent}/skills resolves to the global skills");
+    assert!(dir.join("sanity-reviewer/SKILL.md").is_file(), "{agent}/skills resolves to the global skills");
   }
 
   // Re-running is idempotent: identical files count as already installed, links stay.
@@ -361,7 +357,7 @@ fn a_real_agent_skills_dir_is_linked_into_not_replaced() {
   let skills = home.join(".claude/skills");
   assert!(!skills.symlink_metadata().unwrap().file_type().is_symlink(), "a real dir is never replaced");
   assert_eq!(std::fs::read_to_string(mine.join("SKILL.md")).unwrap(), "# mine\n", "the user's skill is untouched");
-  let link = skills.join("the-beautiful-loop");
+  let link = skills.join("sanity-reviewer");
   assert!(link.symlink_metadata().expect("per-skill link").file_type().is_symlink(), "skills link in one by one");
   assert!(link.join("SKILL.md").is_file(), "per-skill link resolves");
 }

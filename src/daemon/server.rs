@@ -4317,9 +4317,25 @@ mod tests {
     std::fs::remove_dir_all(&dir).ok();
   }
 
+  /// Install (and commit) a stub big-beautiful-build skill into a test repo: its built-in
+  /// def references a deliberately UNBUNDLED skill and is only discoverable once the skill
+  /// is installed — in the repo here, so the test never depends on the developer machine's
+  /// machine-wide install.
+  fn commit_bbb_skill(dir: &std::path::Path) {
+    let skill = dir.join(".skills/big-beautiful-build");
+    std::fs::create_dir_all(&skill).unwrap();
+    std::fs::write(skill.join("SKILL.md"), "# big-beautiful-build\n\nDeliver the FEATURE completely.\n").unwrap();
+    let git = |args: &[&str]| {
+      assert!(std::process::Command::new("git").args(args).current_dir(dir).status().unwrap().success());
+    };
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "install big-beautiful-build"]);
+  }
+
   #[test]
   fn repos_open_lists_builtin_defs_for_a_clean_repo() {
     let dir = clean_repo("open");
+    commit_bbb_skill(&dir);
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let body = format!(r#"{{"path":{}}}"#, quote(&dir.to_string_lossy()));
     let (status, out, mutated) = repos_open_response(&body, &store);
@@ -4689,6 +4705,7 @@ mod tests {
   #[test]
   fn jobs_start_rejects_an_empty_feature_brief() {
     let dir = clean_repo("empty-feature");
+    commit_bbb_skill(&dir);
     let repo = dir.to_string_lossy().into_owned();
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let body = format!(r#"{{"repo":{},"def":"big-beautiful-build","params":{{"FEATURE":"  \n "}}}}"#, quote(&repo));
