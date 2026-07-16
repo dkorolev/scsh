@@ -188,11 +188,13 @@ fn annotation_target_link_html(
 
 /// The one-line page lede shared by the live job page and the offline export: kind,
 /// profile, lifecycle, and task count — enough to tell at a glance what ran and whether
-/// it succeeded.
+/// it succeeded. A job started from the web UI has its planned tasks on `skills` before
+/// any proc registers, so the count is the larger of the two — never "0 tasks" on a
+/// freshly started job.
 pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) -> String {
   let kind = session.kind.as_deref().unwrap_or("profile");
   let profile = session.profile.as_deref().unwrap_or("default");
-  let n = session.procs.len();
+  let n = session.procs.len().max(session.skills.len());
   format!(
     "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}",
     kind = esc(kind),

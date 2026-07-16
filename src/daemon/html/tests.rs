@@ -1067,6 +1067,49 @@ fn offline_export_carries_lede_and_full_meta() {
 }
 
 #[test]
+fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
+  use crate::daemon::model::SkillMeta;
+  // A job started from the web UI pre-populates its planned skills; procs register only
+  // once the spawned run comes up and reports. The lede reads the plan meanwhile — the
+  // header of a freshly opened job page must never say "running · 0 tasks".
+  let session = Session {
+    id: "fresh1".into(),
+    started_at: 1,
+    ended_at: None,
+    profile: Some("arith".into()),
+    kind: Some("workflow".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 1,
+    client_connected: false,
+    run_pid: Some(42),
+    skills: vec![
+      SkillMeta { name: "add".into(), harness: "claude".into() },
+      SkillMeta { name: "multiply".into(), harness: "codex".into() },
+      SkillMeta { name: "summarize".into(), harness: "grok".into() },
+    ],
+    procs: vec![],
+    workflow: None,
+    parent_session: None,
+  };
+  let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
+  assert!(lede.contains("workflow <strong>arith</strong>"), "kind and profile lead the lede: {lede}");
+  assert!(lede.contains("3 tasks"), "the planned task count shows before any proc registers: {lede}");
+  assert!(!lede.contains("0 task"), "never 0 tasks on a fresh job: {lede}");
+}
+
+#[test]
+fn the_job_lede_ticks_live() {
+  let js = live_client_js();
+  assert!(js.contains("function syncSessionLede"), "the lede has a live tick mirror");
+  assert!(
+    js.contains("Math.max((session.procs || []).length, (session.skills || []).length)"),
+    "the live count also reads planned skills, mirroring session_lede_html"
+  );
+  assert!(js.contains("syncSessionLede(session, nowUnix);"), "renderSession keeps the lede current");
+}
+
+#[test]
 fn offline_export_advertises_chapter_keys_only_when_chapters_exist() {
   use super::session_export::CastExport;
   let store = store_with_cast_proc(ProcStatus::Ok);
