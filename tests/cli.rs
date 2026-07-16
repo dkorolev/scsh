@@ -147,10 +147,23 @@ fn help_topics_are_separate_pages() {
   // The workflow alias lands on the same page.
   let wf = scsh(&d, &["help", "workflows"]);
   assert!(wf.out.contains("Harness definitions"), "got: {}", wf.out);
+  // `scsh help agent` is the agent-first contract: discover, gate, run, collect — for
+  // another agent or harness driving scsh.
+  let agent = scsh(&d, &["help", "agent"]);
+  assert_eq!(agent.code, 0, "got: {}", agent.out);
+  assert!(
+    agent.out.contains("You are an agent")
+      && agent.out.contains("scsh list --json")
+      && agent.out.contains("--override-dot-scsh-yml")
+      && agent.out.contains("AGENT-FLEET-DEMO.md"),
+    "got: {}",
+    agent.out
+  );
   // The overview points at all topics but does not carry their detail.
   let overview = scsh(&d, &["help"]);
   assert!(
-    overview.out.contains("scsh help run")
+    overview.out.contains("scsh help agent")
+      && overview.out.contains("scsh help run")
       && overview.out.contains("scsh help .scsh.yml")
       && overview.out.contains("scsh help internals")
       && overview.out.contains("scsh help cache")
@@ -162,6 +175,31 @@ fn help_topics_are_separate_pages() {
   let bad = scsh(&d, &["help", "nope"]);
   assert_eq!(bad.code, 2, "got: {}", bad.out);
   assert!(bad.out.contains("unknown help topic"), "got: {}", bad.out);
+}
+
+#[test]
+fn demo_prints_embedded_walkthroughs() {
+  // Demos print anywhere — not a git repo, no preflight. With no name, `demo` lists them.
+  let d = unique_dir("demo");
+  let ls = scsh(&d, &["demo"]);
+  assert_eq!(ls.code, 0, "got: {}", ls.out);
+  assert!(ls.out.contains("agent-fleet"), "got: {}", ls.out);
+  // A named demo prints the full markdown walkthrough verbatim, so a driving agent needs
+  // no path to any checkout — `scsh` on PATH is enough.
+  let demo = scsh(&d, &["demo", "agent-fleet"]);
+  assert_eq!(demo.code, 0, "got: {}", demo.out);
+  assert!(
+    demo.out.contains("# AGENT-FLEET-DEMO.md") && demo.out.contains("--override-dot-scsh-yml"),
+    "got: {}",
+    demo.out
+  );
+  // The file spelling and the `-demo` suffix resolve to the same walkthrough.
+  assert_eq!(scsh(&d, &["demo", "AGENT-FLEET-DEMO.md"]).code, 0);
+  assert_eq!(scsh(&d, &["demo", "agent-fleet-demo"]).code, 0);
+  // An unknown demo is a usage error listing the real names.
+  let bad = scsh(&d, &["demo", "nope"]);
+  assert_eq!(bad.code, 2, "got: {}", bad.out);
+  assert!(bad.out.contains("no demo named 'nope'") && bad.out.contains("agent-fleet"), "got: {}", bad.out);
 }
 
 #[test]
