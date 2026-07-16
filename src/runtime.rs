@@ -236,7 +236,7 @@ pub fn grok_container_auth_ready() -> bool {
 }
 
 /// Whether grok's stored OAuth login has lapsed: `~/.grok/auth.json` carries an `expires_at`
-/// ISO-8601 timestamp, and once its date is before today the interactive Build TUI stops
+/// ISO-8601 timestamp, and once that instant is behind us the interactive Build TUI stops
 /// trusting the session and demands a fresh browser sign-in (headless `grok -p` silently
 /// refreshes, so it doesn't hit this). When true, the run skips grok with a "sign in on the
 /// host" message rather than hanging on the un-clickable browser-auth screen in the container.
@@ -244,17 +244,27 @@ pub fn grok_container_auth_ready() -> bool {
 pub fn grok_auth_expired() -> bool {
   let Some(path) = grok_auth_file_on_host() else { return false };
   let Ok(text) = std::fs::read_to_string(&path) else { return false };
-  // Pull the value after the first `"expires_at"` key — a quoted ISO date like
-  // "2026-07-03T22:28:34.057655Z". Compare its date (YYYYMMDD) to today's, lexicographically.
-  let Some(rest) = text.split("\"expires_at\"").nth(1).and_then(|s| s.split(':').nth(1)) else { return false };
-  let iso: String = rest.trim().trim_start_matches('"').chars().take(10).collect(); // "2026-07-03"
-  let expires: String = iso.chars().filter(|c| c.is_ascii_digit()).collect(); // "20260703"
-  if expires.len() != 8 {
-    return false;
-  }
   let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-  let today = &format_utc_timestamp(now)[..8]; // "20260707"
-  expires.as_str() < today
+  grok_expires_at_lapsed(&text, now)
+}
+
+/// Pure comparison for [`grok_auth_expired`]: pull the value after the first
+/// `"expires_at"` key — a quoted ISO timestamp like "2026-07-03T22:28:34.057655Z" — and
+/// compare the FULL instant to `now`, both as UTC digit strings. A date-granular
+/// comparison left a token that expires later today looking valid all day (Setup showed
+/// green while grok containers hung on the browser-auth screen). A date-only value
+/// (rare, older files) still lapses only once its day is over.
+pub(crate) fn grok_expires_at_lapsed(auth_json: &str, now: u64) -> bool {
+  let Some(after_key) = auth_json.split("\"expires_at\"").nth(1) else { return false };
+  let Some((_, value)) = after_key.split_once(':') else { return false };
+  let iso: String = value.trim().trim_start_matches('"').chars().take(19).collect(); // "2026-07-03T22:28:34"
+  let expires: String = iso.chars().filter(|c| c.is_ascii_digit()).collect();
+  let today: String = format_utc_timestamp(now).chars().filter(|c| c.is_ascii_digit()).collect(); // "20260716130145"
+  match expires.len() {
+    14 => expires.as_str() < today.as_str(),
+    8 => expires.as_str() < &today[..8],
+    _ => false,
+  }
 }
 
 /// Run-dir-relative Cursor config dir (`CURSOR_CONFIG_DIR` inside the container).
@@ -2132,6 +2142,25 @@ mod tests {
   use super::*;
   use std::ffi::OsString;
   use std::sync::atomic::{AtomicUsize, Ordering};
+
+  #[test]
+  fn grok_expiry_compares_the_full_instant_not_just_the_date() {
+    let auth = |ts: &str| format!("{{ \"other\": 1, \"expires_at\": \"{ts}\" }}");
+    const NOON_ISH: u64 = 1_784_205_296; // 2026-07-16T12:34:56Z
+                                         // Expired earlier TODAY: the date-granular check called this valid all day.
+    assert!(grok_expires_at_lapsed(&auth("2026-07-16T02:37:00.000000Z"), NOON_ISH));
+    // Expires later today: still valid.
+    assert!(!grok_expires_at_lapsed(&auth("2026-07-16T22:00:00.000000Z"), NOON_ISH));
+    // Clearly past / clearly future days.
+    assert!(grok_expires_at_lapsed(&auth("2026-07-03T22:28:34.057655Z"), NOON_ISH));
+    assert!(!grok_expires_at_lapsed(&auth("2026-08-01T00:00:00Z"), NOON_ISH));
+    // Date-only values (older files) keep day granularity: today is not yet lapsed.
+    assert!(!grok_expires_at_lapsed(&auth("2026-07-16"), NOON_ISH));
+    assert!(grok_expires_at_lapsed(&auth("2026-07-15"), NOON_ISH));
+    // Unparseable or absent stays "not expired" — never block on uncertainty.
+    assert!(!grok_expires_at_lapsed(&auth("soon"), NOON_ISH));
+    assert!(!grok_expires_at_lapsed("{}", NOON_ISH));
+  }
 
   #[test]
   fn display_path_with_home_tilde_abbreviates_home() {
