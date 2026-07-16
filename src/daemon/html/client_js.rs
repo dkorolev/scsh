@@ -1517,7 +1517,7 @@ function wfBuildGraphHtml(session, nowUnix) {
       esc(title) + gate + '</span>' + wfAnnotationHtml(session, p) +
       '<span class="wf-meta dim">' + esc(bits.join(' · ')) + '</span></a>';
   }).join('') + wfBookendHtml(finish, false);
-  return '<div class="card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>' +
+  return '<div class="chamfer card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
     wfJobOutcomeHtml(session, nowUnix) +
     '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
@@ -3363,7 +3363,7 @@ function renderInternalJobs(sessions, nowUnix) {
   }).join('');
   if (!card) {
     card = document.createElement('div');
-    card.className = 'card card--accent-left-purple';
+    card.className = 'chamfer card card--accent-left-purple';
     card.id = 'internal-jobs-card';
     card.innerHTML = '<p class="section-label">Internal</p>' +
       '<p class="dim">System jobs — image builds and annotate catch-up — not tied to a project or repository.</p>' +

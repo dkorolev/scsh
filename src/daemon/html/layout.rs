@@ -84,22 +84,47 @@ pub(crate) const PAGE_CSS: &str = r#"
     );
     z-index: 0;
   }
+  /* the ::before surface paints above in-flow text; lift all children over it
+     (absolutely positioned children re-assert their own position later in the sheet) */
+  .chamfer > * { position: relative; z-index: 1; }
 
-  /* ── cards ── */
+  /* ── cards (chamfered islands: outer border/accent layer + ::before surface) ── */
   .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 6px;
+    --cut: 14px;
+    --bw: 1px;
+    --accent-w: 3px;
+    background: var(--border);
     padding: 20px 22px;
     margin-bottom: 20px;
+    position: relative;
   }
-  .card { position: relative; }
-  .card--accent-left-cyan { border-left: 3px solid var(--cyan); }
-  .card--accent-left-purple { border-left: 3px solid var(--purple); }
-  .card--accent-left-green { border-left: 3px solid var(--green); }
-  .card--accent-left-orange { border-left: 3px solid var(--orange); }
-  .card--accent-top-magenta { border-top: 3px solid var(--magenta); }
-  .card--accent-left-magenta { border-left: 3px solid var(--magenta); }
+  .card::before { background: var(--surface); }
+  /* accent edge: the outer layer paints an accent stripe wide enough to wrap
+     the chamfered corners, and the surface is inset further on that side */
+  .card--accent-left-cyan { --accent: var(--cyan); }
+  .card--accent-left-purple { --accent: var(--purple); }
+  .card--accent-left-green { --accent: var(--green); }
+  .card--accent-left-orange { --accent: var(--orange); }
+  .card--accent-left-magenta { --accent: var(--magenta); }
+  .card--accent-top-magenta { --accent: var(--magenta); }
+  .card--accent-left-cyan, .card--accent-left-purple, .card--accent-left-green,
+  .card--accent-left-orange, .card--accent-left-magenta {
+    background: linear-gradient(90deg,
+      var(--accent) 0 calc(var(--cut) + var(--accent-w)),
+      var(--border) 0);
+  }
+  .card--accent-left-cyan::before, .card--accent-left-purple::before, .card--accent-left-green::before,
+  .card--accent-left-orange::before, .card--accent-left-magenta::before {
+    inset: var(--bw) var(--bw) var(--bw) var(--accent-w);
+  }
+  .card--accent-top-magenta {
+    background: linear-gradient(180deg,
+      var(--accent) 0 calc(var(--cut) + var(--accent-w)),
+      var(--border) 0);
+  }
+  .card--accent-top-magenta::before {
+    inset: var(--accent-w) var(--bw) var(--bw) var(--bw);
+  }
 
   /* ── buttons ── */
   .btn, button.btn {
@@ -406,7 +431,8 @@ pub(crate) const PAGE_CSS: &str = r#"
   .workflow-card.wf-expanded {
     position: fixed; inset: clamp(0.75rem, 2.5vw, 2rem); z-index: 1000; margin: 0;
     display: flex; flex-direction: column; max-width: none; min-height: 0;
-    background: var(--surface); box-shadow: 0 24px 80px rgba(0,0,0,0.65);
+    /* clip-path clips box-shadows; drop-shadow follows the chamfered outline instead */
+    filter: drop-shadow(0 24px 80px rgba(0,0,0,0.65));
   }
   .workflow-card.wf-expanded .workflow-visual { flex: 1 1 auto; display: flex; min-height: 0; }
   .workflow-card.wf-expanded .workflow-scroll { flex: 1 1 auto; height: auto; min-height: 0; }

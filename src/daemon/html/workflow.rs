@@ -85,7 +85,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
   nodes_html.push_str(&bookend_html(&finish, false));
 
   format!(
-    r#"<div class="card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>
+    r#"<div class="chamfer card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>
 <div class="workflow-head">
 <h2 class="workflow-title">Job graph</h2>
 {outcome}

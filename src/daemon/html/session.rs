@@ -123,7 +123,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     String::new()
   };
   let body = format!(
-    "<div class=\"card card--accent-left-purple\"><div class=\"session-actions\">{job_diff_btn}{export_btn}{stop_btn}</div>\
+    "<div class=\"chamfer card card--accent-left-purple\"><div class=\"session-actions\">{job_diff_btn}{export_btn}{stop_btn}</div>\
 {session_meta}\n{chapters_pending}</div>\n\
 {workflow}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
     export_btn = export_btn,

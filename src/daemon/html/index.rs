@@ -138,7 +138,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
 <section class=\"tab-panel{run_p}\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">\n{start}</section>\n\
 <section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\" role=\"tabpanel\" aria-labelledby=\"tabbtn-jobs\">\n\
-<div class=\"card card--accent-left-cyan\">\n\
+<div class=\"chamfer card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th>\
@@ -236,7 +236,7 @@ fn images_panel() -> String {
     rows.push_str(&images_skeleton_row(h.as_str(), &crate::runtime::image_tag(h), true));
   }
   format!(
-    r##"<div class="card card--accent-left-orange">
+    r##"<div class="chamfer card card--accent-left-orange">
 <p class="section-label">Harness setup</p>
 <p class="dim">Prepare and verify the agents scsh can run. Choose a runtime, build missing
 images, and sign in on the host. Image freshness alone is not readiness — login is checked
@@ -250,7 +250,7 @@ separately. Model probes run only when you click <strong>Test</strong> (real pro
 <p id="setup-summary" class="setup-summary dim">checking agents…</p>
 <div id="setup-cards" class="setup-cards">{cards}</div>
 </div>
-<div class="card card--accent-left-purple">
+<div class="chamfer card card--accent-left-purple">
 <p class="section-label">Images setup</p>
 <p class="dim">Image tags, sizes, timestamps, base rebuilds, and force rebuilds for the
 selected runtime.</p>
@@ -316,7 +316,7 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
 /// job (POST `/api/v1/jobs/start`, deep-linking to the spawned session). Start is disabled until
 /// the repo is runnable. Default landing tab on the index page.
 fn start_panel() -> &'static str {
-  r##"<div class="card card--accent-left-green">
+  r##"<div class="chamfer card card--accent-left-green">
 <p class="section-label">Run</p>
 <p class="dim">Open a git repository — an absolute path, or the bare name of a project under
 <code>~/.scsh/projects/</code> — to configure and start a harness-definition job in it; the
@@ -369,7 +369,7 @@ fn dirs_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
     None => String::new(),
   };
   format!(
-    r##"<div class="card card--accent-left-magenta">
+    r##"<div class="chamfer card card--accent-left-magenta">
 <p class="section-label">Projects</p>
 {banner}<p class="dim">Current jobs, grouped by where they run: a project under <code>~/.scsh/projects/</code> shows its
 name; anything else shows its repository path. Click a name to filter.</p>
@@ -441,7 +441,7 @@ fn internal_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> Stri
     .collect::<Vec<_>>()
     .join("");
   format!(
-    r##"<div class="card card--accent-left-purple" id="internal-jobs-card">
+    r##"<div class="chamfer card card--accent-left-purple" id="internal-jobs-card">
 <p class="section-label">Internal</p>
 <p class="dim">System jobs — image builds and annotate catch-up — not tied to a project or repository.</p>
 <div id="internal-body">{body}</div>
