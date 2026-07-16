@@ -375,6 +375,41 @@ fn profiles_fall_back_to_the_global_manifest() {
 }
 
 #[test]
+fn probe_dedupes_routes_and_exits_by_availability() {
+  let home = unique_dir("probehome");
+  let scsh_home = home.join(".scsh");
+  // Neutralize any auth the test runner's environment carries (empty values are ignored by
+  // the availability checks), so probing is about THIS pinned home, not the developer's.
+  let envs = [
+    ("HOME", home.to_str().unwrap()),
+    ("SCSH_HOME", scsh_home.to_str().unwrap()),
+    ("OPENAI_API_KEY", ""),
+    ("CLAUDE_CODE_OAUTH_TOKEN", ""),
+    ("CURSOR_API_KEY", ""),
+    ("XAI_API_KEY", ""),
+  ];
+  let staging = unique_dir("probestage");
+  assert_eq!(scsh_env(&staging, &["installskills", "--global"], &envs).code, 0);
+
+  // The bundled code-review profile is 5 reviewers x 3 shared routes: probe reports the 3
+  // distinct routes, resolved from the global manifest (the repo has no .scsh.yml).
+  let repo = unique_dir("proberepo");
+  git_init(&repo);
+  let r = scsh_env(&repo, &["probe", "code-review", "--json"], &envs);
+  assert!(r.code == 0 || r.code == 1, "0 (some route available) or 1 (none): got {} / {}", r.code, r.out);
+  assert!(r.out.contains("\"total\": 3"), "5x3 invocations should dedupe to 3 routes; got: {}", r.out);
+  for harness in ["\"codex\"", "\"claude\"", "\"cursor\""] {
+    assert!(r.out.contains(harness), "route for {harness} should be probed; got: {}", r.out);
+  }
+  // An unavailable route always carries an actionable reason; an available one never does.
+  assert!(!r.out.contains("\"available\": false }"), "unavailable routes must explain why; got: {}", r.out);
+
+  // A profile that exists nowhere is a usage error, distinct from "no routes available".
+  let r = scsh_env(&repo, &["probe", "nope"], &envs);
+  assert_eq!(r.code, 2, "unknown/empty profile is exit 2; got {} / {}", r.code, r.out);
+}
+
+#[test]
 fn installskills_from_a_git_repo() {
   // A tiny "source" repo that ships one skill (with a script, to prove full-dir copy).
   let src = unique_dir("skillsrc");
@@ -1423,11 +1458,11 @@ fn override_yml_rejects_def() {
 }
 
 #[test]
-fn override_yml_only_on_run_list_check() {
+fn override_yml_only_on_run_list_check_probe() {
   let d = unique_dir("ovrybad");
   let r = scsh(&d, &["version", "--override-dot-scsh-yml", "/tmp/x.scsh.yml"]);
   assert_eq!(r.code, 2, "got: {}", r.out);
-  assert!(r.out.contains("only applies to 'run', 'list', and 'check-profile'"), "got: {}", r.out);
+  assert!(r.out.contains("only applies to 'run', 'list', 'check-profile', and 'probe'"), "got: {}", r.out);
 }
 
 #[test]

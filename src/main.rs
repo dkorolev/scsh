@@ -75,6 +75,7 @@ fn run(args: &[String]) -> i32 {
       }
     }
     Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
+    Mode::Probe => probe_cmd(profile, cli.override_dot_scsh_yml.as_deref(), cli.json),
     Mode::Run => match cli.def.as_deref() {
       // The daemon's "start a job" passes the session id it pre-created so its deep link and
       // the one-job-per-repo guard are authoritative before this child registers.
@@ -595,6 +596,7 @@ enum Mode {
   UpdateSkills,
   List,
   CheckProfile,
+  Probe,
   Run,
   UiDemo {
     frames: bool,
@@ -658,6 +660,7 @@ const COMMAND_NAMES: &[&str] = &[
   "list",
   "build-images",
   "check-profile",
+  "probe",
   "init-demo-project",
   "init-beautiful-demo",
   "installskills",
@@ -680,6 +683,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "list" | "ls" => "list",
     "build-images" | "build-image" | "buildimages" => "build-images",
     "check-profile" | "checkprofile" => "check-profile",
+    "probe" => "probe",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
     "init-beautiful-demo" | "init-beautiful-demo-project" => "init-beautiful-demo",
     "installskills" | "install-skills" => "installskills",
@@ -852,6 +856,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         profiles.push(name.clone());
         Some(Mode::CheckProfile)
       }
+      // `probe [profile…]`: report which harness·model routes are runnable on this host —
+      // no image build, no container. Exit 0 when at least one probed route is available.
+      "probe" => Some(Mode::Probe),
       // Hidden dev command: demo the live board with no container/model (see `ui::demo`).
       "__ui-demo" => Some(Mode::UiDemo { frames: false }),
       "--frames" => {
@@ -1047,10 +1054,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         global = true;
         None
       }
-      // After `run`, a bare token is a profile name: `scsh run a b` == `scsh run --profile a,b`.
-      // (A `-`-prefixed token is still an unknown flag, and bare tokens before a command — or
-      // after any non-`run` command — remain errors.)
-      other if matches!(mode, Some(Mode::Run)) && !other.starts_with('-') => {
+      // After `run` (or `probe`), a bare token is a profile name: `scsh run a b` ==
+      // `scsh run --profile a,b`. (A `-`-prefixed token is still an unknown flag, and bare
+      // tokens before a command — or after any other command — remain errors.)
+      other if matches!(mode, Some(Mode::Run | Mode::Probe)) && !other.starts_with('-') => {
         profiles.push(other.to_string());
         None
       }
@@ -1094,9 +1101,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   // `run --profile a b` are all equivalent.
   let profile = if profiles.is_empty() { None } else { Some(profiles.join(",")) };
   // `check-profile` carries its single profile name in the same field; `stats` filters by it.
-  if profile.is_some() && !matches!(mode, Mode::Run | Mode::CheckProfile | Mode::Stats) {
+  if profile.is_some() && !matches!(mode, Mode::Run | Mode::Probe | Mode::CheckProfile | Mode::Stats) {
     return Err(
-      "profiles only apply to 'run' and 'stats' (e.g. `scsh run code-review` or `scsh stats --profile code-review`)"
+      "profiles only apply to 'run', 'probe', and 'stats' (e.g. `scsh run code-review` or `scsh stats --profile code-review`)"
         .into(),
     );
   }
@@ -1109,8 +1116,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  if json && !matches!(mode, Mode::List | Mode::AnnotateCasts | Mode::ExportCasts) {
-    return Err("--json only applies to 'list', 'annotate-cast', and 'export-cast'".into());
+  if json && !matches!(mode, Mode::List | Mode::Probe | Mode::AnnotateCasts | Mode::ExportCasts) {
+    return Err("--json only applies to 'list', 'probe', 'annotate-cast', and 'export-cast'".into());
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -1151,8 +1158,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if def.is_some() && profile.is_some() {
     return Err("--def selects a harness definition, not a profile — don't combine them".into());
   }
-  if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile) {
-    return Err("--override-dot-scsh-yml only applies to 'run', 'list', and 'check-profile'".into());
+  if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe) {
+    return Err("--override-dot-scsh-yml only applies to 'run', 'list', 'check-profile', and 'probe'".into());
   }
   if override_dot_scsh_yml.is_some() && def.is_some() {
     return Err("--override-dot-scsh-yml and --def are mutually exclusive".into());
@@ -2675,6 +2682,90 @@ fn check_profile_cmd(profile: Option<&str>, override_yml: Option<&Path>) -> i32 
     hint(&format!("available: {}", avail.join(", ")));
   }
   1
+}
+
+/// `scsh probe [profile…]` — which harness·model routes are runnable on THIS host: the agent
+/// CLI is installed and authenticated, and an explicit opencode model is actually listed by
+/// `opencode models`. No image is built and no container starts. With profiles, only those
+/// profiles' skills are probed; without, every invocation in the resolved config is. Routes
+/// are deduped across skills (five reviewers sharing three routes probe as three), and the
+/// config resolves exactly as for a run — `--override-dot-scsh-yml`, then the repo's
+/// `.scsh.yml`, then the global manifest. Exit 0 when at least one probed route is available
+/// and 1 when none is, so scripts and skills gate a fleet directly:
+/// `scsh probe code-review && scsh run code-review`.
+fn probe_cmd(profile: Option<&str>, override_yml: Option<&Path>, json_flag: bool) -> i32 {
+  let cfg = match load_config_for_inspection(override_yml, profile) {
+    Ok(c) => c,
+    Err(code) => return code,
+  };
+  let selected: Vec<config::ResolvedInvocation> =
+    if profile.is_some() { select_invocations(&cfg, profile) } else { config::expand_invocations(&cfg) };
+  if selected.is_empty() {
+    match profile {
+      Some(p) => fail(&format!("nothing to probe — the '{p}' profile is empty")),
+      None => fail("nothing to probe — the config declares no skills"),
+    }
+    hint("see the available profiles and their skills:  scsh list");
+    return 2;
+  }
+
+  // Distinct harness·model routes, first-seen order; each is probed once.
+  let model_probe = runtime::OpencodeModelProbe::for_selected(&selected);
+  let mut routes: Vec<(config::Harness, Option<String>)> = Vec::new();
+  for inv in &selected {
+    let key = (inv.harness, inv.model.clone());
+    if !routes.contains(&key) {
+      routes.push(key);
+    }
+  }
+  let rows: Vec<(&'static str, Option<String>, Result<(), String>)> = routes
+    .iter()
+    .map(|(harness, model)| {
+      (harness.as_str(), model.clone(), runtime::check_skill_host(*harness, model.as_deref(), &model_probe))
+    })
+    .collect();
+  let available = rows.iter().filter(|(_, _, res)| res.is_ok()).count();
+
+  if json_flag {
+    let mut out = String::from("{\n  \"routes\": [\n");
+    for (i, (harness, model, res)) in rows.iter().enumerate() {
+      out.push_str(&format!("    {{ \"harness\": {}, ", json::quote(harness)));
+      match model {
+        Some(m) => out.push_str(&format!("\"model\": {}, ", json::quote(m))),
+        None => out.push_str("\"model\": null, "),
+      }
+      match res {
+        Ok(()) => out.push_str("\"available\": true }"),
+        Err(e) => out.push_str(&format!("\"available\": false, \"reason\": {} }}", json::quote(e))),
+      }
+      out.push_str(if i + 1 < rows.len() { ",\n" } else { "\n" });
+    }
+    out.push_str(&format!("  ],\n  \"available\": {available},\n  \"total\": {}\n}}", rows.len()));
+    println!("{out}");
+  } else {
+    for (harness, model, res) in &rows {
+      let route = match model {
+        Some(m) => format!("{harness} · {m}"),
+        None => (*harness).to_string(),
+      };
+      match res {
+        Ok(()) => ok(&route),
+        Err(e) => fail(&format!("{route} — {e}")),
+      }
+    }
+    let summary = format!("{available} of {} route{} available", rows.len(), plural(rows.len()));
+    if available > 0 {
+      ok(&summary);
+    } else {
+      fail(&summary);
+      hint("log in to at least one agent CLI on this host, then re-run");
+    }
+  }
+  if available > 0 {
+    0
+  } else {
+    1
+  }
 }
 
 fn daemon_cmd(action: DaemonAction) -> i32 {
@@ -6966,6 +7057,18 @@ fn print_help_command(name: &str) {
         ("--override-dot-scsh-yml <path>", "Check against this external `.scsh.yml` instead of the repo's."),
       ],
     ),
+    "probe" => (
+      "which model routes are runnable on this host",
+      "scsh probe [profile…] [--json]",
+      &[
+        (
+          "[profile…]",
+          "Probe those profiles' harness·model routes (deduped across skills); no profile = every route in the config. Exit 0 when at least one route is available, 1 when none is — gate a fleet with `scsh probe code-review && scsh run code-review`.",
+        ),
+        ("--json", "Machine-readable routes with per-route availability and the reason when unavailable."),
+        ("--override-dot-scsh-yml <path>", "Probe against this external `.scsh.yml` instead of the repo's."),
+      ],
+    ),
     "init-demo-project" => (
       "scaffold a demo project",
       "scsh init-demo-project",
@@ -7122,6 +7225,7 @@ fn print_help_overview() {
   help_row("list (ls)", "List skills by profile (--verbose, --json).");
   help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
+  help_row("probe [profile…]", "Exit 0 when at least one harness·model route is runnable on this host.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
   help_row("init-beautiful-demo", "Scaffold and commit the code-review loop demo.");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs); --global installs machine-wide.");
@@ -7173,6 +7277,7 @@ fn print_help_run() {
   help_row("scsh list", "Every skill by profile — result path, harness, env (human-readable).");
   help_row("scsh list --json", "Same, as JSON — preferred for scripts and agents.");
   help_row("scsh check-profile <name>", "Exit 0 iff that profile exists with at least one skill (no runtime).");
+  help_row("scsh probe [profile…]", "Exit 0 iff at least one of its harness·model routes is runnable here.");
   println!();
   println!("{}", h_head("External config (no install into the target repo)"));
   help_row("--override-dot-scsh-yml <path>", "Use this `.scsh.yml` and its sibling `.skills/` instead of the repo's.");
@@ -7864,6 +7969,25 @@ mod tests {
     assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
     assert!(cli(&["run", "--def", "add", "--override-dot-scsh-yml", "/x.yml"]).is_err());
     assert!(cli(&["version", "--override-dot-scsh-yml", "/x.yml"]).is_err());
+  }
+
+  #[test]
+  fn probe_parses_profiles_json_and_override() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["probe"]).unwrap();
+    assert!(matches!(c.mode, Mode::Probe));
+    assert_eq!(c.profile, None);
+    let c = cli(&["probe", "code-review"]).unwrap();
+    assert!(matches!(c.mode, Mode::Probe));
+    assert_eq!(c.profile.as_deref(), Some("code-review"));
+    let c = cli(&["probe", "code-review", "--json", "--override-dot-scsh-yml", "/x.yml"]).unwrap();
+    assert!(c.json);
+    assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
+    // Probe takes several profiles, like run.
+    assert_eq!(cli(&["probe", "a", "b"]).unwrap().profile.as_deref(), Some("a,b"));
+    // But probe-only flags stay probe-only.
+    assert!(cli(&["probe", "--global"]).is_err());
+    assert!(cli(&["check-profile", "x", "--json"]).is_err(), "--json doesn't apply to check-profile");
   }
 
   #[test]
