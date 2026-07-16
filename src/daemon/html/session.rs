@@ -103,13 +103,27 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     id = id,
     label = label,
   );
-  // Force stop only while the job is running — hide it otherwise. A control that can
-  // never act again is noise, not a missing feature: the lifecycle badge already says
-  // completed / failed / cancelled. (Deliberate departure from the WEB-UI §2 gray-in-place
-  // rule; the offline export strips the whole actions island the same way.)
+  // Force restart / Force stop only while the job is running — hide them otherwise. A
+  // control that can never act again is noise, not a missing feature: the lifecycle badge
+  // already says completed / failed / cancelled. (Deliberate departure from the WEB-UI §2
+  // gray-in-place rule; the offline export strips the whole actions island the same way.)
+  // Restart is for repository jobs with a def/profile to respawn — image builds and
+  // follow-on annotation sessions have no start recipe to replay.
+  let restartable = session.profile.is_some()
+    && session.parent_session.is_none()
+    && session.repo != crate::daemon::server::IMAGE_BUILDS_REPO
+    && session.repo != crate::daemon::server::INTERNAL_REPO;
   let stop_btn = if lifecycle == SessionLifecycle::Running {
+    let restart = if restartable {
+      format!(
+        "<button type=\"button\" class=\"chamfer btn btn--orange btn--sm\" id=\"session-restart\" data-session=\"{id}\" title=\"Force-restart this job? The current run is stopped (containers killed) and the same job starts fresh.\"><span>Force restart</span></button>\n",
+        id = id,
+      )
+    } else {
+      String::new()
+    };
     format!(
-      "<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\" title=\"Force-stop this job? Running containers will be killed.\"><span>Force stop</span></button>\n",
+      "{restart}<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\" title=\"Force-stop this job? Running containers will be killed.\"><span>Force stop</span></button>\n",
       id = id,
     )
   } else {

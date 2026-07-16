@@ -784,6 +784,10 @@ fn route(
     let (status, body, mutated) = jobs_start_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/jobs/restart" {
+    let (status, body, mutated) = jobs_restart_response(&req.body, store);
+    return (status, body, "application/json", mutated);
+  }
   if req.method == "POST" && req.path == "/api/v1/session/stop" {
     let (status, body, mutated) = session_stop_response(&req.body, store);
     return (status, body, "application/json", mutated);
@@ -1747,49 +1751,63 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   };
   let def_name = field_str(&obj, "def").map(|d| d.trim().to_string()).filter(|d| !d.is_empty());
   let profile_name = field_str(&obj, "profile").map(|p| p.trim().to_string()).filter(|p| !p.is_empty());
-  let run_name = match (&def_name, &profile_name) {
-    (Some(d), None) => d.clone(),
-    (None, Some(p)) => p.clone(),
-    _ => return (400, err_body("give a definition name or a profile name (exactly one)"), false),
-  };
   let repo_in = match field_str(&obj, "repo") {
     Some(r) if !r.trim().is_empty() => r.trim().to_string(),
     _ => return (400, err_body("give a repository path"), false),
   };
-  let params = read_params(&obj);
+  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), store)
+}
 
-  // Re-validate at start time with the SAME checks the run itself makes — a git repo that is
-  // committed, clean, and has a gitignored scratch dir — so the daemon never starts a job the
-  // run would refuse (the browser should already have disabled Start, but never trust the client).
+/// A validated, ready-to-spawn job: the repo root, what to run, and the planned tasks.
+struct PlannedJob {
+  root: std::path::PathBuf,
+  run_name: String,
+  planned: Vec<SkillMeta>,
+  kind: Option<String>,
+  workflow: Option<super::workflow::WorkflowMeta>,
+  run_args: Vec<String>,
+}
+
+/// Everything `jobs/start` checks before touching anything: the path is a runnable git repo
+/// (committed, clean, gitignored scratch — the SAME checks the run itself makes), and the
+/// def/profile + params name a startable job. Split out so `jobs/restart` can refuse a
+/// doomed restart BEFORE it stops the old run.
+fn plan_job_request(
+  repo_in: &str, def_name: &Option<String>, profile_name: &Option<String>, params: &[(String, String)],
+) -> Result<PlannedJob, (u16, String, bool)> {
+  let run_name = match (def_name, profile_name) {
+    (Some(d), None) => d.clone(),
+    (None, Some(p)) => p.clone(),
+    _ => return Err((400, err_body("give a definition name or a profile name (exactly one)"), false)),
+  };
   let Some(root) = crate::git_root_of(std::path::Path::new(&repo_in)) else {
-    return (400, err_body(&format!("not a git repository: {repo_in}")), false);
+    return Err((400, err_body(&format!("not a git repository: {repo_in}")), false));
   };
   let blockers = crate::def_run_blockers(&root);
   if !blockers.is_empty() {
-    return (400, err_body(&format!("repository not ready: {}", blockers.join("; "))), false);
+    return Err((400, err_body(&format!("repository not ready: {}", blockers.join("; "))), false));
   }
-  let repo = root.to_string_lossy().into_owned();
 
   // Validate what will run, and pre-plan its tasks — pre-populated on the session so its
   // page shows them immediately (no blank "limbo" while the spawned run starts up and
   // registers).
-  let (planned, kind, workflow, run_args) = if let Some(profile) = &profile_name {
+  let (planned, kind, workflow, run_args) = if let Some(profile) = profile_name {
     if profile == "default" {
-      return (
+      return Err((
         400,
         err_body("the default profile is always the repo's own — start a NAMED profile, or a definition"),
         false,
-      );
+      ));
     }
     let routes = profile_routes_for(&root, profile);
     if routes.is_empty() {
-      return (
+      return Err((
         400,
         err_body(&format!(
           "no skill profile named '{profile}' — neither this repo's .scsh.yml nor the global manifest (scsh installskills --global) declares it"
         )),
         false,
-      );
+      ));
     }
     let planned: Vec<SkillMeta> =
       routes.iter().map(|r| SkillMeta { name: r.name.clone(), harness: r.harness.as_str().to_string() }).collect();
@@ -1797,15 +1815,31 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
   } else {
     let discovery = crate::harness_def::discover(&root);
     let Some(def) = discovery.find(&run_name) else {
-      return (400, err_body(&format!("no harness definition named '{run_name}'")), false);
+      return Err((400, err_body(&format!("no harness definition named '{run_name}'")), false));
     };
-    if let Err(msg) = validate_job_params(def, &params) {
-      return (400, err_body(&msg), false);
+    if let Err(msg) = validate_job_params(def, params) {
+      return Err((400, err_body(&msg), false));
     }
     let workflow = crate::daemon::workflow::workflow_meta_from_def(def);
     let kind = if def.is_workflow() { Some("workflow".to_string()) } else { None };
     (planned_skills(def, &run_name), kind, workflow, vec!["run".to_string(), "--def".to_string(), run_name.clone()])
   };
+  Ok(PlannedJob { root, run_name, planned, kind, workflow, run_args })
+}
+
+/// The shared start path of `jobs/start` and `jobs/restart`: validate the repo, plan the
+/// tasks, enforce one job per repo, spawn the run, pre-create its session, and persist the
+/// start recipe so the job can later be force-restarted.
+fn start_job_in_repo(
+  repo_in: &str, def_name: Option<String>, profile_name: Option<String>, params: Vec<(String, String)>,
+  store: &Arc<Mutex<Store>>,
+) -> (u16, String, bool) {
+  let PlannedJob { root, run_name, planned, kind, workflow, run_args } =
+    match plan_job_request(repo_in, &def_name, &profile_name, &params) {
+      Ok(p) => p,
+      Err(e) => return e,
+    };
+  let repo = root.to_string_lossy().into_owned();
 
   // One job per directory.
   let now = now_unix_secs();
@@ -1852,6 +1886,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
         let code = child.wait().ok().and_then(|s| s.code());
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
+      write_start_recipe(&session_id, def_name.as_deref(), profile_name.as_deref(), &params);
       let mut store = lock_store(store);
       store.touch(now);
       store.insert_session(
@@ -1966,6 +2001,62 @@ fn repos_json(store: &Store, now: u64) -> String {
     })
     .collect();
   format!("{{\"repos\":[{}]}}", repos.join(","))
+}
+
+/// `POST /api/v1/jobs/restart` — body `{"session":"…"}`. Force-restart a job: stop the old
+/// run first (containers killed, incomplete procs failed `force_stopped` — exactly Force
+/// stop), then start the SAME job fresh in the same repository: from the session's persisted
+/// start recipe when it has one (web-started jobs, params included), else from its stored
+/// def/profile name alone (CLI runs — their env params were never the daemon's to see, so a
+/// definition whose required params have no defaults refuses with the missing param).
+/// Answers `{ok:true,session:"<new id>"}` — the NEW job's id.
+fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let obj = match parse(body) {
+    Ok(Value::Object(o)) => o,
+    _ => return (400, err_body("expected a JSON object"), false),
+  };
+  let session_id = match field_str(&obj, "session") {
+    Some(s) if !s.trim().is_empty() => s.trim().to_string(),
+    _ => return (400, err_body("give a session id"), false),
+  };
+  let (repo, name) = {
+    let store = lock_store(store);
+    let Some(s) = store.sessions.get(&session_id) else {
+      return (404, err_body("session not found"), false);
+    };
+    if s.repo == IMAGE_BUILDS_REPO || s.repo == INTERNAL_REPO || s.parent_session.is_some() {
+      return (400, err_body("only repository jobs can be restarted"), false);
+    }
+    let Some(name) = s.profile.clone() else {
+      return (400, err_body("this job has no definition or profile to restart"), false);
+    };
+    (s.repo.clone(), name)
+  };
+  // The recipe: what jobs/start recorded, or — for a CLI-started run — the name alone,
+  // classified def-vs-profile with the same precedence a fresh start would use.
+  let (def, profile, params) = read_start_recipe(&session_id).unwrap_or_else(|| {
+    let is_def = crate::git_root_of(std::path::Path::new(&repo))
+      .map(|root| crate::harness_def::discover(&root).find(&name).is_some())
+      .unwrap_or(false);
+    if is_def {
+      (Some(name.clone()), None, Vec::new())
+    } else {
+      (None, Some(name.clone()), Vec::new())
+    }
+  });
+  // Refuse a doomed restart BEFORE stopping anything: if the respawn cannot start (repo
+  // dirty, unmet required param, vanished def), the old run — stuck or not — is left alone.
+  if let Err(e) = plan_job_request(&repo, &def, &profile, &params) {
+    return e;
+  }
+  // Stop the old run before spawning, so the one-job-per-repo guard sees the repo free.
+  // Idempotent: restarting an already-ended job just starts it again.
+  let stop_body = format!("{{\"session\":{}}}", quote(&session_id));
+  let (status, out, _) = session_stop_response(&stop_body, store);
+  if status != 200 {
+    return (status, out, false);
+  }
+  start_job_in_repo(&repo, def, profile, params, store)
 }
 
 /// `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job: stop every
@@ -2318,6 +2409,48 @@ fn global_profiles_json() -> Vec<String> {
     .into_iter()
     .map(|(name, agents)| format!("{{\"name\":{},\"agents\":[{}]}}", quote(&name), agents.join(",")))
     .collect()
+}
+
+/// Where a started job's recipe lives: `$SCSH_HOME/sessions/<id>/start.json` — the def or
+/// profile it ran plus the params it was started with. Written by `jobs/start`, read back
+/// by `jobs/restart`, and reclaimed with the rest of the session dir. A session without one
+/// (a CLI-started run — its env was never the daemon's to see) restarts from its stored
+/// name alone.
+fn session_start_recipe_path(session_id: &str) -> std::path::PathBuf {
+  crate::runtime::host_sessions_dir().join(session_id).join("start.json")
+}
+
+/// Best-effort: a missing recipe only means a later restart falls back to the name-only path.
+fn write_start_recipe(session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)]) {
+  let path = session_start_recipe_path(session_id);
+  let Some(dir) = path.parent() else { return };
+  if std::fs::create_dir_all(dir).is_err() {
+    return;
+  }
+  let what = match (def, profile) {
+    (Some(d), _) => format!("\"def\":{}", quote(d)),
+    (_, Some(p)) => format!("\"profile\":{}", quote(p)),
+    _ => return,
+  };
+  let params: Vec<String> = params.iter().map(|(k, v)| format!("{}:{}", quote(k), quote(v))).collect();
+  let _ = std::fs::write(&path, format!("{{{what},\"params\":{{{}}}}}", params.join(",")));
+}
+
+/// A persisted start recipe: `(def, profile, params)`.
+type StartRecipe = (Option<String>, Option<String>, Vec<(String, String)>);
+
+/// The recipe from a session's persisted `start.json`, or `None` when the session has no
+/// (readable) recipe.
+fn read_start_recipe(session_id: &str) -> Option<StartRecipe> {
+  let src = std::fs::read_to_string(session_start_recipe_path(session_id)).ok()?;
+  let Ok(Value::Object(obj)) = parse(&src) else { return None };
+  let def = field_str(&obj, "def").filter(|s| !s.is_empty());
+  let profile = field_str(&obj, "profile").filter(|s| !s.is_empty());
+  if def.is_none() && profile.is_none() {
+    return None;
+  }
+  let params = read_params(&obj);
+  Some((def, profile, params))
 }
 
 /// The routes a named skill profile would run in `root`, mirroring `scsh run <profile>`'s
@@ -3984,33 +4117,39 @@ mod tests {
     let stub = std::env::temp_dir().join(format!("scsh-sleeper-{}.sh", crate::runtime::random_nonce_6()));
     std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
     std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
-    std::env::set_var("SCSH_BIN", &stub);
+    // Isolated $SCSH_HOME: starting a job persists its restart recipe under sessions/.
+    let home = std::env::temp_dir().join(format!("scsh-shome-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap();
     let repo = dir.to_string_lossy().into_owned();
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let body = format!(r#"{{"repo":{},"def":"add","params":{{"A":"2","B":"3"}}}}"#, quote(&repo));
 
-    let (status, out, mutated) = jobs_start_response(&body, &store);
-    assert_eq!(status, 200, "got: {out}");
-    assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
-    let session_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
-    {
-      let guard = store.lock().unwrap();
-      let session = guard.sessions.get(&session_id).expect("session pre-created");
-      assert_eq!(session.profile.as_deref(), Some("add"), "session labeled with the definition name");
-      assert!(!session.repo.is_empty(), "session carries the repo path");
-      // No limbo: the planned tasks are on the session immediately (add's four agents).
-      assert_eq!(session.skills.len(), 4, "planned skills shown at once, before the run registers");
-      assert!(session.skills.iter().any(|s| s.harness == "claude"), "agents listed by harness");
-      assert!(session.skills.iter().all(|s| s.name.starts_with("add-")), "flat routes named {{def}}-{{route}}");
-    }
+    with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      let (status, out, mutated) = jobs_start_response(&body, &store);
+      assert_eq!(status, 200, "got: {out}");
+      assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
+      let session_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+      {
+        let guard = store.lock().unwrap();
+        let session = guard.sessions.get(&session_id).expect("session pre-created");
+        assert_eq!(session.profile.as_deref(), Some("add"), "session labeled with the definition name");
+        assert!(!session.repo.is_empty(), "session carries the repo path");
+        // No limbo: the planned tasks are on the session immediately (add's four agents).
+        assert_eq!(session.skills.len(), 4, "planned skills shown at once, before the run registers");
+        assert!(session.skills.iter().any(|s| s.harness == "claude"), "agents listed by harness");
+        assert!(session.skills.iter().all(|s| s.name.starts_with("add-")), "flat routes named {{def}}-{{route}}");
+      }
 
-    // A second start in the same repo is refused while the first job is still running.
-    let (status2, out2, _) = jobs_start_response(&body, &store);
-    assert_eq!(status2, 409, "got: {out2}");
-    assert!(out2.contains("already running"), "got: {out2}");
+      // A second start in the same repo is refused while the first job is still running.
+      let (status2, out2, _) = jobs_start_response(&body, &store);
+      assert_eq!(status2, 409, "got: {out2}");
+      assert!(out2.contains("already running"), "got: {out2}");
+      std::env::remove_var("SCSH_BIN");
+    });
 
-    std::env::remove_var("SCSH_BIN");
     std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }
 
@@ -4144,6 +4283,162 @@ mod tests {
     assert_eq!(status, 400, "got: {out}");
 
     assert!(store.lock().unwrap().sessions.is_empty(), "nothing spawned");
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_restart_respawns_the_same_job() {
+    let home = std::env::temp_dir().join(format!("scsh-rhome-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap();
+    let dir = clean_repo("restart");
+    let repo = dir.to_string_lossy().into_owned();
+    let stub = std::env::temp_dir().join(format!("scsh-sleeper-{}.sh", crate::runtime::random_nonce_6()));
+    std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+
+    let (old_id, new_id) = with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      // Start `add` from the web, params included; the recipe lands in the session dir.
+      let body = format!(r#"{{"repo":{},"def":"add","params":{{"A":"7","B":"9"}}}}"#, quote(&repo));
+      let (status, out, _) = jobs_start_response(&body, &store);
+      assert_eq!(status, 200, "got: {out}");
+      let old_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+      let recipe = std::fs::read_to_string(session_start_recipe_path(&old_id)).expect("recipe persisted");
+      assert!(recipe.contains(r#""def":"add""#) && recipe.contains(r#""A":"7""#), "recipe: {recipe}");
+
+      // Restart: the old job is force-stopped and the SAME def respawns with the SAME params.
+      let body = format!(r#"{{"session":{}}}"#, quote(&old_id));
+      let (status, out, mutated) = jobs_restart_response(&body, &store);
+      assert_eq!(status, 200, "got: {out}");
+      assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
+      let new_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+      std::env::remove_var("SCSH_BIN");
+      (old_id, new_id)
+    });
+    assert_ne!(old_id, new_id, "the restart answers with the NEW job's id");
+    {
+      let guard = store.lock().unwrap();
+      let old = guard.sessions.get(&old_id).unwrap();
+      assert!(old.ended_at.is_some(), "the old job is stopped, never left running");
+      let new = guard.sessions.get(&new_id).expect("the new session is pre-created");
+      assert_eq!(new.profile.as_deref(), Some("add"), "same definition");
+      assert_eq!(new.skills.len(), 4, "same planned tasks");
+      assert!(new.ended_at.is_none(), "the new job is live");
+    }
+    std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_restart_falls_back_to_the_name_for_cli_runs() {
+    // A CLI-started session has no start.json — the daemon never saw its env. Its stored
+    // def/profile name alone restarts it (params-free; `add`'s params all have defaults).
+    let home = std::env::temp_dir().join(format!("scsh-rhome-cli-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap();
+    let dir = clean_repo("restart-cli");
+    let repo = dir.to_string_lossy().into_owned();
+    let stub = std::env::temp_dir().join(format!("scsh-sleeper-{}.sh", crate::runtime::random_nonce_6()));
+    std::fs::write(&stub, "#!/bin/sh\nsleep 5\n").unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    store.lock().unwrap().insert_session(
+      "cliadd".into(),
+      Session {
+        id: "cliadd".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("add".into()),
+        kind: None,
+        repo: repo.clone(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: now_unix_secs(),
+        client_connected: true,
+        run_pid: None,
+        workflow: None,
+        parent_session: None,
+      },
+    );
+    let (status, out, _) = with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      let out = jobs_restart_response(r#"{"session":"cliadd"}"#, &store);
+      std::env::remove_var("SCSH_BIN");
+      out
+    });
+    assert_eq!(status, 200, "got: {out}");
+    let guard = store.lock().unwrap();
+    assert!(guard.sessions.get("cliadd").unwrap().ended_at.is_some(), "the stuck CLI job is stopped");
+    assert_eq!(guard.sessions.len(), 2, "a fresh job took its place");
+    std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_restart_refuses_what_it_cannot_replay() {
+    let home = std::env::temp_dir().join(format!("scsh-rhome-no-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&home).unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+
+    // Unknown session.
+    let (status, out, _) = jobs_restart_response(r#"{"session":"nosuch"}"#, &store);
+    assert_eq!(status, 404, "got: {out}");
+
+    // An image build is not a repository job — nothing to replay.
+    store.lock().unwrap().insert_session(
+      "buildx".into(),
+      Session {
+        id: "buildx".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("build-images".into()),
+        kind: Some("build".into()),
+        repo: IMAGE_BUILDS_REPO.into(),
+        branch: String::new(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: now_unix_secs(),
+        client_connected: true,
+        run_pid: None,
+        workflow: None,
+        parent_session: None,
+      },
+    );
+    let (status, out, _) = jobs_restart_response(r#"{"session":"buildx"}"#, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("only repository jobs"), "got: {out}");
+
+    // A CLI-started run of a definition with an unmet required param cannot be replayed
+    // faithfully — the daemon never saw its env — so it refuses with the missing param.
+    let dir = clean_repo("restart-park");
+    store.lock().unwrap().insert_session(
+      "clires".into(),
+      Session {
+        id: "clires".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("research".into()),
+        kind: None,
+        repo: dir.to_string_lossy().into_owned(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: now_unix_secs(),
+        client_connected: true,
+        run_pid: None,
+        workflow: None,
+        parent_session: None,
+      },
+    );
+    let (status, out, _) = with_scsh_home(&home, || jobs_restart_response(r#"{"session":"clires"}"#, &store));
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("CITY"), "the missing param is named: {out}");
+    let ended = store.lock().unwrap().sessions.get("clires").unwrap().ended_at;
+    assert!(ended.is_none(), "a refused restart leaves the old run alone — stop only after the respawn validates");
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }
