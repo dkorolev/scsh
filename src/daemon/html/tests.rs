@@ -1895,7 +1895,7 @@ fn live_client_js_shows_connecting_on_ws_close() {
 fn wrap_page_connecting_status_uses_blue() {
   use super::layout::wrap_page;
   let html = wrap_page("scsh sessions", 7274, None, None, "", "<p>body</p>");
-  assert!(html.contains("class=\"daemon-status connecting\""));
+  assert!(html.contains("class=\"chamfer daemon-status connecting\""));
   assert!(html.contains(".daemon-status.connecting .dot { background: var(--cyan);"));
   assert!(!html.contains("fonts.googleapis.com"), "offline-first: no CDN fonts (WEB-UI §5)");
   assert!(html.contains("position: sticky"), "status chrome is pinned");
@@ -1903,6 +1903,12 @@ fn wrap_page_connecting_status_uses_blue() {
   assert!(!html.contains("top: 3.1rem"), "no hard-coded sticky gap above the tabs");
   assert!(html.contains("width: 100%"), "status chrome spans the viewport");
   assert!(html.contains(r#"class="page-shell""#), "content sits in a centered column under the bar");
+  // The bar is a chamfered island in a sticky full-width backdrop; the connection dot
+  // is a 45°-rotated square (diamond), not a circle.
+  assert!(html.contains(r#"class="daemon-status-wrap""#), "island sits in the sticky wrap");
+  assert!(html.contains(".daemon-status .dot {"));
+  assert!(html.contains("transform: rotate(45deg);"), "diamond dot");
+  assert!(!html.contains("border-radius: 50%"), "no round dots remain");
 }
 
 #[test]

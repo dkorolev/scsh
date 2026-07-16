@@ -411,7 +411,7 @@ function setDaemonStatus(kind, label, uptime) {
   const bar = document.getElementById('daemon-status');
   const lbl = document.getElementById('status-label');
   const up = document.getElementById('status-uptime');
-  bar.className = 'daemon-status ' + kind;
+  bar.className = 'chamfer daemon-status ' + kind;
   lbl.textContent = label;
   up.textContent = uptime != null ? fmtUptime(uptime) : '';
 }
