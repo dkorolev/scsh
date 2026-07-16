@@ -601,7 +601,7 @@ function syncProcOutput(det, p) {
     // Unrecorded procs start as slim rows; the output box exists only once the first log
     // line arrives — annotate rows without a recording never grow one.
     if (!lines.length || hasCast(p)) return;
-    det.insertAdjacentHTML('beforeend', '<div class="output"></div>');
+    det.insertAdjacentHTML('beforeend', '<div class="chamfer output"></div>');
     out = det.querySelector('.output');
     setupOutputScroll(out);
   }
@@ -1049,7 +1049,7 @@ function procHtml(p, isOpen, nowUnix) {
   const lines = p.lines || [];
   const body = hasCast(p)
     ? castEmbedHtml(p)
-    : (lines.length ? '<div class="output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
+    : (lines.length ? '<div class="chamfer output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
   const elapsedText = elapsedPhrase(p.status, procElapsed(p, nowUnix), p.fail_reason);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' id="task-' + esc(step) + '" data-workflow-step="' + esc(step) + '"' : '';

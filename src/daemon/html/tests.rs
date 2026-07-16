@@ -1064,7 +1064,7 @@ fn offline_export_keeps_text_log_lines() {
   let note = "no recording — image build ran without asciinema on PATH (text log only)";
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
   let html = session_export_page(&session, &exports, 100);
-  assert!(html.contains(r#"<div class="output">"#), "export embeds the text-log output box: {html}");
+  assert!(html.contains(r#"<div class="chamfer output">"#), "export embeds the text-log output box: {html}");
   assert!(
     html.contains(r#"<div class="line"><span class="at">+0.5s</span> Step 1/4 : FROM ubuntu</div>"#),
     "export keeps the live page's timestamped line markup: {html}"
@@ -1077,7 +1077,7 @@ fn offline_export_keeps_text_log_lines() {
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
   let bare_html = session_export_page(&bare, &exports, 100);
   assert!(bare_html.contains(note), "no lines → the note explains why there is nothing to embed: {bare_html}");
-  assert!(!bare_html.contains(r#"<div class="output">"#), "no lines → no empty output box: {bare_html}");
+  assert!(!bare_html.contains(r#"<div class="chamfer output">"#), "no lines → no empty output box: {bare_html}");
 }
 
 #[test]
@@ -1582,7 +1582,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
   );
   assert!(procs.contains(r#"<a href="/cast/castab/2?dl=1" download>"#), "download link");
   // A recorded proc shows the player, NOT the text output.
-  assert!(!procs.contains(r#"<div class="output">"#), "no text output for recorded proc");
+  assert!(!procs.contains(r#"<div class="chamfer output">"#), "no text output for recorded proc");
   assert!(!procs.contains("autoscroll-ctl"), "no autoscroll control for recorded proc");
 }
 
@@ -1634,7 +1634,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
   );
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
-  assert!(procs.contains(r#"<div class="output">"#), "text fallback output remains");
+  assert!(procs.contains(r#"<div class="chamfer output">"#), "text fallback output remains");
   assert!(!procs.contains("autoscroll-ctl"), "Auto-scroll checkbox removed");
   assert!(!procs.contains("Auto-scroll to bottom"), "Auto-scroll checkbox removed");
   let js = live_client_js();
@@ -1707,14 +1707,14 @@ fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
       assert!(!procs.contains("Stop annotation"), "no stop action on a settled row ({status:?})");
     }
     assert!(!procs.contains("autoscroll-ctl"), "no auto-scroll control on a slim row ({status:?}): {procs}");
-    assert!(!procs.contains(r#"<div class="output">"#), "no output box on a slim row ({status:?}): {procs}");
+    assert!(!procs.contains(r#"<div class="chamfer output">"#), "no output box on a slim row ({status:?}): {procs}");
     assert!(!procs.contains("No output"), "no empty-output placeholder ({status:?}): {procs}");
   }
   // The live-update path renders the same slim shape, so a WS tick never grows the
   // chrome back: the client builds the output box only once log lines exist.
   let js = live_client_js();
   assert!(
-    js.contains("lines.length ? '<div class=\"output\">'"),
+    js.contains("lines.length ? '<div class=\"chamfer output\">'"),
     "procHtml keeps line-less procs slim"
   );
   assert!(js.contains("if (!lines.length || hasCast(p)) return;"), "syncProcOutput never creates an empty box");

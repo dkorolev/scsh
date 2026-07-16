@@ -343,7 +343,7 @@ gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job
 <button type="button" class="chamfer btn btn--green btn--sm" id="project-create"><span>New Project</span></button>
 </div>
 </div>
-<div id="repo-blockers" class="blockers" hidden></div>
+<div id="repo-blockers" class="chamfer blockers" hidden></div>
 <div id="defs-panel" hidden>
 <p class="section-label">Definitions</p>
 <p class="dim">Harness definitions in <code id="open-repo-path"></code> — pick one to configure and start.</p>
@@ -361,7 +361,7 @@ gitignored scratch dir (<code>tmp/</code> or <code>.harness/tmp</code>). One job
 fn dirs_panel(store: &Store, now: u64, filter: Option<&IndexFilter>) -> String {
   let banner = match filter {
     Some(f) => format!(
-      "<p class=\"filter-banner\" data-repo-filter=\"{path}\">Showing <strong>{label}</strong> · \
+      "<p class=\"chamfer filter-banner\" data-repo-filter=\"{path}\">Showing <strong>{label}</strong> · \
 <a class=\"filter-clear\" href=\"/projects\">Show all</a></p>\n",
       path = esc(&f.repo_path()),
       label = esc(&f.label()),
