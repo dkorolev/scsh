@@ -95,12 +95,13 @@ class Scheduler:
         self._cancelled.add(job_id)
 
     def next_job(self):
+        """Return (job, priority), or (None, None) when the queue is empty."""
         while self._heap:
-            _, _, job = heapq.heappop(self._heap)
+            priority, _, job = heapq.heappop(self._heap)
             if job.job_id in self._cancelled:
                 continue
-            return job
-        return None
+            return job, priority
+        return None, None
 EOF
 """Job + its retry policy."""
 
@@ -133,7 +134,7 @@ class Worker:
         self.completed = []
 
     def tick(self):
-        job = self.scheduler.next_job()
+        job, priority = self.scheduler.next_job()
         if job is None:
             return False
         try:
@@ -146,7 +147,8 @@ class Worker:
                 if len(self.dead_letters) > DEAD_LETTER_CAP:
                     self.dead_letters.pop(0)
             else:
-                self.scheduler.submit(job, priority=9)
+                # Keep the original priority — do not silently demote retries.
+                self.scheduler.submit(job, priority=priority)
         return True
 EOF3
 """Demo entry point: submit a few jobs, run the worker to completion."""
@@ -229,8 +231,8 @@ answers will be compared side by side. Work alone, from the code only.
    }
 
 Dig for the `surprising_or_risky` bullets — this codebase has deliberate quirks. Look for
-silent data loss and unbounded retry, not only priority and cancellation behavior. Point at
-real lines of code, not generic advice.
+silent data loss, unbounded retry, and unused helpers, not only cancellation behavior. Point
+at real lines of code, not generic advice.
 MD
 ```
 
@@ -313,14 +315,15 @@ and produce a comparison for the user:
 1. **Scorecard.** The target has three planted quirks. For each agent, report which it
    surfaced in `surprising_or_risky`:
    - `max_attempts=0` means **retry forever** (`jobs.py`, `exhausted()`) — documented nowhere;
-   - a retried job **loses its original priority** — resubmitted at 9, the back of the queue
-     (`worker.py`, the `except` branch);
+   - `backoff_seconds()` is **never called** (`jobs.py`) — retries requeue immediately with
+     no delay despite the helper existing;
    - the dead-letter list is **capped at 100 and silently drops the oldest** failure
      (`worker.py`, `DEAD_LETTER_CAP`).
 2. **Consensus vs. disagreement.** Where do the one-liners and architecture bullets agree?
    Where do the agents genuinely differ — and is any of them *wrong*?
 3. **Unique insights.** Anything only one agent noticed (the FIFO tie-break counter in
-   `scheduler.py` and the silent drop of cancelled jobs are honest bonus finds).
+   `scheduler.py`, retries preserving original priority, and the silent drop of cancelled
+   jobs are honest bonus finds).
 4. **Verdict.** Which explanation would you hand to a new teammate, and why — one short
    paragraph.
 
