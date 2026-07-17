@@ -425,7 +425,7 @@ struct StatusCounts {
   running: usize,
   terminating: usize,
   waiting: usize,
-  ready: usize,
+  queued: usize,
   failed: usize,
   stopped: usize,
   stalled: usize,
@@ -440,7 +440,7 @@ impl StatusCounts {
       WorkflowDisplayState::Running => self.running += 1,
       WorkflowDisplayState::Terminating => self.terminating += 1,
       WorkflowDisplayState::Waiting => self.waiting += 1,
-      WorkflowDisplayState::Ready => self.ready += 1,
+      WorkflowDisplayState::Queued => self.queued += 1,
       WorkflowDisplayState::Failed => self.failed += 1,
       WorkflowDisplayState::ForceStopped => self.stopped += 1,
       WorkflowDisplayState::Stalled => self.stalled += 1,
@@ -448,7 +448,7 @@ impl StatusCounts {
     }
   }
 
-  /// e.g. `4 tasks · <a …>1 running</a> · <a …>2 ready</a>` — status buckets link to the
+  /// e.g. `4 tasks · <a …>1 running</a> · <a …>2 queued</a>` — status buckets link to the
   /// first node of that status in the graph (topmost / leftmost).
   fn summary_html(&self, total: usize, first_of: &std::collections::BTreeMap<WorkflowDisplayState, String>) -> String {
     let mut parts = vec![format!("{total} {}", if total == 1 { "task" } else { "tasks" })];
@@ -458,7 +458,7 @@ impl StatusCounts {
       (self.running, WorkflowDisplayState::Running),
       (self.terminating, WorkflowDisplayState::Terminating),
       (self.waiting, WorkflowDisplayState::Waiting),
-      (self.ready, WorkflowDisplayState::Ready),
+      (self.queued, WorkflowDisplayState::Queued),
       (self.failed, WorkflowDisplayState::Failed),
       (self.stopped, WorkflowDisplayState::ForceStopped),
       (self.stalled, WorkflowDisplayState::Stalled),
@@ -497,7 +497,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
     WorkflowDisplayState::ForceStopped,
     WorkflowDisplayState::Stalled,
     WorkflowDisplayState::Waiting,
-    WorkflowDisplayState::Ready,
+    WorkflowDisplayState::Queued,
     WorkflowDisplayState::Skipped,
   ];
   let mut items = String::new();
@@ -628,7 +628,7 @@ fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
     WorkflowDisplayState::Terminating => 5,
     WorkflowDisplayState::Running => 6,
     WorkflowDisplayState::Stalled => 7,
-    WorkflowDisplayState::Ready => 8,
+    WorkflowDisplayState::Queued => 8,
     WorkflowDisplayState::Waiting => 9,
   }
 }
@@ -686,8 +686,8 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
       meta_bits.push(format!("waiting on {unmet} tasks"));
     }
   }
-  if state == WorkflowDisplayState::Ready {
-    meta_bits.push("ready".into());
+  if state == WorkflowDisplayState::Queued {
+    meta_bits.push("queued".into());
   }
   let gate = if node.conditional {
     // Generic copy only — never surface gate literals in the browser (REMAINS-TO-DO §3).
@@ -761,7 +761,7 @@ fn node_tip(
       }
     }
     WorkflowDisplayState::Waiting => lines.push("Waiting to start".into()),
-    WorkflowDisplayState::Ready => {
+    WorkflowDisplayState::Queued => {
       lines.push("Queued — dependencies finished; waiting for the scheduler to start this task".into())
     }
     WorkflowDisplayState::Running => {
@@ -810,7 +810,7 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
         WorkflowDisplayState::Running => "running",
         WorkflowDisplayState::Terminating => "terminating",
         WorkflowDisplayState::Waiting => "waiting",
-        WorkflowDisplayState::Ready => "queued",
+        WorkflowDisplayState::Queued => "queued",
         WorkflowDisplayState::Stalled => "stalled",
         WorkflowDisplayState::Done => "done",
         WorkflowDisplayState::Graceful => "graceful",
@@ -835,7 +835,8 @@ fn node_proc_for_tip<'a>(
 
 fn state_icon(state: WorkflowDisplayState) -> &'static str {
   match state {
-    WorkflowDisplayState::Waiting | WorkflowDisplayState::Ready => "◇",
+    WorkflowDisplayState::Waiting => "◇",
+    WorkflowDisplayState::Queued => "◈",
     WorkflowDisplayState::Running | WorkflowDisplayState::Terminating => "◆",
     WorkflowDisplayState::Done => "✓",
     WorkflowDisplayState::Graceful => "!",

@@ -48,7 +48,7 @@ pub struct WorkflowNodeMeta {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkflowDisplayState {
   Waiting,
-  Ready,
+  Queued,
   Running,
   Terminating,
   Done,
@@ -64,7 +64,7 @@ impl WorkflowDisplayState {
   pub fn as_str(self) -> &'static str {
     match self {
       Self::Waiting => "waiting",
-      Self::Ready => "ready",
+      Self::Queued => "queued",
       Self::Running => "running",
       Self::Terminating => "terminating",
       Self::Done => "done",
@@ -79,7 +79,7 @@ impl WorkflowDisplayState {
   pub fn label(self) -> &'static str {
     match self {
       Self::Waiting => "Waiting",
-      Self::Ready => "Queued",
+      Self::Queued => "Queued",
       Self::Running => "Running",
       Self::Terminating => "Terminating",
       Self::Done => "Succeeded",
@@ -738,7 +738,7 @@ pub fn display_state(
         if !live {
           WorkflowDisplayState::Stalled
         } else if unmet_needs(session, meta, node) == 0 {
-          WorkflowDisplayState::Ready
+          WorkflowDisplayState::Queued
         } else {
           WorkflowDisplayState::Waiting
         }
@@ -882,9 +882,9 @@ mod tests {
   }
 
   #[test]
-  fn waiting_skill_is_stalled_not_ready_when_job_ended_incomplete() {
+  fn waiting_skill_is_stalled_not_queued_when_job_ended_incomplete() {
     // Build finished; skill never started; session ended mid-job (daemon restart / orphan
-    // reconcile). Lifecycle is Cancelled — must not keep advertising Ready.
+    // reconcile). Lifecycle is Cancelled — must not keep advertising Queued.
     let session = Session {
       id: "cancel".into(),
       started_at: 1,

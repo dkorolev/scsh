@@ -2765,13 +2765,19 @@ fn workflow_graph_renders_builtin_shapes() {
   let fruits = session_page(&store, "fruit1").expect("fruits");
   assert!(
     fruits.contains(r#">1 succeeded</a>"#) && fruits.contains(r#">2 queued</a>"#),
-    "ready stays separate from waiting in the headline"
+    "queued stays separate from waiting in the headline"
   );
   assert!(fruits.contains("data-tip="), "nodes carry instant tooltips");
   assert!(
     fruits.contains("Queued — dependencies finished; waiting for the scheduler to start this task"),
     "queued tip explains why the node is idle"
   );
+  // Queued is visually distinct from Waiting — the whole point of the split. The node
+  // carries the queued state class (its own cyan accent) and the legend uses a different
+  // glyph (◈) than Waiting's ◇, so the two never read as the same grey idle chip.
+  assert!(fruits.contains(r#"data-wf-state="queued""#), "queued nodes carry their own state class");
+  assert!(fruits.contains("wf-leg-queued"), "the legend has a distinct queued entry");
+  assert!(fruits.contains('◈'), "queued uses the filled-inner diamond, not Waiting's hollow ◇");
   // 2 dependency edges + start → categorize + both sorts → finish.
   assert_eq!(
     fruits
