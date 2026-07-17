@@ -70,6 +70,13 @@ pub struct Skill {
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
   /// (`None` = harness default via [`effective_inactivity_timeout`]).
   pub inactivity_timeout: Option<u64>,
+  /// Wall-clock retry budget (`retry_for: 8h`), seconds — how long failed attempts keep
+  /// earning automatic retries, from the first failure (`None` = mode default via
+  /// [`crate::failure::RetryPolicy::resolve`]).
+  pub retry_for: Option<u64>,
+  /// Consecutive identical failures before the retry circuit breaker trips
+  /// (`retry_signature_cap: 3`; `None` = default).
+  pub retry_signature_cap: Option<u32>,
   pub env: Vec<EnvVar>,
   /// Default profile for direct runs, or for matrix routes that omit their own `profile:`.
   pub profile: Option<String>,
@@ -96,6 +103,10 @@ pub struct InvocationRoute {
   pub commits: Option<bool>,
   /// When set, overrides the skill-level `inactivity_timeout:` for this route only.
   pub inactivity_timeout: Option<u64>,
+  /// When set, overrides the skill-level `retry_for:` for this route only.
+  pub retry_for: Option<u64>,
+  /// When set, overrides the skill-level `retry_signature_cap:` for this route only.
+  pub retry_signature_cap: Option<u32>,
 }
 
 /// A concrete run invocation after expanding matrix skills — what `scsh run` executes.
@@ -111,6 +122,10 @@ pub struct ResolvedInvocation {
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
   /// (`None` = harness default via [`effective_inactivity_timeout`] at run time).
   pub inactivity_timeout: Option<u64>,
+  /// Wall-clock retry budget in seconds (`None` = mode default at run time).
+  pub retry_for: Option<u64>,
+  /// Identical-failure breaker cap (`None` = default at run time).
+  pub retry_signature_cap: Option<u32>,
   pub env: Vec<EnvVar>,
   pub profile: Option<String>,
   pub commits: bool,
@@ -172,6 +187,8 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       effort: effort_for(harness, None),
       timeout: skill.timeout,
       inactivity_timeout: skill.inactivity_timeout,
+      retry_for: skill.retry_for,
+      retry_signature_cap: skill.retry_signature_cap,
       env: skill.env.clone(),
       profile: skill.profile.clone(),
       commits: skill.commits,
@@ -192,6 +209,8 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       effort: effort_for(route.harness, route.effort.as_ref()),
       timeout: skill.timeout,
       inactivity_timeout: route.inactivity_timeout.or(skill.inactivity_timeout),
+      retry_for: route.retry_for.or(skill.retry_for),
+      retry_signature_cap: route.retry_signature_cap.or(skill.retry_signature_cap),
       env: skill.env.clone(),
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
       commits: route.commits.unwrap_or(skill.commits),
@@ -608,6 +627,8 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
     "effort",
     "timeout",
     "inactivity_timeout",
+    "retry_for",
+    "retry_signature_cap",
     "env",
     "profile",
     "commits",
@@ -618,7 +639,7 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   for (k, _) in fields {
     if !SK.contains(&k.as_str()) {
       errors.push(format!(
-        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, env, profile, commits, autoinstall, invocations, result)"
+        "unknown key 'skills.{name}.{k}' (allowed: harness, model, effort, timeout, inactivity_timeout, retry_for, retry_signature_cap, env, profile, commits, autoinstall, invocations, result)"
       ));
     }
   }
@@ -738,6 +759,9 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
   // timeout / inactivity_timeout: optional positive integers (seconds).
   let timeout = parse_positive_secs(&fm, name, "timeout", errors);
   let inactivity_timeout = parse_positive_secs(&fm, name, "inactivity_timeout", errors);
+  // retry_for / retry_signature_cap: the route's automatic-retry policy overrides.
+  let retry_for = parse_retry_for(&fm, &format!("skills.{name}"), errors);
+  let retry_signature_cap = parse_retry_signature_cap(&fm, &format!("skills.{name}"), errors);
 
   // env: optional list/mapping of forwarded variables.
   let env = match fm.get("env").copied() {
@@ -819,6 +843,8 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
         effort,
         timeout,
         inactivity_timeout,
+        retry_for,
+        retry_signature_cap,
         env,
         profile,
         commits,
@@ -848,6 +874,48 @@ fn parse_positive_secs(fm: &BTreeMap<&str, &Node>, name: &str, key: &str, errors
       }
       Err(_) => {
         errors.push(format!("'skills.{name}.{key}' must be an integer number of seconds (got '{}')", s.trim()));
+        None
+      }
+    },
+  }
+}
+
+/// Parse one optional `retry_for:` duration field (`8h`, `45m`, `90s`, bare seconds),
+/// pushing schema errors under `<prefix>.retry_for`. Absent key ⇒ `None`. Shared with the
+/// harness-definition step parser, hence the caller-supplied full path prefix.
+pub(crate) fn parse_retry_for(fm: &BTreeMap<&str, &Node>, prefix: &str, errors: &mut Vec<String>) -> Option<u64> {
+  match fm.get("retry_for").copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'{prefix}.retry_for' must be a duration like 90s, 45m, or 8h — not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => match crate::failure::parse_duration_secs(s) {
+      Some(n) if n >= 1 => Some(n),
+      _ => {
+        errors
+          .push(format!("'{prefix}.retry_for' must be a positive duration like 90s, 45m, or 8h (got '{}')", s.trim()));
+        None
+      }
+    },
+  }
+}
+
+/// Parse one optional `retry_signature_cap:` positive integer field, pushing schema
+/// errors under `<prefix>.retry_signature_cap`. Absent key ⇒ `None`.
+pub(crate) fn parse_retry_signature_cap(
+  fm: &BTreeMap<&str, &Node>, prefix: &str, errors: &mut Vec<String>,
+) -> Option<u32> {
+  match fm.get("retry_signature_cap").copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'{prefix}.retry_signature_cap' must be a positive integer, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => match s.trim().parse::<u32>() {
+      Ok(n) if n >= 1 => Some(n),
+      _ => {
+        errors.push(format!("'{prefix}.retry_signature_cap' must be a positive integer (got '{}')", s.trim()));
         None
       }
     },
@@ -889,11 +957,21 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
         errors.push(format!("duplicate key 'skills.{skill}.invocations.{default_name}.{k}'"));
       }
     }
-    const IK: &[&str] = &["name", "harness", "model", "effort", "profile", "commits", "inactivity_timeout"];
+    const IK: &[&str] = &[
+      "name",
+      "harness",
+      "model",
+      "effort",
+      "profile",
+      "commits",
+      "inactivity_timeout",
+      "retry_for",
+      "retry_signature_cap",
+    ];
     for (k, _) in fields {
       if !IK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout)"
+          "unknown key 'skills.{skill}.invocations.{default_name}.{k}' (allowed: name, harness, model, effort, profile, commits, inactivity_timeout, retry_for, retry_signature_cap)"
         ));
       }
     }
@@ -981,8 +1059,21 @@ pub(crate) fn validate_invocations(skill: &str, node: &Node, errors: &mut Vec<St
     };
     let inactivity_timeout =
       parse_positive_secs(&fm, &format!("{skill}.invocations.{default_name}"), "inactivity_timeout", errors);
+    let retry_for = parse_retry_for(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors);
+    let retry_signature_cap =
+      parse_retry_signature_cap(&fm, &format!("skills.{skill}.invocations.{default_name}"), errors);
     if let Some(harness) = harness {
-      out.push(InvocationRoute { name: route_name, harness, model, effort, profile, commits, inactivity_timeout });
+      out.push(InvocationRoute {
+        name: route_name,
+        harness,
+        model,
+        effort,
+        profile,
+        commits,
+        inactivity_timeout,
+        retry_for,
+        retry_signature_cap,
+      });
     }
   }
   out
@@ -2035,6 +2126,46 @@ skills:
       .unwrap_err()
       .iter()
       .any(|e| e.contains("'skills.s.inactivity_timeout' must be an integer number of seconds")));
+  }
+
+  #[test]
+  fn retry_policy_keys_parse_as_durations_and_route_overrides_win() {
+    // Skill-level: human durations, flowing to every route; a route override wins.
+    let yaml = r#"skills:
+  review:
+    retry_for: 8h
+    retry_signature_cap: 3
+    result: tmp/review-{name}.json
+    invocations:
+      codex:
+        harness: codex
+        model: gpt-5.6-luna
+      claude:
+        harness: claude
+        retry_for: 45m
+        retry_signature_cap: 7
+"#;
+    let invs = expand_invocations(&validate(yaml).unwrap());
+    let codex = invs.iter().find(|i| i.name == "review-codex").unwrap();
+    assert_eq!(codex.retry_for, Some(8 * 3600), "skill-level duration inherited");
+    assert_eq!(codex.retry_signature_cap, Some(3));
+    let claude = invs.iter().find(|i| i.name == "review-claude").unwrap();
+    assert_eq!(claude.retry_for, Some(45 * 60), "route override wins");
+    assert_eq!(claude.retry_signature_cap, Some(7));
+
+    // Absent keys stay None (the mode default applies at run time).
+    let plain = one_skill("    harness: opencode\n    result: tmp/x.json\n");
+    let inv = expand_invocations(&validate(&plain).unwrap());
+    assert_eq!(inv[0].retry_for, None);
+    assert_eq!(inv[0].retry_signature_cap, None);
+
+    // Bad values are schema errors naming the key.
+    let bad = one_skill("    harness: opencode\n    retry_for: soon\n    result: tmp/x.json\n");
+    let err = validate(&bad).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("'skills.s.retry_for' must be a positive duration")), "{err:?}");
+    let bad = one_skill("    harness: opencode\n    retry_signature_cap: 0\n    result: tmp/x.json\n");
+    let err = validate(&bad).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("'skills.s.retry_signature_cap' must be a positive integer")), "{err:?}");
   }
 
   #[test]

@@ -20,6 +20,15 @@ pub mod reason {
   pub const CONTAINER_INACTIVE: &str = "container_inactive";
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
   pub const HARNESS_OVERLOADED: &str = "harness_overloaded";
+  /// The harness lost its backend connection (its output says so) and exited non-zero —
+  /// e.g. cursor's "Reconnecting to …" giving up after half an hour. Always retryable.
+  pub const HARNESS_DISCONNECTED: &str = "harness_disconnected";
+  /// The provider definitively rejected the credentials on the FIRST attempt. Permanent:
+  /// no overnight budget can log the user back in.
+  pub const HARNESS_AUTH_REJECTED: &str = "harness_auth_rejected";
+  /// The route kept failing with the SAME failure signature until the circuit breaker
+  /// tripped — retrying further would burn tokens on a deterministic failure.
+  pub const RETRIES_EXHAUSTED_IDENTICAL: &str = "retries_exhausted_identical";
   pub const CONTAINER_RUN: &str = "container_run_failed";
   pub const RESULT_MISSING: &str = "result_file_missing";
   pub const RESULT_INVALID: &str = "result_schema_invalid";
@@ -41,17 +50,12 @@ pub mod reason {
 
 const LOG_NAME: &str = "failures.log";
 
-/// Automatic retries per route before a failure is final. Transient infrastructure
-/// failures (and non-zero harness exits, which in practice are dominated by harnesses
-/// dying at startup under resource pressure) get up to this many fresh attempts.
-pub const MAX_AUTO_RETRIES: u64 = 5;
-
-/// Reasons worth automatic retries (up to [`MAX_AUTO_RETRIES`]): failures that a fresh
-/// clone + container plausibly fix. A non-zero harness exit counts — a harness that
-/// crashes seconds after startup (no output, no result) is indistinguishable from any
-/// other infrastructure hiccup, and a genuine agent failure just burns its retries.
-/// Deterministic preflight failures (bad env, missing result file, failed build) are
-/// never retried. Opt out with `SCSH_NO_RETRY=1`.
+/// Reasons worth automatic retries: failures that a fresh clone + container plausibly
+/// fix. A non-zero harness exit counts — a harness that crashes seconds after startup
+/// (no output, no result) is indistinguishable from any other infrastructure hiccup, and
+/// a genuine agent failure just trips the identical-signature breaker. Deterministic
+/// preflight failures (bad env, missing result file, failed build) are never retried.
+/// Opt out with `SCSH_NO_RETRY=1`.
 pub fn is_transient(reason: &str) -> bool {
   matches!(
     reason,
@@ -59,10 +63,152 @@ pub fn is_transient(reason: &str) -> bool {
       | reason::CONTAINER_INACTIVE
       | reason::CONTAINER_RUN
       | reason::HARNESS_OVERLOADED
+      | reason::HARNESS_DISCONNECTED
       | reason::HARNESS_NONZERO
       | reason::CLONE
       | reason::GIT_DAEMON
   )
+}
+
+/// The retry verdict for one failed attempt: whether the retry machinery may spend
+/// budget on another attempt at all. `Retryable` is still subject to the
+/// [`RetryPolicy`]'s wall-clock budget and identical-signature breaker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Verdict {
+  /// Never retried, in either mode: deterministic preflight/config failures, definitive
+  /// first-attempt credential rejections, and human stop/restart controls.
+  Permanent,
+  /// Worth another attempt within the policy's budget and signature cap.
+  Retryable,
+}
+
+/// Classify a failed attempt. In-run retries stay conservative — the needle-list of
+/// retryable reasons plus a TUI result-miss — because persistence beyond one run is the
+/// job supervisor's business: a job that fails terminally is restarted (resuming its
+/// completed steps) up to its retries budget, so an over-eager in-run verdict would just
+/// double-spend. `first_attempt` scopes the auth verdict: credentials rejected out of
+/// the gate are permanent (no retry budget can log the user back in), but an auth error
+/// appearing only on a LATER attempt (the first one got further) is provider flakiness
+/// and stays retryable.
+pub fn verdict(reason: &str, tui: bool, first_attempt: bool) -> Verdict {
+  if reason == reason::HARNESS_AUTH_REJECTED {
+    return if first_attempt { Verdict::Permanent } else { Verdict::Retryable };
+  }
+  if is_transient(reason) || (reason == reason::RESULT_MISSING && tui) {
+    return Verdict::Retryable;
+  }
+  Verdict::Permanent
+}
+
+/// Automatic-retry policy for one route: wall-clock budgeted (incidents are measured in
+/// hours, so retries are too — an attempt count is meaningless when one frozen attempt
+/// eats 30 watchdog minutes and another fails in 4 seconds), exponentially backed off
+/// with jitter, and circuit-broken on identical consecutive failures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RetryPolicy {
+  /// Wall clock allowed for retries of one route, measured from its FIRST failure.
+  pub budget_secs: u64,
+  /// First backoff delay; doubles per retry up to [`RetryPolicy::backoff_cap_secs`].
+  pub backoff_initial_secs: u64,
+  pub backoff_cap_secs: u64,
+  /// Consecutive identical failure signatures before the breaker trips — what stops
+  /// "the repo doesn't compile" from burning tokens until dawn.
+  pub signature_cap: u32,
+}
+
+/// Default in-run retry budget: most provider blips resolve within half an hour, and
+/// anything longer is the job supervisor's business — it restarts the whole job
+/// (resuming completed steps) on its own backoff, so the two layers together ride out a
+/// multi-hour incident without one run holding containers all night.
+pub const DEFAULT_RETRY_BUDGET_SECS: u64 = 30 * 60;
+pub const DEFAULT_RETRY_SIGNATURE_CAP: u32 = 5;
+pub const RETRY_BACKOFF_INITIAL_SECS: u64 = 60;
+pub const RETRY_BACKOFF_CAP_SECS: u64 = 15 * 60;
+
+impl RetryPolicy {
+  /// The policy for one route: explicit config (route > skill > def step) beats the
+  /// `SCSH_RETRY_FOR` / `SCSH_RETRY_SIGNATURE_CAP` environment, which beats the
+  /// defaults (30m budget, breaker at 5).
+  pub fn resolve(retry_for: Option<u64>, signature_cap: Option<u32>) -> RetryPolicy {
+    let env_budget = std::env::var("SCSH_RETRY_FOR").ok().and_then(|s| parse_duration_secs(&s));
+    let env_cap = std::env::var("SCSH_RETRY_SIGNATURE_CAP").ok().and_then(|s| s.trim().parse().ok());
+    RetryPolicy {
+      budget_secs: retry_for.or(env_budget).unwrap_or(DEFAULT_RETRY_BUDGET_SECS),
+      backoff_initial_secs: RETRY_BACKOFF_INITIAL_SECS,
+      backoff_cap_secs: RETRY_BACKOFF_CAP_SECS,
+      signature_cap: signature_cap.or(env_cap).unwrap_or(DEFAULT_RETRY_SIGNATURE_CAP),
+    }
+  }
+
+  /// Delay before retry number `retries_used + 1`: exponential with a cap, plus ±20%
+  /// deterministic jitter keyed on `salt` so a fleet failing together fans back out
+  /// instead of retrying as a thundering herd. No RNG dependency; same inputs, same
+  /// delay — testable.
+  pub fn backoff_delay_secs(&self, retries_used: u32, salt: u64) -> u64 {
+    let doubled = self.backoff_initial_secs.saturating_mul(2u64.saturating_pow(retries_used.min(32)));
+    let base = doubled.min(self.backoff_cap_secs).max(1);
+    let span = base / 5;
+    if span == 0 {
+      return base;
+    }
+    let hashed = salt.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(31).wrapping_add(retries_used as u64);
+    base - span + (hashed % (2 * span + 1))
+  }
+}
+
+/// Parse a human duration: `90s`, `45m`, `8h`, `2d`, or bare seconds (`900`).
+pub fn parse_duration_secs(s: &str) -> Option<u64> {
+  let t = s.trim();
+  if t.is_empty() {
+    return None;
+  }
+  let (digits, unit) = match t.char_indices().find(|(_, c)| !c.is_ascii_digit()) {
+    Some((i, _)) => t.split_at(i),
+    None => (t, ""),
+  };
+  let n: u64 = digits.parse().ok()?;
+  match unit.trim() {
+    "" | "s" | "sec" | "secs" => Some(n),
+    "m" | "min" | "mins" => n.checked_mul(60),
+    "h" | "hr" | "hrs" => n.checked_mul(3600),
+    "d" => n.checked_mul(86400),
+    _ => None,
+  }
+}
+
+/// A stable fingerprint of one failed attempt, for the identical-failure breaker:
+/// the reason code plus the first detail line (the human "why", before the run-dir and
+/// log pointers, which change every attempt), lowercased, digits erased, whitespace
+/// collapsed, truncated. Two attempts failing the same way — same compiler error, same
+/// missing file — collide; a different failure resets the breaker.
+pub fn failure_signature(reason: &str, detail: Option<&str>) -> String {
+  let first_line = detail.unwrap_or("").lines().next().unwrap_or("");
+  let mut normalized = String::with_capacity(first_line.len().min(200) + reason.len() + 1);
+  normalized.push_str(reason);
+  normalized.push('|');
+  let mut last_space = false;
+  for c in first_line.chars() {
+    if normalized.len() >= 200 {
+      break;
+    }
+    let mapped = if c.is_ascii_digit() {
+      '#'
+    } else if c.is_whitespace() {
+      ' '
+    } else {
+      c.to_ascii_lowercase()
+    };
+    if mapped == ' ' {
+      if last_space {
+        continue;
+      }
+      last_space = true;
+    } else {
+      last_space = false;
+    }
+    normalized.push(mapped);
+  }
+  normalized
 }
 
 /// Provider-capacity messages are transient even when the harness exits cleanly enough to
@@ -81,6 +227,56 @@ pub fn harness_reported_overload(text: &str) -> bool {
     "error 529",
     "status 503",
     "503 service unavailable",
+    "usage limit will reset",
+  ]
+  .iter()
+  .any(|needle| lower.contains(needle))
+}
+
+/// Connectivity-loss messages: a harness that spent its last screen saying "reconnecting"
+/// and then exited non-zero did not fail the task — it lost its provider. The 2026-07-16
+/// overnight failure was literally "Reconnecting to agentn.global.api5.cursor.sh
+/// (attempt 2)" for half an hour before a non-zero exit that earned zero retries.
+pub fn harness_reported_disconnect(text: &str) -> bool {
+  let lower = text.to_ascii_lowercase();
+  [
+    "reconnecting",
+    "connection lost",
+    "connection reset",
+    "connection refused",
+    "econnreset",
+    "etimedout",
+    "network error",
+    "stream disconnected",
+    "disconnected from",
+    "socket hang up",
+    "fetch failed",
+    "dns error",
+    "dns resolution",
+    "tls handshake",
+    "502 bad gateway",
+    "504 gateway",
+    "internal server error",
+    "overloaded_error",
+  ]
+  .iter()
+  .any(|needle| lower.contains(needle))
+}
+
+/// Definitive credential rejections — the strict needle set that makes a first-attempt
+/// failure [`Verdict::Permanent`]: no retry budget can log the user back in, so refuse
+/// loudly instead of burning the night.
+pub fn harness_reported_auth_rejection(text: &str) -> bool {
+  let lower = text.to_ascii_lowercase();
+  [
+    "invalid api key",
+    "authentication failed",
+    "401 unauthorized",
+    "unauthorized: ",
+    "token revoked",
+    "token expired",
+    "please run /login",
+    "oauth token has expired",
   ]
   .iter()
   .any(|needle| lower.contains(needle))
@@ -432,6 +628,7 @@ mod tests {
     assert!(is_transient(reason::CONTAINER_INACTIVE));
     assert!(is_transient(reason::CONTAINER_RUN));
     assert!(is_transient(reason::HARNESS_OVERLOADED));
+    assert!(is_transient(reason::HARNESS_DISCONNECTED));
     assert!(is_transient(reason::HARNESS_NONZERO));
     assert!(is_transient(reason::CLONE));
     assert!(is_transient(reason::GIT_DAEMON));
@@ -441,6 +638,122 @@ mod tests {
     assert!(harness_reported_overload("API Error: service overloaded; try again later"));
     assert!(harness_reported_overload("HTTP 429: Too Many Requests"));
     assert!(harness_reported_overload("status 529"));
+    assert!(harness_reported_overload("Your usage limit will reset at 3am"));
     assert!(!harness_reported_overload("tool exited with status 1"));
+  }
+
+  #[test]
+  fn disconnect_sniffer_matches_the_overnight_cursor_line_and_not_test_failures() {
+    // The literal line from qtsiuf's fix step (2026-07-16): rendered TUI tail.
+    assert!(harness_reported_disconnect("Reconnecting to agentn.global.api5.cursor.sh (attempt 2)"));
+    assert!(harness_reported_disconnect("fetch failed: socket hang up"));
+    assert!(harness_reported_disconnect("upstream returned 502 Bad Gateway"));
+    assert!(harness_reported_disconnect("read tcp 10.0.0.2:443: connection reset by peer"));
+    // A failing go test suite must never read as transient.
+    assert!(!harness_reported_disconnect("--- FAIL: TestGateway (0.03s)\nexit status 1"));
+    assert!(!harness_reported_disconnect("assertion failed: expected 5, got 4"));
+  }
+
+  #[test]
+  fn auth_sniffer_matches_rejections_only() {
+    assert!(harness_reported_auth_rejection("API Error: 401 Unauthorized · Please run /login"));
+    assert!(harness_reported_auth_rejection("OAuth token has expired"));
+    assert!(harness_reported_auth_rejection("Invalid API key provided"));
+    assert!(!harness_reported_auth_rejection("warning: nearing usage limit"));
+    assert!(!harness_reported_auth_rejection("committed as author t@example.com"));
+  }
+
+  #[test]
+  fn verdict_retries_transients_and_fails_fast_on_the_rest() {
+    use Verdict::{Permanent, Retryable};
+    // Retryable: the transient set + TUI result-miss.
+    assert_eq!(verdict(reason::HARNESS_NONZERO, true, true), Retryable);
+    assert_eq!(verdict(reason::HARNESS_DISCONNECTED, false, true), Retryable);
+    assert_eq!(verdict(reason::RESULT_MISSING, true, true), Retryable);
+    // Everything else is permanent IN-RUN — the job supervisor's restarts (with resume)
+    // are the persistence layer for these, not another container in the same run.
+    assert_eq!(verdict(reason::RESULT_MISSING, false, true), Permanent);
+    assert_eq!(verdict(reason::RESULT_INVALID, true, true), Permanent);
+    assert_eq!(verdict(reason::THREAD_PANICKED, true, true), Permanent);
+    assert_eq!(verdict(reason::ENV_UNRESOLVED, true, true), Permanent);
+    assert_eq!(verdict(reason::BUILD_FAILED, true, true), Permanent);
+    assert_eq!(verdict(reason::RETRIES_EXHAUSTED_IDENTICAL, true, true), Permanent);
+    assert_eq!(verdict(reason::FORCE_STOPPED, true, true), Permanent);
+    // Auth: first-attempt rejection is permanent; a LATER-attempt one is flakiness.
+    assert_eq!(verdict(reason::HARNESS_AUTH_REJECTED, true, true), Permanent);
+    assert_eq!(verdict(reason::HARNESS_AUTH_REJECTED, true, false), Retryable);
+  }
+
+  #[test]
+  fn retry_policy_resolves_config_over_env_over_default() {
+    let _lock = crate::runtime::test_env_lock();
+    std::env::remove_var("SCSH_RETRY_FOR");
+    std::env::remove_var("SCSH_RETRY_SIGNATURE_CAP");
+    let p = RetryPolicy::resolve(None, None);
+    assert_eq!(p.budget_secs, DEFAULT_RETRY_BUDGET_SECS);
+    assert_eq!(p.signature_cap, DEFAULT_RETRY_SIGNATURE_CAP);
+    std::env::set_var("SCSH_RETRY_FOR", "45m");
+    std::env::set_var("SCSH_RETRY_SIGNATURE_CAP", "2");
+    let p = RetryPolicy::resolve(None, None);
+    assert_eq!(p.budget_secs, 45 * 60, "env beats the mode default");
+    assert_eq!(p.signature_cap, 2);
+    let p = RetryPolicy::resolve(Some(90), Some(7));
+    assert_eq!(p.budget_secs, 90, "explicit config beats the env");
+    assert_eq!(p.signature_cap, 7);
+    std::env::remove_var("SCSH_RETRY_FOR");
+    std::env::remove_var("SCSH_RETRY_SIGNATURE_CAP");
+  }
+
+  #[test]
+  fn backoff_doubles_with_bounded_jitter_and_caps() {
+    let p = RetryPolicy::resolve(Some(8 * 3600), None);
+    for (retries, base) in [(0u32, 60u64), (1, 120), (2, 240), (3, 480), (4, 900), (10, 900)] {
+      for salt in [0u64, 1, 42, u64::MAX] {
+        let d = p.backoff_delay_secs(retries, salt);
+        let span = base / 5;
+        assert!(d >= base - span && d <= base + span, "retry {retries} salt {salt}: {d}s outside {base}±{span}");
+      }
+    }
+    // Deterministic: same inputs, same delay.
+    assert_eq!(p.backoff_delay_secs(2, 7), p.backoff_delay_secs(2, 7));
+    // Different salts spread the herd (at least sometimes).
+    assert_ne!(p.backoff_delay_secs(3, 1), p.backoff_delay_secs(3, 2));
+  }
+
+  #[test]
+  fn durations_parse_like_humans_write_them() {
+    assert_eq!(parse_duration_secs("90s"), Some(90));
+    assert_eq!(parse_duration_secs("45m"), Some(45 * 60));
+    assert_eq!(parse_duration_secs("8h"), Some(8 * 3600));
+    assert_eq!(parse_duration_secs("2d"), Some(2 * 86400));
+    assert_eq!(parse_duration_secs("900"), Some(900), "bare numbers are seconds");
+    assert_eq!(parse_duration_secs(" 15 m "), Some(15 * 60), "outer and pre-unit spaces are fine");
+    assert_eq!(parse_duration_secs("m15"), None, "the number leads");
+    assert_eq!(parse_duration_secs("h"), None);
+    assert_eq!(parse_duration_secs("8w"), None, "unknown unit");
+    assert_eq!(parse_duration_secs(""), None);
+  }
+
+  #[test]
+  fn failure_signatures_collide_for_same_failures_and_differ_otherwise() {
+    // Same compiler error across attempts — different run dirs ride in LATER detail
+    // lines, so they never enter the signature.
+    let a = failure_signature(
+      reason::HARNESS_NONZERO,
+      Some("error[E0308]: mismatched types at line 42\nrun dir: /tmp/scsh-abcdef-run-fix"),
+    );
+    let b = failure_signature(
+      reason::HARNESS_NONZERO,
+      Some("error[E0308]: mismatched types at line 57\nrun dir: /tmp/scsh-uvwxyz-run-fix"),
+    );
+    assert_eq!(a, b, "digits and later lines are erased");
+    let c = failure_signature(reason::HARNESS_NONZERO, Some("error[E0433]: unresolved import `foo`"));
+    assert_ne!(a, c, "a different first line is a different failure");
+    assert_ne!(
+      failure_signature(reason::CONTAINER_TIMEOUT, Some("x")),
+      failure_signature(reason::CONTAINER_INACTIVE, Some("x")),
+      "the reason code is part of the signature"
+    );
+    assert!(failure_signature("r", Some(&"y".repeat(500))).len() <= 201);
   }
 }

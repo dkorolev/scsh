@@ -373,6 +373,11 @@ pub struct Step {
   /// This step is the first step of a do-while body and may end that loop immediately by
   /// returning the fixed top-level boolean `SCSH_LOOP_BREAK`.
   pub break_loop: bool,
+  /// Wall-clock automatic-retry budget for this step (`retry_for: 8h`), seconds.
+  /// `None` = the run's mode default (attended 30m / unattended 8h).
+  pub retry_for: Option<u64>,
+  /// Consecutive identical failures before this step's retry breaker trips.
+  pub retry_signature_cap: Option<u32>,
 }
 
 /// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
@@ -419,6 +424,8 @@ impl HarnessDef {
       effort: None,
       timeout: None,
       inactivity_timeout: None,
+      retry_for: None,
+      retry_signature_cap: None,
       env: self.params.iter().map(Param::to_env_var).collect(),
       profile: None,
       commits: false,
@@ -812,11 +819,13 @@ fn validate_steps(
       "repeat",
       "do-while",
       "break",
+      "retry_for",
+      "retry_signature_cap",
     ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, retry_for, retry_signature_cap)"
         ));
       }
     }
@@ -897,6 +906,10 @@ fn validate_steps(
       }
     };
 
+    let step_path = format!("steps.{id}");
+    let retry_for = crate::config::parse_retry_for(&fm, &step_path, errors);
+    let retry_signature_cap = crate::config::parse_retry_signature_cap(&fm, &step_path, errors);
+
     if let (Some(agent), Some(task)) = (agent, task) {
       steps.push(Step {
         id: id.to_string(),
@@ -911,6 +924,8 @@ fn validate_steps(
         repeat,
         do_while,
         break_loop,
+        retry_for,
+        retry_signature_cap,
       });
     }
   }

@@ -1684,6 +1684,8 @@ fn step_invocation(
     harness: step.agent.harness,
     model: step.agent.model.clone(),
     effort: step.agent.effort.clone(),
+    retry_for: step.retry_for,
+    retry_signature_cap: step.retry_signature_cap,
     timeout: None,
     inactivity_timeout: None,
     env: inputs
@@ -1713,39 +1715,139 @@ fn schema_repair_invocation(invocation: &ResolvedInvocation, error: &str) -> Res
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum WorkflowRetryDecision {
+enum RetryDecision {
   Stop,
+  /// The identical-failure circuit breaker tripped: stop with its own terminal reason,
+  /// so "kept failing the same way" is distinguishable from "not retryable at all".
+  StopBreaker,
   Browser,
   Schema,
   Automatic,
 }
 
-fn workflow_retry_decision(
-  fail_reason: Option<&str>, restart_requested: bool, schema_retry_used: bool, auto_retries_used: u64,
-  retry_enabled: bool, tui: bool,
-) -> WorkflowRetryDecision {
+/// One route's retry verdict for one failed attempt: browser restarts always win, the
+/// one schema-correction retry comes next, and everything else is the wall-clock
+/// contract — retryable per [`failure::verdict`], within the policy's budget (measured
+/// from the route's FIRST failure), and under its consecutive-identical-failure cap.
+#[allow(clippy::too_many_arguments)]
+fn retry_decision(
+  fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
+  budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool, first_attempt: bool,
+) -> RetryDecision {
   if restart_requested {
-    return WorkflowRetryDecision::Browser;
+    return RetryDecision::Browser;
   }
   if !retry_enabled {
-    return WorkflowRetryDecision::Stop;
+    return RetryDecision::Stop;
   }
-  if fail_reason == Some(failure::reason::RESULT_INVALID) && !schema_retry_used {
-    return WorkflowRetryDecision::Schema;
+  if fail_reason == Some(failure::reason::RESULT_INVALID) && schema_retry_available {
+    return RetryDecision::Schema;
   }
-  let transient = fail_reason
-    .is_some_and(|reason| failure::is_transient(reason) || (reason == failure::reason::RESULT_MISSING && tui));
-  if transient && auto_retries_used < failure::MAX_AUTO_RETRIES {
-    WorkflowRetryDecision::Automatic
-  } else {
-    WorkflowRetryDecision::Stop
+  let Some(reason) = fail_reason else {
+    return RetryDecision::Stop;
+  };
+  if failure::verdict(reason, tui, first_attempt) != failure::Verdict::Retryable {
+    return RetryDecision::Stop;
+  }
+  if consecutive_identical > policy.signature_cap {
+    return RetryDecision::StopBreaker;
+  }
+  if budget_spent_secs >= policy.budget_secs {
+    return RetryDecision::Stop;
+  }
+  RetryDecision::Automatic
+}
+
+/// Per-route retry bookkeeping shared by the flat-fleet and workflow loops: when the
+/// route first failed (the budget clock), how many consecutive attempts failed with the
+/// same signature (the breaker), and how many automatic retries ran (the backoff
+/// exponent). The jitter salt is derived from the session and route identity, so a
+/// fleet failing together fans back out deterministically.
+struct RouteRetryState {
+  policy: failure::RetryPolicy,
+  salt: u64,
+  first_failure_at: Option<Instant>,
+  last_signature: Option<String>,
+  consecutive_identical: u32,
+  auto_retries_used: u32,
+}
+
+impl RouteRetryState {
+  fn new(retry_for: Option<u64>, signature_cap: Option<u32>, session_id: &str, route: &str) -> RouteRetryState {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    session_id.hash(&mut hasher);
+    route.hash(&mut hasher);
+    RouteRetryState {
+      policy: failure::RetryPolicy::resolve(retry_for, signature_cap),
+      salt: hasher.finish(),
+      first_failure_at: None,
+      last_signature: None,
+      consecutive_identical: 0,
+      auto_retries_used: 0,
+    }
+  }
+
+  /// Record one failed attempt: start the budget clock on the first failure and track
+  /// the consecutive-identical streak for the breaker.
+  fn observe_failure(&mut self, run: &SkillRun) {
+    self.first_failure_at.get_or_insert_with(Instant::now);
+    let signature =
+      failure::failure_signature(run.fail_reason.as_deref().unwrap_or("unknown"), run.fail_detail.as_deref());
+    if self.last_signature.as_deref() == Some(signature.as_str()) {
+      self.consecutive_identical += 1;
+    } else {
+      self.last_signature = Some(signature);
+      self.consecutive_identical = 1;
+    }
+  }
+
+  fn budget_spent_secs(&self) -> u64 {
+    self.first_failure_at.map(|at| at.elapsed().as_secs()).unwrap_or(0)
+  }
+
+  fn budget_left_secs(&self) -> u64 {
+    self.policy.budget_secs.saturating_sub(self.budget_spent_secs())
+  }
+
+  /// The delay before the next automatic retry, advancing the backoff exponent.
+  fn next_backoff_secs(&mut self) -> u64 {
+    let delay = self.policy.backoff_delay_secs(self.auto_retries_used, self.salt);
+    self.auto_retries_used += 1;
+    delay
+  }
+
+  /// Rewrite a run that tripped the breaker so the terminal outcome says WHY retries
+  /// ended — `retries_exhausted_identical` — rather than repeating the raw last failure.
+  fn mark_breaker_tripped(&self, run: &mut SkillRun) {
+    let raw = run.fail_reason.clone().unwrap_or_else(|| "unknown".into());
+    run.fail_detail = Some(format!(
+      "{} consecutive attempts failed identically (last: {raw}); retrying further would burn tokens on a deterministic failure",
+      self.consecutive_identical
+    ));
+    run.fail_reason = Some(failure::reason::RETRIES_EXHAUSTED_IDENTICAL.into());
   }
 }
 
+/// Wait out a retry backoff one second at a time, so a browser Force restart on the
+/// pending attempt (or `SCSH_NO_RETRY` never reaching here at all) does not leave the
+/// user staring at a sleeping process. Returns true when the wait was cut short by a
+/// restart request for `proc_index`.
+fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: usize) -> bool {
+  for _ in 0..delay_secs {
+    if daemon::consume_proc_restart(session_id, proc_index) {
+      return true;
+    }
+    std::thread::sleep(Duration::from_secs(1));
+  }
+  false
+}
+
 /// Run one workflow route with the same retry contract as a flat run. Every fresh harness
-/// execution gets a fresh proc row linked to its predecessor: up to [`failure::MAX_AUTO_RETRIES`]
-/// automatic retries for transient failure, one schema-correction retry, and unlimited explicit
-/// browser restarts.
+/// execution gets a fresh proc row linked to its predecessor: automatic retries with
+/// exponential backoff for as long as the route's wall-clock budget allows (unless the
+/// identical-failure breaker trips first), one schema-correction retry, and unlimited
+/// explicit browser restarts.
 #[allow(clippy::too_many_arguments)]
 fn run_workflow_step_with_retries(
   invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
@@ -1757,10 +1859,10 @@ fn run_workflow_step_with_retries(
     require_do_while_repeat: step.do_while.is_some()
       && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
   };
+  let mut retry = RouteRetryState::new(step.retry_for, step.retry_signature_cap, session_id, &invocation.name);
   let mut proc = initial_proc;
   let mut proc_index = proc.index();
   let mut attempts = 0u64;
-  let mut auto_retries_used = 0u64;
   let mut schema_retry_used = false;
   let mut repaired_invocation: Option<ResolvedInvocation> = None;
   loop {
@@ -1787,17 +1889,23 @@ fn run_workflow_step_with_retries(
       return run;
     }
 
+    retry.observe_failure(&run);
     let restart_requested = daemon::consume_proc_restart(session_id, proc_index);
     let invalid_result = run.fail_reason.as_deref() == Some(failure::reason::RESULT_INVALID);
-    let decision = workflow_retry_decision(
+    let decision = retry_decision(
       run.fail_reason.as_deref(),
       restart_requested,
-      schema_retry_used,
-      auto_retries_used,
+      !schema_retry_used,
+      retry.policy,
+      retry.budget_spent_secs(),
+      retry.consecutive_identical,
       failure::retry_enabled(),
       invocation.harness.is_tui(),
+      attempts == 1,
     );
-    if decision == WorkflowRetryDecision::Stop {
+    if decision == RetryDecision::Stop || decision == RetryDecision::StopBreaker {
+      // An invalid-result attempt returns with its proc row still open (run_one_skill
+      // leaves it to the orchestrator, which owns the correction retry) — settle it.
       if invalid_result {
         let why = format!(
           "invalid workflow result: {}",
@@ -1806,21 +1914,29 @@ fn run_workflow_step_with_retries(
         let detail = skill_fail_detail(&why, invocation.harness, run.run_dir.as_deref(), run.log.as_deref());
         proc.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
       }
+      if decision == RetryDecision::StopBreaker {
+        retry.mark_breaker_tripped(&mut run);
+      }
       return run;
     }
 
     let reason = match decision {
-      WorkflowRetryDecision::Browser => failure::reason::RESTART_REQUESTED,
-      WorkflowRetryDecision::Schema => failure::reason::RESULT_INVALID,
-      WorkflowRetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
-      WorkflowRetryDecision::Stop => unreachable!("stop returned above"),
+      RetryDecision::Browser => failure::reason::RESTART_REQUESTED,
+      RetryDecision::Schema => failure::reason::RESULT_INVALID,
+      RetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
+      RetryDecision::Stop | RetryDecision::StopBreaker => unreachable!("terminal decisions returned above"),
     };
     failure::log_retry(session_id, &invocation.name, invocation.harness.as_str(), invocation.model.as_deref(), reason);
-    if decision == WorkflowRetryDecision::Schema {
+    if decision == RetryDecision::Schema {
       schema_retry_used = true;
       let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
       repaired_invocation = Some(schema_repair_invocation(invocation, error));
-      let why = format!("invalid workflow result: {error}");
+    }
+    if invalid_result {
+      let why = format!(
+        "invalid workflow result: {}",
+        run.fail_detail.as_deref().unwrap_or("result did not match the declared schema")
+      );
       let detail = skill_fail_detail(&why, invocation.harness, run.run_dir.as_deref(), run.log.as_deref());
       proc.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
       if !keep_run_dirs() {
@@ -1828,8 +1944,6 @@ fn run_workflow_step_with_retries(
           let _ = std::fs::remove_dir_all(clone);
         }
       }
-    } else if decision == WorkflowRetryDecision::Automatic {
-      auto_retries_used += 1;
     }
 
     let label = format!("{}: {} (retry)", invocation.harness.as_str(), invocation.name);
@@ -1848,9 +1962,25 @@ fn run_workflow_step_with_retries(
         Some(proc_index),
       );
     }
-    next.note(&format!("retrying after {reason}"));
     proc_index = next.index();
     proc = next;
+    // Schema and browser retries fire immediately; automatic retries back off so a fleet
+    // does not hammer a provider mid-incident. The wait is visible on the pending row and
+    // a browser Force restart on it cuts the wait short.
+    if decision == RetryDecision::Automatic {
+      let delay = retry.next_backoff_secs();
+      proc.note(&format!(
+        "retrying in ~{} after {reason} (attempt {}, retry budget {} left)",
+        ui::clock::format_elapsed(delay as f64),
+        attempts + 1,
+        ui::clock::format_elapsed(retry.budget_left_secs() as f64),
+      ));
+      if backoff_sleep_interruptible(delay, session_id, proc_index) {
+        proc.note("retrying now (browser restart)");
+      }
+    } else {
+      proc.note(&format!("retrying after {reason}"));
+    }
   }
 }
 
@@ -3721,10 +3851,10 @@ fn build_and_run(
         let dc = dc.clone();
         let first_index = p.index();
         scope.spawn(move || {
+          let mut retry = RouteRetryState::new(skill.retry_for, skill.retry_signature_cap, session_ref, &skill.name);
           let mut proc = p;
           let mut proc_index = first_index;
           let mut attempts = 0u64;
-          let mut auto_retries_used = 0u64;
           loop {
             attempts += 1;
             let attempt_started = std::time::Instant::now();
@@ -3738,23 +3868,33 @@ fn build_and_run(
               daemon::consume_proc_restart(session_ref, proc_index);
               return run;
             }
-            // A browser Force restart always respawns — each extra attempt costs the user an
-            // explicit click, so no cap and no SCSH_NO_RETRY gate. Otherwise up to
-            // MAX_AUTO_RETRIES automatic retries for transient failures (fresh clone, fresh
-            // container, new live-board row). Deterministic failures return as-is. A missing
-            // result from a TUI harness also earns the automatic retries: its pane can be killed
-            // by a stray signal or teardown before it writes the file, which a fresh run usually
-            // clears.
+            // A browser Force restart always respawns — each extra attempt costs the user
+            // an explicit click, so no budget and no SCSH_NO_RETRY gate. Otherwise the
+            // wall-clock retry contract: retryable failures (fresh clone, fresh container,
+            // new live-board row) keep earning backed-off retries until the route's budget
+            // runs out or the identical-failure breaker trips. A missing result from a TUI
+            // harness also earns retries: its pane can be killed by a stray signal or
+            // teardown before it writes the file, which a fresh run usually clears.
+            retry.observe_failure(&run);
             let restart_requested = daemon::consume_proc_restart(session_ref, proc_index);
-            let transient = run.fail_reason.as_deref().is_some_and(|r| {
-              failure::is_transient(r) || (r == failure::reason::RESULT_MISSING && skill.harness.is_tui())
-            });
-            let auto_retry = auto_retries_used < failure::MAX_AUTO_RETRIES && transient && failure::retry_enabled();
-            if !restart_requested && !auto_retry {
-              return run;
-            }
-            if !restart_requested {
-              auto_retries_used += 1;
+            let decision = retry_decision(
+              run.fail_reason.as_deref(),
+              restart_requested,
+              false,
+              retry.policy,
+              retry.budget_spent_secs(),
+              retry.consecutive_identical,
+              failure::retry_enabled(),
+              skill.harness.is_tui(),
+              attempts == 1,
+            );
+            match decision {
+              RetryDecision::Stop => return run,
+              RetryDecision::StopBreaker => {
+                retry.mark_breaker_tripped(&mut run);
+                return run;
+              }
+              RetryDecision::Browser | RetryDecision::Schema | RetryDecision::Automatic => {}
             }
             let reason = if restart_requested {
               failure::reason::RESTART_REQUESTED
@@ -3780,6 +3920,18 @@ fn build_and_run(
             }
             proc_index = next.index();
             proc = next;
+            if decision == RetryDecision::Automatic {
+              let delay = retry.next_backoff_secs();
+              proc.note(&format!(
+                "retrying in ~{} after {reason} (attempt {}, retry budget {} left)",
+                ui::clock::format_elapsed(delay as f64),
+                attempts + 1,
+                ui::clock::format_elapsed(retry.budget_left_secs() as f64),
+              ));
+              if backoff_sleep_interruptible(delay, session_ref, proc_index) {
+                proc.note("retrying now (browser restart)");
+              }
+            }
           }
         })
       })
@@ -4102,6 +4254,12 @@ impl SkillRun {
   fn failed(reason: &str, run_dir: Option<String>, log: Option<String>, clone_dir: Option<PathBuf>) -> SkillRun {
     SkillRun { fail_reason: Some(reason.into()), run_dir, log, clone_dir, ..SkillRun::base() }
   }
+  /// Attach the human "why" to a failed run — the first line feeds the retry loops'
+  /// identical-failure signatures, so two attempts failing the same way are recognizable.
+  fn with_fail_detail(mut self, why: &str) -> SkillRun {
+    self.fail_detail = Some(why.to_string());
+    self
+  }
   fn invalid_result(
     detail: String, run_dir: String, log: String, clone_dir: Option<PathBuf>, result_content: String,
   ) -> SkillRun {
@@ -4154,6 +4312,47 @@ fn skill_fail_detail(why: &str, harness: config::Harness, run_dir: Option<&str>,
     }
   }
   parts.join("\n")
+}
+
+/// The rendered text of a recording's final stretch, for failure classification: parse the
+/// cast's trailing output events, strip terminal escapes, and keep roughly the last
+/// screenful. A TUI's telling last words — "Reconnecting to …", a 529 page, a login
+/// demand — live only here; the proc lines carry the wrapper's own output. Best-effort:
+/// a missing or unparsable cast yields an empty sample.
+fn cast_tail_text(cast: &Path) -> String {
+  const READ_BYTES: u64 = 32 * 1024;
+  const KEEP_CHARS: usize = 4 * 1024;
+  use std::io::{Read, Seek, SeekFrom};
+  let Ok(mut file) = std::fs::File::open(cast) else { return String::new() };
+  let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+  let start = len.saturating_sub(READ_BYTES);
+  if file.seek(SeekFrom::Start(start)).is_err() {
+    return String::new();
+  }
+  let mut raw = Vec::new();
+  if file.read_to_end(&mut raw).is_err() {
+    return String::new();
+  }
+  let raw = String::from_utf8_lossy(&raw);
+  let mut text = String::new();
+  // Reading from mid-file, the first line is usually truncated — skip it.
+  for line in raw.lines().skip(if start > 0 { 1 } else { 0 }) {
+    let Ok(json::Value::Array(event)) = json::parse(line) else { continue };
+    if let (Some(json::Value::String(kind)), Some(json::Value::String(data))) = (event.get(1), event.get(2)) {
+      if kind == "o" {
+        text.push_str(&console::strip_ansi_codes(data));
+      }
+    }
+  }
+  if text.len() > KEEP_CHARS {
+    let mut cut = text.len() - KEEP_CHARS;
+    while !text.is_char_boundary(cut) {
+      cut += 1;
+    }
+    text.split_off(cut)
+  } else {
+    text
+  }
 }
 
 fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
@@ -4511,7 +4710,8 @@ fn run_one_skill(
       let why = format!("timed out after {}s", skill.timeout.unwrap_or(0));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_TIMEOUT, Some(&detail));
-      return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir);
+      return SkillRun::failed(failure::reason::CONTAINER_TIMEOUT, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
     }
     Ok((false, ui::screen::Killed::Inactive, _)) => {
       // The recorded screen froze past the watchdog limit. Cleanup already ran above; retain
@@ -4520,27 +4720,37 @@ fn run_one_skill(
       let why = format!("no new screen content for {inactivity_secs}s (inactivity_timeout)");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
-      return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir);
+      return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
     }
     Ok((false, ui::screen::Killed::No, last)) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let tail = spinner.tail_lines(failure::FAILURE_TAIL_LINES);
       let why = failure::failure_excerpt(last.as_deref(), &tail, "harness exited non-zero (no output captured)");
+      // Classify from the excerpt AND the rendered cast tail: the proc lines carry only the
+      // wrapper's own output for a TUI harness, while the screen that matters — cursor's
+      // "Reconnecting to …", a provider's 529 page, a login demand — lives in the recording.
+      let sample = format!("{why}\n{}", cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL)));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
-      let reason = if failure::harness_reported_overload(&why) {
+      let reason = if failure::harness_reported_overload(&sample) {
         failure::reason::HARNESS_OVERLOADED
+      } else if failure::harness_reported_disconnect(&sample) {
+        failure::reason::HARNESS_DISCONNECTED
+      } else if failure::harness_reported_auth_rejection(&sample) {
+        failure::reason::HARNESS_AUTH_REJECTED
       } else {
         failure::reason::HARNESS_NONZERO
       };
       spinner.finish_fail(reason, Some(&detail));
-      return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir);
+      return SkillRun::failed(reason, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&why);
     }
     Err(e) => {
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let why = format!("could not run container: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_RUN, Some(&detail));
-      return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir);
+      return SkillRun::failed(failure::reason::CONTAINER_RUN, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
     }
   }
 
@@ -4554,7 +4764,8 @@ fn run_one_skill(
       let why = format!("declared artifact: {e}");
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
-      return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir);
+      return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
     }
   }
   match collect_skill_result(root, &run_dir, &skill.result, secs) {
@@ -4570,7 +4781,8 @@ fn run_one_skill(
           let why = format!("could not read collected result '{}': {error}", skill.result);
           let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
           spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
-          return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir);
+          return SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
+            .with_fail_detail(&why);
         }
       };
       let workflow_outputs = match result_contract.map(|contract| extract_step_outputs(&content, contract)) {
@@ -4628,7 +4840,7 @@ fn run_one_skill(
       schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
       let detail = skill_fail_detail(&e, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
-      SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir)
+      SkillRun::failed(failure::reason::RESULT_MISSING, Some(run_dir_str), Some(log), clone_dir).with_fail_detail(&e)
     }
   }
 }
@@ -8298,64 +8510,54 @@ mod tests {
   }
 
   #[test]
-  fn workflow_retries_transient_failures_up_to_the_cap_and_browser_restarts_without_one() {
-    use WorkflowRetryDecision::{Automatic, Browser, Schema, Stop};
+  fn retry_decision_is_budgeted_breaker_capped_and_browser_restarts_always_win() {
+    use RetryDecision::{Automatic, Browser, Schema, Stop, StopBreaker};
+    let policy = failure::RetryPolicy {
+      budget_secs: 30 * 60,
+      backoff_initial_secs: 60,
+      backoff_cap_secs: 15 * 60,
+      signature_cap: 5,
+    };
+    let decide = |reason: &'static str, spent: u64, identical: u32| {
+      retry_decision(Some(reason), false, false, policy, spent, identical, true, true, true)
+    };
 
+    // A harness dying with a non-zero exit is retryable — a silent crash at container
+    // startup is infrastructure, and both real 2026-07-16 pipeline failures were exactly
+    // that. Budget is wall clock, not an attempt count: retries continue while time is
+    // left and stop the moment it is spent.
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 1), Automatic);
+    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 29 * 60, 1), Automatic);
+    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 30 * 60, 1), Stop);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 1), Automatic);
+    // The identical-failure breaker trips ahead of the budget, with its own verdict.
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 5), Automatic);
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 6), StopBreaker);
+    // Non-transient reasons fail fast in-run; the job supervisor's restarts own them.
+    assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 1), Stop);
+    // The one schema-correction retry precedes the budget logic.
     assert_eq!(
-      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, 0, true, true),
-      Automatic
+      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 1, true, true, true),
+      Schema
     );
-    // Every attempt below the cap earns another automatic retry; the cap is final.
+    // SCSH_NO_RETRY (retry_enabled=false) stops everything except explicit browser clicks.
     assert_eq!(
-      workflow_retry_decision(
-        Some(failure::reason::CONTAINER_INACTIVE),
-        false,
-        false,
-        failure::MAX_AUTO_RETRIES - 1,
-        true,
-        true
-      ),
-      Automatic
-    );
-    assert_eq!(
-      workflow_retry_decision(
-        Some(failure::reason::CONTAINER_INACTIVE),
-        false,
-        false,
-        failure::MAX_AUTO_RETRIES,
-        true,
-        true
-      ),
+      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 1, false, true, true),
       Stop
     );
-    // A harness dying with a non-zero exit is transient too — a silent crash at container
-    // startup is infrastructure, and both real 2026-07-16 pipeline failures were exactly that.
-    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), false, false, 0, true, true), Automatic);
     assert_eq!(
-      workflow_retry_decision(
-        Some(failure::reason::HARNESS_NONZERO),
-        false,
-        false,
-        failure::MAX_AUTO_RETRIES,
-        true,
-        true
-      ),
+      retry_decision(Some(failure::reason::HARNESS_NONZERO), true, false, policy, u64::MAX, 99, false, true, true),
+      Browser,
+      "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
+    );
+    // First-attempt auth rejection is permanent; on a later attempt it is flakiness.
+    assert_eq!(
+      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 1, true, true, true),
       Stop
     );
-    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, false, 0, true, true), Schema);
-    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, true, 0, true, true), Stop);
-    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_MISSING), false, false, 0, true, false), Stop);
-    assert_eq!(workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, 0, false, true), Stop);
     assert_eq!(
-      workflow_retry_decision(
-        Some(failure::reason::HARNESS_NONZERO),
-        true,
-        true,
-        failure::MAX_AUTO_RETRIES,
-        false,
-        true
-      ),
-      Browser
+      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 1, true, true, false),
+      Automatic
     );
   }
   use std::ffi::OsString;
@@ -8524,6 +8726,29 @@ mod tests {
     assert!(cli(&["run", "code-review", "--resume-from", "qtsiuf"]).is_err(), "profiles have no resume");
     assert!(cli(&["run", "--def", "greet", "--resume-from"]).is_err(), "the flag needs a session id");
     assert!(cli(&["run", "--def", "greet", "--resume-from", " "]).is_err(), "…a non-empty one");
+  }
+
+  #[test]
+  fn workflow_steps_parse_retry_policy_keys() {
+    let yml = r#"description: "retry keys"
+steps:
+  one:
+    agent:
+      harness: claude
+    prompt: do it
+    retry_for: 8h
+    retry_signature_cap: 2
+    output:
+      done:
+        type: bool
+"#;
+    let def = harness_def::validate("wf", yml, harness_def::DefSource::Builtin).expect("valid def");
+    assert_eq!(def.steps[0].retry_for, Some(8 * 3600));
+    assert_eq!(def.steps[0].retry_signature_cap, Some(2));
+
+    let bad = yml.replace("retry_for: 8h", "retry_for: whenever");
+    let err = harness_def::validate("wf", &bad, harness_def::DefSource::Builtin).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("'steps.one.retry_for' must be a positive duration")), "{err:?}");
   }
 
   #[test]
@@ -8948,6 +9173,8 @@ mod tests {
       effort: None,
       timeout: None,
       inactivity_timeout: None,
+      retry_for: None,
+      retry_signature_cap: None,
       env: Vec::new(),
       profile: None,
       commits: false,
@@ -9135,6 +9362,8 @@ Subject: [PATCH] add: 2 + 3 = 5
       artifacts: vec!["summary.txt".into()],
       commits: false,
       repeat: None,
+      retry_for: None,
+      retry_signature_cap: None,
       do_while: None,
       break_loop: false,
     };
@@ -9181,6 +9410,8 @@ Subject: [PATCH] add: 2 + 3 = 5
       effort: None,
       timeout: None,
       inactivity_timeout: None,
+      retry_for: None,
+      retry_signature_cap: None,
       env: Vec::new(),
       profile: None,
       commits: false,
