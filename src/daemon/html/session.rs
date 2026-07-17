@@ -230,6 +230,30 @@ fn annotation_target_link_html(
 /// it succeeded. A job started from the web UI has its planned tasks on `skills` before
 /// any proc registers, so the count is the larger of the two — never "0 tasks" on a
 /// freshly started job.
+/// The supervisor row of the session meta list. Every supervised job says what policy is
+/// in force — the morning reader never has to guess; a zero-budget job shows nothing.
+fn supervisor_meta_html(session: &Session, now: u64) -> String {
+  let sup = &session.supervisor;
+  if !sup.supervised() && sup.gave_up.is_none() && sup.restarted_as.is_none() {
+    return String::new();
+  }
+  let state = if let Some(why) = &sup.gave_up {
+    format!("gave up — {}", esc(why))
+  } else if let Some(new_id) = &sup.restarted_as {
+    format!("restarted as <a href=\"/job/{id}\"><code class=\"job-id\">{id}</code></a>", id = esc(new_id))
+  } else if let Some(at) = sup.next_retry_at {
+    let wait = at.saturating_sub(now);
+    format!("restarting in {}", esc(&super::format::format_duration_secs(wait)))
+  } else {
+    "supervised".to_string()
+  };
+  format!(
+    "<dt>Retries</dt><dd data-session-supervisor>attempt {attempt}/{max} · {state}</dd>\n",
+    attempt = sup.attempt(),
+    max = sup.retries,
+  )
+}
+
 pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) -> String {
   let kind = session.kind.as_deref().unwrap_or("profile");
   let profile = session.profile.as_deref().unwrap_or("default");
@@ -449,7 +473,8 @@ fn session_meta_html(session: &Session, now: u64) -> String {
 <dt>Duration</dt><dd data-session-duration>{duration}</dd>
 <dt>Repo</dt><dd data-session-repo><code class="repo-path">{repo}</code></dd>
 <dt>Branch</dt><dd data-session-branch><code>{branch}</code></dd>
-</dl>"#,
+{supervisor}</dl>"#,
+    supervisor = supervisor_meta_html(session, now),
     started_at = session.started_at,
     ended_at = session.ended_at.map(|t| t.to_string()).unwrap_or_default(),
     last_seen = last_seen,

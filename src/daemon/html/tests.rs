@@ -49,6 +49,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       }],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   store
@@ -527,6 +528,7 @@ fn a_retried_route_is_visibly_a_retry() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "retryv").expect("session renders");
@@ -946,6 +948,7 @@ fn session_proc_html_has_no_stray_backslashes() {
       }],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -1027,6 +1030,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
       ],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "difjob").expect("session page");
@@ -1061,6 +1065,7 @@ fn ended_session_hides_force_stop_button() {
       procs: vec![],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "done01").expect("session page");
@@ -1102,6 +1107,7 @@ fn offline_export_carries_lede_and_full_meta() {
     procs: vec![],
     workflow: None,
     parent_session: None,
+    supervisor: Default::default(),
   };
   let html = session_export_page(&session, &[], 100);
   assert!(html.contains(r#"class="page-lede""#), "export carries the live page's lede: {html}");
@@ -1148,6 +1154,7 @@ fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
     procs: vec![],
     workflow: None,
     parent_session: None,
+    supervisor: Default::default(),
   };
   let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
   assert!(lede.contains("workflow <strong>arith</strong>"), "kind and profile lead the lede: {lede}");
@@ -1239,6 +1246,15 @@ fn global_skills_are_startable_from_the_run_page() {
 }
 
 #[test]
+fn every_start_form_carries_the_retries_budget() {
+  let js = live_client_js();
+  assert!(js.contains("function retriesRow"), "the start forms render a retries input");
+  assert!(js.contains(r#"id="job-retries" value="10""#), "…defaulting to 10");
+  assert!(js.contains("retries: jobRetries()"), "def starts post the budget");
+  assert!(js.contains("profile: name, retries: jobRetries()"), "…and so do global-profile starts");
+}
+
+#[test]
 fn the_job_lede_ticks_live() {
   let js = live_client_js();
   assert!(js.contains("function syncSessionLede"), "the lede has a live tick mirror");
@@ -1314,6 +1330,7 @@ fn offline_export_embeds_commits_diff_when_present() {
     }],
     workflow: None,
     parent_session: None,
+    supervisor: Default::default(),
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
@@ -1377,6 +1394,7 @@ fn offline_export_keeps_text_log_lines() {
     }],
     workflow: None,
     parent_session: None,
+    supervisor: Default::default(),
   };
   let note = "no recording — image build ran without asciinema on PATH (text log only)";
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
@@ -1487,6 +1505,7 @@ fn offline_export_includes_workflow_graph() {
       ],
     }),
     parent_session: None,
+    supervisor: Default::default(),
   };
   let exports = [
     CastExport::Note { text: "no recording".into(), diff_html: None },
@@ -1607,6 +1626,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
       ],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "fleet1").expect("session page");
@@ -1747,6 +1767,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
       ],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "fleet2").expect("fleet page");
@@ -1876,6 +1897,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       }],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "castab").expect("session page");
@@ -1964,6 +1986,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
       }],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -2021,6 +2044,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
       }],
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   store
@@ -2592,6 +2616,7 @@ fn workflow_graph_renders_builtin_shapes() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   store.sessions.get_mut("arith1").unwrap().procs[2].elapsed = Some(198.0);
@@ -2734,6 +2759,7 @@ fn workflow_graph_renders_builtin_shapes() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let fruits = session_page(&store, "fruit1").expect("fruits");
@@ -2801,6 +2827,7 @@ fn workflow_graph_renders_builtin_shapes() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let review = session_page(&store, "rev001").expect("review");
@@ -2872,6 +2899,7 @@ fn workflow_graph_renders_builtin_shapes() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let waiting = session_page(&store, "wait1").expect("waiting");
@@ -2928,6 +2956,7 @@ fn workflow_graph_renders_builtin_shapes() {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let stopped = session_page(&store, "stop1").expect("stopped page");
@@ -3082,6 +3111,7 @@ fn workflow_loop_island_advertises_future_iterations() {
       run_pid: Some(1),
       workflow: workflow_meta_from_def(&def),
       parent_session: None,
+      supervisor: Default::default(),
     }
   };
 
@@ -3155,6 +3185,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         }],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     },
   );
   let html = session_page(&store, "solo1").expect("page");

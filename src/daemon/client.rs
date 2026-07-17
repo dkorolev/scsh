@@ -104,8 +104,16 @@ impl Client {
       Some(p) => format!(", \"parent_session\": {}", quote(p)),
       None => String::new(),
     };
+    // An explicit `scsh run --retries N` (propagated as SCSH_RETRIES) declares the job's
+    // restart budget at registration; omitted, the daemon applies its default — or keeps
+    // the budget it already stamped on a session it created itself.
+    let retries_part = std::env::var("SCSH_RETRIES")
+      .ok()
+      .and_then(|s| s.trim().parse::<u32>().ok())
+      .map(|n| format!(", \"retries\": {n}"))
+      .unwrap_or_default();
     let body = format!(
-      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {}{workflow_part}{parent_part} }}",
+      "{{ \"session\": {}, \"repo\": {}, \"branch\": {}, \"profile\": {}, \"kind\": {}, \"skills\": [{}], \"run_pid\": {}{workflow_part}{parent_part}{retries_part} }}",
       quote(&self.inner.session_id),
       quote(repo),
       quote(branch),

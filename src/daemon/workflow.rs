@@ -867,6 +867,7 @@ mod tests {
       run_pid: Some(1),
       workflow: Some(arith_meta()),
       parent_session: None,
+      supervisor: Default::default(),
     };
     // Only first node mapped for this test
     session.workflow.as_mut().unwrap().nodes[1].proc_index = None;
@@ -967,6 +968,7 @@ mod tests {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert_eq!(session.lifecycle_status(60), SessionLifecycle::Cancelled);
     let meta = session.workflow.as_ref().unwrap();
@@ -1114,6 +1116,7 @@ mod tests {
       run_pid: Some(1),
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let meta = effective_workflow_meta(&session).expect("flat job gets a graph");
     let ids: Vec<&str> = meta.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -1242,6 +1245,7 @@ mod tests {
       run_pid: Some(1),
       workflow: Some(arith_meta()),
       parent_session: None,
+      supervisor: Default::default(),
     };
     // Rebind authored proc indices to match this fixture.
     session.workflow.as_mut().unwrap().nodes[0].proc_index = Some(1);
@@ -1373,6 +1377,7 @@ mod tests {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     };
     let meta = effective_workflow_meta(&session).unwrap();
     let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
@@ -1473,6 +1478,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let meta = effective_workflow_meta(&session).unwrap();
     let summarize = meta.nodes.iter().find(|n| n.id == "summarize").unwrap();
@@ -1496,6 +1502,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let map = needs_from_harness_profile(&session).expect("arith builtin");
     assert_eq!(map.get("summarize"), Some(&vec!["add".to_string(), "multiply".to_string()]));
@@ -1566,6 +1573,7 @@ mod tests {
       run_pid: None,
       workflow: Some(workflow),
       parent_session: None,
+      supervisor: Default::default(),
     }
   }
 

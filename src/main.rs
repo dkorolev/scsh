@@ -49,6 +49,10 @@ fn run(args: &[String]) -> i32 {
     }
   };
   let profile = cli.profile.as_deref();
+  if let Some(n) = cli.retries {
+    // One process-wide answer: the daemon client reads SCSH_RETRIES at registration.
+    std::env::set_var("SCSH_RETRIES", n.to_string());
+  }
   match cli.mode {
     Mode::Help(topic) => {
       print_help(topic);
@@ -756,6 +760,9 @@ struct Cli {
   /// survives under the named prior session (`$SCSH_HOME/sessions/<id>/results/`) and run
   /// only the steps that never completed — the restart path for a failed workflow job.
   resume_from: Option<String>,
+  /// `run --retries N`: this job's daemon-restart budget (default 10; 0 = never
+  /// restarted). Propagated as `SCSH_RETRIES` so the session registers it.
+  retries: Option<u32>,
   /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
   /// sibling `.skills/`) instead of the repo's, so a global skill can drive a fleet without
   /// installing into the target tree. The bundle's skills are installed GLOBALLY inside each
@@ -810,6 +817,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_rebuild_base = false;
   let mut def: Option<String> = None;
   let mut resume_from: Option<String> = None;
+  let mut retries: Option<u32> = None;
   let mut override_dot_scsh_yml: Option<PathBuf> = None;
   let mut global = false;
   let mut i = 0;
@@ -1062,6 +1070,15 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           None
         }
       }
+      // `run --retries N`: how many times the daemon may restart this job after a
+      // terminal failure (resuming completed workflow steps). Every job gets 10 unless
+      // told otherwise; 0 opts out of supervision entirely.
+      "--retries" => {
+        i += 1;
+        let n = args.get(i).ok_or("--retries needs a count, e.g. --retries 10 (0 = never restart)")?;
+        retries = Some(n.parse().map_err(|_| format!("bad --retries value '{n}'"))?);
+        None
+      }
       // `run --def <name> --resume-from <session>`: reuse the named prior session's completed
       // step results and run only what never completed.
       "--resume-from" => {
@@ -1207,6 +1224,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       "--resume-from only applies to 'run --def' (e.g. `scsh run --def gorgeous-pipeline --resume-from qtsiuf`)".into(),
     );
   }
+  if retries.is_some() && !matches!(mode, Mode::Run) {
+    return Err("--retries only applies to 'run' (e.g. `scsh run --def greet --retries 3`)".into());
+  }
   if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe) {
     return Err("--override-dot-scsh-yml only applies to 'run', 'list', 'check-profile', and 'probe'".into());
   }
@@ -1230,6 +1250,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_rebuild_base,
     def,
     resume_from,
+    retries,
     override_dot_scsh_yml,
     global,
   })

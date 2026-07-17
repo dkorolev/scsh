@@ -14,6 +14,7 @@ pub mod prune;
 pub mod reap;
 mod server;
 mod setup;
+mod supervisor;
 mod websocket;
 mod workflow;
 

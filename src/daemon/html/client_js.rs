@@ -3563,7 +3563,7 @@ function selectGlobalProfile(name) {
   if (!GLOBAL_PROFILES[name] || !form) return;
   const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
   const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
-  form.innerHTML = '<h4 class="form-title">run global skill profile <code>' + esc(name) + '</code></h4>' +
+  form.innerHTML = '<h4 class="form-title">run global skill profile <code>' + esc(name) + '</code></h4>' + retriesRow() +
     '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
     disabled + '><span>Start job</span></button>' +
     '<span id="def-note" class="dim">' + hint + '</span></div>';
@@ -3575,7 +3575,7 @@ function startGlobalJob(name) {
   const note = document.getElementById('def-note');
   if (!GLOBAL_PROFILES[name] || !OPEN_REPO) return;
   if (!OPEN_REPO_RUNNABLE) { if (note) note.textContent = 'the repository is not ready to run'; return; }
-  postJobStart({ repo: OPEN_REPO, profile: name }, note);
+  postJobStart({ repo: OPEN_REPO, profile: name, retries: jobRetries() }, note);
 }
 function selectDef(name) {
   const def = DEFS_BY_NAME[name];
@@ -3603,7 +3603,7 @@ function selectDef(name) {
   }).join('');
   const disabled = OPEN_REPO_RUNNABLE ? '' : ' disabled';
   const hint = OPEN_REPO_RUNNABLE ? '' : 'the repository is not ready to run (see the blockers above)';
-  form.innerHTML = '<h4 class="form-title">run <code>' + esc(name) + '</code></h4>' + fields +
+  form.innerHTML = '<h4 class="form-title">run <code>' + esc(name) + '</code></h4>' + fields + retriesRow() +
     '<div class="images-controls"><button type="button" class="chamfer btn btn--green btn--sm" id="def-start"' +
     disabled + '><span>Start job</span></button>' +
     '<span id="def-note" class="dim">' + hint + '</span></div>';
@@ -3616,6 +3616,18 @@ function selectDef(name) {
   // them hunt for what their click produced.
   const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
   form.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+}
+// Every job is restarted by the daemon on terminal failure, up to this many times
+// (completed workflow steps are resumed, not re-run). 0 = never restart.
+function retriesRow() {
+  return '<div class="param-row"><label for="job-retries">retries</label> ' +
+    '<input type="number" id="job-retries" value="10" min="0"> ' +
+    '<span class="dim">daemon restarts after a terminal failure (0 = never)</span></div>';
+}
+function jobRetries() {
+  const el = document.getElementById('job-retries');
+  const n = el ? parseInt(el.value, 10) : NaN;
+  return Number.isNaN(n) || n < 0 ? 10 : n;
 }
 function collectParams(def) {
   const out = {};
@@ -3641,7 +3653,7 @@ function startJob(name) {
     if (el) { el.focus(); el.reportValidity(); }
     return;
   }
-  postJobStart({ repo: OPEN_REPO, def: name, params: collectParams(def) }, note);
+  postJobStart({ repo: OPEN_REPO, def: name, params: collectParams(def), retries: jobRetries() }, note);
 }
 function postJobStart(req, note) {
   if (note) note.textContent = 'starting…';

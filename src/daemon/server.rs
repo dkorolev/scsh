@@ -143,6 +143,11 @@ impl Server {
     let reap_running = Arc::new(AtomicBool::new(false));
     let reap_counts: Arc<Mutex<std::collections::HashMap<(String, String), u32>>> =
       Arc::new(Mutex::new(Default::default()));
+    // Job supervisor: schedule restarts for failed supervised sessions and
+    // fire due ones. Firing stops containers and spawns processes, so it runs on its own
+    // thread, one pass at a time (same discipline as the reaper).
+    let mut last_supervise = Instant::now();
+    let supervise_running = Arc::new(AtomicBool::new(false));
 
     loop {
       match listener.accept() {
@@ -186,6 +191,46 @@ impl Server {
             let _ = catch_unwind(AssertUnwindSafe(|| {
               super::reap::reap_pass(&store, &prune, &counts, port, now_unix_secs());
             }));
+            flag.store(false, Ordering::SeqCst);
+          });
+        }
+      }
+
+      if last_supervise.elapsed() >= Duration::from_secs(super::supervisor::SUPERVISOR_INTERVAL_SECS) {
+        last_supervise = Instant::now();
+        let now = now_unix_secs();
+        let scheduled = {
+          let mut store = lock_store(&self.store);
+          super::supervisor::schedule_pass(&mut store, now)
+        };
+        let due = {
+          let store = lock_store(&self.store);
+          store.sessions.values().any(|s| {
+            s.supervisor.supervised()
+              && s.supervisor.gave_up.is_none()
+              && s.supervisor.restarted_as.is_none()
+              && s.supervisor.next_retry_at.is_some_and(|at| now >= at)
+          })
+        };
+        if !scheduled.is_empty() {
+          self.dirty.store(true, Ordering::Relaxed);
+          self.ws_dirty.store(true, Ordering::Relaxed);
+          self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(scheduled);
+        }
+        if due && !supervise_running.swap(true, Ordering::SeqCst) {
+          let store = Arc::clone(&self.store);
+          let dirty = Arc::clone(&self.dirty);
+          let ws_dirty = Arc::clone(&self.ws_dirty);
+          let dirty_sessions = Arc::clone(&self.dirty_sessions);
+          let flag = Arc::clone(&supervise_running);
+          std::thread::spawn(move || {
+            let touched = catch_unwind(AssertUnwindSafe(|| super::supervisor::fire_due(&store, now_unix_secs())))
+              .unwrap_or_default();
+            if !touched.is_empty() {
+              dirty.store(true, Ordering::Relaxed);
+              ws_dirty.store(true, Ordering::Relaxed);
+              dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(touched);
+            }
             flag.store(false, Ordering::SeqCst);
           });
         }
@@ -985,6 +1030,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let workflow =
         crate::daemon::workflow::parse_workflow_value(obj.iter().find(|(k, _)| k == "workflow").map(|(_, v)| v));
       let parent_session = field_str(&obj, "parent_session");
+      let retries = field_num(&obj, "retries").map(|n| n as u32);
       if id.is_empty() {
         return false;
       }
@@ -1011,6 +1057,12 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         if parent_session.is_some() {
           s.parent_session = parent_session;
         }
+        // An explicit CLI --retries wins; a client that omits the field never demotes
+        // daemon-set state (jobs/start budgets, restart-chain inheritance).
+        if let Some(n) = retries {
+          s.supervisor.retries = n;
+          s.supervisor.job_attempt = s.supervisor.job_attempt.max(1);
+        }
         return true;
       }
       let session = Session {
@@ -1028,6 +1080,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         run_pid,
         workflow,
         parent_session,
+        supervisor: crate::daemon::model::SupervisorState::fresh(
+          retries.unwrap_or(crate::daemon::model::DEFAULT_JOB_RETRIES),
+        ),
       };
       store.insert_session(id, session);
       true
@@ -1490,6 +1545,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           run_pid,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1820,6 +1876,7 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
           run_pid,
           workflow,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1845,7 +1902,8 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     Some(r) if !r.trim().is_empty() => r.trim().to_string(),
     _ => return (400, err_body("give a repository path"), false),
   };
-  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, store)
+  let retries = field_num(&obj, "retries").map(|n| n as u32).unwrap_or(crate::daemon::model::DEFAULT_JOB_RETRIES);
+  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, retries, store)
 }
 
 /// A validated, ready-to-spawn job: the repo root, what to run, and the planned tasks.
@@ -1922,7 +1980,7 @@ fn plan_job_request(
 /// start recipe so the job can later be force-restarted.
 fn start_job_in_repo(
   repo_in: &str, def_name: Option<String>, profile_name: Option<String>, params: Vec<(String, String)>,
-  resume_from: Option<String>, store: &Arc<Mutex<Store>>,
+  resume_from: Option<String>, retries: u32, store: &Arc<Mutex<Store>>,
 ) -> (u16, String, bool) {
   let PlannedJob { root, run_name, planned, kind, workflow, run_args } =
     match plan_job_request(repo_in, &def_name, &profile_name, &params) {
@@ -1999,6 +2057,7 @@ fn start_job_in_repo(
           run_pid,
           workflow,
           parent_session: None,
+          supervisor: crate::daemon::model::SupervisorState::fresh(retries),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -2107,7 +2166,7 @@ fn repos_json(store: &Store, now: u64) -> String {
 /// run restores every step the old one completed and runs only the rest; the default
 /// (`"scratch"` or absent) runs everything anew. Answers `{ok:true,session:"<new id>"}` — the
 /// NEW job's id.
-fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
     _ => return (400, err_body("expected a JSON object"), false),
@@ -2121,7 +2180,7 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     None | Some("scratch") => false,
     Some(other) => return (400, err_body(&format!("unknown restart mode '{other}' (resume or scratch)")), false),
   };
-  let (repo, name) = {
+  let (repo, name, retries) = {
     let store = lock_store(store);
     let Some(s) = store.sessions.get(&session_id) else {
       return (404, err_body("session not found"), false);
@@ -2139,7 +2198,7 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
         false,
       );
     }
-    (s.repo.clone(), name)
+    (s.repo.clone(), name, s.supervisor.retries)
   };
   // The recipe: what jobs/start recorded, or — for a CLI-started run — the name alone,
   // classified def-vs-profile with the same precedence a fresh start would use.
@@ -2168,7 +2227,31 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   if status != 200 {
     return (status, out, false);
   }
-  start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), store)
+  let (status, out, mutated) =
+    start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), retries, store);
+  // Link the chain: the old session records its replacement, and the fresh session
+  // inherits the supervisor state (attempt-incremented) so restart budgets and the
+  // job-level breaker span the whole chain rather than resetting per restart.
+  if status == 200 {
+    if let Some(new_id) = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()) {
+      let new_id = new_id.to_string();
+      let mut store = lock_store(store);
+      let inherited = store.sessions.get(&session_id).map(|old| old.supervisor.inherited());
+      if let Some(old) = store.sessions.get_mut(&session_id) {
+        old.supervisor.restarted_as = Some(new_id.clone());
+        old.supervisor.next_retry_at = None;
+        // The stop inside this restart marked the old session "stopped from the browser";
+        // being replaced is not giving up — the chain continues in the new session.
+        old.supervisor.gave_up = None;
+      }
+      if let Some(sup) = inherited {
+        if let Some(new) = store.sessions.get_mut(&new_id) {
+          new.supervisor = sup;
+        }
+      }
+    }
+  }
+  (status, out, mutated)
 }
 
 /// `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job: stop every
@@ -2210,6 +2293,12 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     s.client_connected = false;
     s.run_pid = None;
     s.last_seen_at = now;
+    // A human's stop IS supervision — the supervisor must never resurrect a job the
+    // user explicitly killed.
+    if s.supervisor.supervised() && s.supervisor.restarted_as.is_none() {
+      s.supervisor.next_retry_at = None;
+      s.supervisor.gave_up = Some("stopped from the session browser".into());
+    }
     for p in &mut s.procs {
       if p.status == ProcStatus::Running || p.status == ProcStatus::Waiting {
         p.status = ProcStatus::Fail;
@@ -2971,6 +3060,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3041,6 +3131,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3098,6 +3189,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3175,6 +3267,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3239,6 +3332,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3306,6 +3400,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3394,6 +3489,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3457,6 +3553,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3656,6 +3753,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     {
       let mut s = store.lock().unwrap();
@@ -3732,6 +3830,31 @@ mod tests {
   }
 
   #[test]
+  fn session_start_stamps_the_retries_budget_and_explicit_beats_daemon_default() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    // A CLI-started run with no --retries gets the default budget: every job is
+    // presumed worth finishing.
+    let body = r#"{"session":"cliabc","repo":"/r","branch":"main","profile":"default","skills":[]}"#;
+    assert!(handle_api_post("/api/v1/session/start", body, &store, &prune));
+    {
+      let guard = store.lock().unwrap();
+      let sup = &guard.sessions["cliabc"].supervisor;
+      assert_eq!(sup.retries, crate::daemon::model::DEFAULT_JOB_RETRIES);
+      assert_eq!(sup.attempt(), 1);
+    }
+    // Re-registering WITHOUT the field (a daemon-spawned child) keeps the daemon-set
+    // budget; an explicit `scsh run --retries 0` overrides it — including down to zero.
+    store.lock().unwrap().sessions.get_mut("cliabc").unwrap().supervisor.retries = 3;
+    let body = r#"{"session":"cliabc","repo":"/r","branch":"main","profile":"default","skills":[]}"#;
+    assert!(handle_api_post("/api/v1/session/start", body, &store, &prune));
+    assert_eq!(store.lock().unwrap().sessions["cliabc"].supervisor.retries, 3, "absent field never demotes");
+    let body = r#"{"session":"cliabc","repo":"/r","branch":"main","profile":"default","skills":[],"retries":0}"#;
+    assert!(handle_api_post("/api/v1/session/start", body, &store, &prune));
+    assert_eq!(store.lock().unwrap().sessions["cliabc"].supervisor.retries, 0, "explicit 0 opts out");
+  }
+
+  #[test]
   fn display_or_absolute_repo_keeps_labels_and_absolutizes_paths() {
     assert_eq!(display_or_absolute_repo(""), "");
     assert_eq!(display_or_absolute_repo("(image builds)"), "(image builds)");
@@ -3784,6 +3907,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -3896,6 +4020,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -4003,6 +4128,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -4089,6 +4215,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     store
@@ -4156,6 +4283,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: Some("srcjob".into()),
+        supervisor: Default::default(),
       },
     );
     let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
@@ -4338,6 +4466,7 @@ mod tests {
             run_pid: None,
             workflow: None,
             parent_session: None,
+            supervisor: Default::default(),
           },
         );
       }
@@ -4410,6 +4539,7 @@ mod tests {
             run_pid: Some(u32::MAX / 2),
             workflow: None,
             parent_session: None,
+            supervisor: Default::default(),
           },
         );
       }
@@ -4765,7 +4895,8 @@ mod tests {
     let (old_id, new_id) = with_scsh_home(&home, || {
       std::env::set_var("SCSH_BIN", &stub);
       // `greet` is a built-in WORKFLOW definition (defaulted params), so resume applies.
-      let body = format!(r#"{{"repo":{},"def":"greet"}}"#, quote(&repo));
+      // Started with an explicit retries budget, which must survive the restart.
+      let body = format!(r#"{{"repo":{},"def":"greet","retries":3}}"#, quote(&repo));
       let (status, out, _) = jobs_start_response(&body, &store);
       assert_eq!(status, 200, "got: {out}");
       let old_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
@@ -4779,6 +4910,17 @@ mod tests {
       (old_id, new_id)
     });
     assert_ne!(old_id, new_id, "resume answers with the NEW job's id");
+    {
+      let guard = store.lock().unwrap();
+      let old = guard.sessions.get(&old_id).unwrap();
+      assert_eq!(old.supervisor.retries, 3, "jobs/start recorded the retries budget");
+      assert_eq!(old.supervisor.restarted_as.as_deref(), Some(new_id.as_str()), "the chain is linked");
+      assert!(old.supervisor.gave_up.is_none(), "being replaced is not giving up");
+      let new = guard.sessions.get(&new_id).unwrap();
+      assert_eq!(new.supervisor.retries, 3, "the fresh session inherits the budget");
+      assert_eq!(new.supervisor.attempt(), 2, "…one attempt later");
+      assert!(new.supervisor.next_retry_at.is_none(), "…with the schedule cleared");
+    }
     // The respawned stub writes its argv asynchronously — poll briefly for it.
     let mut args = String::new();
     for _ in 0..50 {
@@ -4810,6 +4952,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let (status, out, _) = jobs_restart_response(r#"{"session":"flatjb","mode":"resume"}"#, &store);
@@ -4856,6 +4999,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let (status, out, _) = with_scsh_home(&home, || {
@@ -4901,6 +5045,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let (status, out, _) = jobs_restart_response(r#"{"session":"buildx"}"#, &store);
@@ -4927,6 +5072,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let (status, out, _) = with_scsh_home(&home, || jobs_restart_response(r#"{"session":"clires"}"#, &store));
@@ -5023,6 +5169,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
@@ -5055,6 +5202,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     reconcile_finished_job(&store, "done", Some(0), "");
@@ -5083,6 +5231,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let out = repos_json(&store, 51);

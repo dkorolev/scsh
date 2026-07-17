@@ -208,6 +208,70 @@ pub struct SkillMeta {
   pub harness: String,
 }
 
+/// Job restarts the supervisor may spend on one job before giving up. Every job gets
+/// this budget unless its start says otherwise (`scsh run --retries N`, or `"retries"`
+/// on `jobs/start`); `0` opts a job out of supervision entirely.
+pub const DEFAULT_JOB_RETRIES: u32 = 10;
+/// Consecutive supervisor restarts failing with the SAME step + reason before the
+/// job-level breaker trips — scsh's own bug or a deterministic workflow failure should
+/// not burn ten fleets overnight.
+pub const JOB_FAIL_STREAK_CAP: u32 = 3;
+
+/// Supervisor state for one session. Every job is first-class: the daemon restarts a
+/// terminal failure up to the job's retries budget, and the state is inherited
+/// (attempt-incremented) by the fresh session each restart creates, so the budget spans
+/// the whole chain. The all-zero default — what sessions persisted before this feature
+/// parse back to — means "no retries budget", so a daemon upgrade never resurrects
+/// history; new sessions are stamped with their budget at creation.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SupervisorState {
+  /// 1-based run ordinal within the restart chain (0 on old records = 1, the original).
+  pub job_attempt: u32,
+  /// Restart budget for the whole chain; `0` = never restarted by the daemon.
+  pub retries: u32,
+  /// When the supervisor will restart this failed job (unix secs); `None` = nothing scheduled.
+  pub next_retry_at: Option<u64>,
+  /// The failed step + reason of the run this state was inherited from, and how many
+  /// consecutive runs failed exactly that way — the job-level breaker's memory.
+  pub fail_signature: Option<String>,
+  pub fail_streak: u32,
+  /// Set when the supervisor stopped retrying (ceiling or breaker), with the reason —
+  /// the loud, permanent, explained terminal state.
+  pub gave_up: Option<String>,
+  /// The session that replaced this one after a restart (manual or supervisor's).
+  pub restarted_as: Option<String>,
+}
+
+impl SupervisorState {
+  /// The state every fresh job starts with: attempt 1 of `retries` restarts.
+  pub fn fresh(retries: u32) -> SupervisorState {
+    SupervisorState { job_attempt: 1, retries, ..Default::default() }
+  }
+
+  /// Whether the daemon restarts this job on terminal failure.
+  pub fn supervised(&self) -> bool {
+    self.retries > 0
+  }
+
+  pub fn attempt(&self) -> u32 {
+    self.job_attempt.max(1)
+  }
+
+  /// The state a restart's fresh session starts with: one attempt later, the retry
+  /// schedule cleared, breaker memory carried.
+  pub fn inherited(&self) -> SupervisorState {
+    SupervisorState {
+      job_attempt: self.attempt() + 1,
+      retries: self.retries,
+      next_retry_at: None,
+      fail_signature: self.fail_signature.clone(),
+      fail_streak: self.fail_streak,
+      gave_up: None,
+      restarted_as: None,
+    }
+  }
+}
+
 /// One `scsh run` invocation — grouped by session id (six lowercase letters).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
@@ -238,6 +302,8 @@ pub struct Session {
   /// When this session was spawned as a follow-on job (e.g. standalone `annotate-cast` for
   /// recordings under `$SCSH_HOME/sessions/<id>/`), the parent session id. `None` otherwise.
   pub parent_session: Option<String>,
+  /// Unattended-supervisor state; [`SupervisorState::default`] for attended jobs.
+  pub supervisor: SupervisorState,
 }
 
 /// A repository opened from the daemon UI, ready to start jobs in. Kept in memory only (a
@@ -635,6 +701,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     assert_eq!(session.duration_secs(200), Some(100));
@@ -673,6 +740,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     // If the retry ALSO failed, the newest attempt is a real failure: job failed.
@@ -714,6 +782,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
 
     assert_eq!(session.proc_attempt(&session.procs[0]), (1, 3));
@@ -739,6 +808,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS), SessionLifecycle::Running);
     assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
@@ -762,6 +832,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let mut proc = test_proc(ProcStatus::Running);
     proc.started_at = Some(110);
@@ -811,6 +882,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert_eq!(session.lifecycle_status(50), SessionLifecycle::Cancelled);
   }
@@ -881,6 +953,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     assert!(session.has_incomplete_procs());
     assert_eq!(session.lifecycle_status(2), SessionLifecycle::Running);
@@ -903,6 +976,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let mut running_proc = test_proc(ProcStatus::Running);
     running_proc.started_at = Some(10);
@@ -922,6 +996,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     let mut sessions = BTreeMap::new();
     sessions.insert(done.id.clone(), done);
@@ -958,6 +1033,7 @@ mod tests {
           run_pid: None,
           workflow: None,
           parent_session: None,
+          supervisor: Default::default(),
         },
       );
     }
@@ -1004,6 +1080,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     assert_eq!(store.alive_clients(now + SESSION_START_TIMEOUT_SECS), 1);

@@ -125,6 +125,24 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>
     Some(p) => format!(", \"parent_session\": {}", quote(p)),
     None => String::new(),
   };
+  // Supervisor state rides only when it says something (records persisted before the
+  // retries budget existed parse back to the zero-budget default without it).
+  let supervisor = if s.supervisor == Default::default() {
+    String::new()
+  } else {
+    let sup = &s.supervisor;
+    format!(
+      ", \"supervisor\": {{ \"job_attempt\": {}, \"retries\": {}, \
+\"next_retry_at\": {}, \"fail_signature\": {}, \"fail_streak\": {}, \"gave_up\": {}, \"restarted_as\": {} }}",
+      sup.job_attempt,
+      sup.retries,
+      sup.next_retry_at.map_or_else(|| "null".to_string(), |t| t.to_string()),
+      opt_str(&sup.fail_signature),
+      sup.fail_streak,
+      opt_str(&sup.gave_up),
+      opt_str(&sup.restarted_as),
+    )
+  };
   let lifecycle = lifecycle_at.map(|now| {
     let state = s.lifecycle_status(now);
     format!(", \"lifecycle\": {}, \"lifecycle_label\": {}", quote(state.css_class()), quote(state.label()))
@@ -132,7 +150,7 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session}{lifecycle} }}",
+\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session}{supervisor}{lifecycle} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -227,6 +245,7 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   let run_pid = field_num(obj, "run_pid").and_then(|n| if n > 0.0 { Some(n as u32) } else { None });
   let workflow = super::workflow::parse_workflow_value(field_value(obj, "workflow").ok());
   let parent_session = field_str(obj, "parent_session");
+  let supervisor = parse_supervisor(field_value(obj, "supervisor").ok());
   Ok(Session {
     id,
     started_at,
@@ -242,7 +261,24 @@ fn parse_session(v: &Value) -> Result<Session, String> {
     run_pid,
     workflow,
     parent_session,
+    supervisor,
   })
+}
+
+/// Supervisor state, absent on records persisted before it existed (⇒ attended default).
+fn parse_supervisor(v: Option<&Value>) -> super::model::SupervisorState {
+  let Some(Value::Object(obj)) = v else {
+    return Default::default();
+  };
+  super::model::SupervisorState {
+    job_attempt: field_num(obj, "job_attempt").unwrap_or(0.0) as u32,
+    retries: field_num(obj, "retries").unwrap_or(0.0) as u32,
+    next_retry_at: field_num(obj, "next_retry_at").and_then(|n| if n > 0.0 { Some(n as u64) } else { None }),
+    fail_signature: field_str(obj, "fail_signature"),
+    fail_streak: field_num(obj, "fail_streak").unwrap_or(0.0) as u32,
+    gave_up: field_str(obj, "gave_up"),
+    restarted_as: field_str(obj, "restarted_as"),
+  }
 }
 
 fn parse_skills(v: Option<&Value>) -> Vec<SkillMeta> {
@@ -431,6 +467,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
     let s = parse_session_json(&session_json_store(&session)).unwrap();
@@ -448,6 +485,21 @@ mod tests {
     let with_parent = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(with_parent.parent_session.as_deref(), Some("parent1"));
     assert!(session_json_store(&session).contains("\"parent_session\": \"parent1\""));
+
+    // Default supervisor state stays OUT of the JSON (old daemons must still parse it),
+    // and a non-default one roundtrips every field.
+    assert!(!session_json_store(&session).contains("supervisor"));
+    session.supervisor = crate::daemon::model::SupervisorState {
+      job_attempt: 3,
+      retries: 10,
+      next_retry_at: Some(2000),
+      fail_signature: Some("fix|harness_nonzero_exit".into()),
+      fail_streak: 2,
+      gave_up: None,
+      restarted_as: Some("newone".into()),
+    };
+    let sup = parse_session_json(&session_json_store(&session)).unwrap().supervisor;
+    assert_eq!(sup, session.supervisor);
   }
 
   #[test]
@@ -487,6 +539,7 @@ mod tests {
         ],
       }),
       parent_session: None,
+      supervisor: Default::default(),
     };
     let parsed = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(parsed.workflow.as_ref().unwrap().nodes.len(), 2);
@@ -549,6 +602,7 @@ mod tests {
         run_pid: None,
         workflow: None,
         parent_session: None,
+        supervisor: Default::default(),
       },
     );
     let light = tick_json_light(&store, 105);

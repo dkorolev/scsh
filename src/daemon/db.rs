@@ -159,6 +159,7 @@ mod tests {
       run_pid: None,
       workflow: None,
       parent_session: None,
+      supervisor: Default::default(),
     }
   }
 
