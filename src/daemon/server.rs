@@ -363,9 +363,10 @@ fn pending_browser_kill(fail_reason: Option<&str>) -> Option<PendingBrowserKill>
 }
 
 /// Persisted sessions must never claim work is still running after the owning process or
-/// session ended. Annotation is bounded by its watchdog, so an orphaned annotation row is
-/// represented as a terminal timeout; other proc kinds retain the generic incomplete-session
-/// reason used by normal deregistration.
+/// session ended. An orphaned annotation row means its PROCESS vanished mid-work (killed,
+/// crashed, host rebooted) — a real model timeout reports itself as `annotation_timed_out`
+/// before the process exits — so it settles as `annotation_interrupted`; other proc kinds
+/// retain the generic incomplete-session reason used by normal deregistration.
 fn settle_loaded_incomplete_procs(session: &mut Session) {
   let ended = session.ended_at.unwrap_or(session.last_seen_at);
   for proc in &mut session.procs {
@@ -383,8 +384,9 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
     }
     proc.status = ProcStatus::Fail;
     if proc.kind == ProcKind::Annotate {
-      proc.fail_reason = Some(crate::failure::reason::ANNOTATION_TIMED_OUT.into());
-      proc.detail = Some("annotation timed out before reporting completion".into());
+      proc.fail_reason = Some(crate::failure::reason::ANNOTATION_INTERRUPTED.into());
+      proc.detail =
+        Some("annotation process exited without reporting completion; the recording is unchanged and will be re-annotated on a later run".into());
     } else {
       proc.fail_reason = Some(crate::failure::reason::SESSION_END_INCOMPLETE.into());
       if proc.detail.is_none() {
@@ -4614,8 +4616,8 @@ mod tests {
       assert_eq!(annotation.procs[0].status, ProcStatus::Fail);
       assert_eq!(
         annotation.procs[0].fail_reason.as_deref(),
-        Some(crate::failure::reason::ANNOTATION_TIMED_OUT),
-        "orphaned annotations persist a terminal timeout, never stale running"
+        Some(crate::failure::reason::ANNOTATION_INTERRUPTED),
+        "orphaned annotations persist a terminal interruption, never stale running"
       );
     }
     drop(server2);

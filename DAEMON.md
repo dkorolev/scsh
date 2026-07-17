@@ -131,6 +131,13 @@ headless `cursor-agent -p`. Failures show as **annotation failed** on the annota
 (best-effort — they never fail the parent skill). When a daemon client is live, annotation
 appears as post-skill **annotate** procs on the same job (before the session ends);
 standalone `scsh annotate-cast` may register a short `(internal)` session instead.
+Background annotations run **fully detached** (their own session, no controlling
+terminal), so the launching terminal or agent harness tearing down its process group
+cannot kill an annotation that is doing its job. An annotate row whose process still
+vanished mid-work (crash, reboot) settles as `annotation_interrupted` — distinct from a
+real model watchdog `annotation_timed_out` — and its stale `.annotating` marker expires
+after 15 minutes, so the recording is re-annotated by a later run instead of staying
+chapterless forever.
 The player loads chapters from `GET /cast/{session}/{proc}/chapters` (returns `{}` when
 absent). Annotate on demand with:
 

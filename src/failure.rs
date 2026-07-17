@@ -40,6 +40,10 @@ pub mod reason {
   pub const RESTART_REQUESTED: &str = "restart_requested";
   pub const SESSION_END_INCOMPLETE: &str = "session_end_before_proc_finish";
   pub const ANNOTATION_TIMED_OUT: &str = "annotation_timed_out";
+  /// The annotation PROCESS vanished without reporting completion — killed by a terminal
+  /// or harness teardown, a crash, a reboot — as opposed to running past its model
+  /// watchdog ([`ANNOTATION_TIMED_OUT`]). The recording is unchanged either way.
+  pub const ANNOTATION_INTERRUPTED: &str = "annotation_interrupted";
   pub const FORCE_STOPPED: &str = "force_stopped";
   /// Settled counterpart of [`RESTART_REQUESTED`]: this attempt was stopped from the
   /// session browser to make room for the fresh attempt that supersedes it.
