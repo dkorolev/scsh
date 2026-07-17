@@ -2275,7 +2275,18 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
       return (404, err_body("session not found"), false);
     };
     if s.ended_at.is_some() {
-      return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
+      // Even a stop that arrives after the job settled is the human saying stop: the
+      // session's pending supervision is cancelled, not just this (absent) run —
+      // otherwise the supervisor would resurrect a job the user explicitly killed.
+      let mutated =
+        if s.supervisor.supervised() && s.supervisor.restarted_as.is_none() && s.supervisor.gave_up.is_none() {
+          s.supervisor.next_retry_at = None;
+          s.supervisor.gave_up = Some("stopped from the session browser".into());
+          true
+        } else {
+          false
+        };
+      return (200, "{\"ok\":true,\"already_ended\":true}".into(), mutated);
     }
     let containers: Vec<String> = s.procs.iter().filter_map(|p| p.container_name.clone()).collect();
     let suppressed: Vec<String> = s
@@ -3818,6 +3829,46 @@ mod tests {
     assert_eq!(status, 404);
     assert!(!mutated);
     assert!(body.contains("not found"));
+  }
+
+  #[test]
+  fn session_stop_cancels_supervision_even_on_an_already_ended_job() {
+    // A stub-spawned supervised job can die (and settle) before the user's stop arrives.
+    // The already_ended early return must STILL cancel supervision — otherwise the
+    // supervisor resurrects a job the human explicitly killed. Found live by
+    // RESILIENCE-DEMO.md step 5.
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    store.lock().unwrap().insert_session(
+      "endedd".into(),
+      Session {
+        id: "endedd".into(),
+        started_at: 50,
+        ended_at: Some(60),
+        profile: Some("greet".into()),
+        kind: Some("workflow".into()),
+        repo: "/r".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 60,
+        client_connected: false,
+        run_pid: None,
+        workflow: None,
+        parent_session: None,
+        supervisor: crate::daemon::model::SupervisorState {
+          next_retry_at: Some(1000),
+          ..crate::daemon::model::SupervisorState::fresh(crate::daemon::model::DEFAULT_JOB_RETRIES)
+        },
+      },
+    );
+    let (status, body, mutated) = session_stop_response(r#"{"session":"endedd"}"#, &store);
+    assert_eq!(status, 200);
+    assert!(body.contains("already_ended"), "got: {body}");
+    assert!(mutated, "the supervision cancel must persist");
+    let guard = store.lock().unwrap();
+    let sup = &guard.sessions["endedd"].supervisor;
+    assert_eq!(sup.gave_up.as_deref(), Some("stopped from the session browser"));
+    assert!(sup.next_retry_at.is_none(), "no restart stays scheduled");
   }
 
   #[test]

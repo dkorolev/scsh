@@ -27,12 +27,18 @@ pub const SUPERVISOR_INTERVAL_SECS: u64 = 15;
 
 /// Backoff between job restarts: 5m · 2ⁿ capped at 60m, with the same deterministic ±20%
 /// jitter the step-level retries use — restarting two failed fleets in lockstep would
-/// re-create the thundering herd that helped kill them.
+/// re-create the thundering herd that helped kill them. `SCSH_JOB_BACKOFF_INITIAL_SECS`
+/// shrinks the first delay so RESILIENCE-DEMO.md and tests run in minutes, not hours.
 fn job_backoff_secs(restarts_done: u32, salt: u64) -> u64 {
+  let initial = std::env::var("SCSH_JOB_BACKOFF_INITIAL_SECS")
+    .ok()
+    .and_then(|s| s.trim().parse().ok())
+    .filter(|n| *n >= 1)
+    .unwrap_or(5 * 60);
   crate::failure::RetryPolicy {
     budget_secs: u64::MAX,
-    backoff_initial_secs: 5 * 60,
-    backoff_cap_secs: 60 * 60,
+    backoff_initial_secs: initial,
+    backoff_cap_secs: (60 * 60).max(initial),
     signature_cap: 1,
   }
   .backoff_delay_secs(restarts_done, salt)

@@ -8358,10 +8358,19 @@ fn print_help_defs() {
   println!("{}", h_head("Retries and resume"));
   print!(
     r#"  A failed step retries automatically — fresh clone, fresh container, a new attempt row
-  linked to the failed one — up to 5 times for transient failures: container/runtime trouble,
-  provider overload, or the harness exiting non-zero (a harness dying at startup is
-  infrastructure, and a genuine agent failure just burns its retries). An invalid result gets
-  one schema-correction retry. The first step that stays failed stops the workflow.
+  linked to the failed one — for as long as its wall-clock retry budget allows (default
+  30m; provider incidents are measured in hours, so retries are too). Retryable:
+  container/runtime trouble, provider overload/disconnects, and non-zero harness exits (a
+  harness dying at startup is infrastructure). Retries back off exponentially with jitter;
+  a route failing the SAME way 5 times in a row trips a circuit breaker instead of burning
+  tokens until dawn. An invalid result gets one schema-correction retry. Tune per skill,
+  route, or def step with retry_for: (90s/45m/8h) and retry_signature_cap:, or run-wide
+  with SCSH_RETRY_FOR / SCSH_RETRY_SIGNATURE_CAP; SCSH_NO_RETRY=1 disables everything.
+  Beyond one run, every job is presumed worth finishing: on terminal failure the daemon
+  restarts it (resuming completed workflow steps) with 5m→60m backoff, up to the job's
+  retries budget — 10 by default, `scsh run --retries N` or the browser start form's
+  retries field to change it, 0 to opt out — stopping early after 3 identical job
+  failures or a human's Force stop.
   scsh run --def <name> --resume-from <session>   restores every step whose validated result
   the named session already produced (loop iterations included, commits already on the branch)
   and runs only the rest. The session browser's "Restart remaining" button on a failed job
@@ -8734,6 +8743,18 @@ mod tests {
     assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
     assert!(cli(&["run", "--def", "add", "--override-dot-scsh-yml", "/x.yml"]).is_err());
     assert!(cli(&["version", "--override-dot-scsh-yml", "/x.yml"]).is_err());
+  }
+
+  #[test]
+  fn retries_parses_on_run_only() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["run", "--def", "greet", "--retries", "3"]).unwrap();
+    assert!(matches!(c.mode, Mode::Run));
+    assert_eq!(c.retries, Some(3));
+    assert_eq!(cli(&["run", "--retries", "0"]).unwrap().retries, Some(0), "0 opts out of supervision");
+    assert_eq!(cli(&["run"]).unwrap().retries, None, "absent = the daemon's default budget");
+    assert!(cli(&["run", "--retries", "many"]).is_err(), "the count is a number");
+    assert!(cli(&["list", "--retries", "3"]).is_err(), "run-only flag");
   }
 
   #[test]
