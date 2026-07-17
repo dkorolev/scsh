@@ -1606,17 +1606,29 @@ mod tests {
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_terra")).count(), 5);
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_cursor")).count(), 5);
     }
+    let mut actual_reviewer_skills = std::collections::BTreeSet::new();
     for r in initial.iter().chain(&reviewers) {
       assert!(!r.commits, "reviewers are read-only");
-      let words = r.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+      let expected_name = crate::config::CODE_REVIEWER_SKILLS
+        .into_iter()
+        .find(|name| {
+          let reviewer = name.strip_suffix("-reviewer").unwrap();
+          r.id.contains(&format!("_{reviewer}_"))
+        })
+        .unwrap_or_else(|| panic!("{} has a known reviewer specialty", r.id));
+      let expected_body = crate::config::bundled_skill_body(expected_name).expect("reviewer is bundled");
+      match &r.task {
+        StepTask::Skill { name, body } => {
+          actual_reviewer_skills.insert(name.as_str());
+          assert_eq!(name, expected_name, "{} references its canonical reviewer", r.id);
+          assert_eq!(body, expected_body, "{} receives the bundled prompt byte-for-byte", r.id);
+        }
+        StepTask::Prompt(_) => panic!("{} must reference the canonical skill, not copy its prompt", r.id),
+      }
+      assert!(r.task.body().contains("Look, understand, analyze — never execute"), "{} is static-only", r.id);
       assert!(
-        words.contains("the commits since the current branch diverged from the repository's default branch"),
-        "{} reviews THIS branch's change set, not the whole tree",
-        r.id
-      );
-      assert!(
-        words.contains("Never request, recommend, or create any additional PR-description section"),
-        "{} enforces the PR-description policy",
+        r.task.body().contains("When scsh appends a workflow-specific `## Output` contract"),
+        "{} explicitly supports the lossless workflow adapter",
         r.id
       );
       if r.id.ends_with("_terra") {
@@ -1624,6 +1636,24 @@ mod tests {
         assert_eq!(r.agent.effort.as_deref(), Some("high"));
       }
     }
+    assert_eq!(
+      actual_reviewer_skills,
+      crate::config::CODE_REVIEWER_SKILLS.into_iter().collect(),
+      "the native Gorgeous workflow must use the exact dkorolev/code-review-skills reviewer set"
+    );
+
+    for id in ["prepare", "decide", "fix", "collect"] {
+      assert!(
+        matches!(def.steps.iter().find(|step| step.id == id).unwrap().task, StepTask::Prompt(_)),
+        "{id} remains native orchestration, not a reviewer substitution"
+      );
+    }
+
+    let (_, source) = builtin_defs().into_iter().find(|(name, _)| *name == "gorgeous-pipeline").unwrap();
+    assert!(
+      !source.to_ascii_lowercase().contains("fantastic"),
+      "the Gorgeous workflow must never invoke or depend on Fantastic logic"
+    );
   }
 
   #[test]

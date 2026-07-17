@@ -13,6 +13,11 @@
 # wide so the pipeline does not depend on the Cursor CLI accepting five simultaneous
 # interactive sessions. Nothing is pushed: fixes come back as commits on the caller's
 # branch, exactly like every commits-enabled workflow step.
+#
+# Every reviewer step executes the corresponding canonical reviewer skill, embedded in scsh's
+# install bundle byte-for-byte from dkorolev/code-review-skills. scsh appends only the compact
+# grade/comments workflow-output adapter that the shared skill contract explicitly supports.
+# Both batches therefore receive the same full static-review prompt with no YAML copy to drift.
 description: "Loop the current branch through the 15-route Opus + Codex + Cursor review fleet until it meets the approval bar."
 steps:
   prepare:
@@ -41,19 +46,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review conventions, naming, structure, formatting, repository rules, and idioms.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -67,19 +60,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review conventions, naming, structure, formatting, repository rules, and idioms.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -92,19 +73,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review conventions, naming, structure, formatting, repository rules, and idioms.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -117,20 +86,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
-      user-facing capability.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -144,20 +100,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
-      user-facing capability.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -170,20 +113,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Challenge scope, necessity, and complexity; require PR-DESCRIPTION.md to name the
-      user-facing capability.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -196,21 +126,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review PR-description clarity and ordering, commit coherence, and whether the change
-      should be re-sliced. PR-DESCRIPTION.md is a required pipeline artifact; assess its
-      presentation without suggesting its removal.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -224,21 +140,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review PR-description clarity and ordering, commit coherence, and whether the change
-      should be re-sliced. PR-DESCRIPTION.md is a required pipeline artifact; assess its
-      presentation without suggesting its removal.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -251,21 +153,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review PR-description clarity and ordering, commit coherence, and whether the change
-      should be re-sliced. PR-DESCRIPTION.md is a required pipeline artifact; assess its
-      presentation without suggesting its removal.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -278,19 +166,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Check only glaring performance, basic-security, and resource-leak problems.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -304,19 +180,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Check only glaring performance, basic-security, and resource-leak problems.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -331,19 +195,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Check only glaring performance, basic-security, and resource-leak problems.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -356,21 +208,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review test coverage, committed human-followable verification documentation, and
-      teardown. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
@@ -384,21 +222,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review test coverage, committed human-followable verification documentation, and
-      teardown. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
@@ -411,21 +235,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Review test coverage, committed human-followable verification documentation, and
-      teardown. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three actionable comment paragraphs. Grade excellent, good, average,
-      or poor. Write `grade` as a string and `comments` as an array of strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
@@ -525,23 +335,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the conventions reviewer profile: examine naming, structure, formatting,
-      repository rules, and idiomatic consistency. Respect deliberate decisions in
-      `STYLE-NOTES.md`. Treat `PR-DESCRIPTION.md` as context but grade the code.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -556,23 +350,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the conventions reviewer profile: examine naming, structure, formatting,
-      repository rules, and idiomatic consistency. Respect deliberate decisions in
-      `STYLE-NOTES.md`. Treat `PR-DESCRIPTION.md` as context but grade the code.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -586,23 +364,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the conventions reviewer profile: examine naming, structure, formatting,
-      repository rules, and idiomatic consistency. Respect deliberate decisions in
-      `STYLE-NOTES.md`. Treat `PR-DESCRIPTION.md` as context but grade the code.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: conventions-reviewer
     output:
       grade:
         type: enum
@@ -616,24 +378,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the justification reviewer profile: challenge scope and necessity, ask whether
-      the change earns its complexity, and require `PR-DESCRIPTION.md` to state the
-      user-facing capability. Respect ratified or deliberate decisions documented in the
-      repository.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -648,24 +393,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the justification reviewer profile: challenge scope and necessity, ask whether
-      the change earns its complexity, and require `PR-DESCRIPTION.md` to state the
-      user-facing capability. Respect ratified or deliberate decisions documented in the
-      repository.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -679,24 +407,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the justification reviewer profile: challenge scope and necessity, ask whether
-      the change earns its complexity, and require `PR-DESCRIPTION.md` to state the
-      user-facing capability. Respect ratified or deliberate decisions documented in the
-      repository.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: justification-reviewer
     output:
       grade:
         type: enum
@@ -710,25 +421,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the reviewability reviewer profile: assess whether `PR-DESCRIPTION.md` explains
-      the big picture before details, whether the commit history is coherent, and whether
-      the change should be re-sliced or split. PR-DESCRIPTION.md is a required pipeline
-      artifact; assess its presentation without suggesting its removal. Anchor findings
-      to commits and the PR, not individual code lines.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -743,25 +436,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the reviewability reviewer profile: assess whether `PR-DESCRIPTION.md` explains
-      the big picture before details, whether the commit history is coherent, and whether
-      the change should be re-sliced or split. PR-DESCRIPTION.md is a required pipeline
-      artifact; assess its presentation without suggesting its removal. Anchor findings
-      to commits and the PR, not individual code lines.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -775,25 +450,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the reviewability reviewer profile: assess whether `PR-DESCRIPTION.md` explains
-      the big picture before details, whether the commit history is coherent, and whether
-      the change should be re-sliced or split. PR-DESCRIPTION.md is a required pipeline
-      artifact; assess its presentation without suggesting its removal. Anchor findings
-      to commits and the PR, not individual code lines.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: reviewability-reviewer
     output:
       grade:
         type: enum
@@ -807,23 +464,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the deliberately shallow sanity reviewer profile. Flag only glaring performance,
-      basic-security, or resource-leak problems; stay quiet when nothing is obviously
-      wrong.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -838,23 +479,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the deliberately shallow sanity reviewer profile. Flag only glaring performance,
-      basic-security, or resource-leak problems; stay quiet when nothing is obviously
-      wrong.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -869,23 +494,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the deliberately shallow sanity reviewer profile. Flag only glaring performance,
-      basic-security, or resource-leak problems; stay quiet when nothing is obviously
-      wrong.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: sanity-reviewer
     output:
       grade:
         type: enum
@@ -899,25 +508,7 @@ steps:
     agent:
       harness: claude
       model: claude-opus-4-8
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the testing reviewer profile: check whether changed behavior has runnable unit
-      tests or a committed human-followable verification document, whether those
-      instructions are sufficient, and whether tooling tears down without leaking
-      resources. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
@@ -932,25 +523,7 @@ steps:
       harness: codex
       model: gpt-5.6-terra
       effort: high
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the testing reviewer profile: check whether changed behavior has runnable unit
-      tests or a committed human-followable verification document, whether those
-      instructions are sufficient, and whether tooling tears down without leaking
-      resources. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
@@ -964,25 +537,7 @@ steps:
     agent:
       harness: cursor
       model: auto
-    prompt: |
-      Review THIS BRANCH'S change set: the commits since the current branch diverged from
-      the repository's default branch (main or master). Enumerate them with git and diff
-      against that base; grade only what this branch changes.
-
-      Run the testing reviewer profile: check whether changed behavior has runnable unit
-      tests or a committed human-followable verification document, whether those
-      instructions are sufficient, and whether tooling tears down without leaking
-      resources. Keep verification evidence in tests, README, or a committed verification
-      document; PR-DESCRIPTION.md is change narrative only.
-      Return at most three concrete actionable comments, one paragraph each. Use `excellent`
-      for approve with praise, `good` for approve with nits, and `average` or `poor` only
-      when real work is needed. Write `grade` as a string and `comments` as an array of
-      strings.
-      `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and
-      `## Implementation Details`, in that order. Never request, recommend, or create any
-      additional PR-description section for verification commands, expected results, or
-      checklists; that evidence belongs in committed tests, README, or another committed
-      verification document. Do not change files or commit.
+    skill: testing-reviewer
     output:
       grade:
         type: enum
