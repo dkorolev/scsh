@@ -429,7 +429,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-failed { color: var(--red); }
   .wf-leg-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
-  .wf-leg-waiting, .wf-leg-ready, .wf-leg-skipped { color: var(--text-muted); }
+  .wf-leg-waiting, .wf-leg-skipped { color: var(--text-muted); }
+  /* Queued (deps met, container coming up) is a cool blue — distinct from grey Waiting
+     (blocked on a dependency), so the two never read as the same idle state. */
+  .wf-leg-queued { color: var(--cyan); }
   .workflow-scroll {
     --cut: 8px; --bw: 0px; /* clip only — same corner language as the enclosing island */
     overflow: auto; max-width: 100%; height: 29rem; padding: 0.5rem;
@@ -570,8 +573,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-stopped .wf-state, .wf-node.wf-stopped .wf-id { color: var(--red); }
   .wf-node.wf-stalled { --accent: var(--purple); }
   .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--purple); }
-  .wf-node.wf-waiting, .wf-node.wf-ready { --accent: var(--text-muted); }
-  .wf-node.wf-waiting .wf-state, .wf-node.wf-ready .wf-state { color: var(--text-muted); }
+  .wf-node.wf-waiting { --accent: var(--text-muted); }
+  .wf-node.wf-waiting .wf-state { color: var(--text-muted); }
+  .wf-node.wf-queued { --accent: var(--cyan); }
+  .wf-node.wf-queued .wf-state { color: var(--cyan); }
   .wf-node.wf-skipped { --accent: var(--text-muted); opacity: 0.75; }
   .wf-node.wf-skipped .wf-state, .wf-node.wf-skipped .wf-id { color: var(--text-muted); }
   .wf-node.wf-build { --accent: var(--cyan); }

@@ -1253,10 +1253,10 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'◇',ready:'◇',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '◇';
+  return ({waiting:'◇',queued:'◈',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '◇';
 }
 function wfStateLabel(state) {
-  return ({waiting:'Waiting',ready:'Queued',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
+  return ({waiting:'Waiting',queued:'Queued',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
     stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
 }
 function wfJobOutcome(session, nowUnix) {
@@ -1319,7 +1319,7 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
     lines.push('Waiting on:');
     unmetIds.forEach(id => lines.push('• ' + wfBlockerLine(session, id, nowUnix)));
   } else if (state === 'waiting') lines.push('Waiting to start');
-  else if (state === 'ready') lines.push('Queued — dependencies finished; waiting for the scheduler to start this task');
+  else if (state === 'queued') lines.push('Queued — dependencies finished; waiting for the scheduler to start this task');
   else if (state === 'running') {
     lines.push((node.id === 'build_base' || node.id.indexOf('build_') === 0) ? 'Image build running' : 'Running');
   } else if (state === 'terminating') lines.push(p && p.fail_reason === 'restart_requested'
@@ -1360,12 +1360,12 @@ function wfDisplayState(session, node, nowUnix) {
   if (p.status === 'running') return live ? 'running' : 'stalled';
   if (p.status === 'waiting') {
     if (!live) return 'stalled';
-    return wfUnmetNeeds(session, node) === 0 ? 'ready' : 'waiting';
+    return wfUnmetNeeds(session, node) === 0 ? 'queued' : 'waiting';
   }
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','terminating','done','graceful','failed','stopped','stalled','waiting','ready','skipped'];
+  const order = ['running','terminating','done','graceful','failed','stopped','stalled','waiting','queued','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
@@ -1375,9 +1375,9 @@ function wfLegendHtml(present) {
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
-    (key === 'ready' ? 'queued' : (key === 'graceful' ? 'graceful shutdown' : key)));
+    (key === 'graceful' ? 'graceful shutdown' : key));
   for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
-    [counts.ready,'ready'],[counts.failed,'failed'],[counts.stopped,'stopped'],
+    [counts.queued,'queued'],[counts.failed,'failed'],[counts.stopped,'stopped'],
     [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
     const id = first && first[label];
@@ -1426,7 +1426,7 @@ function wfNodeRanks(nodes) {
   return nodes.map(n => rankOf(n.id));
 }
 function wfStatusStackRank(state) {
-  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,stalled:6,ready:7,waiting:8})[state] ?? 10;
+  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,stalled:6,queued:7,waiting:8})[state] ?? 10;
 }
 function wfLayoutNodes(session, nodes, nowUnix) {
   const ranks = wfNodeRanks(nodes);
@@ -1638,7 +1638,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
   const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, ready: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
@@ -1650,7 +1650,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     else if (state === 'running') counts.running++;
     else if (state === 'terminating') counts.terminating++;
     else if (state === 'waiting') counts.waiting++;
-    else if (state === 'ready') counts.ready++;
+    else if (state === 'queued') counts.queued++;
     else if (state === 'failed') counts.failed++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
@@ -1668,7 +1668,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     else if (state === 'waiting' && unmetIds.length > 1 && unmetIds.length <= 3) {
       bits.push('waiting on ' + unmetIds.map(wfNodeTitle).join(', '));
     } else if (state === 'waiting' && unmetIds.length > 3) bits.push('waiting on ' + unmetIds.length + ' tasks');
-    if (state === 'ready') bits.push('ready');
+    if (state === 'queued') bits.push('queued');
     const gate = node.conditional
       ? '<span class="chamfer wf-gate" data-tip="Runs only when its gate passes" aria-label="Runs only when its gate passes">when</span>'
       : '';
@@ -1779,7 +1779,7 @@ function updateWorkflowGraph(session, nowUnix) {
   const root = ensureWorkflowGraphMounted(session, nowUnix);
   if (!root) return;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, ready: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
@@ -1790,7 +1790,7 @@ function updateWorkflowGraph(session, nowUnix) {
     else if (state === 'running') counts.running++;
     else if (state === 'terminating') counts.terminating++;
     else if (state === 'waiting') counts.waiting++;
-    else if (state === 'ready') counts.ready++;
+    else if (state === 'queued') counts.queued++;
     else if (state === 'failed') counts.failed++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
@@ -1846,7 +1846,7 @@ function updateWorkflowGraph(session, nowUnix) {
       else if (state === 'waiting' && unmetIds.length > 1 && unmetIds.length <= 3) {
         bits.push('waiting on ' + unmetIds.map(wfNodeTitle).join(', '));
       } else if (state === 'waiting' && unmetIds.length > 3) bits.push('waiting on ' + unmetIds.length + ' tasks');
-      if (state === 'ready') bits.push('ready');
+      if (state === 'queued') bits.push('queued');
       meta.textContent = bits.join(' · ');
     }
   });
