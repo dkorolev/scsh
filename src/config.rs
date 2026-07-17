@@ -385,6 +385,11 @@ pub fn demo_yaml() -> &'static str {
 /// demo/self-test — and deliberately nothing else: the delivery-pipeline skill families
 /// live in their own repositories (dkorolev/beautiful-skills and friends) and install from
 /// source (`scsh installskills --global <url>`), so the bundle can never drift from them.
+/// Keep this set identical to the shipped reviewers in dkorolev/code-review-skills.
+#[cfg(test)]
+pub const CODE_REVIEWER_SKILLS: [&str; 5] =
+  ["conventions-reviewer", "justification-reviewer", "reviewability-reviewer", "sanity-reviewer", "testing-reviewer"];
+
 pub fn bundled_skills() -> [(&'static str, &'static str); 6] {
   [
     (".skills/conventions-reviewer/SKILL.md", include_str!("../.skills/conventions-reviewer/SKILL.md")),
@@ -1674,29 +1679,27 @@ mod tests {
   fn bundled_skills_ship_the_reviewers_and_nothing_that_can_drift() {
     let skills = bundled_skills();
     assert_eq!(skills.len(), 6);
-    for name in [
-      "conventions-reviewer",
-      "justification-reviewer",
-      "reviewability-reviewer",
-      "sanity-reviewer",
-      "testing-reviewer",
-      "scsh-harness-demo-and-selftest",
-    ] {
+    for name in CODE_REVIEWER_SKILLS.into_iter().chain(["scsh-harness-demo-and-selftest"]) {
       let expected_path = format!(".skills/{name}/SKILL.md");
       let (_, body) =
         skills.iter().find(|(path, _)| *path == expected_path).unwrap_or_else(|| panic!("missing {name}"));
       assert!(body.contains(&format!("name: {name}")), "wrong body for {name}");
     }
     let manifest = validate(bundled_skills_manifest()).expect("bundled manifest should validate");
-    for name in [
-      "conventions-reviewer",
-      "justification-reviewer",
-      "reviewability-reviewer",
-      "sanity-reviewer",
-      "testing-reviewer",
-    ] {
-      assert!(manifest.skills.iter().any(|skill| skill.name == name), "bundled manifest is missing {name}");
-    }
+    let expected: std::collections::BTreeSet<_> = CODE_REVIEWER_SKILLS.into_iter().collect();
+    let bundled: std::collections::BTreeSet<_> = skills
+      .iter()
+      .filter_map(|(path, _)| path.strip_prefix(".skills/")?.strip_suffix("/SKILL.md"))
+      .filter(|name| name.ends_with("-reviewer"))
+      .collect();
+    assert_eq!(bundled, expected, "the embedded reviewer set must match dkorolev/code-review-skills");
+    let manifested: std::collections::BTreeSet<_> = manifest
+      .skills
+      .iter()
+      .filter(|skill| skill.profile.as_deref() == Some("code-review"))
+      .map(|skill| skill.name.as_str())
+      .collect();
+    assert_eq!(manifested, expected, "the bundled manifest must declare the exact reviewer set");
     // The delivery-pipeline families live in their own repositories and install from
     // source — the bundle carries NO copy of them, so it can never drift from them.
     for (path, _) in &skills {
@@ -1723,23 +1726,23 @@ mod tests {
         "demo scaffold {path} recommends a forbidden PR section"
       );
     }
-    for name in [
-      "conventions-reviewer",
-      "justification-reviewer",
-      "reviewability-reviewer",
-      "sanity-reviewer",
-      "testing-reviewer",
-    ] {
+    for name in CODE_REVIEWER_SKILLS {
       let path = format!(".skills/{name}/SKILL.md");
       let body = bundled_skills()
         .into_iter()
         .find_map(|(candidate, body)| (candidate == path).then_some(body))
         .expect("policy-bearing skill is bundled");
+      let policy = body.to_ascii_lowercase();
       assert!(
-        body.contains("additional `PR-DESCRIPTION.md` section") || body.contains("additional PR-description section"),
-        "bundled skill {path} must explicitly reject extra PR-description sections"
+        policy.contains("never request, recommend, or create a `pr-description.md` section for verification")
+          || policy.contains("never require `pr-description.md` to contain verification"),
+        "bundled skill {path} must keep verification out of the PR description"
       );
-      assert!(body.contains("Verification evidence belongs") || body.contains("verification evidence belongs"));
+      assert!(
+        policy.contains("verification belongs in committed tests")
+          || policy.contains("verification evidence and instructions belong in committed tests"),
+        "bundled skill {path} must keep verification in committed branch content"
+      );
     }
   }
 
