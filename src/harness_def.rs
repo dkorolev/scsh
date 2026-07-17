@@ -374,7 +374,7 @@ pub struct Step {
   /// returning the fixed top-level boolean `SCSH_LOOP_BREAK`.
   pub break_loop: bool,
   /// Wall-clock automatic-retry budget for this step (`retry_for: 8h`), seconds.
-  /// `None` = the run's mode default (attended 30m / unattended 8h).
+  /// `None` = the default (30m).
   pub retry_for: Option<u64>,
   /// Consecutive identical failures before this step's retry breaker trips.
   pub retry_signature_cap: Option<u32>,

@@ -216,6 +216,15 @@ per directory. Here the word "harness" means the runnable definition; the CLI it
 (claude/codex/opencode/…) is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and
 [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
 
+Failed steps retry automatically under a wall-clock budget with exponential backoff (see
+`scsh help def`, "Retries and resume"), and every job is presumed worth finishing: on
+terminal failure the daemon's supervisor restarts it — resuming completed workflow steps —
+up to the job's retries budget (10 by default; `scsh run --retries N` or the browser start
+form to change it, 0 to opt out). A failed workflow job also restarts by hand from the
+browser — "Restart remaining" reuses every completed step's result — or from the console
+with `--resume-from <session>`. See [`RESILIENCE-DEMO.md`](RESILIENCE-DEMO.md) for the
+agent-followable walkthrough.
+
 The built-in `big-beautiful-build` workflow is the browser's complete feature factory: open an existing clean repository or create a new project, paste the full feature brief into its multiline form, and start the job. Cursor Auto executes the canonical `big-beautiful-build` skill — which lives in [dkorolev/beautiful-skills](https://github.com/dkorolev/beautiful-skills), not in the binary: the definition resolves it from the repo's `.skills/` or the machine-wide install, and is listed only where it is installed — commits working code, a runnable demo, documentation, and verification. The job page preserves the structured result and commits diff; the full report is copied into the repository's job scratch directory. No terminal is required to start or follow the build; see [`DEMO-BIG-BEAUTIFUL-BUILD.md`](DEMO-BIG-BEAUTIFUL-BUILD.md).
 
 **Installing skills.** With no arguments, `scsh installskills` installs all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/` — and deliberately nothing more: the delivery-pipeline skill families live in their own repositories and install from source, so the bundle can never drift from them. See [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md) for the code-first review-loop demo. Give the command one or more **git URLs** to install another repository's skills (installed in order, as if you ran the command once per repo):

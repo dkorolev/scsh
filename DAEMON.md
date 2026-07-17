@@ -301,12 +301,43 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   spawns the fresh run with `--resume-from <old id>`, so every step the old session completed
   is restored from its persisted result and only the unfinished steps run; the default
   (`"scratch"` or absent) runs everything anew. Answers `{"ok":true,"session":"<new id>"}`.
-  The failed-job page's "Restart remaining" / "Restart from scratch" buttons call this.
+  The failed-job page's "Restart remaining" / "Restart from scratch" buttons call this. The
+  old session records `restarted_as` and the chain's supervisor state (attempt count,
+  retries budget, breaker memory) is inherited by the fresh session.
 - `POST /api/v1/repos/pick` — pop the host's native folder chooser (the daemon is local) and
   return the chosen path: `{"ok":true,"path":…}`, `{"ok":false,"cancelled":true}`, or
   `{"ok":false,"error":…}` on a headless host (type the path instead)
 - `GET /api/v1/repos` — the opened repositories and any repos that have jobs, each with its
   jobs (sessions) grouped underneath
+
+## The job supervisor
+
+Every job is presumed worth finishing: when it terminally fails — step budgets exhausted,
+the run process died, the host rebooted — the daemon schedules a job restart at 5m·2ⁿ
+backoff (capped at 60m, jittered) and fires it through `jobs/restart` (`mode=resume` for
+workflow jobs, so completed steps restore instantly and only the failed frontier
+re-executes). Persisted supervised sessions whose run died with the daemon read as failed
+on the next tick and schedule normally — a 3am host reboot needs no adoption pass.
+Sessions persisted before the retries budget existed parse back to a zero budget, so a
+daemon upgrade never resurrects history.
+
+The one knob is the job's **retries budget** — 10 by default for every job, set per start
+with `scsh run --retries N`, the `retries` field on `jobs/start`, or the browser start
+form's retries input; `0` opts a job out of supervision. Eventually is not infinitely: the
+chain stops loudly when any ceiling trips, with the reason in the session's supervisor
+state and the failures log:
+
+- **Retries budget**: `N` restarts per chain (default 10).
+- **Job-level breaker**: 3 consecutive runs failing at the same step for the same reason —
+  a deterministic failure (or an scsh bug), not a provider incident.
+- **A human's stop**: force-stopping a job cancels its supervision permanently; a manual
+  stop IS supervision, and it wins.
+
+The job page's meta shows the policy in force (`Retries · attempt 3/10 · restarting in
+4m`, a link to the replacement session, or exactly why it gave up), and every decision is a
+`supervisor_scheduled` / `supervisor_restart` / `supervisor_gave_up` line in
+`scsh failures`. `SCSH_JOB_BACKOFF_INITIAL_SECS` shrinks the first delay for tests and
+RESILIENCE-DEMO.md.
 
 ## Harness definitions
 
