@@ -23,6 +23,8 @@ path to any checkout is needed — with `scsh` on the PATH, the whole prompt is:
 > Every step is a single copy-pasteable command; you should never need to write a script of
 > your own — the one exception is step 8, which is **your own analysis work**, not a shell
 > command. Report each **Expect:** line as PASS or FAIL, and give a final PASS/FAIL verdict.
+> Every step re-derives `DEMO_ROOT` from a pointer file, so it does not matter whether your
+> shell tool keeps environment variables (or the working directory) between commands.
 
 ## What this proves
 
@@ -45,20 +47,26 @@ three workers are just **agents** / **agent jobs**.
 [ -f ~/.zshrc ] && . ~/.zshrc 2>/dev/null || true
 command -v git  >/dev/null && echo "git: ok"  || echo "git: MISSING (required)"
 command -v scsh >/dev/null && echo "scsh: on PATH" || echo "scsh: MISSING (build with cargo build --release)"
+command -v python3 >/dev/null && echo "python3: ok" || echo "python3: MISSING (required for the step-7 schema check)"
 { command -v docker || command -v podman || command -v container; } >/dev/null 2>&1 \
   && echo "container runtime: ok" || echo "container runtime: MISSING (required)"
 ```
 
-**Expect:** all three `ok`. The agent routes themselves are probed in step 5.
+**Expect:** all four `ok`. The agent routes themselves are probed in step 5.
 
 ## 2. Work area
 
+One command, self-deciding: inside a git work tree (e.g. the `scsh` checkout itself) the
+demo nests under `tmp/` so nothing pollutes the repo; anywhere else it lands in the current
+directory. The chosen path is also written to a pointer file, which every later step reads
+back — the demo never depends on `$DEMO_ROOT` surviving between your shell commands.
+
 ```sh
-DEMO_ROOT="$(pwd)/scsh-agent-fleet-demo-$(date -u +%Y%m%d-%H%M%S)" && mkdir -p "$DEMO_ROOT" && echo "$DEMO_ROOT"
+BASE="$(pwd)" && git rev-parse --is-inside-work-tree >/dev/null 2>&1 && BASE="$BASE/tmp"; DEMO_ROOT="$BASE/scsh-agent-fleet-demo-$(date -u +%Y%m%d-%H%M%S)" && mkdir -p "$DEMO_ROOT" && printf '%s\n' "$DEMO_ROOT" > /tmp/scsh-agent-fleet-demo-root && echo "$DEMO_ROOT"
 ```
 
-(If you are inside the `scsh` repo itself, prefix the path with `tmp/` so nothing pollutes
-the checkout: `DEMO_ROOT="$(pwd)/tmp/scsh-agent-fleet-demo-…"`.)
+**Expect:** the absolute demo path prints (under `…/tmp/` when you started inside a git
+work tree).
 
 ## 3. The target codebase — small, real, and deliberately quirky
 
@@ -67,7 +75,7 @@ may or may not notice (the scorecard in step 8 names them). It ships **no `.scsh
 `.skills/`** — the target knows nothing about scsh.
 
 ```sh
-mkdir -p "$DEMO_ROOT/repo" && cd "$DEMO_ROOT/repo" && git init -q && printf '/tmp\n' > .gitignore && printf '# minisched\n\nA tiny in-memory job scheduler. The code is the documentation.\n' > README.md && cat > scheduler.py <<'EOF' && cat > jobs.py <<'EOF2' && cat > worker.py <<'EOF3' && cat > main.py <<'EOF4' && git add -A && git commit -qm "minisched: tiny in-memory job scheduler." && ls && git status --porcelain && echo "repo: clean"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && mkdir -p "$DEMO_ROOT/repo" && cd "$DEMO_ROOT/repo" && git init -q && printf '/tmp\n' > .gitignore && printf '# minisched\n\nA tiny in-memory job scheduler. The code is the documentation.\n' > README.md && cat > scheduler.py <<'EOF' && cat > jobs.py <<'EOF2' && cat > worker.py <<'EOF3' && cat > main.py <<'EOF4' && git add -A && git commit -qm "minisched: tiny in-memory job scheduler." && ls && git status --porcelain && echo "repo: clean"
 """In-memory priority scheduler. Lower number = higher priority."""
 
 import heapq
@@ -176,7 +184,7 @@ named by `$SCSH_RESULT` — which scsh always places under the target repo's git
 `tmp/` and copies back per route as `tmp/explain_<route>_result.json`.
 
 ```sh
-mkdir -p "$DEMO_ROOT/bundle/.skills/explain-codebase" && cat > "$DEMO_ROOT/bundle/.scsh.yml" <<'YML' && cat > "$DEMO_ROOT/bundle/.skills/explain-codebase/SKILL.md" <<'MD' && echo "bundle: ready"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && mkdir -p "$DEMO_ROOT/bundle/.skills/explain-codebase" && cat > "$DEMO_ROOT/bundle/.scsh.yml" <<'YML' && cat > "$DEMO_ROOT/bundle/.skills/explain-codebase/SKILL.md" <<'MD' && echo "bundle: ready"
 skills:
   explain-codebase:
     timeout: 900
@@ -220,7 +228,8 @@ answers will be compared side by side. Work alone, from the code only.
      "confidence": "high|medium|low"
    }
 
-Dig for the `surprising_or_risky` bullets — this codebase has deliberate quirks. Point at
+Dig for the `surprising_or_risky` bullets — this codebase has deliberate quirks. Look for
+silent data loss and unbounded retry, not only priority and cancellation behavior. Point at
 real lines of code, not generic advice.
 MD
 ```
@@ -232,7 +241,7 @@ MD
 Gate before running — this is the `scsh help agent` loop, step 2:
 
 ```sh
-cd "$DEMO_ROOT/repo" && scsh probe --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml" --json
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && cd "$DEMO_ROOT/repo" && scsh probe --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml" --json
 ```
 
 **Expect:** JSON with exactly three routes — `claude`·`sonnet`, `codex`·`gpt-5.6-luna`,
@@ -245,20 +254,23 @@ retry.
 ## 6. Run the fleet — one command, three agent jobs, one wait
 
 ```sh
-cd "$DEMO_ROOT/repo" && scsh run --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && cd "$DEMO_ROOT/repo" && scsh run --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml"
 ```
 
 This is the moment the demo is about: the command launches every available route as its own
 containerized agent job on a clean clone of the commit, and **blocks until all of them
-finish**. Sit on the call — that IS the wait. (First run may build container images; a few
-extra minutes. Spectators: `scsh daemon start` and http://127.0.0.1:7274 shows the jobs
-live.)
+finish**. Sit on the call — that IS the wait; do **not** background it, do not poll, and do
+not conclude it is stuck. Expected wall clock: with warm container images, roughly **one to
+three minutes** for the three routes; the very first run also builds the images, which adds
+**several minutes** on top. If your shell tool enforces a command timeout, raise it to at
+least ten minutes for this step. (Spectators: `scsh daemon start` and http://127.0.0.1:7274
+shows the jobs live.)
 
 **Expect:** one line per route; every route that probed available **succeeds**, routes that
 probed unavailable are **skipped**; overall exit code 0.
 
 ```sh
-ls tmp/ && git status --porcelain && echo "repo: clean"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && cd "$DEMO_ROOT/repo" && ls tmp/ && git status --porcelain && echo "repo: clean"
 ```
 
 **Expect:** one `explain_<route>_result.json` per successful route under `tmp/`
@@ -266,13 +278,32 @@ ls tmp/ && git status --porcelain && echo "repo: clean"
 `explain_cursor-composer-fast_result.json`); `repo: clean` prints — the results are in
 gitignored scratch, nothing tracked changed, nothing committed, nothing left the machine.
 
-## 7. Collect
+## 7. Collect — and machine-check the schema
+
+Print every result, then validate each against the step-4 contract. The check is mechanical
+on purpose: a malformed result is a harness bug worth catching here, so the judgment work in
+step 8 starts from known-good inputs.
 
 ```sh
-for f in tmp/explain_*_result.json; do echo "== $f"; cat "$f"; echo; done
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && cd "$DEMO_ROOT/repo" && for f in tmp/explain_*_result.json; do echo "== $f"; cat "$f"; echo; done && python3 - <<'PY'
+import json, pathlib, sys
+need = {"agent", "one_liner", "purpose", "architecture", "entry_points", "surprising_or_risky", "confidence"}
+ok = True
+for p in sorted(pathlib.Path("tmp").glob("explain_*_result.json")):
+    try:
+        missing = need - json.loads(p.read_text()).keys()
+    except Exception as e:
+        print(f"{p.name}: INVALID JSON ({e})")
+        ok = False
+        continue
+    print(f"{p.name}: {'OK' if not missing else 'MISSING ' + ','.join(sorted(missing))}")
+    ok = ok and not missing
+sys.exit(0 if ok else 1)
+PY
 ```
 
-**Expect:** each file is one valid JSON object matching the schema from step 4.
+**Expect:** each file prints as one JSON object, and the checker reports `OK` for every
+result with exit code 0. A `MISSING`/`INVALID` line is a **FAIL** for that route.
 
 ## 8. Synthesize — this part is you
 
@@ -300,7 +331,7 @@ pass condition.
 ## 9. Re-collect for free — the cache
 
 ```sh
-scsh run --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && cd "$DEMO_ROOT/repo" && scsh run --override-dot-scsh-yml "$DEMO_ROOT/bundle/.scsh.yml"
 ```
 
 **Expect:** every previously-successful route reports `(cached)` and the command returns
@@ -312,7 +343,7 @@ are already yours; re-running the orchestration is free.
 The demo leaves `$DEMO_ROOT` for inspection. When done:
 
 ```sh
-rm -rf "$DEMO_ROOT"
+DEMO_ROOT="${DEMO_ROOT:-$(cat /tmp/scsh-agent-fleet-demo-root)}" && rm -rf "$DEMO_ROOT" /tmp/scsh-agent-fleet-demo-root
 ```
 
 ---
