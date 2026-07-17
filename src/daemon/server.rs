@@ -965,6 +965,12 @@ fn route(
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
     }
+    // The running daemon's own version — so `scsh daemon status` can report what is
+    // actually serving (which may lag the installed CLI until a restart), not just the
+    // caller's version.
+    "/api/v1/version" => {
+      (200, format!("{{ \"version\": {} }}", quote(&crate::version::display())), "application/json", false)
+    }
     // The match scrutinee is the query-stripped path, so query params must be read
     // from `req.path` — a `path.split_once("runtime=")` here can never match.
     "/api/v1/images" => {
@@ -3006,6 +3012,21 @@ mod tests {
   fn parse_content_length_is_case_insensitive() {
     let headers = b"POST / HTTP/1.1\r\ncontent-length: 9\r\n\r\n";
     assert_eq!(parse_content_length(headers), 9);
+  }
+
+  #[test]
+  fn version_endpoint_reports_the_running_daemons_version() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    let req =
+      HttpRequest { method: "GET".into(), path: "/api/v1/version".into(), body: String::new(), headers: Vec::new() };
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/json");
+    assert!(!mutated);
+    assert!(body.contains(crate::version::pkg_version()), "endpoint omits the version: {body}");
+    assert!(body.contains("\"version\""), "{body}");
   }
 
   #[test]

@@ -3251,10 +3251,20 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
     DaemonAction::Status => {
       let port = daemon::daemon_port();
       if daemon::Client::daemon_alive() {
-        if let Some(pid) = daemon::read_live_pid(port) {
-          ok(&format!("session browser daemon running (pid {pid}) on {}", daemon::base_url(port)));
-        } else {
-          ok(&format!("session browser daemon responding on {}", daemon::base_url(port)));
+        // The RUNNING daemon's version, which can lag the installed binary until a
+        // restart. An older daemon serving "unknown" (pre-endpoint) is reported honestly.
+        let running =
+          daemon::daemon_reported_version(port).unwrap_or_else(|| "unknown (older than this feature)".into());
+        let where_at = daemon::base_url(port);
+        match daemon::read_live_pid(port) {
+          Some(pid) => ok(&format!("session browser daemon running (pid {pid}, scsh {running}) on {where_at}")),
+          None => ok(&format!("session browser daemon responding (scsh {running}) on {where_at}")),
+        }
+        // Nudge only on a real mismatch: the binary was upgraded but the daemon still runs
+        // the old code, so a restart is needed to pick up the new build.
+        let installed = crate::version::display();
+        if daemon_version_is_stale(&running, &installed) {
+          hint(&format!("→ the installed scsh is {installed}; restart to run it in the daemon: scsh daemon restart"));
         }
         0
       } else if let Some(pid) = daemon::read_live_pid(port) {
@@ -3268,6 +3278,14 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
       }
     }
   }
+}
+
+/// Whether the running daemon's reported version warrants a "restart to pick up the new
+/// build" nudge: it differs from the installed binary AND is a real version (a daemon too
+/// old to serve `/api/v1/version` reports `unknown …`, which is not actionable via restart
+/// of *this* build — we already say so in the status line, without a misleading nudge).
+fn daemon_version_is_stale(running: &str, installed: &str) -> bool {
+  running != installed && !running.starts_with("unknown")
 }
 
 fn daemon_serve(mode: daemon::DaemonMode, port: u16) -> i32 {
@@ -8623,6 +8641,19 @@ mod tests {
     );
   }
   use std::ffi::OsString;
+
+  #[test]
+  fn daemon_version_staleness_nudges_only_on_a_real_mismatch() {
+    // Same build: no nudge.
+    assert!(!daemon_version_is_stale("1.29.5", "1.29.5"));
+    assert!(!daemon_version_is_stale("1.29.5 (abc1234)", "1.29.5 (abc1234)"));
+    // Upgraded binary, daemon still on the old build: nudge.
+    assert!(daemon_version_is_stale("1.29.4", "1.29.5"));
+    assert!(daemon_version_is_stale("1.29.5 (aaaaaaa)", "1.29.5 (bbbbbbb)"));
+    // A daemon too old to serve the version endpoint reports "unknown …" — the status
+    // line already explains that; a restart-nudge would be misleading, so suppress it.
+    assert!(!daemon_version_is_stale("unknown (older than this feature)", "1.29.5"));
+  }
 
   #[test]
   fn stale_annotation_markers_self_heal_and_fresh_ones_block() {

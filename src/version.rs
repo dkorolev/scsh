@@ -9,21 +9,20 @@ pub fn pkg_version() -> &'static str {
   env!("CARGO_PKG_VERSION")
 }
 
-/// Git short hash from build time, or a runtime `git rev-parse` fallback; empty when unknown.
+/// Git short hash stamped at build time by `build.rs`; empty for a source-tarball build
+/// (e.g. `cargo install scsh` from crates.io), which has no `.git` to describe.
+///
+/// Deliberately NOT a runtime `git describe`: an installed binary must report one stable
+/// identity, not borrow the git state of whatever directory it happens to run in. The old
+/// runtime fallback made the same binary print different hashes — and a spurious `-dirty`
+/// — depending on the caller's working tree.
 pub fn git_stamp() -> String {
   static CACHE: OnceLock<String> = OnceLock::new();
-  CACHE.get_or_init(compute_git_stamp).clone()
+  CACHE.get_or_init(|| GIT_DESCRIBE.to_string()).clone()
 }
 
-fn compute_git_stamp() -> String {
-  let embedded = GIT_DESCRIBE;
-  if !embedded.is_empty() {
-    return embedded.to_string();
-  }
-  runtime_git_describe().unwrap_or_default()
-}
-
-/// CLI-style version line: `1.8.0 (85555ff-dirty)` or just `1.8.0`.
+/// CLI-style version line: `1.8.0 (85555ff-dirty)` in a dev build, or just `1.8.0` for a
+/// crates.io install.
 pub fn display() -> String {
   let git = git_stamp();
   if git.is_empty() {
@@ -31,37 +30,6 @@ pub fn display() -> String {
   } else {
     format!("{} ({git})", pkg_version())
   }
-}
-
-fn runtime_git_describe() -> Option<String> {
-  let mut dir = std::env::current_dir().ok()?;
-  for _ in 0..32 {
-    if dir.join(".git").exists() {
-      return runtime_git_describe_in(&dir);
-    }
-    dir = dir.parent()?.to_path_buf();
-  }
-  None
-}
-
-fn runtime_git_describe_in(repo: &std::path::Path) -> Option<String> {
-  let out = std::process::Command::new("git").arg("-C").arg(repo).args(["rev-parse", "HEAD"]).output().ok()?;
-  if !out.status.success() {
-    return None;
-  }
-  let hash: String = String::from_utf8_lossy(&out.stdout).trim().chars().take(7).collect();
-  if hash.is_empty() {
-    return None;
-  }
-  let dirty = std::process::Command::new("git")
-    .arg("-C")
-    .arg(repo)
-    .args(["status", "--porcelain"])
-    .output()
-    .ok()
-    .filter(|o| o.status.success())
-    .is_some_and(|o| !o.stdout.is_empty());
-  Some(if dirty { format!("{hash}-dirty") } else { hash })
 }
 
 #[cfg(test)]

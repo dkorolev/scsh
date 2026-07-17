@@ -114,6 +114,28 @@ pub fn daemon_api_responds(port: u16) -> bool {
   resp.starts_with("HTTP/1.1 200") && resp.contains("application/json")
 }
 
+/// The version string the running daemon reports over `GET /api/v1/version` (its own
+/// `version::display()`), or `None` if the daemon is unreachable or too old to serve it.
+pub fn daemon_reported_version(port: u16) -> Option<String> {
+  let addr: SocketAddr = format!("127.0.0.1:{port}").parse().ok()?;
+  let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
+  stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+  stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+  let req = "GET /api/v1/version HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+  stream.write_all(req.as_bytes()).ok()?;
+  let mut resp = String::new();
+  stream.read_to_string(&mut resp).ok()?;
+  if !resp.starts_with("HTTP/1.1 200") {
+    return None;
+  }
+  let body = resp.split("\r\n\r\n").nth(1)?;
+  // Minimal extraction of the sole string field — avoids pulling the JSON parser in here.
+  let after = body.split("\"version\":").nth(1)?;
+  let start = after.find('"')? + 1;
+  let end = after[start..].find('"')? + start;
+  Some(after[start..end].to_string())
+}
+
 /// Daemon mode from the cross-process mode marker, when present and valid.
 pub fn read_persisted_mode(port: u16) -> Option<super::model::DaemonMode> {
   let text = std::fs::read_to_string(mode_file(port)).ok()?;
