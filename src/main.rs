@@ -80,7 +80,7 @@ fn run(args: &[String]) -> i32 {
     Mode::Run => match cli.def.as_deref() {
       // The daemon's "start a job" passes the session id it pre-created so its deep link and
       // the one-job-per-repo guard are authoritative before this child registers.
-      Some(name) => preflight_then_def(name, cli.failures.session.as_deref()),
+      Some(name) => preflight_then_def(name, cli.failures.session.as_deref(), cli.resume_from.as_deref()),
       None => preflight_then(Action::Run, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref()),
     },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
@@ -752,6 +752,10 @@ struct Cli {
   /// `run --def <name>`: run the named harness definition (a `.harness/<name>.yml` or a
   /// built-in) instead of the repo's `.scsh.yml` skills. Its params come from the environment.
   def: Option<String>,
+  /// `run --def <name> --resume-from <session>`: restore every step whose validated result
+  /// survives under the named prior session (`$SCSH_HOME/sessions/<id>/results/`) and run
+  /// only the steps that never completed — the restart path for a failed workflow job.
+  resume_from: Option<String>,
   /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
   /// sibling `.skills/`) instead of the repo's, so a global skill can drive a fleet without
   /// installing into the target tree. The bundle's skills are installed GLOBALLY inside each
@@ -805,6 +809,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut build_force = false;
   let mut build_rebuild_base = false;
   let mut def: Option<String> = None;
+  let mut resume_from: Option<String> = None;
   let mut override_dot_scsh_yml: Option<PathBuf> = None;
   let mut global = false;
   let mut i = 0;
@@ -1057,6 +1062,17 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           None
         }
       }
+      // `run --def <name> --resume-from <session>`: reuse the named prior session's completed
+      // step results and run only what never completed.
+      "--resume-from" => {
+        i += 1;
+        let id = args.get(i).ok_or("--resume-from needs a session id, e.g. --resume-from qtsiuf")?;
+        if id.trim().is_empty() {
+          return Err("--resume-from session id must not be empty".into());
+        }
+        resume_from = Some(id.trim().to_string());
+        None
+      }
       // Use an external `.scsh.yml` (and its sibling `.skills/`) instead of the repo's — so a
       // global Cursor skill can drive `scsh run code-review` without polluting the target tree.
       "--override-dot-scsh-yml" => {
@@ -1186,6 +1202,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if def.is_some() && profile.is_some() {
     return Err("--def selects a harness definition, not a profile — don't combine them".into());
   }
+  if resume_from.is_some() && def.is_none() {
+    return Err(
+      "--resume-from only applies to 'run --def' (e.g. `scsh run --def gorgeous-pipeline --resume-from qtsiuf`)".into(),
+    );
+  }
   if override_dot_scsh_yml.is_some() && !matches!(mode, Mode::Run | Mode::List | Mode::CheckProfile | Mode::Probe) {
     return Err("--override-dot-scsh-yml only applies to 'run', 'list', 'check-profile', and 'probe'".into());
   }
@@ -1208,6 +1229,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     build_force,
     build_rebuild_base,
     def,
+    resume_from,
     override_dot_scsh_yml,
     global,
   })
@@ -1349,7 +1371,7 @@ fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
 /// same repo-hygiene + runtime preflight applies, but the config steps are replaced by
 /// definition discovery and env-parameter validation. The definition's `task` body is
 /// materialized into each run clone as `.skills/<name>/SKILL.md`, so the repo stays clean.
-fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
+fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&str>) -> i32 {
   // git installed → inside a repo → runnable (committed, clean, a gitignored scratch dir). A def
   // run accepts either `tmp/` or `.harness/tmp` as the scratch root, so it does not reuse the
   // `.scsh.yml` preflight (which requires `tmp/` specifically).
@@ -1428,7 +1450,12 @@ fn preflight_then_def(name: &str, session: Option<&str>) -> i32 {
   // A workflow definition runs through the DAG orchestrator; a flat one goes through the
   // existing matrix expander below.
   if def.is_workflow() {
-    return run_workflow(&rt, &root, &def, session);
+    return run_workflow(&rt, &root, &def, session, resume_from);
+  }
+  if resume_from.is_some() {
+    fail(&format!("'{name}' is a flat definition — --resume-from only applies to workflow definitions (steps:)"));
+    hint("flat routes are independent; just run the definition again");
+    return 1;
   }
 
   // `doctor` additionally reports which agent images are built and whose credentials are
@@ -1632,6 +1659,19 @@ fn extract_step_outputs(
   Ok(out)
 }
 
+/// A prior session's persisted result for `run_id`, when it still validates against the step's
+/// output contract — the restore criterion for `--resume-from`. A result only ever persists
+/// after its run succeeded or failed validation, so "present and valid" is exactly "this step
+/// completed"; anything else (missing, unreadable, schema drift) re-runs the step.
+fn restored_step_result(
+  results_dir: &Path, run_id: &str, contract: WorkflowResultContract<'_>,
+) -> Option<(String, std::collections::HashMap<String, String>, PathBuf)> {
+  let path = results_dir.join(format!("{}.json", run_id.replace('/', "_")));
+  let content = std::fs::read_to_string(&path).ok()?;
+  let outputs = extract_step_outputs(&content, contract).ok()?;
+  Some((content, outputs, path))
+}
+
 /// Build the run invocation for one workflow step: the step's agent, its `SKILL.md` body
 /// (prompt + scsh's I/O contract), its resolved inputs as constant env vars, and a per-step
 /// result file under the session scratch dir.
@@ -1681,7 +1721,7 @@ enum WorkflowRetryDecision {
 }
 
 fn workflow_retry_decision(
-  fail_reason: Option<&str>, restart_requested: bool, schema_retry_used: bool, auto_retry_used: bool,
+  fail_reason: Option<&str>, restart_requested: bool, schema_retry_used: bool, auto_retries_used: u64,
   retry_enabled: bool, tui: bool,
 ) -> WorkflowRetryDecision {
   if restart_requested {
@@ -1695,7 +1735,7 @@ fn workflow_retry_decision(
   }
   let transient = fail_reason
     .is_some_and(|reason| failure::is_transient(reason) || (reason == failure::reason::RESULT_MISSING && tui));
-  if transient && !auto_retry_used {
+  if transient && auto_retries_used < failure::MAX_AUTO_RETRIES {
     WorkflowRetryDecision::Automatic
   } else {
     WorkflowRetryDecision::Stop
@@ -1703,8 +1743,9 @@ fn workflow_retry_decision(
 }
 
 /// Run one workflow route with the same retry contract as a flat run. Every fresh harness
-/// execution gets a fresh proc row linked to its predecessor: one automatic retry for transient
-/// infrastructure failure, one schema-correction retry, and unlimited explicit browser restarts.
+/// execution gets a fresh proc row linked to its predecessor: up to [`failure::MAX_AUTO_RETRIES`]
+/// automatic retries for transient failure, one schema-correction retry, and unlimited explicit
+/// browser restarts.
 #[allow(clippy::too_many_arguments)]
 fn run_workflow_step_with_retries(
   invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
@@ -1719,7 +1760,7 @@ fn run_workflow_step_with_retries(
   let mut proc = initial_proc;
   let mut proc_index = proc.index();
   let mut attempts = 0u64;
-  let mut auto_retry_used = false;
+  let mut auto_retries_used = 0u64;
   let mut schema_retry_used = false;
   let mut repaired_invocation: Option<ResolvedInvocation> = None;
   loop {
@@ -1752,7 +1793,7 @@ fn run_workflow_step_with_retries(
       run.fail_reason.as_deref(),
       restart_requested,
       schema_retry_used,
-      auto_retry_used,
+      auto_retries_used,
       failure::retry_enabled(),
       invocation.harness.is_tui(),
     );
@@ -1788,7 +1829,7 @@ fn run_workflow_step_with_retries(
         }
       }
     } else if decision == WorkflowRetryDecision::Automatic {
-      auto_retry_used = true;
+      auto_retries_used += 1;
     }
 
     let label = format!("{}: {} (retry)", invocation.harness.as_str(), invocation.name);
@@ -1885,12 +1926,45 @@ fn ensure_workflow_images(
 /// flat run uses) with its inputs bound from params and upstream outputs, validating each step's
 /// typed output, evaluating `when:` gates (a false gate — or a skipped dependency — skips the
 /// step), and running independent runnable steps in parallel. One session, one live board.
-fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>) -> i32 {
+///
+/// With `resume_from`, the walk first consults the named prior session's persisted results
+/// (`$SCSH_HOME/sessions/<id>/results/<run_id>.json`): every step whose result is present and
+/// still validates against its output contract is restored without a container — loop
+/// iterations included, since the run id carries the iteration number — and only the steps
+/// that never completed actually run. Commits a restored step made are already on the caller's
+/// branch from the prior run, so nothing is re-integrated.
+fn run_workflow(
+  rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>, resume_from: Option<&str>,
+) -> i32 {
   use std::collections::HashMap;
   ui::signals::install();
 
+  // Resolve the resume source before anything registers: a vanished results dir (pruned old
+  // session) degrades to a normal full run with a warning, never a hard failure.
+  let resume: Option<(String, PathBuf)> = resume_from.and_then(|old| {
+    let dir = runtime::session_results_dir(old);
+    if dir.is_dir() {
+      Some((old.to_string(), dir))
+    } else {
+      warn(&format!(
+        "nothing to resume from session '{old}' — no results under {} — running every step",
+        dir.display()
+      ));
+      None
+    }
+  });
+  if let Some((old, dir)) = &resume {
+    ok(&format!("resuming from session {old} — completed step results under {} are reused", dir.display()));
+  }
+
   // One session for the whole workflow (mirrors build_and_run's daemon attach).
   let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
+  // Persist the start recipe (def name + env-resolved params) so the browser can restart or
+  // resume this job later even when it was CLI-started — those env params were never the
+  // daemon's to see. For daemon-spawned jobs this rewrites the same values it passed in.
+  let recipe_params: Vec<(String, String)> =
+    def.params.iter().filter_map(|p| std::env::var(&p.name).ok().map(|v| (p.name.clone(), v))).collect();
+  daemon::write_start_recipe(&session_id, Some(&def.name), None, &recipe_params);
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
@@ -2034,10 +2108,14 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
     }
     ran_count += to_run.len();
 
-    // Resolve inputs and pair each runnable step with its pre-declared proc row.
+    // Resolve inputs and pair each runnable step with its pre-declared proc row. A step whose
+    // result survives in the resume source is restored on the spot (green row, no container);
+    // only the rest of the wave spawns work.
     let mut invs: Vec<ResolvedInvocation> = Vec::new();
     let mut procs: Vec<ui::screen::Proc> = Vec::new();
+    let mut live_steps: Vec<&harness_def::Step> = Vec::new();
     let mut run_ids: Vec<String> = Vec::new();
+    let mut restored_runs: Vec<(String, SkillRun)> = Vec::new();
     for s in &to_run {
       let mut inputs: Vec<(String, String)> = Vec::new();
       for b in &s.inputs {
@@ -2050,8 +2128,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
       } else {
         s.iteration_run_id(iteration)
       };
-      invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
-      if s.is_loop() || do_while_end_for.contains_key(&s.id) {
+      let p = if s.is_loop() || do_while_end_for.contains_key(&s.id) {
         let label = format!("{}: {} · iteration {iteration}", s.agent.harness.as_str(), s.id);
         let p = ui.proc(label.clone(), false);
         if let Some(c) = &daemon_client {
@@ -2072,20 +2149,43 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
           "{} iteration {iteration}",
           if do_while_end_for.contains_key(&s.id) { "do-while" } else { s.loop_kind() }
         ));
-        procs.push(p);
+        p
       } else {
-        procs.push(step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc"));
+        step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc")
+      };
+      if let Some((old_sid, results_dir)) = &resume {
+        let contract = WorkflowResultContract {
+          outputs: &s.outputs,
+          require_do_while_repeat: s.do_while.is_some()
+            && !s.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+        };
+        if let Some((content, outputs, old_path)) = restored_step_result(results_dir, &run_id, contract) {
+          if let Some(dest) = fleet::persist_skill_result(&session_id, &run_id, &old_path) {
+            if let Some(c) = &daemon_client {
+              c.proc_result(p.index(), &dest);
+            }
+          }
+          p.finish_ok(Some(&format!("restored from session {old_sid} — result reused, no container run")));
+          let mut run = SkillRun::cached(None, content, Some(outputs));
+          run.proc_index = p.index();
+          restored_runs.push((run_id.clone(), run));
+          run_ids.push(run_id);
+          continue;
+        }
       }
+      invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
+      procs.push(p);
+      live_steps.push(s);
       run_ids.push(run_id);
     }
 
     // Run the wave in parallel — independent steps proceed at once.
-    let results: Vec<(String, SkillRun)> = std::thread::scope(|scope| {
+    let mut results: Vec<(String, SkillRun)> = std::thread::scope(|scope| {
       let ui_ref = &ui;
       let handles: Vec<_> = invs
         .iter()
         .zip(procs)
-        .zip(to_run.iter())
+        .zip(live_steps.iter())
         .map(|((inv, p), step)| {
           let dc = daemon_client.clone();
           let base_ref = base.as_deref();
@@ -2105,6 +2205,7 @@ fn run_workflow(rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, sessio
         })
         .collect()
     });
+    results.append(&mut restored_runs);
 
     // Record each step's outcome in definition order; the first failure (run failure or an
     // output that does not match the declared schema) aborts the workflow. Commit-enabled
@@ -3623,7 +3724,7 @@ fn build_and_run(
           let mut proc = p;
           let mut proc_index = first_index;
           let mut attempts = 0u64;
-          let mut auto_retry_used = false;
+          let mut auto_retries_used = 0u64;
           loop {
             attempts += 1;
             let attempt_started = std::time::Instant::now();
@@ -3638,20 +3739,22 @@ fn build_and_run(
               return run;
             }
             // A browser Force restart always respawns — each extra attempt costs the user an
-            // explicit click, so no cap and no SCSH_NO_RETRY gate. Otherwise ONE automatic
-            // retry for transient infrastructure failures (fresh clone, fresh container, new
-            // live-board row). Deterministic failures return as-is. A missing result from a
-            // TUI harness also earns the automatic retry: its pane can be killed by a stray
-            // signal or teardown before it writes the file, which a fresh run usually clears.
+            // explicit click, so no cap and no SCSH_NO_RETRY gate. Otherwise up to
+            // MAX_AUTO_RETRIES automatic retries for transient failures (fresh clone, fresh
+            // container, new live-board row). Deterministic failures return as-is. A missing
+            // result from a TUI harness also earns the automatic retries: its pane can be killed
+            // by a stray signal or teardown before it writes the file, which a fresh run usually
+            // clears.
             let restart_requested = daemon::consume_proc_restart(session_ref, proc_index);
             let transient = run.fail_reason.as_deref().is_some_and(|r| {
               failure::is_transient(r) || (r == failure::reason::RESULT_MISSING && skill.harness.is_tui())
             });
-            if !restart_requested && !(!auto_retry_used && transient && failure::retry_enabled()) {
+            let auto_retry = auto_retries_used < failure::MAX_AUTO_RETRIES && transient && failure::retry_enabled();
+            if !restart_requested && !auto_retry {
               return run;
             }
             if !restart_requested {
-              auto_retry_used = true;
+              auto_retries_used += 1;
             }
             let reason = if restart_requested {
               failure::reason::RESTART_REQUESTED
@@ -8019,6 +8122,20 @@ fn print_help_defs() {
 "#
   );
   println!();
+  println!("{}", h_head("Retries and resume"));
+  print!(
+    r#"  A failed step retries automatically — fresh clone, fresh container, a new attempt row
+  linked to the failed one — up to 5 times for transient failures: container/runtime trouble,
+  provider overload, or the harness exiting non-zero (a harness dying at startup is
+  infrastructure, and a genuine agent failure just burns its retries). An invalid result gets
+  one schema-correction retry. The first step that stays failed stops the workflow.
+  scsh run --def <name> --resume-from <session>   restores every step whose validated result
+  the named session already produced (loop iterations included, commits already on the branch)
+  and runs only the rest. The session browser's "Restart remaining" button on a failed job
+  does exactly this; "Restart from scratch" re-runs everything.
+"#
+  );
+  println!();
   println!(
     "{}",
     h_head("Executable examples (built in — read them with `scsh run --def <name>` or in src/harness_defs/)")
@@ -8181,25 +8298,65 @@ mod tests {
   }
 
   #[test]
-  fn workflow_retries_transient_failures_once_and_browser_restarts_without_a_cap() {
+  fn workflow_retries_transient_failures_up_to_the_cap_and_browser_restarts_without_one() {
     use WorkflowRetryDecision::{Automatic, Browser, Schema, Stop};
 
     assert_eq!(
-      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, false, true, true),
+      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, 0, true, true),
+      Automatic
+    );
+    // Every attempt below the cap earns another automatic retry; the cap is final.
+    assert_eq!(
+      workflow_retry_decision(
+        Some(failure::reason::CONTAINER_INACTIVE),
+        false,
+        false,
+        failure::MAX_AUTO_RETRIES - 1,
+        true,
+        true
+      ),
       Automatic
     );
     assert_eq!(
-      workflow_retry_decision(Some(failure::reason::CONTAINER_INACTIVE), false, false, true, true, true),
+      workflow_retry_decision(
+        Some(failure::reason::CONTAINER_INACTIVE),
+        false,
+        false,
+        failure::MAX_AUTO_RETRIES,
+        true,
+        true
+      ),
       Stop
     );
-    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, false, false, true, true), Schema);
-    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, true, false, true, true), Stop);
-    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), false, false, false, true, true), Stop);
+    // A harness dying with a non-zero exit is transient too — a silent crash at container
+    // startup is infrastructure, and both real 2026-07-16 pipeline failures were exactly that.
+    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), false, false, 0, true, true), Automatic);
     assert_eq!(
-      workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, false, false, true),
+      workflow_retry_decision(
+        Some(failure::reason::HARNESS_NONZERO),
+        false,
+        false,
+        failure::MAX_AUTO_RETRIES,
+        true,
+        true
+      ),
       Stop
     );
-    assert_eq!(workflow_retry_decision(Some(failure::reason::HARNESS_NONZERO), true, true, true, false, true), Browser);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, false, 0, true, true), Schema);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_INVALID), false, true, 0, true, true), Stop);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::RESULT_MISSING), false, false, 0, true, false), Stop);
+    assert_eq!(workflow_retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, 0, false, true), Stop);
+    assert_eq!(
+      workflow_retry_decision(
+        Some(failure::reason::HARNESS_NONZERO),
+        true,
+        true,
+        failure::MAX_AUTO_RETRIES,
+        false,
+        true
+      ),
+      Browser
+    );
   }
   use std::ffi::OsString;
 
@@ -8354,6 +8511,41 @@ mod tests {
     assert_eq!(c.override_dot_scsh_yml.as_deref(), Some(std::path::Path::new("/x.yml")));
     assert!(cli(&["run", "--def", "add", "--override-dot-scsh-yml", "/x.yml"]).is_err());
     assert!(cli(&["version", "--override-dot-scsh-yml", "/x.yml"]).is_err());
+  }
+
+  #[test]
+  fn resume_from_parses_on_def_runs_only() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let c = cli(&["run", "--def", "greet", "--resume-from", "qtsiuf"]).unwrap();
+    assert!(matches!(c.mode, Mode::Run));
+    assert_eq!(c.def.as_deref(), Some("greet"));
+    assert_eq!(c.resume_from.as_deref(), Some("qtsiuf"));
+    assert!(cli(&["run", "--resume-from", "qtsiuf"]).is_err(), "resume without --def has nothing to restore into");
+    assert!(cli(&["run", "code-review", "--resume-from", "qtsiuf"]).is_err(), "profiles have no resume");
+    assert!(cli(&["run", "--def", "greet", "--resume-from"]).is_err(), "the flag needs a session id");
+    assert!(cli(&["run", "--def", "greet", "--resume-from", " "]).is_err(), "…a non-empty one");
+  }
+
+  #[test]
+  fn restored_step_result_restores_only_valid_results() {
+    let outputs =
+      [harness_def::OutputField { name: "grade".into(), ty: harness_def::OutputType::String, choices: vec![] }];
+    let contract = WorkflowResultContract { outputs: &outputs, require_do_while_repeat: false };
+    let dir = std::env::temp_dir().join(format!("scsh-restore-{}", runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("review.json"), r#"{"grade":"good"}"#).unwrap();
+    std::fs::write(dir.join("drifted.json"), r#"{"score":5}"#).unwrap();
+
+    // A persisted result that still validates restores: raw JSON + typed outputs + its path.
+    let (content, outputs_map, path) = restored_step_result(&dir, "review", contract).expect("valid result restores");
+    assert_eq!(content, r#"{"grade":"good"}"#);
+    assert_eq!(outputs_map.get("grade").map(String::as_str), Some("good"));
+    assert!(path.ends_with("review.json"));
+    // Loop iterations look up by their full run id — a different id is a different result.
+    assert!(restored_step_result(&dir, "review-while-collect-2", contract).is_none(), "missing iteration re-runs");
+    // Schema drift since the old run means the old result no longer satisfies the def: re-run.
+    assert!(restored_step_result(&dir, "drifted", contract).is_none(), "an invalid result never restores");
+    std::fs::remove_dir_all(&dir).ok();
   }
 
   #[test]

@@ -294,6 +294,14 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   per directory, validate the definition + params, then spawn a detached `scsh run --def <name>`
   in the repo with the params as environment and a pre-created session id.
   `{"ok":true,"session":id}`; a second job in the same repo (or a dirty tree) gets 409
+- `POST /api/v1/jobs/restart` — body `{"session":"…","mode":"resume"|"scratch"}`. Stop the old
+  run (exactly `session/stop`; idempotent on an ended job), then start the SAME job fresh from
+  the session's persisted start recipe (`$SCSH_HOME/sessions/<id>/start.json` — def/profile +
+  params; both web- and CLI-started runs write one). `mode:"resume"` (workflow jobs only)
+  spawns the fresh run with `--resume-from <old id>`, so every step the old session completed
+  is restored from its persisted result and only the unfinished steps run; the default
+  (`"scratch"` or absent) runs everything anew. Answers `{"ok":true,"session":"<new id>"}`.
+  The failed-job page's "Restart remaining" / "Restart from scratch" buttons call this.
 - `POST /api/v1/repos/pick` — pop the host's native folder chooser (the daemon is local) and
   return the chosen path: `{"ok":true,"path":…}`, `{"ok":false,"cancelled":true}`, or
   `{"ok":false,"error":…}` on a headless host (type the path instead)

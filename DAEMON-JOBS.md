@@ -232,6 +232,31 @@ Use an `arith` or `fruits` session URL from steps 9–10. Report PASS/FAIL per b
    have skills or image builds (builds are nodes with edges into skills).
 2. Casts, results, commits diffs, Force stop, and job snapshot export still work.
 
+## 13. Restart a failed job — resume and from-scratch (no container)
+
+A failed job's page offers **Restart remaining** (workflow jobs — reuse every completed step's
+result, run only what never completed) and **Restart from scratch**. Point the daemon's
+`SCSH_BIN` at a wrapper that keeps daemon commands real but makes every spawned JOB die at once
+(before registering), so a started job settles as a failed session within a second or two:
+
+```console
+"$SCSH_BIN" daemon stop
+STUB="$(mktemp -t scsh-stub)" && printf '#!/bin/sh\ncase "$1" in daemon|__daemon-serve) exec "%s" "$@";; *) echo boom >&2; exit 1;; esac\n' "$SCSH_BIN" > "$STUB" && chmod +x "$STUB"
+SCSH_BIN="$STUB" "$SCSH_BIN" daemon start
+SID=$(curl -s -X POST "localhost:7391/api/v1/jobs/start" \
+  -d "{\"repo\":\"$REPO\",\"def\":\"greet\",\"params\":{}}" | sed 's/.*"session":"\([a-z]*\)".*/\1/')
+sleep 2
+curl -s "localhost:7391/job/$SID" | grep -o 'id="session-resume"\|id="session-restart-scratch"\|id="session-stop"'
+curl -s -X POST "localhost:7391/api/v1/jobs/restart" -d "{\"session\":\"$SID\",\"mode\":\"resume\"}"
+```
+
+**Expect:** the failed job page contains `id="session-resume"` and `id="session-restart-scratch"`
+but no `id="session-stop"`; the restart call answers `"ok":true` with a NEW session id. (`greet`
+is a workflow; on a flat job like `add`, `"mode":"resume"` is refused with HTTP 400 explaining
+that flat routes restart from scratch.) With a real runtime, the resumed job's page shows every
+step the failed run completed as an instant green row noted `restored from session <old id>`,
+and only the unfinished steps start containers.
+
 ## Cleanup
 
 ```console

@@ -2541,43 +2541,61 @@ function initSessionStop() {
   if (!btn) return;
   btn.addEventListener('click', () => forceStopSession(btn));
 }
-// ---- force restart (session page) ----
-async function forceRestartSession(btn) {
+// ---- restart (session page): force-restart while running, resume / from-scratch once failed ----
+async function restartSessionJob(btn, mode, dialog) {
   const id = btn.getAttribute('data-session');
   if (!id) return;
+  const label = btn.querySelector('span') ? btn.querySelector('span').textContent : dialog.confirmLabel;
   const ok = await scshConfirm({
-    title: 'Force restart this job?',
-    body: 'The current run is stopped — running containers are killed — and the same job starts fresh.',
-    confirmLabel: 'Force restart',
+    title: dialog.title,
+    body: dialog.body,
+    confirmLabel: dialog.confirmLabel,
     danger: true,
   });
   if (!ok) return;
   btn.disabled = true;
   setBtnLabel(btn, 'Restarting…');
   try {
+    const body = { session: id };
+    if (mode) body.mode = mode;
     const resp = await fetch('/api/v1/jobs/restart', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ session: id }),
+      body: JSON.stringify(body),
     });
     const data = await resp.json().catch(() => ({}));
     if (!resp.ok || data.ok === false || !data.session) {
       btn.disabled = false;
-      setBtnLabel(btn, 'Force restart');
+      setBtnLabel(btn, label);
       showToast(data.error || ('restart failed (HTTP ' + resp.status + ')'));
       return;
     }
     window.location.href = '/job/' + data.session;
   } catch (e) {
     btn.disabled = false;
-    setBtnLabel(btn, 'Force restart');
+    setBtnLabel(btn, label);
     showToast(String(e));
   }
 }
 function initSessionRestart() {
-  const btn = document.getElementById('session-restart');
-  if (!btn) return;
-  btn.addEventListener('click', () => forceRestartSession(btn));
+  const live = document.getElementById('session-restart');
+  if (live) live.addEventListener('click', () => restartSessionJob(live, null, {
+    title: 'Force restart this job?',
+    body: 'The current run is stopped — running containers are killed — and the same job starts fresh.',
+    confirmLabel: 'Force restart',
+  }));
+  const resume = document.getElementById('session-resume');
+  if (resume) resume.addEventListener('click', () => restartSessionJob(resume, 'resume', {
+    title: 'Restart the remaining steps?',
+    body: 'A fresh run of the same job starts; every step this run completed is restored from its result, and only the steps that never completed run again.',
+    confirmLabel: 'Restart remaining',
+  }));
+  const scratch = document.getElementById('session-restart-scratch');
+  if (scratch) scratch.addEventListener('click', () => restartSessionJob(scratch, 'scratch', {
+    title: 'Restart this job from scratch?',
+    body: 'The same job starts fresh — every step runs anew; nothing from this run is reused.',
+    confirmLabel: 'Restart from scratch',
+  }));
 }
 // ---- per-proc restart (session page) ----
 async function restartProc(btn) {
