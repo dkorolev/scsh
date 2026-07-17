@@ -418,7 +418,7 @@ fn annotate_run_casts(
       daemon::chapters_sidecar_path(&c.to_string_lossy())
         .map(|s| {
           annotate::sidecar_is_stale(c, &s)
-            && !annotation_marker(c).exists()
+            && !annotation_in_progress(c)
             && !annotate::automatic_annotation_suppressed(c)
         })
         .unwrap_or(false)
@@ -543,9 +543,35 @@ fn annotation_marker(cast: &Path) -> PathBuf {
   PathBuf::from(marker)
 }
 
+/// How long an `.annotating` marker is trusted as evidence of live work. Comfortably above
+/// the worst honest annotation (transcript render + two 180s model attempts + recorded-TUI
+/// teardown); past it the marker is a leftover of a killed annotation, and honoring it
+/// would block the cast's re-annotation forever.
+const ANNOTATION_MARKER_TTL: Duration = Duration::from_secs(15 * 60);
+
+/// True while a FRESH marker says another process is annotating this cast right now. A
+/// stale marker — its process killed before the cleanup trap ran — is deleted on sight, so
+/// one interrupted annotation can never permanently silence a recording.
+fn annotation_in_progress(cast: &Path) -> bool {
+  let marker = annotation_marker(cast);
+  let Ok(meta) = std::fs::metadata(&marker) else {
+    return false;
+  };
+  let fresh = meta.modified().ok().and_then(|m| m.elapsed().ok()).is_some_and(|age| age < ANNOTATION_MARKER_TTL);
+  if !fresh {
+    let _ = std::fs::remove_file(&marker);
+  }
+  fresh
+}
+
 /// Start annotation as soon as one run's durable recording exists. The marker prevents
 /// the end-of-job catch-up sweep from duplicating live work; the child shell removes it on
 /// every exit, while a successful child leaves the chapters sidecar that makes catch-up a no-op.
+///
+/// The worker is fully detached (double-fork + `setsid`, the daemon's own pattern): an
+/// annotation doing its job must survive the launching terminal or agent harness tearing
+/// down its process group the moment the run's foreground command returns — exactly what
+/// used to kill annotations seconds in while their runs had already succeeded.
 fn spawn_cast_annotation(cast: &Path) {
   if !annotate::host_can_annotate() || annotate::automatic_annotation_suppressed(cast) {
     return;
@@ -554,6 +580,9 @@ fn spawn_cast_annotation(cast: &Path) {
     return;
   };
   if !annotate::sidecar_is_stale(cast, &sidecar) {
+    return;
+  }
+  if annotation_in_progress(cast) {
     return;
   }
   let marker = annotation_marker(cast);
@@ -570,14 +599,17 @@ fn spawn_cast_annotation(cast: &Path) {
     exe = runtime::shell_quote(&exe.to_string_lossy()),
     cast = runtime::shell_quote(&cast.to_string_lossy()),
   );
-  if Command::new("sh")
-    .args(["-c", &script])
-    .stdin(Stdio::null())
-    .stdout(Stdio::null())
-    .stderr(Stdio::null())
-    .spawn()
-    .is_err()
+  let mut cmd = Command::new("sh");
+  cmd.args(["-c", &script]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+  #[cfg(unix)]
   {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: the pre_exec hook uses only async-signal-safe syscalls (fork/setsid/_exit).
+    unsafe {
+      cmd.pre_exec(daemon::daemon_detach_child);
+    }
+  }
+  if cmd.spawn().is_err() {
     let _ = std::fs::remove_file(marker);
   }
 }
@@ -8591,6 +8623,33 @@ mod tests {
     );
   }
   use std::ffi::OsString;
+
+  #[test]
+  fn stale_annotation_markers_self_heal_and_fresh_ones_block() {
+    let dir = std::env::temp_dir().join(format!("scsh-marker-{}", runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cast = dir.join("run.cast");
+    std::fs::write(&cast, "{}\n").unwrap();
+
+    // No marker: nothing in progress.
+    assert!(!annotation_in_progress(&cast));
+
+    // A fresh marker blocks (another process is honestly annotating) and survives the check.
+    let marker = annotation_marker(&cast);
+    std::fs::write(&marker, "").unwrap();
+    assert!(annotation_in_progress(&cast));
+    assert!(marker.exists(), "a fresh marker is honored, not deleted");
+
+    // A stale marker — the annotating process was killed before its cleanup trap ran — is
+    // deleted on sight, so one interrupted annotation never blocks the cast forever.
+    let stale = std::time::SystemTime::now() - (ANNOTATION_MARKER_TTL + Duration::from_secs(60));
+    std::fs::File::options().write(true).open(&marker).unwrap().set_modified(stale).unwrap();
+    assert!(!annotation_in_progress(&cast));
+    assert!(!marker.exists(), "the stale marker was removed");
+    // …and the next check starts clean.
+    assert!(!annotation_in_progress(&cast));
+    std::fs::remove_dir_all(&dir).ok();
+  }
 
   #[test]
   fn parent_session_from_cast_path_extracts_id() {
