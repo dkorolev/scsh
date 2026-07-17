@@ -41,9 +41,17 @@ pub mod reason {
 
 const LOG_NAME: &str = "failures.log";
 
-/// Reasons worth one automatic retry: infrastructure hiccups that a fresh clone +
-/// container plausibly fix. Deterministic failures (bad env, missing result file,
-/// harness exiting non-zero) are never retried. Opt out with `SCSH_NO_RETRY=1`.
+/// Automatic retries per route before a failure is final. Transient infrastructure
+/// failures (and non-zero harness exits, which in practice are dominated by harnesses
+/// dying at startup under resource pressure) get up to this many fresh attempts.
+pub const MAX_AUTO_RETRIES: u64 = 5;
+
+/// Reasons worth automatic retries (up to [`MAX_AUTO_RETRIES`]): failures that a fresh
+/// clone + container plausibly fix. A non-zero harness exit counts — a harness that
+/// crashes seconds after startup (no output, no result) is indistinguishable from any
+/// other infrastructure hiccup, and a genuine agent failure just burns its retries.
+/// Deterministic preflight failures (bad env, missing result file, failed build) are
+/// never retried. Opt out with `SCSH_NO_RETRY=1`.
 pub fn is_transient(reason: &str) -> bool {
   matches!(
     reason,
@@ -51,6 +59,7 @@ pub fn is_transient(reason: &str) -> bool {
       | reason::CONTAINER_INACTIVE
       | reason::CONTAINER_RUN
       | reason::HARNESS_OVERLOADED
+      | reason::HARNESS_NONZERO
       | reason::CLONE
       | reason::GIT_DAEMON
   )
@@ -138,7 +147,7 @@ pub fn log_skill(reason: &str, skill: &str, detail: &str) {
   write_event(&ev, &format!("skill failed: reason={reason} skill={skill}"), Some(detail));
 }
 
-/// A failed attempt is being retried once (recorded so stats can distinguish recovered routes).
+/// A failed attempt is being retried (recorded so stats can distinguish recovered routes).
 pub fn log_retry(session: &str, skill: &str, harness: &str, model: Option<&str>, reason: &str) {
   let ev = FailureEvent {
     kind: "retry".into(),
@@ -149,7 +158,7 @@ pub fn log_retry(session: &str, skill: &str, harness: &str, model: Option<&str>,
     model: model.map(str::to_string),
     ..Default::default()
   };
-  write_event(&ev, &format!("retrying: reason={reason} session={session} skill={skill} (one retry)"), None);
+  write_event(&ev, &format!("retrying: reason={reason} session={session} skill={skill}"), None);
 }
 
 /// The session browser daemon inferred a failure (e.g. deregister while proc still running).
@@ -423,11 +432,11 @@ mod tests {
     assert!(is_transient(reason::CONTAINER_INACTIVE));
     assert!(is_transient(reason::CONTAINER_RUN));
     assert!(is_transient(reason::HARNESS_OVERLOADED));
+    assert!(is_transient(reason::HARNESS_NONZERO));
     assert!(is_transient(reason::CLONE));
     assert!(is_transient(reason::GIT_DAEMON));
     assert!(!is_transient(reason::ENV_UNRESOLVED));
     assert!(!is_transient(reason::RESULT_MISSING));
-    assert!(!is_transient(reason::HARNESS_NONZERO));
     assert!(!is_transient(reason::BUILD_FAILED));
     assert!(harness_reported_overload("API Error: service overloaded; try again later"));
     assert!(harness_reported_overload("HTTP 429: Too Many Requests"));

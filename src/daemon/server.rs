@@ -1845,7 +1845,7 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     Some(r) if !r.trim().is_empty() => r.trim().to_string(),
     _ => return (400, err_body("give a repository path"), false),
   };
-  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), store)
+  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, store)
 }
 
 /// A validated, ready-to-spawn job: the repo root, what to run, and the planned tasks.
@@ -1922,7 +1922,7 @@ fn plan_job_request(
 /// start recipe so the job can later be force-restarted.
 fn start_job_in_repo(
   repo_in: &str, def_name: Option<String>, profile_name: Option<String>, params: Vec<(String, String)>,
-  store: &Arc<Mutex<Store>>,
+  resume_from: Option<String>, store: &Arc<Mutex<Store>>,
 ) -> (u16, String, bool) {
   let PlannedJob { root, run_name, planned, kind, workflow, run_args } =
     match plan_job_request(repo_in, &def_name, &profile_name, &params) {
@@ -1952,6 +1952,9 @@ fn start_job_in_repo(
   cmd.current_dir(&root);
   for (k, v) in &params {
     cmd.env(k, v);
+  }
+  if let Some(old) = &resume_from {
+    cmd.args(["--resume-from", old]);
   }
   cmd.args(["--session", &session_id]);
   cmd.env(super::paths::PORT_ENV, port.to_string());
@@ -2094,13 +2097,16 @@ fn repos_json(store: &Store, now: u64) -> String {
   format!("{{\"repos\":[{}]}}", repos.join(","))
 }
 
-/// `POST /api/v1/jobs/restart` — body `{"session":"…"}`. Force-restart a job: stop the old
-/// run first (containers killed, incomplete procs failed `force_stopped` — exactly Force
-/// stop), then start the SAME job fresh in the same repository: from the session's persisted
-/// start recipe when it has one (web-started jobs, params included), else from its stored
-/// def/profile name alone (CLI runs — their env params were never the daemon's to see, so a
-/// definition whose required params have no defaults refuses with the missing param).
-/// Answers `{ok:true,session:"<new id>"}` — the NEW job's id.
+/// `POST /api/v1/jobs/restart` — body `{"session":"…","mode":"resume"|"scratch"}`.
+/// Force-restart a job: stop the old run first (containers killed, incomplete procs failed
+/// `force_stopped` — exactly Force stop), then start the SAME job fresh in the same
+/// repository: from the session's persisted start recipe when it has one (params included),
+/// else from its stored def/profile name alone (older CLI runs — their env params were never
+/// persisted, so a definition whose required params have no defaults refuses with the missing
+/// param). `mode:"resume"` (workflow jobs only) passes `--resume-from <old id>` so the fresh
+/// run restores every step the old one completed and runs only the rest; the default
+/// (`"scratch"` or absent) runs everything anew. Answers `{ok:true,session:"<new id>"}` — the
+/// NEW job's id.
 fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
@@ -2109,6 +2115,11 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   let session_id = match field_str(&obj, "session") {
     Some(s) if !s.trim().is_empty() => s.trim().to_string(),
     _ => return (400, err_body("give a session id"), false),
+  };
+  let resume = match field_str(&obj, "mode").as_deref() {
+    Some("resume") => true,
+    None | Some("scratch") => false,
+    Some(other) => return (400, err_body(&format!("unknown restart mode '{other}' (resume or scratch)")), false),
   };
   let (repo, name) = {
     let store = lock_store(store);
@@ -2121,6 +2132,13 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     let Some(name) = s.profile.clone() else {
       return (400, err_body("this job has no definition or profile to restart"), false);
     };
+    if resume && s.kind.as_deref() != Some("workflow") {
+      return (
+        400,
+        err_body("resume applies to workflow jobs — this job's routes are independent, restart it from scratch"),
+        false,
+      );
+    }
     (s.repo.clone(), name)
   };
   // The recipe: what jobs/start recorded, or — for a CLI-started run — the name alone,
@@ -2140,6 +2158,9 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   if let Err(e) = plan_job_request(&repo, &def, &profile, &params) {
     return e;
   }
+  if resume && def.is_none() {
+    return (400, err_body("resume applies to workflow definition jobs — restart this job from scratch"), false);
+  }
   // Stop the old run before spawning, so the one-job-per-repo guard sees the repo free.
   // Idempotent: restarting an already-ended job just starts it again.
   let stop_body = format!("{{\"session\":{}}}", quote(&session_id));
@@ -2147,7 +2168,7 @@ fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
   if status != 200 {
     return (status, out, false);
   }
-  start_job_in_repo(&repo, def, profile, params, store)
+  start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), store)
 }
 
 /// `POST /api/v1/session/stop` — body `{"session":"…"}`. Force-stop a stalled job: stop every
@@ -2606,8 +2627,13 @@ fn session_start_recipe_path(session_id: &str) -> std::path::PathBuf {
   crate::runtime::host_sessions_dir().join(session_id).join("start.json")
 }
 
-/// Best-effort: a missing recipe only means a later restart falls back to the name-only path.
-fn write_start_recipe(session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)]) {
+/// Best-effort: a missing recipe only means a later restart falls back to the name-only path
+/// (and loses any env params). The daemon writes it when it spawns a job; a CLI-started
+/// workflow run writes its own (def name + env-resolved params), so every job restarts with
+/// the params it actually ran with.
+pub(crate) fn write_start_recipe(
+  session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)],
+) {
   let path = session_start_recipe_path(session_id);
   let Some(dir) = path.parent() else { return };
   if std::fs::create_dir_all(dir).is_err() {
@@ -4718,6 +4744,85 @@ mod tests {
       assert!(new.ended_at.is_none(), "the new job is live");
     }
     std::fs::remove_file(&stub).ok();
+    std::fs::remove_dir_all(&home).ok();
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn jobs_restart_resume_passes_the_old_session_to_the_respawn() {
+    let nonce = crate::runtime::random_nonce_6();
+    let home = std::env::temp_dir().join(format!("scsh-rhome-resume-{nonce}"));
+    std::fs::create_dir_all(&home).unwrap();
+    let dir = clean_repo("restart-resume");
+    let repo = dir.to_string_lossy().into_owned();
+    // The stub captures its argv so the test can see exactly what a resume respawn runs.
+    let argfile = std::env::temp_dir().join(format!("scsh-resume-args-{nonce}.txt"));
+    let stub = std::env::temp_dir().join(format!("scsh-sleeper-{nonce}.sh"));
+    std::fs::write(&stub, format!("#!/bin/sh\necho \"$@\" > {}\nsleep 5\n", argfile.display())).unwrap();
+    std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap();
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+
+    let (old_id, new_id) = with_scsh_home(&home, || {
+      std::env::set_var("SCSH_BIN", &stub);
+      // `greet` is a built-in WORKFLOW definition (defaulted params), so resume applies.
+      let body = format!(r#"{{"repo":{},"def":"greet"}}"#, quote(&repo));
+      let (status, out, _) = jobs_start_response(&body, &store);
+      assert_eq!(status, 200, "got: {out}");
+      let old_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+
+      let body = format!(r#"{{"session":{},"mode":"resume"}}"#, quote(&old_id));
+      let (status, out, mutated) = jobs_restart_response(&body, &store);
+      assert_eq!(status, 200, "got: {out}");
+      assert!(mutated && out.contains("\"ok\":true"), "got: {out}");
+      let new_id = out.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap().to_string();
+      std::env::remove_var("SCSH_BIN");
+      (old_id, new_id)
+    });
+    assert_ne!(old_id, new_id, "resume answers with the NEW job's id");
+    // The respawned stub writes its argv asynchronously — poll briefly for it.
+    let mut args = String::new();
+    for _ in 0..50 {
+      args = std::fs::read_to_string(&argfile).unwrap_or_default();
+      if args.contains("--resume-from") {
+        break;
+      }
+      std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(args.contains("run --def greet"), "the same workflow def respawns: {args}");
+    assert!(args.contains(&format!("--resume-from {old_id}")), "the fresh run resumes the OLD session: {args}");
+    assert!(args.contains(&format!("--session {new_id}")), "…under the NEW session id: {args}");
+
+    // Resume is workflow-only: a flat job's routes are independent, so the mode is refused.
+    store.lock().unwrap().insert_session(
+      "flatjb".into(),
+      Session {
+        id: "flatjb".into(),
+        started_at: 50,
+        ended_at: Some(60),
+        profile: Some("add".into()),
+        kind: None,
+        repo: repo.clone(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 60,
+        client_connected: false,
+        run_pid: None,
+        workflow: None,
+        parent_session: None,
+      },
+    );
+    let (status, out, _) = jobs_restart_response(r#"{"session":"flatjb","mode":"resume"}"#, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("workflow"), "the refusal explains the workflow-only rule: {out}");
+
+    // An unknown mode is a caller bug, not a silent scratch restart.
+    let (status, out, _) = jobs_restart_response(r#"{"session":"flatjb","mode":"sideways"}"#, &store);
+    assert_eq!(status, 400, "got: {out}");
+    assert!(out.contains("unknown restart mode"), "got: {out}");
+
+    std::fs::remove_file(&stub).ok();
+    std::fs::remove_file(&argfile).ok();
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }

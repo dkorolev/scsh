@@ -133,6 +133,24 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
       "{restart}<button type=\"button\" class=\"chamfer btn btn--red btn--sm\" id=\"session-stop\" data-session=\"{id}\" title=\"Force-stop this job? Running containers will be killed.\"><span>Force stop</span></button>\n",
       id = id,
     )
+  } else if restartable && matches!(lifecycle, SessionLifecycle::Failed | SessionLifecycle::Cancelled) {
+    // A settled failure IS restartable — that's the whole point of keeping the recipe. The
+    // primary action resumes: a fresh run of the same job that restores every step whose
+    // result this session already produced and runs only what never completed (workflow jobs;
+    // for flat jobs the resume request falls back server-side with a clear error). The
+    // secondary action re-runs everything from scratch.
+    let resume = if session.kind.as_deref() == Some("workflow") {
+      format!(
+        "<button type=\"button\" class=\"chamfer btn btn--orange btn--sm\" id=\"session-resume\" data-session=\"{id}\" title=\"Restart this job, reusing every completed step's result from this run — only the steps that never completed are run again.\"><span>Restart remaining</span></button>\n",
+        id = id,
+      )
+    } else {
+      String::new()
+    };
+    format!(
+      "{resume}<button type=\"button\" class=\"chamfer btn btn--orange btn--sm\" id=\"session-restart-scratch\" data-session=\"{id}\" title=\"Start the same job again from scratch — every step runs anew.\"><span>Restart from scratch</span></button>\n",
+      id = id,
+    )
   } else {
     String::new()
   };

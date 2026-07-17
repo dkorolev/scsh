@@ -1173,22 +1173,58 @@ fn force_restart_rides_beside_force_stop_only_where_it_can_act() {
   assert!(!page.contains(r#"id="session-restart""#), "builds cannot be force-restarted: {page}");
   assert!(page.contains(r#"id="session-stop""#), "…but can still be force-stopped");
 
-  // A settled job offers neither — controls that can never act again are noise.
+  // A COMPLETED job offers neither — controls that can never act again are noise.
   let mut done = store_with_cast_proc(ProcStatus::Ok);
   done.sessions.get_mut("castab").unwrap().ended_at = Some(2);
   let page = session_page(&done, "castab").expect("settled session renders");
   assert!(!page.contains(r#"id="session-restart""#), "no restart on a settled job: {page}");
   assert!(!page.contains(r#"id="session-stop""#), "no stop on a settled job: {page}");
+  assert!(!page.contains(r#"id="session-resume""#), "no resume on a completed job: {page}");
+}
+
+#[test]
+fn a_failed_job_offers_resume_and_scratch_restart() {
+  let mut failed = store_with_cast_proc(ProcStatus::Fail);
+  {
+    let s = failed.sessions.get_mut("castab").unwrap();
+    s.ended_at = Some(2);
+    s.kind = Some("workflow".into());
+    s.procs[0].fail_reason = Some(crate::failure::reason::HARNESS_NONZERO.into());
+  }
+  let page = session_page(&failed, "castab").expect("failed session renders");
+  assert!(page.contains(r#"id="session-resume""#), "a failed workflow job offers Restart remaining: {page}");
+  assert!(page.contains(r#"id="session-restart-scratch""#), "…and Restart from scratch");
+  assert!(!page.contains(r#"id="session-stop""#), "no Force stop on a settled job: {page}");
+  let resume = page.find(r#"id="session-resume""#).unwrap();
+  let scratch = page.find(r#"id="session-restart-scratch""#).unwrap();
+  assert!(resume < scratch, "resume (the cheap, usually-right action) rides first");
+
+  // A failed flat job has independent routes — nothing to resume, scratch restart only.
+  failed.sessions.get_mut("castab").unwrap().kind = None;
+  let page = session_page(&failed, "castab").expect("failed flat session renders");
+  assert!(!page.contains(r#"id="session-resume""#), "flat jobs have no resume: {page}");
+  assert!(page.contains(r#"id="session-restart-scratch""#), "…but restart from scratch: {page}");
+
+  // An image-build failure has no recipe to replay — no restart controls at all.
+  failed.sessions.get_mut("castab").unwrap().repo = crate::daemon::server::IMAGE_BUILDS_REPO.into();
+  let page = session_page(&failed, "castab").expect("failed build session renders");
+  assert!(!page.contains(r#"id="session-restart-scratch""#), "builds cannot be restarted: {page}");
 }
 
 #[test]
 fn force_restart_is_wired_live() {
   let js = live_client_js();
-  assert!(js.contains("function forceRestartSession"), "the button has a handler");
+  assert!(js.contains("function restartSessionJob"), "the button has a handler");
   assert!(js.contains("'/api/v1/jobs/restart'"), "it calls the restart endpoint");
   assert!(js.contains("Force restart this job?"), "a confirm gate rides in front of the kill");
   assert!(js.contains("initSessionRestart();"), "the handler is wired on page load");
   assert!(js.contains("window.location.href = '/job/' + data.session"), "success lands on the NEW job's page");
+  // The settled-failure buttons post their explicit modes and confirm first.
+  assert!(js.contains("'session-resume'"), "the failed-job page wires Restart remaining");
+  assert!(js.contains("'session-restart-scratch'"), "…and Restart from scratch");
+  assert!(js.contains("'resume'"), "resume posts mode resume");
+  assert!(js.contains("'scratch'"), "scratch posts mode scratch");
+  assert!(js.contains("Restart the remaining steps?"), "resume confirms before spawning");
 }
 
 #[test]
