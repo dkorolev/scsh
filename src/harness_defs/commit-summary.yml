@@ -1,0 +1,172 @@
+# Built-in workflow demo: three models independently analyze recent commits, then each model
+# reads all three committed reports and corrects its own before Cursor Composer writes one final
+# summary. The report commits are the file handoff between otherwise isolated workflow clones.
+description: "Three models analyze and cross-correct recent commits; Cursor Composer writes one summary."
+params:
+  DAYS:
+    type: int
+    default: "7"
+    description: "Number of days of commits reachable from HEAD to analyze"
+steps:
+  analyze_claude:
+    agent:
+      harness: claude
+      model: sonnet
+    inputs:
+      DAYS: params.DAYS
+    prompt: |
+      Analyze every commit reachable from HEAD whose commit date is within the past DAYS days.
+      Use local git commands only; do not fetch, pull, or use the network. Start with
+      `git log --since="$DAYS days ago" --date=iso-strict --format=fuller --stat`, then inspect
+      relevant diffs with `git show`. Ignore commits whose subject starts with `commit-summary:`;
+      they are bookkeeping from an earlier run. If there are no matching commits, say so clearly.
+
+      Write `COMMIT-ANALYSIS-CLAUDE.md` at the repository root. Focus on the narrative of the
+      work: major themes, user-visible changes, why the changes appear to matter, and notable
+      follow-up work. Ground every claim in commits you inspected and include abbreviated commit
+      hashes. Commit ONLY that file with the exact message
+      `commit-summary: add Claude analysis`. Do not change anything else. Return `report_file` as
+      the exact string `COMMIT-ANALYSIS-CLAUDE.md` only after the commit succeeds.
+    output:
+      report_file:
+        type: string
+    commits: true
+
+  analyze_codex:
+    agent:
+      harness: codex
+      model: gpt-5.6-luna
+    inputs:
+      DAYS: params.DAYS
+    prompt: |
+      Analyze every commit reachable from HEAD whose commit date is within the past DAYS days.
+      Use local git commands only; do not fetch, pull, or use the network. Start with
+      `git log --since="$DAYS days ago" --date=iso-strict --format=fuller --stat`, then inspect
+      relevant diffs with `git show`. Ignore commits whose subject starts with `commit-summary:`;
+      they are bookkeeping from an earlier run. If there are no matching commits, say so clearly.
+
+      Write `COMMIT-ANALYSIS-CODEX.md` at the repository root. Focus on implementation details:
+      architecture and API changes, correctness or operational risks, test evidence, and likely
+      maintenance implications. Ground every claim in commits you inspected and include
+      abbreviated commit hashes. Commit ONLY that file with the exact message
+      `commit-summary: add Codex analysis`. Do not change anything else. Return `report_file` as
+      the exact string `COMMIT-ANALYSIS-CODEX.md` only after the commit succeeds.
+    output:
+      report_file:
+        type: string
+    commits: true
+
+  analyze_grok:
+    agent:
+      harness: grok
+      model: grok-4.5
+    inputs:
+      DAYS: params.DAYS
+    prompt: |
+      Analyze every commit reachable from HEAD whose commit date is within the past DAYS days.
+      Use local git commands only; do not fetch, pull, or use the network. Start with
+      `git log --since="$DAYS days ago" --date=iso-strict --format=fuller --stat`, then inspect
+      relevant diffs with `git show`. Ignore commits whose subject starts with `commit-summary:`;
+      they are bookkeeping from an earlier run. If there are no matching commits, say so clearly.
+
+      Write `COMMIT-ANALYSIS-GROK.md` at the repository root. Focus on the shape of the history:
+      recurring themes, change velocity, areas of concentrated churn, omissions, and questions
+      the history leaves open. Ground every claim in commits you inspected and include
+      abbreviated commit hashes. Commit ONLY that file with the exact message
+      `commit-summary: add Grok analysis`. Do not change anything else. Return `report_file` as
+      the exact string `COMMIT-ANALYSIS-GROK.md` only after the commit succeeds.
+    output:
+      report_file:
+        type: string
+    commits: true
+
+  correct_claude:
+    needs: analyze_claude, analyze_codex, analyze_grok
+    agent:
+      harness: claude
+      model: sonnet
+    prompt: |
+      Read `COMMIT-ANALYSIS-CLAUDE.md`, `COMMIT-ANALYSIS-CODEX.md`, and
+      `COMMIT-ANALYSIS-GROK.md` in full. Check the other models' evidence against local git
+      history, identify anything they caught that your Claude report missed, and resolve factual
+      disagreements. Ignore the workflow's own `commit-summary:` commits when checking the
+      requested time window. Revise ONLY `COMMIT-ANALYSIS-CLAUDE.md` into your corrected response.
+      Preserve its useful perspective, remove unsupported claims, and add a final
+      `## Corrections after peer review` section that briefly names substantive corrections or
+      says that none were needed. Commit ONLY that file with the exact message
+      `commit-summary: correct Claude analysis`. Do not use the network. Return `corrected: true`
+      only after the commit succeeds.
+    output:
+      corrected:
+        type: bool
+    commits: true
+
+  correct_codex:
+    needs: analyze_claude, analyze_codex, analyze_grok
+    agent:
+      harness: codex
+      model: gpt-5.6-luna
+    prompt: |
+      Read `COMMIT-ANALYSIS-CLAUDE.md`, `COMMIT-ANALYSIS-CODEX.md`, and
+      `COMMIT-ANALYSIS-GROK.md` in full. Check the other models' evidence against local git
+      history, identify anything they caught that your Codex report missed, and resolve factual
+      disagreements. Ignore the workflow's own `commit-summary:` commits when checking the
+      requested time window. Revise ONLY `COMMIT-ANALYSIS-CODEX.md` into your corrected response.
+      Preserve its useful perspective, remove unsupported claims, and add a final
+      `## Corrections after peer review` section that briefly names substantive corrections or
+      says that none were needed. Commit ONLY that file with the exact message
+      `commit-summary: correct Codex analysis`. Do not use the network. Return `corrected: true`
+      only after the commit succeeds.
+    output:
+      corrected:
+        type: bool
+    commits: true
+
+  correct_grok:
+    needs: analyze_claude, analyze_codex, analyze_grok
+    agent:
+      harness: grok
+      model: grok-4.5
+    prompt: |
+      Read `COMMIT-ANALYSIS-CLAUDE.md`, `COMMIT-ANALYSIS-CODEX.md`, and
+      `COMMIT-ANALYSIS-GROK.md` in full. Check the other models' evidence against local git
+      history, identify anything they caught that your Grok report missed, and resolve factual
+      disagreements. Ignore the workflow's own `commit-summary:` commits when checking the
+      requested time window. Revise ONLY `COMMIT-ANALYSIS-GROK.md` into your corrected response.
+      Preserve its useful perspective, remove unsupported claims, and add a final
+      `## Corrections after peer review` section that briefly names substantive corrections or
+      says that none were needed. Commit ONLY that file with the exact message
+      `commit-summary: correct Grok analysis`. Do not use the network. Return `corrected: true`
+      only after the commit succeeds.
+    output:
+      corrected:
+        type: bool
+    commits: true
+
+  compose_summary:
+    needs: correct_claude, correct_codex, correct_grok
+    agent:
+      harness: cursor
+      model: composer-2.5-fast
+    inputs:
+      DAYS: params.DAYS
+    prompt: |
+      Read the corrected `COMMIT-ANALYSIS-CLAUDE.md`, `COMMIT-ANALYSIS-CODEX.md`, and
+      `COMMIT-ANALYSIS-GROK.md` files in full. Use local git history to resolve any remaining
+      disagreement, excluding the workflow's own `commit-summary:` commits from the analyzed
+      window. Write one concise, standalone synthesis to `COMMIT-SUMMARY.md` with:
+
+      - a title stating the DAYS-day window;
+      - an executive summary;
+      - major changes grouped by theme, with abbreviated commit hashes;
+      - risks, test evidence, and follow-up items;
+      - a short note on points where the corrected reports converged or still differed.
+
+      Do not concatenate the reports and do not invent consensus. Commit ONLY
+      `COMMIT-SUMMARY.md` with the exact message `commit-summary: compose final summary`.
+      Do not change the three analysis files and do not use the network. Return `summary_file`
+      as the exact string `COMMIT-SUMMARY.md` only after the commit succeeds.
+    output:
+      summary_file:
+        type: string
+    commits: true

@@ -20,9 +20,9 @@ use crate::config::{self, EnvRule, EnvVar, InvocationRoute, Node, Skill};
 pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
-/// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and `fruits`/`code-review`/`arith`/`greet`
-/// (workflows) are always available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 18] {
+/// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and the workflow demos are always
+/// available regardless of the repo. `(name, yaml)`.
+pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -30,6 +30,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 18] {
     ("fruits", include_str!("harness_defs/fruits.yml")),
     ("code-review", include_str!("harness_defs/code-review.yml")),
     ("arith", include_str!("harness_defs/arith.yml")),
+    ("commit-summary", include_str!("harness_defs/commit-summary.yml")),
     ("greet", include_str!("harness_defs/greet.yml")),
     ("demo-pr", include_str!("harness_defs/demo-pr.yml")),
     ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
@@ -1509,6 +1510,39 @@ mod tests {
     let body = summarize.render_skill_body();
     assert!(body.contains("Required files"), "got: {body}");
     assert!(body.contains("`summary.txt`"), "got: {body}");
+  }
+
+  #[test]
+  fn builtin_commit_summary_cross_corrects_three_reports_before_cursor_composes() {
+    let def = builtin("commit-summary");
+    assert!(def.is_workflow());
+    assert_eq!(def.steps.len(), 7);
+    let days = def.params.iter().find(|p| p.name == "DAYS").expect("DAYS param");
+    assert_eq!(days.ty, ParamType::Int);
+    assert_eq!(days.default.as_deref(), Some("7"));
+
+    let initial_ids = ["analyze_claude", "analyze_codex", "analyze_grok"];
+    let correction_ids = ["correct_claude", "correct_codex", "correct_grok"];
+    let report_files = ["COMMIT-ANALYSIS-CLAUDE.md", "COMMIT-ANALYSIS-CODEX.md", "COMMIT-ANALYSIS-GROK.md"];
+    let initial_needs = initial_ids.map(str::to_string).to_vec();
+    for id in initial_ids {
+      let step = def.steps.iter().find(|s| s.id == id).unwrap();
+      assert!(step.needs.is_empty() && step.commits, "{id} is an independent committed report");
+    }
+    for id in correction_ids {
+      let step = def.steps.iter().find(|s| s.id == id).unwrap();
+      assert_eq!(step.needs, initial_needs);
+      assert!(step.commits, "{id} commits its corrected report");
+      for file in report_files {
+        assert!(step.task.body().contains(file), "{id} reads {file}");
+      }
+    }
+
+    let compose = def.steps.iter().find(|s| s.id == "compose_summary").unwrap();
+    assert_eq!(compose.needs, correction_ids.map(str::to_string).to_vec());
+    assert_eq!(compose.agent.harness, crate::config::Harness::Cursor);
+    assert_eq!(compose.agent.model.as_deref(), Some("composer-2.5-fast"));
+    assert!(compose.commits && compose.task.body().contains("COMMIT-SUMMARY.md"));
   }
 
   #[test]

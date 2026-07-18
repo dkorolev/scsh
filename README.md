@@ -200,7 +200,8 @@ See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 **Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
 runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
 `~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits`, `code-review`,
-`arith`, and `greet` workflows — `fruits` fans out into two sorters, then commits `README.md`,
+`arith`, `commit-summary`, and `greet` workflows — `fruits` fans out into two sorters, then
+commits `README.md`,
 `FRUITS.md`, and `VEGGIES.md` from a final fan-in step; `greet` is the multi-step fake-PR demo:
 scaffold a broken `greet()`,
 fix it, commit `PR-DESCRIPTION.md` — plus the flat `demo-pr` definition: one shot that commits a
@@ -217,6 +218,16 @@ folder picker) and start a job from a rendered parameter form — the daemon run
 per directory. Here the word "harness" means the runnable definition; the CLI it dispatches to
 (claude/codex/opencode/…) is the definition's *agent*. See [`DAEMON.md`](DAEMON.md) and
 [`DAEMON-JOBS.md`](DAEMON-JOBS.md).
+
+`commit-summary` is the file-handoff example: Claude, Codex, and Grok independently analyze
+commits from the past `DAYS` days (`7` by default), commit three reports, then each reads all
+three files and corrects its own report. Cursor Composer reads the corrected files and commits
+one `COMMIT-SUMMARY.md`. Run it with the default window or override it from the environment:
+
+```sh
+scsh run --def commit-summary
+DAYS=30 scsh run --def commit-summary
+```
 
 Failed steps retry automatically under a wall-clock budget with exponential backoff (see
 `scsh help def`, "Retries and resume"), and every job is presumed worth finishing: on
