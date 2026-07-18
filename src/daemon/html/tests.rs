@@ -1246,12 +1246,34 @@ fn global_skills_are_startable_from_the_run_page() {
 }
 
 #[test]
-fn every_start_form_carries_the_retries_budget() {
+fn start_forms_leave_retry_policy_to_the_daemon() {
   let js = live_client_js();
-  assert!(js.contains("function retriesRow"), "the start forms render a retries input");
-  assert!(js.contains(r#"id="job-retries" value="10""#), "…defaulting to 10");
-  assert!(js.contains("retries: jobRetries()"), "def starts post the budget");
-  assert!(js.contains("profile: name, retries: jobRetries()"), "…and so do global-profile starts");
+  assert!(!js.contains("job-retries"), "retry policy is daemon-owned, not a demo job parameter");
+  assert!(!js.contains("retries: jobRetries()"), "definition starts use the daemon default");
+}
+
+#[test]
+fn job_restart_history_appears_only_after_supervision_acts() {
+  let mut store = store_with_cast_proc(ProcStatus::Running);
+  let session = store.sessions.get_mut("castab").unwrap();
+  session.supervisor = crate::daemon::model::SupervisorState::fresh(25);
+  let fresh = session_page(&store, "castab").expect("fresh supervised session renders");
+  let fresh_markup = fresh.split("<script").next().unwrap();
+  assert!(!fresh_markup.contains("Job restarts</dt>"), "an unused policy is not job history");
+
+  let session = store.sessions.get_mut("castab").unwrap();
+  session.supervisor.next_retry_at = Some(u64::MAX);
+  let scheduled = session_page(&store, "castab").expect("scheduled restart renders");
+  assert!(scheduled.contains("Job restarts</dt><dd data-session-supervisor>1 of 25 · scheduled in"));
+
+  let session = store.sessions.get_mut("castab").unwrap();
+  session.supervisor.next_retry_at = None;
+  session.supervisor.job_attempt = 2;
+  let replacement = session_page(&store, "castab").expect("replacement run renders");
+  assert!(replacement.contains("Job restarts</dt><dd data-session-supervisor>1 of 25 · running replacement"));
+  let js = live_client_js();
+  assert!(js.contains("function syncSupervisorMeta"), "the initially absent row can appear on a live tick");
+  assert!(js.contains("syncSupervisorMeta(session, nowUnix);"));
 }
 
 #[test]

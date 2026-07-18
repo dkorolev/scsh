@@ -211,10 +211,10 @@ pub struct SkillMeta {
 /// Job restarts the supervisor may spend on one job before giving up. Every job gets
 /// this budget unless its start says otherwise (`scsh run --retries N`, or `"retries"`
 /// on `jobs/start`); `0` opts a job out of supervision entirely.
-pub const DEFAULT_JOB_RETRIES: u32 = 10;
+pub const DEFAULT_JOB_RETRIES: u32 = 25;
 /// Consecutive supervisor restarts failing with the SAME step + reason before the
 /// job-level breaker trips — scsh's own bug or a deterministic workflow failure should
-/// not burn ten fleets overnight.
+/// not burn the full restart budget overnight.
 pub const JOB_FAIL_STREAK_CAP: u32 = 3;
 
 /// Supervisor state for one session. Every job is first-class: the daemon restarts a

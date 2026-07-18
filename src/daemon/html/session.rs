@@ -215,26 +215,26 @@ fn annotation_target_link_html(
 /// it succeeded. A job started from the web UI has its planned tasks on `skills` before
 /// any proc registers, so the count is the larger of the two — never "0 tasks" on a
 /// freshly started job.
-/// The supervisor row of the session meta list. Every supervised job says what policy is
-/// in force — the morning reader never has to guess; a zero-budget job shows nothing.
+/// The supervisor row of the session meta list. Policy alone is not job history: keep a
+/// fresh first run quiet, then surface the restart budget once supervision acts on it.
 fn supervisor_meta_html(session: &Session, now: u64) -> String {
   let sup = &session.supervisor;
-  if !sup.supervised() && sup.gave_up.is_none() && sup.restarted_as.is_none() {
+  let attempt = sup.attempt();
+  if attempt == 1 && sup.next_retry_at.is_none() && sup.gave_up.is_none() && sup.restarted_as.is_none() {
     return String::new();
   }
-  let state = if let Some(why) = &sup.gave_up {
-    format!("gave up — {}", esc(why))
+  let (restarts, state) = if let Some(why) = &sup.gave_up {
+    (attempt.saturating_sub(1), format!("gave up — {}", esc(why)))
   } else if let Some(new_id) = &sup.restarted_as {
-    format!("restarted as <a href=\"/job/{id}\"><code class=\"job-id\">{id}</code></a>", id = esc(new_id))
+    (attempt, format!("continued as <a href=\"/job/{id}\"><code class=\"job-id\">{id}</code></a>", id = esc(new_id)))
   } else if let Some(at) = sup.next_retry_at {
     let wait = at.saturating_sub(now);
-    format!("restarting in {}", esc(&super::format::format_duration_secs(wait)))
+    (attempt, format!("scheduled in {}", esc(&super::format::format_duration_secs(wait))))
   } else {
-    "supervised".to_string()
+    (attempt.saturating_sub(1), "running replacement".to_string())
   };
   format!(
-    "<dt>Retries</dt><dd data-session-supervisor>attempt {attempt}/{max} · {state}</dd>\n",
-    attempt = sup.attempt(),
+    "<dt data-session-supervisor-label>Job restarts</dt><dd data-session-supervisor>{restarts} of {max} · {state}</dd>\n",
     max = sup.retries,
   )
 }

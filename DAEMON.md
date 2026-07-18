@@ -341,20 +341,22 @@ on the next tick and schedule normally — a 3am host reboot needs no adoption p
 Sessions persisted before the retries budget existed parse back to a zero budget, so a
 daemon upgrade never resurrects history.
 
-The one knob is the job's **retries budget** — 10 by default for every job, set per start
-with `scsh run --retries N`, the `retries` field on `jobs/start`, or the browser start
-form's retries input; `0` opts a job out of supervision. Eventually is not infinitely: the
+The job's **restart budget** is 25 by default, set explicitly with `scsh run --retries N`
+or the `retries` field on `jobs/start`; `0` opts a job out of supervision. Normal browser
+starts use the daemon policy instead of presenting it as a workflow parameter. Eventually
+is not infinitely: the
 chain stops loudly when any ceiling trips, with the reason in the session's supervisor
 state and the failures log:
 
-- **Retries budget**: `N` restarts per chain (default 10).
+- **Restart budget**: `N` restarts per chain (default 25).
 - **Job-level breaker**: 3 consecutive runs failing at the same step for the same reason —
   a deterministic failure (or an scsh bug), not a provider incident.
 - **A human's stop**: force-stopping a job cancels its supervision permanently; a manual
   stop IS supervision, and it wins.
 
-The job page's meta shows the policy in force (`Retries · attempt 3/10 · restarting in
-4m`, a link to the replacement session, or exactly why it gave up), and every decision is a
+The job page stays quiet until supervision acts, then shows restart history (`Job
+restarts · 2 of 25 · scheduled in 4m`, a link to the replacement session, or exactly why
+it gave up), and every decision is a
 `supervisor_scheduled` / `supervisor_restart` / `supervisor_gave_up` line in
 `scsh failures`. `SCSH_JOB_BACKOFF_INITIAL_SECS` shrinks the first delay for tests and
 RESILIENCE-DEMO.md.

@@ -1,8 +1,8 @@
 //! The job supervisor: every job is first-class and presumed worth finishing — the
 //! daemon itself restarts terminal failures, backed off, budgeted, and circuit-broken,
 //! so a job left overnight eventually pushes through or fails loudly with the whole
-//! story recorded. The one knob is the job's retries budget (default 10, `0` = fail
-//! fast), set at start from `scsh run --retries N` or the browser's start form.
+//! story recorded. The one knob is the job's retries budget (default 25, `0` = fail
+//! fast), set explicitly from `scsh run --retries N`; browser starts use the default.
 //!
 //! Two phases per tick. **Schedule** (under the store lock, pure over [`Store`]): a
 //! newly-failed supervised session gets `next_retry_at = now + backoff`, or a `gave_up`
@@ -36,6 +36,7 @@ fn job_backoff_secs(restarts_done: u32, salt: u64) -> u64 {
     .filter(|n| *n >= 1)
     .unwrap_or(5 * 60);
   crate::failure::RetryPolicy {
+    max_retries: u32::MAX,
     budget_secs: u64::MAX,
     backoff_initial_secs: initial,
     backoff_cap_secs: (60 * 60).max(initial),
@@ -111,7 +112,7 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
       &id,
       "supervisor_scheduled",
       "(supervisor)",
-      &format!("attempt {attempt}/{max} failed at {signature}; restarting in {delay}s"),
+      &format!("restart {attempt}/{max} scheduled after failure at {signature}; starting in {delay}s"),
     );
     dirty.push(id);
   }
@@ -150,8 +151,9 @@ pub fn fire_due(store: &Arc<Mutex<Store>>, now: u64) -> Vec<String> {
         "supervisor_restart",
         "(supervisor)",
         &format!(
-          "attempt {} restarted as {} ({mode})",
+          "restart {} of {} continued as {} ({mode})",
           s.supervisor.attempt(),
+          s.supervisor.retries,
           s.supervisor.restarted_as.as_deref().unwrap_or("?")
         ),
       );

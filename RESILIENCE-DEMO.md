@@ -2,10 +2,10 @@
 
 This verifies the job-supervision contract end to end **without containers or agent
 credentials**: every job is presumed worth finishing — one that keeps dying is restarted by
-the daemon's supervisor with backoff up to its retries budget (10 by default), the whole
+the daemon's supervisor with backoff up to its restart budget (25 by default), the whole
 chain is linked and logged, the identical-failure breaker gives up loudly, and a human's
-stop always wins. (Step-level retry budgets, backoff, and failure classification are
-covered by unit tests in `src/failure.rs` and `src/main.rs` — this harness exercises the
+stop always wins. (Task-level retry counters, time budgets, backoff, and failure
+classification are covered by unit tests in `src/failure.rs` and `src/main.rs` — this harness exercises the
 daemon layer above them.)
 
 Follow the steps in order and check each **Expect** line. Report PASS/FAIL per step.
@@ -48,7 +48,7 @@ sleep 25
 curl -s "localhost:7392/api/v1/session/$SID" | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s["lifecycle"], s.get("supervisor"))'
 ```
 
-**Expect:** lifecycle `failed`, and a `supervisor` object with `"retries": 10` (supervision
+**Expect:** lifecycle `failed`, and a `supervisor` object with `"retries": 25` (supervision
 is the default — nothing opted in), `"job_attempt": 1`, and either a `next_retry_at`
 timestamp or (if the restart already fired) `"restarted_as"` naming a new session id.
 
@@ -83,7 +83,7 @@ waiting longer adds none.
 "$SCSH_BIN" failures --last 30 | grep -E "supervisor_(scheduled|restart|gave_up)" | head
 ```
 
-**Expect:** `supervisor_scheduled` lines naming `attempt K/10 … restarting in Ns`,
+**Expect:** `supervisor_scheduled` lines naming `restart K/25 … starting in Ns`,
 `supervisor_restart` lines linking each restart, and one `supervisor_gave_up` line with the
 breaker's reason — the morning-after timeline, reconstructable from the log alone.
 
@@ -97,10 +97,10 @@ s = json.load(sys.stdin)
 if (s.get("supervisor") or {}).get("gave_up"): print(s["started_at"], s["id"])
 '
 done | sort -n | tail -1 | cut -d" " -f2)
-curl -s "localhost:7392/job/$LAST" | grep -o "Unattended</dt><dd[^<]*>[^<]*" | head -1
+curl -s "localhost:7392/job/$LAST" | grep -o "Job restarts</dt><dd[^<]*>[^<]*" | head -1
 ```
 
-**Expect:** the meta list shows an `Unattended` row reading `attempt 4/10 · gave up — 4
+**Expect:** the meta list shows a `Job restarts` row reading `3 of 25 · gave up — 4
 consecutive runs failed identically at …` (attempt number per your observed chain).
 
 ## 5. A human's stop cancels supervision permanently
@@ -121,17 +121,16 @@ way — a stop that arrives after the job settled still means stop.)
 ## 6. (Optional, real runtime) The overnight scenario, for real
 
 With a container runtime and agent credentials, run a real workflow and observe the full
-stack — 30m step budgets with backed-off in-run retries, and the supervisor behind them:
+stack — five task retries within a 30m budget, and the supervisor behind them:
 
 ```console
 "$SCSH_BIN" daemon stop && "$SCSH_BIN" daemon start     # real daemon, no stub
 cd "$REPO" && "$SCSH_BIN" run --def greet
 ```
 
-**Expect:** the job page's meta shows `Retries · attempt 1/10 · supervised` (pass
-`--retries 0` and the row disappears — that job is never restarted). If a step fails
-transiently mid-run, its retry row notes `retrying in ~Ns … (attempt K, retry budget Xm
-left)`; if the whole run is killed (`kill -9` its PID), the daemon restarts the job with
+**Expect:** the job page shows no restart row until supervision acts. If a task fails
+transiently mid-run, its retry row notes `retrying in ~Ns … (retry K of 5, … left)`; if
+the whole run is killed (`kill -9` its PID), the daemon restarts the job with
 `--resume-from`, restoring completed steps instantly and re-running only the frontier.
 
 ## Cleanup
