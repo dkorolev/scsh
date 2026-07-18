@@ -9,8 +9,11 @@ pub fn pkg_version() -> &'static str {
   env!("CARGO_PKG_VERSION")
 }
 
-/// Git short hash stamped at build time by `build.rs`; empty for a source-tarball build
-/// (e.g. `cargo install scsh` from crates.io), which has no `.git` to describe.
+/// Git short hash stamped at build time by `build.rs`: `git describe` in a checkout
+/// (with `-dirty` when the tree is not clean), or the release commit from the
+/// `.cargo_vcs_info.json` that cargo embeds in every published crate — so a
+/// `cargo install scsh` build reports the exact main commit it was cut from. Empty only
+/// when neither source knows the commit.
 ///
 /// Deliberately NOT a runtime `git describe`: an installed binary must report one stable
 /// identity, not borrow the git state of whatever directory it happens to run in. The old

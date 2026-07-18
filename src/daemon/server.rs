@@ -1003,7 +1003,16 @@ fn route(
     // actually serving (which may lag the installed CLI until a restart), not just the
     // caller's version.
     "/api/v1/version" => {
-      (200, format!("{{ \"version\": {} }}", quote(&crate::version::display())), "application/json", false)
+      // `commit` is the bare stamp (null when unknown); `version` keeps the human line
+      // (`1.30.3 (d5e2270)`) existing callers parse.
+      let commit = crate::version::git_stamp();
+      let commit_json = if commit.is_empty() { "null".to_string() } else { quote(&commit) };
+      (
+        200,
+        format!("{{ \"version\": {}, \"commit\": {commit_json} }}", quote(&crate::version::display())),
+        "application/json",
+        false,
+      )
     }
     // The match scrutinee is the query-stripped path, so query params must be read
     // from `req.path` — a `path.split_once("runtime=")` here can never match.
@@ -3103,6 +3112,15 @@ mod tests {
     assert!(!mutated);
     assert!(body.contains(crate::version::pkg_version()), "endpoint omits the version: {body}");
     assert!(body.contains("\"version\""), "{body}");
+    // The bare stamp rides alongside: a hash string in any stamped build, null otherwise.
+    assert!(body.contains("\"commit\""), "{body}");
+    let stamp = crate::version::git_stamp();
+    if stamp.is_empty() {
+      assert!(body.contains("\"commit\": null"), "{body}");
+    } else {
+      assert!(body.contains(&format!("\"commit\": \"{stamp}\"")), "{body}");
+    }
+    assert!(parse(&body).is_ok(), "version payload parses as JSON: {body}");
   }
 
   #[test]
