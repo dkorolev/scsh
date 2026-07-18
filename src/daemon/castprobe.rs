@@ -141,19 +141,19 @@ pub(crate) fn cast_probe_snapshot(store: &Store) -> Vec<CastProcSnapshot> {
 /// mode cleanly). Probes for procs that left the snapshot (evicted sessions) are dropped.
 pub(crate) fn probe_growth_messages(
   procs: &[CastProcSnapshot], probes: &mut HashMap<(String, usize), CastProbe>,
-) -> Vec<String> {
+) -> Vec<((String, usize), String)> {
   let mut out = Vec::new();
   for (session, index, cast_path, running) in procs {
     let key = (session.clone(), *index);
     if *running {
-      let probe = probes.entry(key).or_default();
+      let probe = probes.entry(key.clone()).or_default();
       probe.probe(Path::new(cast_path));
       if let Some(duration) = probe.take_growth() {
-        out.push(cast_growth_json(session, *index, duration, true));
+        out.push((key, cast_growth_json(session, *index, duration, true)));
       }
     } else if let Some(mut probe) = probes.remove(&key) {
       probe.probe(Path::new(cast_path));
-      out.push(cast_growth_json(session, *index, probe.duration(), false));
+      out.push((key, cast_growth_json(session, *index, probe.duration(), false)));
     }
   }
   probes.retain(|(session, index), _| procs.iter().any(|(s, i, _, _)| s == session && i == index));
@@ -255,8 +255,9 @@ mod tests {
     let snapshot = vec![("sess01".to_string(), 0usize, cast.clone(), true)];
     let msgs = probe_growth_messages(&snapshot, &mut probes);
     assert_eq!(msgs.len(), 1);
+    assert_eq!(msgs[0].0, ("sess01".to_string(), 0), "growth message is keyed for per-proc coalescing");
     assert_eq!(
-      msgs[0],
+      msgs[0].1,
       r#"{ "type": "cast_growth", "session": "sess01", "proc": 0, "duration": 0.5, "running": true }"#
     );
 
@@ -267,7 +268,7 @@ mod tests {
     let finished = vec![("sess01".to_string(), 0usize, cast.clone(), false)];
     let msgs = probe_growth_messages(&finished, &mut probes);
     assert_eq!(msgs.len(), 1);
-    assert!(msgs[0].contains("\"running\": false"));
+    assert!(msgs[0].1.contains("\"running\": false"));
     assert!(probes.is_empty());
     assert!(probe_growth_messages(&finished, &mut probes).is_empty(), "no repeat final message");
 
