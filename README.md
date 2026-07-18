@@ -246,6 +246,10 @@ under **`$SCSH_HOME/.skills/`** (default `~/.scsh/.skills/`), their profile bloc
 **global manifest** `$SCSH_HOME/.scsh.yml`, and each installed skill is symlinked into the
 user-level skills dir of every coding agent already present on the machine (`~/.claude/skills`,
 `~/.cursor/skills`, `~/.codex/skills`, ... — detected by their home dot-dirs; none are planted).
+Both global install commands refuse to proceed when one of those agent directories contains a
+real local copy of an `scsh`-managed skill: move or remove the shadow copy and rerun, and `scsh`
+will create a per-skill symlink to the canonical `$SCSH_HOME/.skills/` copy. This preflight occurs
+before the canonical skill files or manifest are changed.
 From then on, `scsh run`/`list`/`check-profile` in **any** git repo fall back to the global
 manifest for profiles the repo's own `.scsh.yml` does not declare (skill bodies are injected into
 the run clone, exactly like `--override-dot-scsh-yml` — the target repo stays clean), so the full
@@ -277,7 +281,9 @@ folder it finds (no manifest merge).
 
 Either way it wires up the five host symlinks (`.claude/skills`, `.codex/skills`,
 `.cursor/skills`, `.opencode/skills`, `.agents/skills` → `../.skills`), and never clobbers
-a file that differs from the source (an identical one is simply "already installed"). Use
+a file that differs from the source (an identical one is simply "already installed"). Both
+commands refuse before changing the repository when one of those host paths is a real local
+copy instead of a symlink; move or remove the conflicting path and rerun. Use
 `scsh updateskills [url]` to overwrite skill files and their existing manifest blocks with the source's version.
 
 The legacy flags `--help`/`-h`, `--version`/`-V`, and `--init-demo-project` still work as
