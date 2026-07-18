@@ -1,6 +1,6 @@
 [package]
 name = "scsh"
-version = "1.30.8"
+version = "1.31.0"
 edition = "2021"
 # Strictest requirement in the dependency graph (redb 4.1 needs 1.89); pinned so any
 # cargo new enough to parse the manifests (1.85+) reports that scsh itself needs 1.89
