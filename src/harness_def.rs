@@ -379,6 +379,10 @@ pub struct Step {
   pub retry_for: Option<u64>,
   /// Consecutive identical failures before this step's retry breaker trips.
   pub retry_signature_cap: Option<u32>,
+  /// Seconds the recorded screen may show nothing new before the watchdog kills this
+  /// step's run (`inactivity_timeout: 3600`). `None` = the harness default (30m). For
+  /// steps whose agent legitimately works quietly for long stretches (a big fix pass).
+  pub inactivity_timeout: Option<u64>,
 }
 
 /// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
@@ -822,11 +826,12 @@ fn validate_steps(
       "break",
       "retry_for",
       "retry_signature_cap",
+      "inactivity_timeout",
     ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, retry_for, retry_signature_cap)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, retry_for, retry_signature_cap, inactivity_timeout)"
         ));
       }
     }
@@ -910,6 +915,7 @@ fn validate_steps(
     let step_path = format!("steps.{id}");
     let retry_for = crate::config::parse_retry_for(&fm, &step_path, errors);
     let retry_signature_cap = crate::config::parse_retry_signature_cap(&fm, &step_path, errors);
+    let inactivity_timeout = crate::config::parse_positive_secs_at(&fm, &step_path, "inactivity_timeout", errors);
 
     if let (Some(agent), Some(task)) = (agent, task) {
       steps.push(Step {
@@ -927,6 +933,7 @@ fn validate_steps(
         break_loop,
         retry_for,
         retry_signature_cap,
+        inactivity_timeout,
       });
     }
   }
@@ -1622,6 +1629,15 @@ mod tests {
     let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
     assert_eq!(fix.needs, vec!["decide".to_string()]);
     assert!(fix.commits, "fixes come back as commits");
+    assert_eq!(fix.agent.harness, crate::config::Harness::Codex);
+    assert_eq!(fix.agent.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(fix.inactivity_timeout, Some(3600), "a healthy fix pass outlives the default novelty window");
+    assert!(fix.task.body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
+    assert!(
+      fix.outputs.iter().any(|o| o.name == "message" && o.ty == OutputType::String),
+      "one-line changes summary — the job-page headline"
+    );
+    assert!(fix.outputs.iter().any(|o| o.name == "actions" && o.ty == OutputType::String));
 
     // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();

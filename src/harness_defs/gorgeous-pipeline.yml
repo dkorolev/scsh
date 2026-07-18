@@ -307,8 +307,12 @@ steps:
     inputs:
       FEEDBACK: decide.change_request
     agent:
-      harness: cursor
-      model: auto
+      harness: codex
+      model: gpt-5.6-sol
+    # The heaviest step in the loop: one agent absorbing feedback from 15 reviewer routes.
+    # A healthy fix pass routinely thinks and edits quietly for longer than the default
+    # 30-minute novelty window, so it gets a doubled one.
+    inactivity_timeout: 3600
     prompt: |
       Address EVERY requested change in FEEDBACK: either change the code accordingly, or —
       when you judge a comment purely stylistic and the current code deliberate — append a
@@ -320,12 +324,20 @@ steps:
       headings. Commit your changes with the message `Address review feedback.` Never
       create any additional PR-description section for verification commands, expected
       results, or checklists; that evidence belongs in committed tests, README, or another
-      committed verification document. Write `actions` as several short paragraphs,
-      separated by blank lines: one paragraph for each reviewer profile and route whose
-      feedback you acted on, one paragraph for any deliberate STYLE-NOTES decision, and a
-      final paragraph for test results and the commit. Do not collapse distinct review
-      areas into one paragraph.
+      committed verification document. Narrate your progress in the terminal as you work:
+      print one short line when you take up each reviewer profile's feedback and after
+      each meaningful change (a file edited, a STYLE-NOTES decision recorded). A run whose
+      screen shows nothing new for too long is treated as stalled and killed — never work
+      silently for more than a few minutes at a stretch. Put a one-line summary of the
+      whole change set — what changed, how many files, the commit — in the `message`
+      result field. Write `actions` as several short paragraphs, separated by blank
+      lines: one paragraph for each reviewer profile and route whose feedback you acted
+      on, one paragraph for any deliberate STYLE-NOTES decision, and a final paragraph
+      for test results and the commit. Do not collapse distinct review areas into one
+      paragraph.
     output:
+      message:
+        type: string
       actions:
         type: string
     commits: true

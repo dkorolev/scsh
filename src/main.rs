@@ -1787,7 +1787,7 @@ fn step_invocation(
     retry_for: step.retry_for,
     retry_signature_cap: step.retry_signature_cap,
     timeout: None,
-    inactivity_timeout: None,
+    inactivity_timeout: step.inactivity_timeout,
     env: inputs
       .into_iter()
       .map(|(key, value)| config::EnvVar { key, rule: config::EnvRule::Constant(value) })
@@ -8368,8 +8368,8 @@ fn print_help_config() {
       timeout: 600        #     optional; seconds — kill the container & fail if exceeded
       inactivity_timeout: 1800 # optional; seconds the recorded screen may show nothing new
                           #       before the run is killed as stuck. Default 1800 (30 minutes).
-                          #       Per-route override
-                          #       under invocations: is allowed too.
+                          #       Per-route override under invocations: is allowed too, and a
+                          #       workflow def step takes the same key.
       env:                #     optional; host vars to forward (-e) into the container
         - A: ${A}         #       require A — refuse the skill if A is unset
         - B: ${B:-5}      #       forward B, or inject the default 5 when unset
@@ -9112,6 +9112,7 @@ steps:
     prompt: do it
     retry_for: 8h
     retry_signature_cap: 2
+    inactivity_timeout: 3600
     output:
       done:
         type: bool
@@ -9119,10 +9120,18 @@ steps:
     let def = harness_def::validate("wf", yml, harness_def::DefSource::Builtin).expect("valid def");
     assert_eq!(def.steps[0].retry_for, Some(8 * 3600));
     assert_eq!(def.steps[0].retry_signature_cap, Some(2));
+    assert_eq!(def.steps[0].inactivity_timeout, Some(3600));
 
     let bad = yml.replace("retry_for: 8h", "retry_for: whenever");
     let err = harness_def::validate("wf", &bad, harness_def::DefSource::Builtin).unwrap_err();
     assert!(err.iter().any(|e| e.contains("'steps.one.retry_for' must be a positive duration")), "{err:?}");
+
+    let bad = yml.replace("inactivity_timeout: 3600", "inactivity_timeout: soon");
+    let err = harness_def::validate("wf", &bad, harness_def::DefSource::Builtin).unwrap_err();
+    assert!(
+      err.iter().any(|e| e.contains("'steps.one.inactivity_timeout' must be an integer number of seconds")),
+      "{err:?}"
+    );
   }
 
   #[test]
@@ -9738,6 +9747,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       repeat: None,
       retry_for: None,
       retry_signature_cap: None,
+      inactivity_timeout: Some(3600),
       do_while: None,
       break_loop: false,
     };
@@ -9745,6 +9755,8 @@ Subject: [PATCH] add: 2 + 3 = 5
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
     assert_eq!(inv.result, "tmp/scsh/abcdef/summarize.json");
     assert_eq!(inv.artifacts, vec!["tmp/scsh/abcdef/summary.txt".to_string()]);
+    // The step's own novelty window rides into the invocation — the watchdog reads it from there.
+    assert_eq!(inv.inactivity_timeout, Some(3600));
     // Side files are not journaled in the cache, so artifact steps must always run live.
     let caller = repo("artifacts-nocache");
     assert!(cache_key(&caller, &inv, &[]).is_none(), "artifact steps must bypass the cache");
