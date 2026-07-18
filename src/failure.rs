@@ -104,12 +104,14 @@ pub fn verdict(reason: &str, tui: bool, first_attempt: bool) -> Verdict {
   Verdict::Permanent
 }
 
-/// Automatic-retry policy for one route: wall-clock budgeted (incidents are measured in
-/// hours, so retries are too — an attempt count is meaningless when one frozen attempt
-/// eats 30 watchdog minutes and another fails in 4 seconds), exponentially backed off
-/// with jitter, and circuit-broken on identical consecutive failures.
+/// Automatic-retry policy for one task: count- and wall-clock-budgeted, exponentially
+/// backed off with jitter, and circuit-broken on identical consecutive failures. The
+/// count is the primary user-facing ceiling; elapsed time prevents several slow attempts
+/// from holding a run indefinitely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RetryPolicy {
+  /// Automatic retries allowed for one task before the run escalates to the job supervisor.
+  pub max_retries: u32,
   /// Wall clock allowed for retries of one route, measured from its FIRST failure.
   pub budget_secs: u64,
   /// First backoff delay; doubles per retry up to [`RetryPolicy::backoff_cap_secs`].
@@ -120,11 +122,12 @@ pub struct RetryPolicy {
   pub signature_cap: u32,
 }
 
-/// Default in-run retry budget: most provider blips resolve within half an hour, and
-/// anything longer is the job supervisor's business — it restarts the whole job
+/// Default in-run retry policy: most provider blips resolve within five retries and half
+/// an hour, and anything longer is the job supervisor's business — it restarts the whole job
 /// (resuming completed steps) on its own backoff, so the two layers together ride out a
 /// multi-hour incident without one run holding containers all night.
 pub const DEFAULT_RETRY_BUDGET_SECS: u64 = 30 * 60;
+pub const DEFAULT_TASK_RETRIES: u32 = 5;
 pub const DEFAULT_RETRY_SIGNATURE_CAP: u32 = 5;
 pub const RETRY_BACKOFF_INITIAL_SECS: u64 = 60;
 pub const RETRY_BACKOFF_CAP_SECS: u64 = 15 * 60;
@@ -137,6 +140,7 @@ impl RetryPolicy {
     let env_budget = std::env::var("SCSH_RETRY_FOR").ok().and_then(|s| parse_duration_secs(&s));
     let env_cap = std::env::var("SCSH_RETRY_SIGNATURE_CAP").ok().and_then(|s| s.trim().parse().ok());
     RetryPolicy {
+      max_retries: DEFAULT_TASK_RETRIES,
       budget_secs: retry_for.or(env_budget).unwrap_or(DEFAULT_RETRY_BUDGET_SECS),
       backoff_initial_secs: RETRY_BACKOFF_INITIAL_SECS,
       backoff_cap_secs: RETRY_BACKOFF_CAP_SECS,
@@ -694,6 +698,7 @@ mod tests {
     std::env::remove_var("SCSH_RETRY_FOR");
     std::env::remove_var("SCSH_RETRY_SIGNATURE_CAP");
     let p = RetryPolicy::resolve(None, None);
+    assert_eq!(p.max_retries, DEFAULT_TASK_RETRIES);
     assert_eq!(p.budget_secs, DEFAULT_RETRY_BUDGET_SECS);
     assert_eq!(p.signature_cap, DEFAULT_RETRY_SIGNATURE_CAP);
     std::env::set_var("SCSH_RETRY_FOR", "45m");

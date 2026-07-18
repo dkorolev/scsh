@@ -802,7 +802,7 @@ struct Cli {
   /// survives under the named prior session (`$SCSH_HOME/sessions/<id>/results/`) and run
   /// only the steps that never completed — the restart path for a failed workflow job.
   resume_from: Option<String>,
-  /// `run --retries N`: this job's daemon-restart budget (default 10; 0 = never
+  /// `run --retries N`: this job's daemon-restart budget (default 25; 0 = never
   /// restarted). Propagated as `SCSH_RETRIES` so the session registers it.
   retries: Option<u32>,
   /// `run`/`list`/`check-profile --override-dot-scsh-yml <path>`: use this `.scsh.yml` (and its
@@ -1150,11 +1150,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         }
       }
       // `run --retries N`: how many times the daemon may restart this job after a
-      // terminal failure (resuming completed workflow steps). Every job gets 10 unless
+      // terminal failure (resuming completed workflow steps). Every job gets 25 unless
       // told otherwise; 0 opts out of supervision entirely.
       "--retries" => {
         i += 1;
-        let n = args.get(i).ok_or("--retries needs a count, e.g. --retries 10 (0 = never restart)")?;
+        let n = args.get(i).ok_or("--retries needs a count, e.g. --retries 25 (0 = never restart)")?;
         retries = Some(n.parse().map_err(|_| format!("bad --retries value '{n}'"))?);
         None
       }
@@ -1826,18 +1826,22 @@ enum RetryDecision {
 }
 
 /// One route's retry verdict for one failed attempt: browser restarts always win, the
-/// one schema-correction retry comes next, and everything else is the wall-clock
-/// contract — retryable per [`failure::verdict`], within the policy's budget (measured
-/// from the route's FIRST failure), and under its consecutive-identical-failure cap.
+/// one schema-correction retry comes next, and everything else is the task retry
+/// contract — retryable per [`failure::verdict`], within both its count and wall-clock
+/// budgets, and under its consecutive-identical-failure cap.
 #[allow(clippy::too_many_arguments)]
 fn retry_decision(
   fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
-  budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool, first_attempt: bool,
+  retries_used: u32, budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool,
+  first_attempt: bool,
 ) -> RetryDecision {
   if restart_requested {
     return RetryDecision::Browser;
   }
   if !retry_enabled {
+    return RetryDecision::Stop;
+  }
+  if retries_used >= policy.max_retries {
     return RetryDecision::Stop;
   }
   if fail_reason == Some(failure::reason::RESULT_INVALID) && schema_retry_available {
@@ -1860,8 +1864,8 @@ fn retry_decision(
 
 /// Per-route retry bookkeeping shared by the flat-fleet and workflow loops: when the
 /// route first failed (the budget clock), how many consecutive attempts failed with the
-/// same signature (the breaker), and how many automatic retries ran (the backoff
-/// exponent). The jitter salt is derived from the session and route identity, so a
+/// same signature (the breaker), and how many automatic retries ran (the count ceiling
+/// and backoff exponent). The jitter salt is derived from the session and route identity, so a
 /// fleet failing together fans back out deterministically.
 struct RouteRetryState {
   policy: failure::RetryPolicy,
@@ -1869,7 +1873,7 @@ struct RouteRetryState {
   first_failure_at: Option<Instant>,
   last_signature: Option<String>,
   consecutive_identical: u32,
-  auto_retries_used: u32,
+  retries_used: u32,
 }
 
 impl RouteRetryState {
@@ -1884,7 +1888,7 @@ impl RouteRetryState {
       first_failure_at: None,
       last_signature: None,
       consecutive_identical: 0,
-      auto_retries_used: 0,
+      retries_used: 0,
     }
   }
 
@@ -1910,10 +1914,18 @@ impl RouteRetryState {
     self.policy.budget_secs.saturating_sub(self.budget_spent_secs())
   }
 
+  fn retries_left(&self) -> u32 {
+    self.policy.max_retries.saturating_sub(self.retries_used)
+  }
+
+  fn record_immediate_retry(&mut self) {
+    self.retries_used += 1;
+  }
+
   /// The delay before the next automatic retry, advancing the backoff exponent.
   fn next_backoff_secs(&mut self) -> u64 {
-    let delay = self.policy.backoff_delay_secs(self.auto_retries_used, self.salt);
-    self.auto_retries_used += 1;
+    let delay = self.policy.backoff_delay_secs(self.retries_used, self.salt);
+    self.retries_used += 1;
     delay
   }
 
@@ -1945,7 +1957,7 @@ fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: us
 
 /// Run one workflow route with the same retry contract as a flat run. Every fresh harness
 /// execution gets a fresh proc row linked to its predecessor: automatic retries with
-/// exponential backoff for as long as the route's wall-clock budget allows (unless the
+/// exponential backoff for as long as the task's count and wall-clock budgets allow (unless the
 /// identical-failure breaker trips first), one schema-correction retry, and unlimited
 /// explicit browser restarts.
 #[allow(clippy::too_many_arguments)]
@@ -1997,6 +2009,7 @@ fn run_workflow_step_with_retries(
       restart_requested,
       !schema_retry_used,
       retry.policy,
+      retry.retries_used,
       retry.budget_spent_secs(),
       retry.consecutive_identical,
       failure::retry_enabled(),
@@ -2028,6 +2041,7 @@ fn run_workflow_step_with_retries(
     };
     failure::log_retry(session_id, &invocation.name, invocation.harness.as_str(), invocation.model.as_deref(), reason);
     if decision == RetryDecision::Schema {
+      retry.record_immediate_retry();
       schema_retry_used = true;
       let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
       repaired_invocation = Some(schema_repair_invocation(invocation, error));
@@ -2070,14 +2084,18 @@ fn run_workflow_step_with_retries(
     if decision == RetryDecision::Automatic {
       let delay = retry.next_backoff_secs();
       proc.note(&format!(
-        "retrying in ~{} after {reason} (attempt {}, retry budget {} left)",
+        "retrying in ~{} after {reason} (retry {} of {}, {} and {} retries left)",
         ui::clock::format_elapsed(delay as f64),
-        attempts + 1,
+        retry.retries_used,
+        retry.policy.max_retries,
         ui::clock::format_elapsed(retry.budget_left_secs() as f64),
+        retry.retries_left(),
       ));
       if backoff_sleep_interruptible(delay, session_id, proc_index) {
         proc.note("retrying now (browser restart)");
       }
+    } else if decision == RetryDecision::Schema {
+      proc.note(&format!("retrying after {reason} (retry {} of {})", retry.retries_used, retry.policy.max_retries));
     } else {
       proc.note(&format!("retrying after {reason}"));
     }
@@ -3983,6 +4001,7 @@ fn build_and_run(
               restart_requested,
               false,
               retry.policy,
+              retry.retries_used,
               retry.budget_spent_secs(),
               retry.consecutive_identical,
               failure::retry_enabled(),
@@ -4024,10 +4043,12 @@ fn build_and_run(
             if decision == RetryDecision::Automatic {
               let delay = retry.next_backoff_secs();
               proc.note(&format!(
-                "retrying in ~{} after {reason} (attempt {}, retry budget {} left)",
+                "retrying in ~{} after {reason} (retry {} of {}, {} and {} retries left)",
                 ui::clock::format_elapsed(delay as f64),
-                attempts + 1,
+                retry.retries_used,
+                retry.policy.max_retries,
                 ui::clock::format_elapsed(retry.budget_left_secs() as f64),
+                retry.retries_left(),
               ));
               if backoff_sleep_interruptible(delay, session_ref, proc_index) {
                 proc.note("retrying now (browser restart)");
@@ -8615,9 +8636,9 @@ fn print_help_defs() {
   println!();
   println!("{}", h_head("Retries and resume"));
   print!(
-    r#"  A failed step retries automatically — fresh clone, fresh container, a new attempt row
-  linked to the failed one — for as long as its wall-clock retry budget allows (default
-  30m; provider incidents are measured in hours, so retries are too). Retryable:
+    r#"  A failed task retries automatically — fresh clone, fresh container, a new attempt row
+  linked to the failed one — up to 5 times and for at most its wall-clock retry budget
+  (default 30m). Retryable:
   container/runtime trouble, provider overload/disconnects, and non-zero harness exits (a
   harness dying at startup is infrastructure). Retries back off exponentially with jitter;
   a route failing the SAME way 5 times in a row trips a circuit breaker instead of burning
@@ -8626,8 +8647,8 @@ fn print_help_defs() {
   with SCSH_RETRY_FOR / SCSH_RETRY_SIGNATURE_CAP; SCSH_NO_RETRY=1 disables everything.
   Beyond one run, every job is presumed worth finishing: on terminal failure the daemon
   restarts it (resuming completed workflow steps) with 5m→60m backoff, up to the job's
-  retries budget — 10 by default, `scsh run --retries N` or the browser start form's
-  retries field to change it, 0 to opt out — stopping early after 3 identical job
+  restart budget — 25 by default, or `scsh run --retries N`, 0 to opt out — stopping
+  early after 3 identical job
   failures or a human's Force stop.
   scsh run --def <name> --resume-from <session>   restores every step whose validated result
   the named session already produced (loop iterations included, commits already on the branch)
@@ -8801,50 +8822,63 @@ mod tests {
   fn retry_decision_is_budgeted_breaker_capped_and_browser_restarts_always_win() {
     use RetryDecision::{Automatic, Browser, Schema, Stop, StopBreaker};
     let policy = failure::RetryPolicy {
+      max_retries: 5,
       budget_secs: 30 * 60,
       backoff_initial_secs: 60,
       backoff_cap_secs: 15 * 60,
       signature_cap: 5,
     };
-    let decide = |reason: &'static str, spent: u64, identical: u32| {
-      retry_decision(Some(reason), false, false, policy, spent, identical, true, true, true)
+    let decide = |reason: &'static str, retries: u32, spent: u64, identical: u32| {
+      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true)
     };
 
     // A harness dying with a non-zero exit is retryable — a silent crash at container
     // startup is infrastructure, and both real 2026-07-16 pipeline failures were exactly
-    // that. Budget is wall clock, not an attempt count: retries continue while time is
-    // left and stop the moment it is spent.
-    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 1), Automatic);
-    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 29 * 60, 1), Automatic);
-    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 30 * 60, 1), Stop);
-    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 1), Automatic);
+    // that. Both ceilings apply: retry number five may run while time remains, then the
+    // count stops a sixth retry; a slow sequence can exhaust the wall clock first.
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 0, 1), Automatic);
+    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 4, 29 * 60, 1), Automatic);
+    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 5, 0, 1), Stop);
+    assert_eq!(decide(failure::reason::CONTAINER_TIMEOUT, 0, 30 * 60, 1), Stop);
+    assert_eq!(decide(failure::reason::HARNESS_DISCONNECTED, 0, 0, 1), Automatic);
     // The identical-failure breaker trips ahead of the budget, with its own verdict.
-    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 5), Automatic);
-    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 6), StopBreaker);
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 0, 5), Automatic);
+    assert_eq!(decide(failure::reason::HARNESS_NONZERO, 0, 0, 6), StopBreaker);
     // Non-transient reasons fail fast in-run; the job supervisor's restarts own them.
-    assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 1), Stop);
+    assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 0, 1), Stop);
     // The one schema-correction retry precedes the budget logic.
     assert_eq!(
-      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 1, true, true, true),
+      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true),
       Schema
     );
     // SCSH_NO_RETRY (retry_enabled=false) stops everything except explicit browser clicks.
     assert_eq!(
-      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 1, false, true, true),
+      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 0, 1, false, true, true),
       Stop
     );
     assert_eq!(
-      retry_decision(Some(failure::reason::HARNESS_NONZERO), true, false, policy, u64::MAX, 99, false, true, true),
+      retry_decision(
+        Some(failure::reason::HARNESS_NONZERO),
+        true,
+        false,
+        policy,
+        u32::MAX,
+        u64::MAX,
+        99,
+        false,
+        true,
+        true,
+      ),
       Browser,
       "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
     );
     // First-attempt auth rejection is permanent; on a later attempt it is flakiness.
     assert_eq!(
-      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 1, true, true, true),
+      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 0, 1, true, true, true),
       Stop
     );
     assert_eq!(
-      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 1, true, true, false),
+      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 0, 1, true, true, false),
       Automatic
     );
   }

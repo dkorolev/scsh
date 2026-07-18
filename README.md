@@ -229,11 +229,11 @@ scsh run --def commit-summary
 DAYS=30 scsh run --def commit-summary
 ```
 
-Failed steps retry automatically under a wall-clock budget with exponential backoff (see
-`scsh help def`, "Retries and resume"), and every job is presumed worth finishing: on
+Failed tasks retry automatically up to five times under a wall-clock budget with
+exponential backoff (see `scsh help def`, "Retries and resume"), and every job is presumed worth finishing: on
 terminal failure the daemon's supervisor restarts it — resuming completed workflow steps —
-up to the job's retries budget (10 by default; `scsh run --retries N` or the browser start
-form to change it, 0 to opt out). A failed workflow job also restarts by hand from the
+up to the job's restart budget (25 by default; `scsh run --retries N`, or 0 to opt out).
+A failed workflow job also restarts by hand from the
 browser — "Restart remaining" reuses every completed step's result — or from the console
 with `--resume-from <session>`. See [`RESILIENCE-DEMO.md`](RESILIENCE-DEMO.md) for the
 agent-followable walkthrough.
