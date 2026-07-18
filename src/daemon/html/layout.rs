@@ -317,6 +317,10 @@ pub(crate) const PAGE_CSS: &str = r#"
 
   /* ── tables ── */
   .table-scroll { overflow-x: auto; width: 100%; margin-bottom: 0.5rem; }
+  /* Stats tab: failure-rate color speaks first; the key column keeps route names on one line. */
+  .stats-table .stats-key { white-space: nowrap; }
+  .stats-table .stats-fail-high { color: var(--red); font-weight: 700; }
+  .stats-table .stats-fail-some { color: var(--orange); }
   table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
   thead tr { border-bottom: 1px solid var(--border); }
   tbody tr { border-bottom: 1px solid rgba(42,49,64,0.7); }
