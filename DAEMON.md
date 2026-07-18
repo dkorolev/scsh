@@ -5,6 +5,11 @@ numeric keypad) that collects events from every `scsh run` and renders them as a
 web UI. Terminal scrollback is painful for parallel container output; the session browser is
 the easier way to read build logs, harness output, and per-skill results.
 
+The daemon serves the **local machine only**. It accepts connections on every interface so a
+remote caller gets an explicit `403` denial ("scsh daemon serves the local machine only")
+rather than a silent connection refusal, but it turns away every non-loopback peer before
+reading the request — only clients on the host itself are ever served.
+
 ## Commands
 
 ```console

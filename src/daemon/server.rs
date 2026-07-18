@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::io::{Read, Write};
-use std::net::{TcpListener, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -127,7 +127,11 @@ impl Server {
       queue.save(self.port);
     }
 
-    let addr = format!("127.0.0.1:{}", self.port);
+    // Serve the local machine only. We bind every interface rather than just loopback so a
+    // remote caller gets an explicit, readable denial (see [`peer_is_local`]) instead of a
+    // silent connection refusal — every non-loopback peer is turned away in `handle_connection`
+    // before its request is read or routed.
+    let addr = format!("0.0.0.0:{}", self.port);
     let listener = TcpListener::bind(&addr)?;
     listener.set_nonblocking(true)?;
     let pid_path = pid_file(self.port);
@@ -425,12 +429,31 @@ fn settle_dead_run_pids(store: &mut Store, now: u64) -> Vec<String> {
 /// Handle one request. Returns `(mutated, session_id)`: `mutated` drives the persist + WS
 /// refresh, and `session_id` (extracted from a mutating POST body) is the one session to
 /// write through to the store DB — so a mutation persists just that session, not the store.
+/// Whether a connecting peer is on the local machine and may be served. Loopback covers both
+/// families — `127.0.0.0/8` and IPv6 `::1` — so a browser reaching `localhost` over either is
+/// served, while anything arriving over a routable interface is denied.
+fn peer_is_local(peer: SocketAddr) -> bool {
+  peer.ip().is_loopback()
+}
+
 fn handle_connection(
   mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
   ws_dirty: &AtomicBool,
 ) -> std::io::Result<(bool, Option<String>)> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
+  // The daemon serves the local machine only. Turn away any non-loopback peer here — before
+  // the request is read or routed — with a clear denial instead of the silent connection
+  // refusal a loopback-only bind would give (see the listener bind for why we bind wider).
+  match stream.peer_addr() {
+    Ok(peer) if peer_is_local(peer) => {}
+    peer => {
+      let from = peer.map(|p| p.ip().to_string()).unwrap_or_else(|_| "an unknown address".to_string());
+      let body = format!("scsh daemon serves the local machine only.\nThis request came from {from} and was denied.\n");
+      write_response(&mut stream, 403, &body, "text/plain; charset=utf-8")?;
+      return Ok((false, None));
+    }
+  }
   stream.set_read_timeout(Some(Duration::from_secs(5)))?;
   let req = read_request(&mut stream)?;
   if websocket::wants_upgrade(&req.method, &req.path, &req.headers) {
@@ -2915,6 +2938,7 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str, content_type:
   let status_text = match status {
     200 => "OK",
     400 => "Bad Request",
+    403 => "Forbidden",
     404 => "Not Found",
     405 => "Method Not Allowed",
     _ => "Error",
@@ -2962,6 +2986,35 @@ mod tests {
   use std::io::Write;
   use std::net::TcpListener;
   use std::thread;
+
+  #[test]
+  fn peer_is_local_serves_loopback_only() {
+    // Loopback over either family is the local machine and is served.
+    assert!(peer_is_local("127.0.0.1:7274".parse().unwrap()));
+    assert!(peer_is_local("127.0.0.5:7274".parse().unwrap()));
+    assert!(peer_is_local("[::1]:7274".parse().unwrap()));
+    // Anything arriving over a routable interface is not local and is denied.
+    assert!(!peer_is_local("192.168.1.10:7274".parse().unwrap()));
+    assert!(!peer_is_local("10.0.0.4:7274".parse().unwrap()));
+    assert!(!peer_is_local("203.0.113.7:7274".parse().unwrap()));
+    assert!(!peer_is_local("[2001:db8::1]:7274".parse().unwrap()));
+  }
+
+  #[test]
+  fn write_response_labels_forbidden() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = thread::spawn(move || {
+      let (mut server, _) = listener.accept().unwrap();
+      write_response(&mut server, 403, "denied\n", "text/plain; charset=utf-8").unwrap();
+    });
+    let mut client = std::net::TcpStream::connect(addr).unwrap();
+    let mut buf = String::new();
+    client.read_to_string(&mut buf).unwrap();
+    handle.join().unwrap();
+    assert!(buf.starts_with("HTTP/1.1 403 Forbidden\r\n"), "got: {buf}");
+    assert!(buf.contains("denied\n"));
+  }
 
   #[test]
   fn read_request_reads_body_after_split_header() {
