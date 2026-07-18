@@ -40,7 +40,7 @@ All symlinks point at this directory so one edit updates every host.
 | [multiply](multiply/SKILL.md) | Product of `X`·`Y` with **no defaults** — errors if either `X` or `Y` is unset |
 | [demo-pr](demo-pr/SKILL.md) | Minimal fake PR: write `demo_pr_note.txt` + `PR-DESCRIPTION.md`, two commits (packdiff Description panel) |
 
-The root `.scsh.yml` is the source of truth for the beautiful skills' profiles and the 15 reviewer routes. The `add` and `multiply` reference examples are scaffolded by `scsh init-demo-project`; the code-review loop's deliberately imperfect word-counting project is scaffolded by `scsh init-beautiful-demo`. See [`DEMO.md`](../DEMO.md) and [`DEMO-BEAUTIFUL-LOOP.md`](../DEMO-BEAUTIFUL-LOOP.md).
+The root `.scsh.yml` is the source of truth for the beautiful skills' profiles and the 15 reviewer routes. The `add` and `multiply` reference examples are scaffolded by `scsh init-demo-project`. See [`DEMO.md`](../DEMO.md).
 
 ## Adding a skill
 

@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and the workflow demos are always
 /// available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 18] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -36,7 +36,6 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
     ("demo-loop-repeat", include_str!("harness_defs/demo-loop-repeat.yml")),
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
     ("demo-loop-break", include_str!("harness_defs/demo-loop-break.yml")),
-    ("demo-beautiful-loop", include_str!("harness_defs/demo-beautiful-loop.yml")),
     ("gorgeous-pipeline", include_str!("harness_defs/gorgeous-pipeline.yml")),
     ("big-beautiful-build", include_str!("harness_defs/big-beautiful-build.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
@@ -1615,8 +1614,8 @@ mod tests {
   #[test]
   fn builtin_gorgeous_pipeline_reviews_the_current_branch_in_a_loop() {
     let def = builtin("gorgeous-pipeline");
-    // demo-beautiful-loop minus the scaffolded `implement` step: the branch already
-    // carries the work, so the pipeline starts at `prepare`.
+    // No scaffolding step: the branch already carries the work, so the pipeline
+    // starts at `prepare`.
     assert_eq!(def.steps.len(), 34);
     assert!(def.steps.iter().all(|s| s.id != "implement"), "no scaffolding step");
 
@@ -1704,122 +1703,6 @@ mod tests {
       !source.to_ascii_lowercase().contains("fantastic"),
       "the Gorgeous workflow must never invoke or depend on Fantastic logic"
     );
-  }
-
-  #[test]
-  fn builtin_beautiful_loop_demo_wires_a_review_panel_do_while() {
-    let def = builtin("demo-beautiful-loop");
-    assert_eq!(def.steps.len(), 35);
-
-    let implement = def.steps.iter().find(|s| s.id == "implement").unwrap();
-    let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
-    let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
-    assert!(implement.needs.is_empty() && implement.commits);
-    assert_eq!(prepare.needs, vec!["implement".to_string()]);
-    assert_eq!(fix.needs, vec!["decide".to_string()]);
-    for coder in [implement, prepare, fix] {
-      assert_eq!(coder.agent.harness, crate::config::Harness::Cursor);
-      assert_eq!(coder.agent.model.as_deref(), Some("auto"));
-      assert!(coder.commits);
-    }
-    for heading in ["## Summary", "## What This Changes", "## Implementation Details"] {
-      assert!(prepare.task.body().contains(heading), "prepare pins {heading}");
-      assert!(fix.task.body().contains(heading), "fix preserves {heading}");
-    }
-    assert!(fix.task.body().contains("required demo artifact"));
-
-    let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
-    let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
-    assert_eq!(initial.len(), 15);
-    assert_eq!(reviewers.len(), 15);
-    for profile in ["conventions", "justification", "reviewability", "sanity", "testing"] {
-      assert_eq!(initial.iter().filter(|r| r.id.starts_with(&format!("initial_{profile}_"))).count(), 3);
-      assert_eq!(reviewers.iter().filter(|r| r.id.starts_with(&format!("review_{profile}_"))).count(), 3);
-    }
-    for r in initial.iter().chain(&reviewers) {
-      let expected_need = match r.id.as_str() {
-        "initial_testing_cursor" => "initial_conventions_cursor",
-        "initial_sanity_cursor" => "initial_justification_cursor",
-        "review_testing_cursor" => "review_conventions_cursor",
-        "review_sanity_cursor" => "review_justification_cursor",
-        id if id.starts_with("initial_") => "prepare",
-        _ => "fix",
-      };
-      assert_eq!(r.needs, vec![expected_need.to_string()]);
-      assert!(!r.commits, "reviewers are read-only");
-      if r.id.ends_with("_opus") {
-        assert_eq!(r.agent.harness, crate::config::Harness::Claude);
-        assert_eq!(r.agent.model.as_deref(), Some("claude-opus-4-8"));
-        assert!(r.agent.effort.is_none());
-      } else if r.id.ends_with("_terra") {
-        assert_eq!(r.agent.harness, crate::config::Harness::Codex);
-        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-terra"));
-        assert_eq!(r.agent.effort.as_deref(), Some("high"));
-      } else {
-        assert!(r.id.ends_with("_cursor"));
-        assert_eq!(r.agent.harness, crate::config::Harness::Cursor);
-        assert_eq!(r.agent.model.as_deref(), Some("auto"));
-        assert!(r.agent.effort.is_none());
-      }
-      let grade = r.outputs.iter().find(|o| o.name == "grade").expect("every reviewer grades");
-      assert_eq!(grade.ty, OutputType::Enum);
-      assert_eq!(grade.choices, ["excellent", "good", "average", "poor"]);
-      assert!(r.outputs.iter().any(|o| o.name == "comments" && o.ty == OutputType::StringList));
-      assert!(!r.outputs.iter().any(|o| o.name == "comment_count"));
-      let prompt_words = r.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
-      assert!(
-        prompt_words.contains("`grade` as a string") && prompt_words.contains("`comments` as an array"),
-        "{} must state the distinct grade and comments types without ambiguity",
-        r.id
-      );
-      assert!(
-        r.task.body().contains("Never request, recommend, or create any")
-          && r.task.body().contains("additional PR-description section"),
-        "{} must enforce the PR-description policy at the reviewer boundary",
-        r.id
-      );
-      if r.id.contains("testing") {
-        assert!(r.task.body().contains("PR-DESCRIPTION.md is") && r.task.body().contains("change narrative only"));
-      }
-      if r.id.contains("reviewability") {
-        assert!(r.task.body().contains("required demo artifact"));
-      }
-    }
-    for prefix in ["initial", "review"] {
-      let direct_cursor_reviewers = reviewers
-        .iter()
-        .chain(&initial)
-        .filter(|r| {
-          r.id.starts_with(prefix)
-            && r.id.ends_with("_cursor")
-            && r.needs[0] == if prefix == "initial" { "prepare" } else { "fix" }
-        })
-        .count();
-      assert_eq!(direct_cursor_reviewers, 3, "{prefix} review round must open exactly three Cursor lanes");
-    }
-
-    let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
-    let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
-    assert_eq!(decide.agent.harness, crate::config::Harness::Cursor);
-    assert!(decide.break_loop);
-    assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
-    assert_eq!(collect.do_while.as_deref(), Some("decide"));
-    assert!(collect.outputs.iter().any(|o| o.name == "approved" && o.ty == OutputType::Bool));
-    assert!(collect.outputs.iter().any(|o| o.name == "feedback"));
-    for boundary in [prepare, decide, fix, collect] {
-      assert!(
-        boundary.task.body().contains("additional") && boundary.task.body().contains("PR-description section"),
-        "{} must preserve the PR-description invariant",
-        boundary.id
-      );
-    }
-    let body = do_while_body(&def.steps, collect);
-    assert_eq!(body.len(), 18);
-    assert_eq!(body.first(), Some(&"decide"));
-    assert_eq!(body.last(), Some(&"collect"));
-    assert!(body.contains(&"fix"));
-    assert!(reviewers.iter().all(|r| body.contains(&r.id.as_str())));
-    assert!(collect.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
   }
 
   #[test]

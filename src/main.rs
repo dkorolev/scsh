@@ -64,7 +64,6 @@ fn run(args: &[String]) -> i32 {
       0
     }
     Mode::InitDemo => init_demo(),
-    Mode::InitBeautifulDemo => init_beautiful_demo(),
     Mode::Demo { name } => demo_cmd(name.as_deref()),
     Mode::InstallSkills => install_skills(false, &cli.sources, cli.global),
     Mode::UpdateSkills => install_skills(true, &cli.sources, cli.global),
@@ -632,7 +631,6 @@ enum Mode {
   Help(HelpTopic),
   Version,
   InitDemo,
-  InitBeautifulDemo,
   InstallSkills,
   UpdateSkills,
   List,
@@ -719,7 +717,6 @@ const COMMAND_NAMES: &[&str] = &[
   "check-profile",
   "probe",
   "init-demo-project",
-  "init-beautiful-demo",
   "demo",
   "installskills",
   "updateskills",
@@ -743,7 +740,6 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "check-profile" | "checkprofile" => "check-profile",
     "probe" => "probe",
     "init-demo-project" | "init" | "init-demo" => "init-demo-project",
-    "init-beautiful-demo" | "init-beautiful-demo-project" => "init-beautiful-demo",
     "demo" | "demos" => "demo",
     "installskills" | "install-skills" => "installskills",
     "updateskills" | "update-skills" => "updateskills",
@@ -938,7 +934,6 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         None
       }
       "init-demo-project" | "init" | "--init-demo-project" => Some(Mode::InitDemo),
-      "init-beautiful-demo" | "init-beautiful-demo-project" => Some(Mode::InitBeautifulDemo),
       // `demo [name]`: print an embedded, agent-followable walkthrough verbatim to stdout —
       // the markdown IS the interface, no checkout path needed. No name lists the demos.
       "demo" | "demos" => {
@@ -6703,92 +6698,6 @@ fn init_demo() -> i32 {
   0
 }
 
-/// Create the small, deliberately imperfect repository consumed by the built-in
-/// `demo-beautiful-loop` workflow. Unlike `init-demo-project`, this scaffold needs no
-/// `.scsh.yml`: its next command is `scsh run --def demo-beautiful-loop`.
-fn init_beautiful_demo() -> i32 {
-  if runtime::which("git").is_none() {
-    fail("git is not installed or not on PATH");
-    hint(install_git_hint());
-    return 1;
-  }
-  let root = match git_root() {
-    Ok(r) => r,
-    Err(_) => {
-      fail("not inside a git repository");
-      hint(&format!("create one here with: {}", bold("git init .")));
-      return 1;
-    }
-  };
-  let dirty = uncommitted_changes(&root);
-  let tracked = git_capture(&root, &["ls-files"]).unwrap_or_default();
-  if !dirty.is_empty() || !tracked.trim().is_empty() {
-    fail("the beautiful demo scaffold needs a clean, empty git repository");
-    for path in tracked.lines().chain(dirty.iter().map(String::as_str)).take(10) {
-      hint(&format!("already present: {path}"));
-    }
-    hint("create a fresh directory, run `git init`, then run `scsh init-beautiful-demo`");
-    return 1;
-  }
-
-  let files = [
-    ("wordstats.py", include_str!("demo_beautiful/wordstats.py"), true),
-    ("test_wordstats.py", include_str!("demo_beautiful/test_wordstats.py"), false),
-    ("README.md", include_str!("demo_beautiful/README.md"), false),
-    ("CONTRIBUTING.md", include_str!("demo_beautiful/CONTRIBUTING.md"), false),
-  ];
-  for (rel, _, _) in files {
-    if root.join(rel).exists() {
-      fail(&format!("{rel} already exists — not overwriting"));
-      hint("use a fresh repository for the beautiful-loop demo");
-      return 1;
-    }
-  }
-
-  match ensure_tmp_gitignored(&root) {
-    Ok(true) => ok("added '/tmp' to .gitignore"),
-    Ok(false) => {}
-    Err(e) => {
-      fail(&format!("could not update .gitignore: {e}"));
-      return 1;
-    }
-  }
-
-  let mut staged = vec![".gitignore".to_string()];
-  for (rel, body, executable) in files {
-    let dest = root.join(rel);
-    if let Err(e) = std::fs::write(&dest, body) {
-      fail(&format!("could not write {}: {e}", dest.display()));
-      return 1;
-    }
-    #[cfg(unix)]
-    if executable {
-      use std::os::unix::fs::PermissionsExt;
-      if let Err(e) = std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(0o755)) {
-        fail(&format!("could not make {} executable: {e}", dest.display()));
-        return 1;
-      }
-    }
-    staged.push(rel.to_string());
-  }
-  ok("scaffolded the beautiful-loop word-counting project");
-
-  match commit_scaffold(&root, &staged, "Add beautiful loop demo scaffold.") {
-    Ok(()) => {
-      ok("committed the scaffold");
-      println!("\nThe project is committed and clean. Next:");
-      println!("  {}", bold("python3 -m unittest -v"));
-      println!("  {}", bold("scsh run --def demo-beautiful-loop"));
-      0
-    }
-    Err(e) => {
-      fail(&format!("could not commit the beautiful demo scaffold: {e}"));
-      hint("configure git user.name and user.email, commit the scaffold, then run the workflow");
-      1
-    }
-  }
-}
-
 /// Commit the freshly-scaffolded project so the working tree is clean and the very
 /// next `scsh` can run (a real run clones COMMITTED state). Stages only `paths`
 /// (never `git add -A`), so unrelated work already in the repo is left untouched.
@@ -6923,7 +6832,7 @@ fn install_skills(overwrite: bool, sources: &[String], global: bool) -> i32 {
     hint(
       "delivery-pipeline skills install from source: scsh installskills https://github.com/dkorolev/beautiful-skills",
     );
-    hint("run /scsh-harness-demo-and-selftest for the basic harness demo, or `scsh run --def demo-beautiful-loop` for the review loop");
+    hint("run /scsh-harness-demo-and-selftest for the basic harness demo, or `scsh run --def gorgeous-pipeline` for the review loop");
   }
   0
 }
@@ -8036,11 +7945,6 @@ fn print_help_command(name: &str) {
       "scsh init-demo-project",
       &[("(no flags)", "Write and commit a small demo .scsh.yml + skills into the current dir.")],
     ),
-    "init-beautiful-demo" => (
-      "scaffold the code-review loop demo",
-      "scsh init-beautiful-demo",
-      &[("(no flags)", "Write and commit the tiny word-counting project used by demo-beautiful-loop.")],
-    ),
     "demo" => (
       "print an embedded agent-followable walkthrough",
       "scsh demo [name]",
@@ -8203,7 +8107,6 @@ fn print_help_overview() {
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
   help_row("probe [profile…]", "Exit 0 when at least one harness·model route is runnable on this host.");
   help_row("init-demo-project", "Scaffold and commit a demo project.");
-  help_row("init-beautiful-demo", "Scaffold and commit the code-review loop demo.");
   help_row("demo [name]", "Print an embedded agent-followable walkthrough (no name lists them).");
   help_row("installskills [url…]", "Install skills (bundled or from git URLs); --global installs machine-wide.");
   help_row("updateskills [url…]", "Reinstall skills, overwriting local copies (--global for the machine-wide set).");
@@ -8664,11 +8567,9 @@ fn print_help_defs() {
   help_row("demo-loop-repeat", "Fixed loop: increment and commit number.txt three times.");
   help_row("demo-loop-do-while", "Agent-driven loop: increment until a compare step says stop.");
   help_row("demo-loop-break", "Early exit: check first, then skip the rest of the loop body.");
-  help_row("demo-beautiful-loop", "Review loop: initial panel -> decide -> fix -> fresh panel; decide can break");
-  help_cont("before any fix. Feedback rides the loop-carried channel, so review comments never");
-  help_cont("enter git history.");
   help_row("gorgeous-pipeline", "The review loop on YOUR branch: prepare PR-DESCRIPTION.md, then the 15-route");
   help_cont("Opus/Codex/Cursor fleet loops decide -> fix -> review until the approval bar is met.");
+  help_cont("Feedback rides the loop-carried channel, so review comments never enter git history.");
   println!();
 }
 
@@ -9766,20 +9667,21 @@ Subject: [PATCH] add: 2 + 3 = 5
   fn resolve_input_falls_back_to_the_previous_loop_iteration() {
     // The loop-carried channel: a do-while body step reads the loop end's PREVIOUS-iteration
     // output. Empty on round one, populated once the loop repeats, and current state wins once
-    // the step has a value THIS round. Exercised live by the demo-beautiful-loop builtin.
-    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "demo-beautiful-loop").unwrap();
-    let def = harness_def::validate("demo-beautiful-loop", src, harness_def::DefSource::Builtin).unwrap();
-    let feedback = harness_def::Ref::StepField { step: "decide".into(), field: "feedback".into() };
+    // the step has a value THIS round. Exercised live by the gorgeous-pipeline builtin, whose
+    // `decide` reads `collect.feedback` from the round before.
+    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "gorgeous-pipeline").unwrap();
+    let def = harness_def::validate("gorgeous-pipeline", src, harness_def::DefSource::Builtin).unwrap();
+    let feedback = harness_def::Ref::StepField { step: "collect".into(), field: "feedback".into() };
     let mut state = std::collections::HashMap::new();
     let mut loop_prev = std::collections::HashMap::new();
     assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "", "round one: no feedback yet");
     loop_prev.insert(
-      "decide".to_string(),
+      "collect".to_string(),
       StepState { skipped: false, outputs: [("feedback".to_string(), "add tests".to_string())].into() },
     );
     assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "add tests", "round two reads the saved round");
     state.insert(
-      "decide".to_string(),
+      "collect".to_string(),
       StepState { skipped: false, outputs: [("feedback".to_string(), "current".to_string())].into() },
     );
     assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "current", "live state beats the carried value");

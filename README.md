@@ -184,7 +184,6 @@ scsh run --def <name>      Run a harness definition (built-in, ~/.harness/, or r
 scsh list  (alias: ls)     List every skill by profile — result, commits, env (--verbose: + internals).
 scsh probe [profile]       Which harness·model routes are runnable here (exit 0 iff at least one is).
 scsh init-demo-project     Scaffold AND commit a demo: .scsh.yml + example skills + tmp/ ignore.
-scsh init-beautiful-demo   Scaffold AND commit the word-counting project for demo-beautiful-loop.
 scsh installskills [url]   Install skills — bundled, or a git repo's (merges its .scsh.yml).
                            --global installs machine-wide under ~/.scsh instead (no repo needed).
 scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's (--global too).
@@ -242,7 +241,7 @@ The built-in `big-beautiful-build` workflow is the browser's complete feature fa
 
 The built-in `gorgeous-pipeline` workflow prepares the current branch, runs the five-specialty Opus/Codex/Cursor review fleet, and loops through fixes until the score bar passes. Every one of its 30 review steps references the same canonical reviewer body embedded for `scsh installskills`, kept byte-identical with [dkorolev/code-review-skills](https://github.com/dkorolev/code-review-skills); `scsh` appends only the workflow's grade/comments output contract. The reviewers inspect commits, diffs, source, tests, documentation, and repository guidelines statically — they never build, run, lint, format, test, execute repository scripts, or invoke the product.
 
-**Installing skills.** With no arguments, `scsh installskills` installs all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/` — and deliberately nothing more: the delivery-pipeline skill families live in their own repositories and install from source, so the bundle can never drift from them. See [`DEMO-BEAUTIFUL-LOOP.md`](DEMO-BEAUTIFUL-LOOP.md) for the code-first review-loop demo. Give the command one or more **git URLs** to install another repository's skills (installed in order, as if you ran the command once per repo):
+**Installing skills.** With no arguments, `scsh installskills` installs all five code-review specialties, their 15-route `code-review` profile, and `scsh-harness-demo-and-selftest` into the repo's `.skills/` — and deliberately nothing more: the delivery-pipeline skill families live in their own repositories and install from source, so the bundle can never drift from them. Give the command one or more **git URLs** to install another repository's skills (installed in order, as if you ran the command once per repo):
 
 ```sh
 scsh installskills https://github.com/dkorolev/beautiful-skills

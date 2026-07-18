@@ -140,7 +140,7 @@ fn help_topics_are_separate_pages() {
       && defs.out.contains("SCSH_LOOP_BREAK")
       && defs.out.contains("Loop-carried")
       && defs.out.contains("demo-loop-break")
-      && defs.out.contains("demo-beautiful-loop"),
+      && !defs.out.contains("demo-beautiful-loop"),
     "got: {}",
     defs.out
   );
@@ -211,6 +211,17 @@ fn unknown_option_is_rejected() {
 }
 
 #[test]
+fn removed_beautiful_demo_surfaces_stay_removed() {
+  // `init-beautiful-demo` and the `demo-beautiful-loop` builtin were retired with the
+  // demo; the command must stay unknown (the builtin's absence is pinned in the defs
+  // listing test above).
+  let d = unique_dir("nobeautiful");
+  let r = scsh(&d, &["init-beautiful-demo"]);
+  assert_eq!(r.code, 2, "got: {}", r.out);
+  assert!(r.out.contains("unknown command or option"), "got: {}", r.out);
+}
+
+#[test]
 fn no_command_shows_help() {
   // The default command is `help`: a bare `scsh` is safe and self-explanatory — it
   // shows help, it does NOT preflight or run (even outside a git repo).
@@ -242,7 +253,6 @@ fn help_covers_every_command_and_exit_codes() {
     ("stats", "scsh stats"),
     ("annotate-cast", "scsh annotate-cast"),
     ("daemon", "scsh daemon"),
-    ("init-beautiful-demo", "scsh init-beautiful-demo"),
     ("ls", "scsh list"),                // alias resolves to `list`
     ("annotate", "scsh annotate-cast"), // alias resolves to `annotate-cast`
     ("export-cast", "scsh export-cast"),
@@ -1074,62 +1084,6 @@ fn init_demo_commits_a_ready_to_run_project() {
     .expect("git check-ignore")
     .success();
   assert!(ignored, "init-demo should make /tmp gitignored");
-}
-
-#[test]
-fn init_beautiful_demo_commits_the_runnable_wordstats_starting_point() {
-  let d = unique_dir("beautifuldemo");
-  git_init(&d);
-
-  let init = scsh(&d, &["init-beautiful-demo"]);
-  assert_eq!(init.code, 0, "got: {}", init.out);
-  assert!(init.out.contains("committed the scaffold"), "got: {}", init.out);
-  assert!(init.out.contains("scsh run --def demo-beautiful-loop"), "got: {}", init.out);
-  assert!(git_clean(&d), "beautiful demo should leave a clean tree");
-  assert!(d.join("wordstats.py").is_file());
-  assert!(d.join("test_wordstats.py").is_file());
-  assert!(d.join("README.md").is_file());
-  assert!(d.join("CONTRIBUTING.md").is_file());
-  assert!(!d.join("PR-DESCRIPTION.md").exists(), "the workflow, not the scaffold, writes the PR description");
-  assert!(!d.join(".scsh.yml").exists(), "the built-in definition does not need a project manifest");
-
-  let ignored = Command::new("git").args(["check-ignore", "-q", "tmp"]).current_dir(&d).status().unwrap();
-  assert!(ignored.success(), "beautiful demo should gitignore tmp/");
-  let tests = Command::new("python3").args(["-m", "unittest", "-v"]).current_dir(&d).output().unwrap();
-  assert!(
-    tests.status.success(),
-    "baseline wordstats test should pass:\n{}{}",
-    String::from_utf8_lossy(&tests.stdout),
-    String::from_utf8_lossy(&tests.stderr)
-  );
-}
-
-#[test]
-fn init_beautiful_demo_refuses_a_nonempty_repository() {
-  let d = unique_dir("beautifuldirty");
-  git_init(&d);
-  std::fs::write(d.join("notes.txt"), "mine\n").unwrap();
-
-  let init = scsh(&d, &["init-beautiful-demo"]);
-  assert_eq!(init.code, 1, "got: {}", init.out);
-  assert!(init.out.contains("clean, empty git repository"), "got: {}", init.out);
-  assert_eq!(std::fs::read_to_string(d.join("notes.txt")).unwrap(), "mine\n");
-  assert!(!d.join("wordstats.py").exists(), "refusal must not partially scaffold files");
-}
-
-#[test]
-fn init_beautiful_demo_refuses_an_existing_committed_project() {
-  let d = unique_dir("beautifultracked");
-  git_init(&d);
-  std::fs::write(d.join("notes.txt"), "tracked\n").unwrap();
-  git(&d, &["add", "notes.txt"]);
-  git(&d, &["commit", "-qm", "existing project"]);
-
-  let init = scsh(&d, &["init-beautiful-demo"]);
-  assert_eq!(init.code, 1, "got: {}", init.out);
-  assert!(init.out.contains("clean, empty git repository"), "got: {}", init.out);
-  assert!(init.out.contains("already present: notes.txt"), "got: {}", init.out);
-  assert!(!d.join("wordstats.py").exists());
 }
 
 #[test]
