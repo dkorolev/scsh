@@ -208,6 +208,38 @@ mod tests {
   }
 
   #[test]
+  fn daemon_serves_a_connection_burst_within_one_tick() {
+    let _spawn = DAEMON_SPAWN_LOCK.lock().unwrap();
+    let port = unused_local_port();
+    let _env = RestoreDaemonPortEnv::set(port);
+    let _guard = EphemeralDaemonGuard { port };
+    let _ = stop();
+    ensure_for_run().expect("ensure_for_run");
+    wait_daemon_mode(port, DaemonMode::Ephemeral);
+    // Twenty concurrent one-shot requests (every response is Connection: close, so each
+    // is its own connection — a job page's fetch burst). The accept loop must drain the
+    // whole backlog per tick: one-accept-per-100ms-tick would need two full seconds.
+    let start = std::time::Instant::now();
+    let clients: Vec<_> = (0..20)
+      .map(|_| {
+        std::thread::spawn(move || {
+          use std::io::{Read, Write};
+          let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+          s.write_all(b"GET /api/v1/version HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+          let mut buf = String::new();
+          s.read_to_string(&mut buf).unwrap();
+          assert!(buf.starts_with("HTTP/1.1 200"), "burst request served: {buf}");
+        })
+      })
+      .collect();
+    for c in clients {
+      c.join().unwrap();
+    }
+    let elapsed = start.elapsed();
+    assert!(elapsed < std::time::Duration::from_millis(1500), "20-connection burst took {elapsed:?}");
+  }
+
+  #[test]
   fn start_persistent_replaces_ephemeral_daemon() {
     let _spawn = DAEMON_SPAWN_LOCK.lock().unwrap();
     let port = unused_local_port();

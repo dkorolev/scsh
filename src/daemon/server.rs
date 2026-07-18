@@ -25,6 +25,9 @@ const WS_TICK: Duration = Duration::from_millis(500);
 const PRUNE_TICK: Duration = Duration::from_secs(30);
 const MAX_PROC_LINES: usize = 5000;
 const MAX_HTTP_BODY: usize = 512 * 1024;
+/// Connections accepted per main-loop tick before yielding to housekeeping. Far above any
+/// browser burst (each request is its own connection); only a flood ever hits it.
+const ACCEPT_BURST_CAP: usize = 256;
 const MAX_HTTP_HEADER: usize = 64 * 1024;
 
 fn lock_store(store: &Mutex<Store>) -> MutexGuard<'_, Store> {
@@ -154,30 +157,38 @@ impl Server {
     let supervise_running = Arc::new(AtomicBool::new(false));
 
     loop {
-      match listener.accept() {
-        Ok((stream, _)) => {
-          let store = Arc::clone(&self.store);
-          let prune = Arc::clone(&self.prune);
-          let dirty = Arc::clone(&self.dirty);
-          let ws_dirty = Arc::clone(&self.ws_dirty);
-          let dirty_sessions = Arc::clone(&self.dirty_sessions);
-          let ws_hub = Arc::clone(&self.ws_hub);
-          std::thread::spawn(move || {
-            let (mutated, session_id) = catch_unwind(AssertUnwindSafe(|| {
-              handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty).unwrap_or((false, None))
-            }))
-            .unwrap_or((false, None));
-            if mutated {
-              dirty.store(true, Ordering::Relaxed);
-              ws_dirty.store(true, Ordering::Relaxed);
-              if let Some(id) = session_id {
-                dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+      // Drain the whole accept backlog every tick. A single accept per 100ms tick capped
+      // the daemon at ten connections a second — and every request is its own connection
+      // (responses are `Connection: close`) — so a job page's burst of fetches, or the
+      // same page through an SSH tunnel, serialized at 100ms per request. The cap only
+      // guards the housekeeping below from a connection flood; a browser burst is drained
+      // in one pass.
+      for _ in 0..ACCEPT_BURST_CAP {
+        match listener.accept() {
+          Ok((stream, _)) => {
+            let store = Arc::clone(&self.store);
+            let prune = Arc::clone(&self.prune);
+            let dirty = Arc::clone(&self.dirty);
+            let ws_dirty = Arc::clone(&self.ws_dirty);
+            let dirty_sessions = Arc::clone(&self.dirty_sessions);
+            let ws_hub = Arc::clone(&self.ws_hub);
+            std::thread::spawn(move || {
+              let (mutated, session_id) = catch_unwind(AssertUnwindSafe(|| {
+                handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty).unwrap_or((false, None))
+              }))
+              .unwrap_or((false, None));
+              if mutated {
+                dirty.store(true, Ordering::Relaxed);
+                ws_dirty.store(true, Ordering::Relaxed);
+                if let Some(id) = session_id {
+                  dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+                }
               }
-            }
-          });
+            });
+          }
+          Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+          Err(e) => return Err(e),
         }
-        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
-        Err(e) => return Err(e),
       }
 
       self.persist_if_due();
