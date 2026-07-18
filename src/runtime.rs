@@ -2312,6 +2312,33 @@ mod tests {
     assert!(df.contains("ENV SCSH=1"));
   }
 
+  #[test]
+  fn dockerfile_uses_only_classic_top_level_instructions() {
+    let df = dockerfile();
+    assert!(!df.contains("<<"), "Dockerfile heredocs are unsupported by Podman 4.9 / Buildah 1.33");
+
+    let mut continued = false;
+    for (line_index, line) in df.lines().enumerate() {
+      let trimmed = line.trim();
+      if trimmed.is_empty() || trimmed.starts_with('#') {
+        continue;
+      }
+      if continued {
+        continued = trimmed.ends_with('\\');
+        continue;
+      }
+
+      let instruction = trimmed.split_ascii_whitespace().next().unwrap_or_default();
+      assert!(
+        matches!(instruction, "ARG" | "ENV" | "FROM" | "LABEL" | "RUN" | "USER" | "WORKDIR"),
+        "unsupported top-level Dockerfile instruction at line {}: {line}",
+        line_index + 1
+      );
+      continued = trimmed.ends_with('\\');
+    }
+    assert!(!continued, "Dockerfile ends during a continued instruction");
+  }
+
   /// Apple Containers sends the Dockerfile in a gRPC header (16KB default). Files that
   /// approach that limit fail with "Stream unexpectedly closed" (apple/container#735).
   /// Keep a margin under the soft limit so builds keep working on macOS / Apple Silicon.
@@ -2443,7 +2470,7 @@ TAG
     // tmux kill-session teardown (SIGHUP) must still write `.exit` — the trap exits so the
     // EXIT trap runs. Keeps "absent .exit = uncatchable SIGKILL" true for every harness,
     // including any harness whose graceful quit is sometimes ignored.
-    assert!(df.contains("exit 129' HUP"), "HUP trap must exit so .exit gets written");
+    assert!(df.contains("exit 129") && df.contains("HUP;"), "HUP trap must exit so .exit gets written");
   }
 
   #[test]
