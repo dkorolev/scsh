@@ -2092,7 +2092,7 @@ steps:
     let f = builtin("fruits");
     assert!(f.is_workflow(), "fruits is a workflow");
     assert!(f.task.is_none() && f.invocations.is_empty(), "a workflow has no flat task/invocations");
-    assert_eq!(f.steps.len(), 3);
+    assert_eq!(f.steps.len(), 4);
     let categorize = f.steps.iter().find(|s| s.id == "categorize").unwrap();
     assert!(categorize.needs.is_empty() && categorize.outputs.iter().any(|o| o.name == "fruits"));
     let sort_fruits = f.steps.iter().find(|s| s.id == "sort_fruits").unwrap();
@@ -2100,6 +2100,18 @@ steps:
     // Its LIST input binds to categorize.fruits.
     let bind = sort_fruits.inputs.iter().find(|b| b.name == "LIST").unwrap();
     assert_eq!(bind.source, Ref::StepField { step: "categorize".into(), field: "fruits".into() });
+    let write_files = f.steps.iter().find(|s| s.id == "write_files").unwrap();
+    assert_eq!(write_files.needs, vec!["sort_fruits", "sort_vegetables"]);
+    assert!(write_files.commits, "the final fan-in step integrates its committed files");
+    let fruits = write_files.inputs.iter().find(|binding| binding.name == "FRUITS").unwrap();
+    assert_eq!(fruits.source, Ref::StepField { step: "sort_fruits".into(), field: "sorted".into() });
+    let veggies = write_files.inputs.iter().find(|binding| binding.name == "VEGGIES").unwrap();
+    assert_eq!(veggies.source, Ref::StepField { step: "sort_vegetables".into(), field: "sorted".into() });
+    let body = write_files.render_skill_body();
+    for path in ["README.md", "FRUITS.md", "VEGGIES.md"] {
+      assert!(body.contains(path), "final step must require {path}");
+    }
+    assert!(body.contains("fruits: add sorted produce lists"), "final step fixes the commit subject");
   }
 
   /// A minimal two-step workflow source for negative tests.
