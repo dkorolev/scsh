@@ -695,11 +695,7 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
     .and_then(|p| std::fs::read_to_string(p).ok());
   const NO_RECORDING: &str = "no recording — skipped/failed before output";
   let Some(cast_path) = proc.cast_path.as_deref() else {
-    let note = match proc.kind {
-      ProcKind::Build => "no recording — image build ran without asciinema on PATH (text log only)",
-      ProcKind::Skill | ProcKind::Annotate => NO_RECORDING,
-    };
-    return html::CastExport::Note { text: note.into(), diff_html };
+    return html::CastExport::Note { text: NO_RECORDING.into(), diff_html };
   };
   let Ok(ndjson) = read_complete_cast_lines(cast_path) else {
     return html::CastExport::Note { text: NO_RECORDING.into(), diff_html };

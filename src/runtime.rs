@@ -1064,29 +1064,6 @@ pub fn asciinema_available() -> bool {
     .unwrap_or(false)
 }
 
-/// Argv that records `build_shell_cmd` under a real PTY into `cast_path` (asciinema 3.x).
-///
-/// `--headless` keeps the live board's terminal free (the cast is the UI); `--return` forwards
-/// the builder's exit status; `--overwrite` lets a retry reuse the same path. Window size matches
-/// the default harness PTY so BuildKit / Apple `container` render their native progress TUI.
-pub fn asciinema_rec_argv(cast_path: &str, cols: u16, rows: u16, build_shell_cmd: &str) -> Vec<String> {
-  vec![
-    "asciinema".into(),
-    "rec".into(),
-    "-q".into(),
-    "--overwrite".into(),
-    "--return".into(),
-    "--headless".into(),
-    "-f".into(),
-    "asciicast-v3".into(),
-    "--window-size".into(),
-    format!("{cols}x{rows}"),
-    "--command".into(),
-    build_shell_cmd.into(),
-    cast_path.into(),
-  ]
-}
-
 /// **Permanent** per-session artifact root: `$SCSH_HOME/sessions/<session>/`. EVERYTHING a
 /// session produces — skill recordings, image-build casts, harness logs — lives under its
 /// own session id, so one `ls` names a run's artifacts and one `rm -rf` (or `scsh gc`)
@@ -3067,13 +3044,6 @@ TAG
     assert!(forced_ctx.contains(&"--no-cache".to_string()));
     assert!(!build_command_context("docker", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", false)
       .contains(&"--no-cache".to_string()));
-    // Host TUI recorder argv (asciinema 3.x) — builds get a real PTY, not --progress=plain.
-    let rec = asciinema_rec_argv("/tmp/b.cast", 120, 40, "docker build -t t /ctx");
-    assert_eq!(rec[0], "asciinema");
-    assert!(rec.contains(&"--headless".to_string()));
-    assert!(rec.contains(&"--return".to_string()));
-    assert!(rec.contains(&"asciicast-v3".to_string()));
-    assert!(rec.contains(&"120x40".to_string()));
     assert!(!build_command_context("container", "t:l", "t", "/ctx", 1, 1, "UTC", "fp", false)
       .contains(&"--progress=plain".to_string()));
     assert_eq!(

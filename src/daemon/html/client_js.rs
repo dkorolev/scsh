@@ -674,30 +674,6 @@ function saveUiPrefs(patch) {
   try { localStorage.setItem(uiPrefsKey(), JSON.stringify(next)); } catch (_) {}
   return next;
 }
-function isAtBottom(el, slack) {
-  slack = slack ?? 4;
-  return el.scrollHeight - el.scrollTop - el.clientHeight <= slack;
-}
-function scrollOutputToBottom(out) {
-  if (!out) return;
-  out._scshAutoScroll = true;
-  const go = () => { out.scrollTop = out.scrollHeight; };
-  go();
-  requestAnimationFrame(() => {
-    go();
-    requestAnimationFrame(() => {
-      go();
-      out._scshAutoScroll = false;
-    });
-  });
-}
-function followOutput(out) {
-  // Sticky follow: stay pinned to the bottom unless the viewer scrolled up.
-  return !out || out._scshFollow !== false;
-}
-function lineHtml(l) {
-  return '<div class="line"><span class="at">+' + esc(Number(l.at).toFixed(1)) + 's</span> ' + esc(l.text) + '</div>';
-}
 function containerRuntimeName(runtime) {
   if (runtime === 'container') return 'Apple Containers';
   if (runtime === 'docker') return 'Docker';
@@ -708,24 +684,6 @@ function containerRuntimeName(runtime) {
 function containerDetailsHtml(p) {
   return '<span class="container-runtime-label">runtime</span> <span class="container-runtime-name">' +
     esc(containerRuntimeName(p.container_runtime)) + '</span> · container: ' + esc(p.container_name);
-}
-function syncProcOutput(det, p) {
-  const lines = p.lines || [];
-  let out = det.querySelector('.output');
-  if (!out) {
-    // Unrecorded procs start as slim rows; the output box exists only once the first log
-    // line arrives — annotate rows without a recording never grow one.
-    if (!lines.length || hasCast(p)) return;
-    det.insertAdjacentHTML('beforeend', '<div class="chamfer output"></div>');
-    out = det.querySelector('.output');
-    setupOutputScroll(out);
-  }
-  const existing = out.querySelectorAll('.line').length;
-  if (lines.length > existing) {
-    const chunk = lines.slice(existing).map(lineHtml).join('');
-    out.insertAdjacentHTML('beforeend', chunk);
-    if (followOutput(out)) scrollOutputToBottom(out);
-  }
 }
 function updateProcFields(det, p, nowUnix) {
   const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
@@ -827,18 +785,17 @@ function updateProcFields(det, p, nowUnix) {
       const div = document.createElement('div');
       div.className = 'container dim';
       div.innerHTML = containerDetailsHtml(p);
-      // A slim row (no recording, no lines yet) has no body element to anchor on, so the
-      // container line simply closes out the row until an output box appears above it.
-      const before = det.querySelector('.cast') || det.querySelector('.output');
+      // A slim row (no recording yet) has no body element to anchor on, so the container
+      // line simply closes out the row until the cast embed appears above it.
+      const before = det.querySelector('.cast');
       if (before) det.insertBefore(div, before);
       else det.appendChild(div);
     }
   } else if (containerEl) containerEl.remove();
-  // A proc that gained a cast (rendered earlier as text) swaps its output for the embed
-  // and gets a run-snapshot link above Force stop.
+  // A proc that gained a cast upgrades its slim row to the embed and gets a run-snapshot
+  // link above Force stop.
   const castEl = det.querySelector('.cast');
   if (hasCast(p) && !castEl) {
-    det.querySelector('.output')?.remove();
     ensureProcSnapshot(det, p);
     det.insertAdjacentHTML('beforeend', castEmbedHtml(p));
   } else if (castEl && castEl.dataset.status !== p.status) {
@@ -1194,13 +1151,10 @@ document.addEventListener('fullscreenchange', onCastFullscreenChange);
 document.addEventListener('webkitfullscreenchange', onCastFullscreenChange);
 function procHtml(p, isOpen, nowUnix) {
   const container = p.container_name ? '<div class="container dim">' + containerDetailsHtml(p) + '</div>' : '';
-  // Mirrors the server-rendered shape (session.rs): recorded procs embed the player;
-  // text-logging procs keep the output box (sticky follow); a proc with neither — an
-  // annotate row without a recording, say — stays a slim summary-only row.
-  const lines = p.lines || [];
-  const body = hasCast(p)
-    ? castEmbedHtml(p)
-    : (lines.length ? '<div class="chamfer output">' + lines.map(l => lineHtml(l)).join('') + '</div>' : '');
+  // Mirrors the server-rendered shape (session.rs): recorded procs embed the player; a
+  // proc without a recording — an annotate row, say — stays a slim summary-only row.
+  // There is deliberately no text-log body: the cast IS the output format.
+  const body = hasCast(p) ? castEmbedHtml(p) : '';
   const elapsedText = procElapsedPhrase(p, nowUnix);
   const step = workflowStepIdForProc(p);
   const taskAttrs = step ? ' data-workflow-step="' + esc(step) + '"' : '';
@@ -2187,23 +2141,6 @@ function bindSessionProcs(root) {
     if (ev.target && ev.target.matches && ev.target.matches('details.proc')) persistOpenProcs();
   }, true);
 }
-function setupOutputScroll(out) {
-  if (!out || out.dataset.scrollBound) return;
-  out.dataset.scrollBound = '1';
-  out._scshFollow = true;
-  const markUserScroll = () => { out._scshUserScroll = true; };
-  out.addEventListener('wheel', markUserScroll, { passive: true });
-  out.addEventListener('touchmove', markUserScroll, { passive: true });
-  out.addEventListener('keydown', markUserScroll);
-  out.addEventListener('mousedown', markUserScroll);
-  out.addEventListener('scroll', () => {
-    if (out._scshAutoScroll) return;
-    if (!out._scshUserScroll) return;
-    out._scshUserScroll = false;
-    // Scroll up → pause follow; return to the bottom → resume (no checkbox).
-    out._scshFollow = isAtBottom(out);
-  }, { passive: true });
-}
 function renderSession(session, nowUnix) {
   const root = document.getElementById('session-procs');
   if (!root || !session) return;
@@ -2220,12 +2157,9 @@ function renderSession(session, nowUnix) {
       root.appendChild(det);
       initProcDiffs(det);
       initProcKills(det);
-      setupOutputScroll(det.querySelector('.output'));
-      if (procIsLive(p.status)) scrollOutputToBottom(det.querySelector('.output'));
     } else {
       det.open = userOpen;
       updateProcFields(det, p, nowUnix);
-      syncProcOutput(det, p);
       const step = workflowStepIdForProc(p);
       let taskAnchor = det.querySelector('.proc-task-anchor');
       if (taskAnchor && (!step || taskAnchor.id !== 'task-' + step)) {
@@ -2402,10 +2336,6 @@ startProcClock();
   if (!root) return;
   initSessionMetaFromDom();
   bindSessionProcs(root);
-  root.querySelectorAll('.output').forEach(out => {
-    setupOutputScroll(out);
-    if (followOutput(out)) scrollOutputToBottom(out);
-  });
   initCasts(root);
   initSessionStop();
   initSessionRestart();

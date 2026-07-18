@@ -71,9 +71,10 @@ as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
 Missing/invalid credentials fail fast with a clear "log in on the host" error before any
 container starts — scsh never tries to drive a login screen.
 
-Each recorded skill — and each image build recorded on the host — is shown as an **inline
-player** in the session page (a build falls back to a text log only when `asciinema` is
-missing from PATH). The player is scsh's own **scsh-cast-player** — a first-party,
+Each recorded skill — and each image build — is shown as an **inline player** in the
+session page. Builds are recorded by scsh itself (`scsh __record-pty` runs the builder
+under a real PTY and writes the asciicast), so every build is a cast on every machine —
+there is no text-log format. The player is scsh's own **scsh-cast-player** — a first-party,
 clean-room component (`src/daemon/html/player/`, MIT like the rest of scsh; no third-party
 code or license rides in the browser UI). It has:
 
@@ -288,8 +289,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   deep-link it. One build at a time — a concurrent request gets 409. Stderr is captured and
   the session is reconciled on exit (same as `jobs/start`), so a build that dies before it
   registers becomes a failed session with the error — never a stranded "running" one. Each
-  image build is recorded as an asciinema cast on the host (same ASCII-cinema player as
-  skill runs) whenever `asciinema` is on PATH.
+  image build is recorded as a cast by scsh's own PTY recorder (same ASCII-cinema player
+  as skill runs) — no host tooling required.
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
   — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path,
   `/proc/diff` the packed commits-diff page a step's integration produced

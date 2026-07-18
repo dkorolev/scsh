@@ -366,15 +366,6 @@ impl Proc {
     self.exec(program, args, None, timeout, watch)
   }
 
-  /// Like [`Proc::run`] but feeds `stdin` to the child and then closes it (EOF) — how the image
-  /// build streams the generated Dockerfile to `docker build -` while its output is tailed.
-  pub fn run_with_stdin(
-    &self, program: &str, args: &[String], stdin: &[u8],
-  ) -> std::io::Result<(bool, Option<String>)> {
-    let (ok, _killed, last) = self.exec(program, args, Some(stdin), None, None)?;
-    Ok((ok, last))
-  }
-
   /// Spawn `program args`, pump both output streams into the model as timestamped lines,
   /// optionally feed `stdin` then EOF, and optionally kill on `timeout`. The single core the
   /// public `run*` methods delegate to.

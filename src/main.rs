@@ -16,6 +16,7 @@ mod harness_def;
 mod json;
 #[cfg(test)]
 mod licenses;
+mod ptyrec;
 mod runtime;
 mod sha1;
 mod sha256;
@@ -93,6 +94,7 @@ fn run(args: &[String]) -> i32 {
     Mode::UiDemo { frames } => ui::demo::run(frames),
     Mode::Daemon { action } => daemon_cmd(action),
     Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
+    Mode::RecordPty { cast, cols, rows, argv } => ptyrec::record(&cast, cols, rows, &argv),
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Prune => prune_cmd(cli.prune_now),
@@ -648,6 +650,14 @@ enum Mode {
     mode: daemon::DaemonMode,
     port: u16,
   },
+  /// Hidden: record a command under a PTY as an asciicast (scsh is its own recorder —
+  /// this is how image builds become casts with no host asciinema).
+  RecordPty {
+    cast: PathBuf,
+    cols: u16,
+    rows: u16,
+    argv: Vec<String>,
+  },
   /// Browse the failure log (`scsh failures`), with filters and `--stats`.
   Failures,
   /// Browse durable run statistics (`scsh stats`): durations and workload per route.
@@ -1077,6 +1087,43 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
           }
         }
         Some(Mode::DaemonServe { mode, port })
+      }
+      "__record-pty" => {
+        let mut cast: Option<PathBuf> = None;
+        let mut cols: u16 = 200;
+        let mut rows: u16 = 50;
+        let mut argv: Vec<String> = Vec::new();
+        loop {
+          i += 1;
+          match args.get(i).map(|s| s.as_str()) {
+            None => break,
+            Some("--cast") => {
+              i += 1;
+              cast = Some(PathBuf::from(args.get(i).ok_or("__record-pty --cast needs a path")?));
+            }
+            Some("--cols") => {
+              i += 1;
+              let c = args.get(i).ok_or("__record-pty --cols needs a number")?;
+              cols = c.parse().map_err(|_| format!("bad cols '{c}'"))?;
+            }
+            Some("--rows") => {
+              i += 1;
+              let r = args.get(i).ok_or("__record-pty --rows needs a number")?;
+              rows = r.parse().map_err(|_| format!("bad rows '{r}'"))?;
+            }
+            Some("--") => {
+              argv = args[i + 1..].to_vec();
+              i = args.len();
+              break;
+            }
+            Some(other) => return Err(format!("unknown __record-pty option '{other}' (args go after --)")),
+          }
+        }
+        let cast = cast.ok_or("__record-pty needs --cast <path>")?;
+        if argv.is_empty() {
+          return Err("__record-pty needs a command after --".into());
+        }
+        Some(Mode::RecordPty { cast, cols, rows, argv })
       }
       "--profile" | "--profiles" => {
         i += 1;
@@ -2051,21 +2098,13 @@ fn ensure_workflow_images(
   let tz = runtime::host_timezone();
   let build_one =
     |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
-      // Cast mode: the asciinema player is the UI (tail=false — no text-log echo).
+      // Cast mode: the recorded player is the UI (tail=false — no text-log echo). The
+      // proc's "harness" is what is actually running — `podman build`, not the harness
+      // whose image is being built (that one is already in the label).
+      let builder = format!("{} build", backend_name(&rt.name));
       let p = ui.proc(label.clone(), false);
       if let Some(c) = daemon_client {
-        c.proc_add(
-          p.index(),
-          &label,
-          daemon::ProcKind::Build,
-          None,
-          harness.map(|h| h.as_str()),
-          None,
-          None,
-          None,
-          None,
-          None,
-        );
+        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
       }
       p.start();
       let stem = harness.map(|h| h.as_str()).unwrap_or("base");
@@ -3772,29 +3811,20 @@ fn build_and_run(
   let mut base_build = None;
   if base_needs_build {
     let base_label = format!("using {} · build base", backend_name(&rt.name));
+    let builder = format!("{} build", backend_name(&rt.name));
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, None, None, None, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
     }
     base_build = Some(p);
   }
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
     let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
+    let builder = format!("{} build", backend_name(&rt.name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(
-        p.index(),
-        &label,
-        daemon::ProcKind::Build,
-        None,
-        Some(spec.harness.as_str()),
-        None,
-        None,
-        None,
-        None,
-        None,
-      );
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
     }
     harness_build_procs.push(p);
   }
@@ -6154,11 +6184,10 @@ fn now_secs() -> u64 {
   std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
-/// Build a single harness image as a recorded TUI (asciinema on the host), the same ASCII-cinema
-/// path skills use inside the container. docker/podman/Apple `container` all get a context-dir
-/// build under a real PTY so BuildKit / Apple progress render natively; the cast is registered
-/// with the daemon so the session page embeds the player instead of a text log. Falls back to
-/// the old piped text pump only when `asciinema` is not on PATH.
+/// Build a single harness image as a recorded TUI — scsh re-executes itself as the PTY
+/// recorder (`__record-pty`), so docker/podman/Apple `container` all render their native
+/// progress under a real PTY and EVERY build is a cast on every machine, no host tooling
+/// required. The cast is registered with the daemon so the session page embeds the player.
 /// `no_cache` forces every layer to rebuild (`build-images --force` / `--rebuild-base`).
 #[allow(clippy::too_many_arguments)]
 fn run_build(
@@ -6166,68 +6195,26 @@ fn run_build(
   fingerprint: &str, no_cache: bool, daemon_client: Option<&daemon::Client>, cast_stem: &str, session_id: &str,
 ) -> Result<(), (String, i32)> {
   let tz = runtime::host_timezone();
-  let started = |e: std::io::Error| (format!("failed to start '{runtime_name}': {e}"), 1);
 
   if runtime_name == "container" && runtime::apple_dockerfile_too_large(dockerfile) {
     return Err((runtime::apple_dockerfile_too_large_message(dockerfile.len()), 1));
   }
 
-  // Prefer the TUI path whenever asciinema is available — every build should be a cast.
-  if runtime::asciinema_available() {
-    return run_build_tui(
-      build,
-      runtime_name,
-      tag,
-      target,
-      dockerfile,
-      uid,
-      gid,
-      &tz,
-      fingerprint,
-      no_cache,
-      daemon_client,
-      cast_stem,
-      session_id,
-    );
-  }
-
-  // Fallback: no asciinema on the host — stream plain text into the board (legacy path).
-  hint(
-    "asciinema not found on PATH — image builds fall back to a text log (install asciinema for the TUI cast player)",
-  );
-  let (ok, last) = match runtime::build_method(runtime_name) {
-    runtime::BuildMethod::Stdin => {
-      let cmd = runtime::build_command_stdin(runtime_name, tag, target, uid, gid, &tz, fingerprint, no_cache);
-      build.run_with_stdin(&cmd[0], &cmd[1..], dockerfile.as_bytes()).map_err(started)?
-    }
-    runtime::BuildMethod::ContextDir => {
-      let dir = make_temp_dir().map_err(|e| (format!("could not create build context: {e}"), 1))?;
-      let path = dir.join(runtime::CONTEXT_DOCKERFILE_NAME);
-      if let Err(e) = std::fs::write(&path, dockerfile) {
-        let _ = std::fs::remove_dir_all(&dir);
-        return Err((format!("could not write Dockerfile to build context: {e}"), 1));
-      }
-      let cmd = runtime::build_command_context(
-        runtime_name,
-        tag,
-        target,
-        &dir.to_string_lossy(),
-        uid,
-        gid,
-        &tz,
-        fingerprint,
-        no_cache,
-      );
-      let out = build.run(&cmd[0], &cmd[1..]).map_err(started);
-      let _ = std::fs::remove_dir_all(&dir);
-      out?
-    }
-  };
-  if ok {
-    Ok(())
-  } else {
-    Err(image_build_failure(runtime_name, target, tag, build, last.as_deref()))
-  }
+  run_build_tui(
+    build,
+    runtime_name,
+    tag,
+    target,
+    dockerfile,
+    uid,
+    gid,
+    &tz,
+    fingerprint,
+    no_cache,
+    daemon_client,
+    cast_stem,
+    session_id,
+  )
 }
 
 fn image_build_failure(
@@ -6243,8 +6230,8 @@ fn image_build_failure(
   (format!("image build failed (runtime={runtime_name}, target={target}, tag={tag}): {detail}"), 1)
 }
 
-/// Record one image build under a host PTY via `asciinema rec --headless`, register the cast
-/// with the daemon, and return Ok/Err from the builder's exit status.
+/// Record one image build under a host PTY via scsh's own recorder (`__record-pty`),
+/// register the cast with the daemon, and return Ok/Err from the builder's exit status.
 #[allow(clippy::too_many_arguments)]
 fn run_build_tui(
   build: &ui::screen::Proc, runtime_name: &str, tag: &str, target: &str, dockerfile: &str, uid: u32, gid: u32,
@@ -6280,9 +6267,21 @@ fn run_build_tui(
     fingerprint,
     no_cache,
   );
-  let build_shell = runtime::shell_join(&build_argv);
   let term = config::Terminal::default();
-  let rec = runtime::asciinema_rec_argv(&cast_path_str, term.cols, term.rows, &build_shell);
+  // scsh records the PTY itself — argv passes through verbatim after `--`, no shell join.
+  let exe = std::env::current_exe().map_err(|e| (format!("could not find the scsh binary: {e}"), 1))?;
+  let mut rec: Vec<String> = vec![
+    exe.to_string_lossy().into_owned(),
+    "__record-pty".into(),
+    "--cast".into(),
+    cast_path_str.clone(),
+    "--cols".into(),
+    term.cols.to_string(),
+    "--rows".into(),
+    term.rows.to_string(),
+    "--".into(),
+  ];
+  rec.extend(build_argv);
 
   if let Some(c) = daemon_client {
     // Register before the recorder starts so the session page can open the player mid-build.
@@ -6291,7 +6290,7 @@ fn run_build_tui(
 
   let started = |e: std::io::Error| {
     let _ = std::fs::remove_dir_all(&dir);
-    (format!("failed to start asciinema: {e}"), 1)
+    (format!("failed to start the build recorder: {e}"), 1)
   };
   // Quiet pump: the cast is the UI; we still capture a short tail for failure excerpts.
   let (ok, last) = build.run(&rec[0], &rec[1..]).map_err(started)?;
@@ -6430,29 +6429,20 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
   let mut base_build = None;
   if build_base {
     let label = format!("using {} · build base", backend_name(&rt_name));
+    let builder = format!("{} build", backend_name(&rt_name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, None, None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
     }
     base_build = Some(p);
   }
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
     let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
+    let builder = format!("{} build", backend_name(&rt_name));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(
-        p.index(),
-        &label,
-        daemon::ProcKind::Build,
-        None,
-        Some(spec.harness.as_str()),
-        None,
-        None,
-        None,
-        None,
-        None,
-      );
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
     }
     harness_build_procs.push(p);
   }

@@ -1347,7 +1347,7 @@ fn offline_export_embeds_commits_diff_when_present() {
 }
 
 #[test]
-fn offline_export_keeps_text_log_lines() {
+fn offline_export_renders_unrecorded_procs_as_note_rows() {
   use super::session_export::CastExport;
   use crate::daemon::model::OutputLine;
   // A proc that ran WITHOUT a recording shows full timestamped log lines on the live page;
@@ -1396,23 +1396,14 @@ fn offline_export_keeps_text_log_lines() {
     parent_session: None,
     supervisor: Default::default(),
   };
-  let note = "no recording — image build ran without asciinema on PATH (text log only)";
+  let note = "no recording — skipped/failed before output";
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
   let html = session_export_page(&session, &exports, 100);
-  assert!(html.contains(r#"<div class="chamfer output">"#), "export embeds the text-log output box: {html}");
-  assert!(
-    html.contains(r#"<div class="line"><span class="at">+0.5s</span> Step 1/4 : FROM ubuntu</div>"#),
-    "export keeps the live page's timestamped line markup: {html}"
-  );
-  assert!(html.contains("&lt;hostile&gt; &amp; escaped"), "log lines are HTML-escaped: {html}");
-  assert!(!html.contains(note), "the one-line note gives way to the actual log lines: {html}");
-  // A proc with truly no output still gets the explanatory note, not an empty box.
-  let mut bare = session.clone();
-  bare.procs[0].lines.clear();
-  let exports = [CastExport::Note { text: note.into(), diff_html: None }];
-  let bare_html = session_export_page(&bare, &exports, 100);
-  assert!(bare_html.contains(note), "no lines → the note explains why there is nothing to embed: {bare_html}");
-  assert!(!bare_html.contains(r#"<div class="chamfer output">"#), "no lines → no empty output box: {bare_html}");
+  // There is no text-log format anywhere — the cast is the output format — so an
+  // unrecorded proc exports as its note row alone, even when log lines were streamed.
+  assert!(!html.contains(r#"<div class="chamfer output">"#), "no text-log output box in exports: {html}");
+  assert!(!html.contains("Step 1/4 : FROM ubuntu"), "streamed lines never render as text: {html}");
+  assert!(html.contains(note), "the note explains why there is nothing to embed: {html}");
 }
 
 #[test]
@@ -2071,12 +2062,14 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
   );
   let html = session_page(&store, "test").expect("session page");
   let procs = session_procs_html(&html);
-  assert!(procs.contains(r#"<div class="chamfer output">"#), "text fallback output remains");
+  // The text-log body is gone entirely: streamed lines never render, so neither does any
+  // of the retired terminal chrome around them.
+  assert!(!procs.contains(r#"<div class="chamfer output">"#), "no text output box: {procs}");
   assert!(!procs.contains("autoscroll-ctl"), "Auto-scroll checkbox removed");
   assert!(!procs.contains("Auto-scroll to bottom"), "Auto-scroll checkbox removed");
   let js = live_client_js();
   assert!(!js.contains("Auto-scroll to bottom"), "client JS has no Auto-scroll checkbox");
-  assert!(js.contains("followOutput"), "sticky follow without a checkbox");
+  assert!(!js.contains("followOutput"), "the text-follow machinery is gone with the text body");
 }
 
 /// A one-proc store whose proc is an `Annotate` row: no recording, no log lines — the
@@ -2150,13 +2143,9 @@ fn annotate_rows_render_slim_without_the_retired_terminal_chrome() {
     assert!(!procs.contains("No output"), "no empty-output placeholder ({status:?}): {procs}");
   }
   // The live-update path renders the same slim shape, so a WS tick never grows the
-  // chrome back: the client builds the output box only once log lines exist.
+  // chrome back: the client has no text-body path at all — a proc is a cast or a slim row.
   let js = live_client_js();
-  assert!(
-    js.contains("lines.length ? '<div class=\"chamfer output\">'"),
-    "procHtml keeps line-less procs slim"
-  );
-  assert!(js.contains("if (!lines.length || hasCast(p)) return;"), "syncProcOutput never creates an empty box");
+  assert!(!js.contains("chamfer output"), "the client never builds a text output box");
   assert!(!js.contains("No output yet."), "the retired empty-output placeholder is gone from the client");
 }
 

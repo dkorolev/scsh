@@ -941,19 +941,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* The log panel scrolls its own content, so the chamfer is clip-only (--bw: 0 —
      an inset ::before surface would scroll away) and the hairline ring is an inset
      box-shadow, which stays attached to the visible box. */
-  .output {
-    --cut: 8px; --bw: 0px;
-    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.8rem;
-    max-height: 24rem; overflow: auto; margin: 0.5rem 0; padding: 0.65rem;
-    background: #0a0e14; box-shadow: inset 0 0 0 1px var(--border);
-    width: 100%; box-sizing: border-box;
-  }
-  .line { white-space: pre; }
   .detail { overflow-wrap: anywhere; white-space: pre-wrap; max-width: 100%; color: var(--text-muted); }
   .container { overflow-x: auto; white-space: pre; max-width: 100%; color: var(--text-muted); }
   .container-runtime-label { color: var(--text); font-weight: 700; }
   .container-runtime-name { color: var(--cyan); font-weight: 700; }
-  .at { opacity: 0.5; margin-right: 0.35rem; }
 
   /* ── cast player embed ── */
   .cast {

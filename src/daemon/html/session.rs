@@ -29,26 +29,11 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     let note = if finished && !detail.is_empty() { detail } else { proc.note.as_deref().unwrap_or("") };
     let note_html =
       if finished && looks_like_artifact_path(note) { format!("<code>{}</code>", esc(note)) } else { esc(note) };
-    // Recorded procs (skills and TUI image builds) show the inline cast player; text-only
-    // build fallbacks (no asciinema on PATH) keep the timestamped output (sticky follow).
-    // A proc with neither a recording nor a single log line — annotate rows without a
-    // recording are the canonical case — stays a slim summary-only row: terminal chrome
-    // belongs to procs that actually stream output.
-    let body_html = if proc_has_cast(proc) {
-      cast_embed_html(&session.id, proc)
-    } else if proc.lines.is_empty() {
-      String::new()
-    } else {
-      let mut lines_html = String::new();
-      for line in &proc.lines {
-        lines_html.push_str(&format!(
-          "<div class=\"line\"><span class=\"at\">+{at:.1}s</span> {text}</div>\n",
-          at = line.at,
-          text = esc(&line.text)
-        ));
-      }
-      format!("<div class=\"chamfer output\">{lines_html}</div>")
-    };
+    // Recorded procs (skills and image builds alike — scsh records builds itself) show
+    // the inline cast player; a proc without a recording — annotate rows are the
+    // canonical case — stays a slim summary-only row. There is deliberately no text-log
+    // body: the cast IS the output format.
+    let body_html = if proc_has_cast(proc) { cast_embed_html(&session.id, proc) } else { String::new() };
     let snapshot_btn = proc_snapshot_btn_html(&session.id, proc);
     let diff_btn = proc_diff_btn_html(&session.id, proc);
     let annotation_target = annotation_target_link_html(session, proc);

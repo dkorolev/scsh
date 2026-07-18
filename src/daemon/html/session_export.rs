@@ -205,21 +205,8 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
         diff = diff_embed_html(diff),
       )
     }
-    // Parity with the live page: a proc that ran without a recording keeps its full
-    // timestamped log lines offline (same static markup as the live text-log body; the
-    // auto-scroll control is live-only). The no-recording note is dropped here because
-    // the lines ARE the record; it stays only when there is truly no output to show.
-    CastExport::Note { .. } if !proc.lines.is_empty() => {
-      let mut lines_html = String::new();
-      for line in &proc.lines {
-        lines_html.push_str(&format!(
-          "<div class=\"line\"><span class=\"at\">+{at:.1}s</span> {text}</div>\n",
-          at = line.at,
-          text = esc(&line.text)
-        ));
-      }
-      format!("<div class=\"chamfer output\">{lines_html}</div>\n{}", diff_embed_html(diff))
-    }
+    // Parity with the live page: no text-log body exists anywhere — the cast is the
+    // output format — so an unrecorded proc exports as its note row alone.
     CastExport::Note { text, .. } => {
       format!("<div class=\"detail dim\">{}</div>\n{}", esc(text), diff_embed_html(diff))
     }
