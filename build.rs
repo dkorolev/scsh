@@ -1,5 +1,8 @@
 //! Build script: stamp the binary with the current git commit (seven hex digits) and
-//! whether the tree was dirty at build time, so `scsh version` can report them.
+//! whether the tree was dirty at build time, so `scsh version` can report them. A
+//! crates.io install has no `.git`, but cargo embeds `.cargo_vcs_info.json` — the exact
+//! commit the release was published from — into every crate, so the stamp survives
+//! `cargo install scsh` too.
 //! Also refuse to compile when `src/Dockerfile` exceeds Apple Containers' soft size
 //! limit (gRPC header — apple/container#735), so macOS / Apple Silicon stays green.
 //! Std-only — shells out to `git` with `-C $CARGO_MANIFEST_DIR` so the hash is found
@@ -18,6 +21,7 @@ fn main() {
   println!("cargo:rerun-if-changed=build.rs");
   println!("cargo:rerun-if-changed=src/Dockerfile");
   println!("cargo:rerun-if-env-changed=SCSH_GIT_DESCRIBE");
+  println!("cargo:rerun-if-changed=.cargo_vcs_info.json");
   let head = manifest_dir.join(".git/HEAD");
   let index = manifest_dir.join(".git/index");
   if head.exists() {
@@ -58,13 +62,21 @@ fn check_dockerfile_fits_apple_containers(manifest_dir: &Path) {
   }
 }
 
-/// Seven hex digits of HEAD, plus `-dirty` when the tree is not clean. Empty when git is
-/// unavailable or the crate is not in a checkout (e.g. a crates.io source tarball).
+/// Seven hex digits of HEAD, plus `-dirty` when the tree is not clean. A published crate
+/// carries no `.git`, so `.cargo_vcs_info.json` — written by `cargo publish` with the
+/// exact release commit, and clean by definition (publish refuses a dirty tree) — is
+/// consulted first: it only ever exists in an unpacked crate, where it is authoritative
+/// even if some parent directory happens to be an unrelated git checkout. Empty only
+/// when neither source knows the commit.
 fn git_describe(repo: &Path) -> String {
   if let Ok(v) = std::env::var("SCSH_GIT_DESCRIBE") {
     if !v.is_empty() {
       return v;
     }
+  }
+
+  if let Some(sha) = cargo_vcs_info_sha(repo) {
+    return sha;
   }
 
   let hash: String = match git_in(repo, &["rev-parse", "HEAD"]) {
@@ -77,6 +89,16 @@ fn git_describe(repo: &Path) -> String {
   } else {
     hash
   }
+}
+
+/// The seven-digit `git.sha1` from `.cargo_vcs_info.json`, or `None` when the file is
+/// absent (a checkout) or holds no plausible hash. Std-only parse: locate the `"sha1"`
+/// key and take the quoted hex string after it.
+fn cargo_vcs_info_sha(repo: &Path) -> Option<String> {
+  let text = std::fs::read_to_string(repo.join(".cargo_vcs_info.json")).ok()?;
+  let after_key = text.split("\"sha1\"").nth(1)?;
+  let sha: String = after_key.split('"').nth(1)?.chars().take_while(|c| c.is_ascii_hexdigit()).take(7).collect();
+  (sha.len() == 7).then_some(sha)
 }
 
 fn git_in(repo: &Path, args: &[&str]) -> Option<String> {
