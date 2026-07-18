@@ -636,6 +636,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .fleet-title { margin: 0 0 0.35rem; font-size: 0.95rem; font-weight: 600; }
   .fleet-summary { margin: 0 0 0.55rem; font-size: 0.85rem; }
+  /* Job-level verdict: the closing recap across every fleet — summary text at full
+     strength (it IS the content; there is no table under it). */
+  .fleet-verdict .fleet-summary { margin-bottom: 0; font-size: 0.9rem; color: var(--text); }
   .fleet-compare {
     width: 100%; border-collapse: collapse; font-size: 0.85rem;
   }

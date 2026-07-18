@@ -272,6 +272,13 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 - `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
+- `GET /api/v1/session/{id}/fleet` — JSON fleet aggregation for scripts and reduce steps:
+  each multi-route skill's rollup (the same shape as the end-of-run `<skill>-rollup.json`
+  files under `sessions/{id}/results/`) plus a job-level `verdict` across every fleet —
+  route counts (`ok`/`fail`/`pending`), a grade histogram, the mean on the excellent=5 ·
+  good=4 · average=3 · poor=2 · bad=1 scale, and total findings. Computed live from the
+  session's procs, so it serves mid-run; `verdict` is `null` on a job with no fleets.
+  Descriptive only — scsh reports the numbers and leaves any approval bar to the caller
 - `GET /api/v1/images` — JSON status of every scsh image (base + one per harness) on the
   detected runtime: exists, up-to-date (fingerprint match), created, size (created/size are
   `null` on Apple `container`, which has no inspect formatter)

@@ -2277,6 +2277,7 @@ function syncFleetSections(session, nowUnix) {
   const sections = document.querySelectorAll('section.fleet[data-skill-source]');
   if (!sections.length) return;
   const procs = (session && session.procs) || [];
+  const allMembers = [];
   sections.forEach(sec => {
     const source = sec.getAttribute('data-skill-source') || '';
     const rich = !!sec.querySelector('.fleet-grade, .fleet-issues');
@@ -2292,6 +2293,7 @@ function syncFleetSections(session, nowUnix) {
       }
       jump.setAttribute('data-proc', String(p.index));
       members.push(p);
+      allMembers.push(p);
       row.className = 'fleet-row ' + (p.status || '');
       const statusCell = row.querySelector('.fleet-status');
       if (statusCell) {
@@ -2323,6 +2325,17 @@ function syncFleetSections(session, nowUnix) {
       : source + ': ' + ok + ' ok, ' + fail + ' fail · ' + members.length + ' ' + noun;
     setTextUnlessSelecting(summaryEl, text);
   });
+  // The job-level verdict's counts span ticks from the same snapshots; its grade half
+  // (histogram, mean) needs the daemon's result files, so it keeps the server render.
+  const verdictCounts = document.querySelector('section.fleet-verdict .fv-counts');
+  if (verdictCounts && allMembers.length) {
+    const ok = allMembers.filter(p => p.status === 'ok' || p.status === 'graceful').length;
+    const fail = allMembers.filter(p => p.status === 'fail').length;
+    const pending = allMembers.filter(p => p.status === 'running' || p.status === 'waiting').length;
+    let text = ok + ' ok, ' + fail + ' fail';
+    if (pending) text += ', ' + pending + ' pending';
+    setTextUnlessSelecting(verdictCounts, text);
+  }
 }
 function onWsMessage(msg) {
   if (msg.type === 'cast_growth') { onCastGrowth(msg); return; }

@@ -6,7 +6,7 @@ use super::escape::esc;
 use super::format::format_elapsed_clock;
 use super::proc::status_glyph;
 use crate::daemon::model::Session;
-use crate::fleet::{fleet_groups, FleetGroup, FleetRoute};
+use crate::fleet::{fleet_groups, fleet_verdict, FleetGroup, FleetRoute, FleetVerdict};
 
 /// Render each comparison table after the last proc it summarizes. A completed comparison
 /// should read as a recap of the work immediately above it, not as a block of future knowledge
@@ -19,10 +19,51 @@ pub(crate) fn fleet_sections_by_anchor(session: &Session) -> std::collections::B
     let out = anchored.entry(anchor).or_insert_with(|| String::from("<div class=\"fleets\">\n"));
     out.push_str(&fleet_group_html(group));
   }
+  // Job-level verdict: one closing recap under the final comparison, counting every
+  // route across every fleet. Only when the job ran more than one fleet — a single
+  // group's own summary line already is that recap.
+  if groups.len() >= 2 {
+    if let (Some(verdict), Some(last)) = (fleet_verdict(&groups), anchored.keys().max().copied()) {
+      if let Some(out) = anchored.get_mut(&last) {
+        out.push_str(&fleet_verdict_html(&verdict, groups.len()));
+      }
+    }
+  }
   for out in anchored.values_mut() {
     out.push_str("</div>\n");
   }
   anchored
+}
+
+/// The whole-run recap: route counts plus the grade histogram and mean a reader needs
+/// to judge a review fleet at a glance. The counts span ticks live (client JS); the
+/// grade half needs the daemon's result files, so it refreshes on server renders.
+fn fleet_verdict_html(v: &FleetVerdict, fleets: usize) -> String {
+  let mut counts = format!("{} ok, {} fail", v.ok, v.fail);
+  if v.pending > 0 {
+    counts.push_str(&format!(", {} pending", v.pending));
+  }
+  let mut grades = String::new();
+  for (grade, n) in &v.grades {
+    grades.push_str(&format!(" · {} ×{n}", esc(grade)));
+  }
+  if let Some(mean) = v.mean_score {
+    grades.push_str(&format!(" · mean {mean:.2}"));
+  }
+  if v.findings_total > 0 {
+    grades.push_str(&format!(" · {} finding{}", v.findings_total, if v.findings_total == 1 { "" } else { "s" }));
+  }
+  format!(
+    r#"<section class="chamfer fleet fleet-verdict" data-fleet-verdict>
+<h3 class="fleet-title">Fleet verdict <span class="dim">· {fleets} skills · {routes} routes</span></h3>
+<p class="fleet-summary"><span class="fv-counts">{counts}</span><span class="fv-grades">{grades}</span></p>
+</section>
+"#,
+    fleets = fleets,
+    routes = v.routes,
+    counts = esc(&counts),
+    grades = grades,
+  )
 }
 
 fn fleet_group_html(g: &FleetGroup) -> String {

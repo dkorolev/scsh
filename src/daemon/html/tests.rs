@@ -1675,6 +1675,86 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
 }
 
 #[test]
+fn session_page_renders_job_level_fleet_verdict_across_skills() {
+  let dir = std::env::temp_dir().join(format!("scsh-verdict-{}", crate::runtime::random_nonce_6()));
+  std::fs::create_dir_all(&dir).unwrap();
+  let graded = |name: &str, grade: &str, issues: u64| -> String {
+    let path = dir.join(format!("{name}.json"));
+    std::fs::write(&path, format!(r#"{{"result":{{"grade":"{grade}","issues_found":{issues}}},"issues":[]}}"#))
+      .unwrap();
+    path.to_string_lossy().into_owned()
+  };
+  let route = |index: usize, source: &str, route_name: &str, result_path: String| ProcRecord {
+    index,
+    previous_attempt: None,
+    kind: ProcKind::Skill,
+    label: format!("{source}-{route_name}"),
+    status: ProcStatus::Ok,
+    note: None,
+    detail: None,
+    fail_reason: None,
+    container_name: None,
+    container_runtime: None,
+    cast_path: None,
+    diff_path: None,
+    skill_source: Some(source.into()),
+    route: Some(route_name.into()),
+    result_path: Some(result_path),
+    annotate_target: None,
+    harness: Some("claude".into()),
+    skill_name: Some(format!("{source}-{route_name}")),
+    model: None,
+    started_at: Some(1),
+    elapsed: Some(1.0),
+    lines: vec![],
+  };
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  store.sessions.insert(
+    "verd1".into(),
+    Session {
+      id: "verd1".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      kind: Some("profile".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![
+        route(0, "conventions-reviewer", "opus", graded("c-opus", "excellent", 1)),
+        route(1, "conventions-reviewer", "codex", graded("c-codex", "good", 2)),
+        route(2, "testing-reviewer", "opus", graded("t-opus", "excellent", 0)),
+        route(3, "testing-reviewer", "codex", graded("t-codex", "good", 0)),
+      ],
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+    },
+  );
+  let html = session_page(&store, "verd1").expect("session page");
+  assert!(html.contains("data-fleet-verdict"), "job-level verdict present: {html}");
+  assert!(html.contains("Fleet verdict"), "verdict panel is titled");
+  assert!(html.contains("· 2 skills · 4 routes"), "verdict counts skills and routes");
+  assert!(html.contains("4 ok, 0 fail"), "verdict counts settled routes");
+  assert!(html.contains("excellent ×2 · good ×2 · mean 4.50 · 3 findings"), "grade histogram, mean, findings: {html}");
+  // The verdict is the CLOSING recap: it renders after the last per-skill comparison.
+  let last_group = html.rfind("data-skill-source=").expect("groups");
+  let verdict_at = html.find("data-fleet-verdict").expect("verdict");
+  assert!(verdict_at > last_group, "verdict follows every comparison it summarizes");
+  // Live: the counts span ticks from snapshots; the grade half keeps the server render.
+  let js = live_client_js();
+  assert!(js.contains("section.fleet-verdict .fv-counts"), "verdict counts tick live");
+  // A single fleet renders no job-level verdict — its own summary line is the recap.
+  store.sessions.get_mut("verd1").unwrap().procs.truncate(2);
+  let single = session_page(&store, "verd1").expect("single-fleet page");
+  assert!(!single.contains("data-fleet-verdict"), "one group needs no cross-fleet recap");
+  let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn fleet_routes_stack_completed_before_running_before_waiting() {
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(

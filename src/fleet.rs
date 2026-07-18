@@ -114,6 +114,51 @@ fn fleet_status_stack_rank(status: ProcStatus) -> u8 {
   }
 }
 
+/// One group's rollup JSON — the exact body of `<skill_source>-rollup.json`, also served
+/// inside the fleet API payload so the files and the endpoint can never drift.
+pub fn group_rollup_json(g: &FleetGroup) -> String {
+  let mut routes_json = Vec::new();
+  let mut messages = Vec::new();
+  let mut grades = Vec::new();
+  let mut issues_total: u64 = 0;
+  let mut ok = 0usize;
+  let mut fail = 0usize;
+  for r in &g.routes {
+    if matches!(r.status, ProcStatus::Ok | ProcStatus::Graceful) {
+      ok += 1;
+    } else if r.status == ProcStatus::Fail {
+      fail += 1;
+    }
+    if let Some(gr) = &r.grade {
+      grades.push(gr.clone());
+    }
+    if let Some(n) = r.issues_found {
+      issues_total = issues_total.saturating_add(n);
+    }
+    if let Some(m) = r.result_message.as_deref().or(r.detail.as_deref()) {
+      messages.push(m.to_string());
+    }
+    routes_json.push(format!(
+      "{{ \"route\": {}, \"harness\": {}, \"model\": {}, \"status\": {}, \"detail\": {}, \"grade\": {}, \"issues_found\": {} }}",
+      json::quote(&r.route),
+      json::quote(&r.harness),
+      opt_json_str(r.model.as_deref()),
+      json::quote(r.status.as_str()),
+      opt_json_str(r.detail.as_deref()),
+      opt_json_str(r.grade.as_deref()),
+      r.issues_found.map(|n| n.to_string()).unwrap_or_else(|| "null".into()),
+    ));
+  }
+  let agree = !messages.is_empty() && messages.iter().all(|m| m == &messages[0]);
+  format!(
+    "{{\n  \"skill_source\": {},\n  \"ok\": {ok},\n  \"fail\": {fail},\n  \"agree\": {},\n  \"issues_total\": {issues_total},\n  \"grades\": [{}],\n  \"routes\": [\n    {}\n  ]\n}}\n",
+    json::quote(&g.skill_source),
+    if agree { "true" } else { "false" },
+    grades.iter().map(|gr| json::quote(gr)).collect::<Vec<_>>().join(", "),
+    routes_json.join(",\n    "),
+  )
+}
+
 /// Write deterministic rollup JSON for every multi-route skill_source.
 pub fn write_rollups(session_id: &str, procs: &[ProcRecord]) -> Vec<PathBuf> {
   let groups = fleet_groups(procs);
@@ -121,52 +166,41 @@ pub fn write_rollups(session_id: &str, procs: &[ProcRecord]) -> Vec<PathBuf> {
   let dir = runtime::session_results_dir(session_id);
   let _ = std::fs::create_dir_all(&dir);
   for g in groups {
-    let mut routes_json = Vec::new();
-    let mut messages = Vec::new();
-    let mut grades = Vec::new();
-    let mut issues_total: u64 = 0;
-    let mut ok = 0usize;
-    let mut fail = 0usize;
-    for r in &g.routes {
-      if matches!(r.status, ProcStatus::Ok | ProcStatus::Graceful) {
-        ok += 1;
-      } else if r.status == ProcStatus::Fail {
-        fail += 1;
-      }
-      if let Some(gr) = &r.grade {
-        grades.push(gr.clone());
-      }
-      if let Some(n) = r.issues_found {
-        issues_total = issues_total.saturating_add(n);
-      }
-      if let Some(m) = r.result_message.as_deref().or(r.detail.as_deref()) {
-        messages.push(m.to_string());
-      }
-      routes_json.push(format!(
-        "{{ \"route\": {}, \"harness\": {}, \"model\": {}, \"status\": {}, \"detail\": {}, \"grade\": {}, \"issues_found\": {} }}",
-        json::quote(&r.route),
-        json::quote(&r.harness),
-        opt_json_str(r.model.as_deref()),
-        json::quote(r.status.as_str()),
-        opt_json_str(r.detail.as_deref()),
-        opt_json_str(r.grade.as_deref()),
-        r.issues_found.map(|n| n.to_string()).unwrap_or_else(|| "null".into()),
-      ));
-    }
-    let agree = !messages.is_empty() && messages.iter().all(|m| m == &messages[0]);
-    let body = format!(
-      "{{\n  \"skill_source\": {},\n  \"ok\": {ok},\n  \"fail\": {fail},\n  \"agree\": {},\n  \"issues_total\": {issues_total},\n  \"grades\": [{}],\n  \"routes\": [\n    {}\n  ]\n}}\n",
-      json::quote(&g.skill_source),
-      if agree { "true" } else { "false" },
-      grades.iter().map(|gr| json::quote(gr)).collect::<Vec<_>>().join(", "),
-      routes_json.join(",\n    "),
-    );
     let path = dir.join(format!("{}-rollup.json", g.skill_source));
-    if std::fs::write(&path, body).is_ok() {
+    if std::fs::write(&path, group_rollup_json(&g)).is_ok() {
       written.push(path);
     }
   }
   written
+}
+
+/// The fleet API payload (`GET /api/v1/session/<id>/fleet`): every group's rollup plus
+/// the job-level verdict, computed from live proc records so it serves mid-run — no
+/// waiting for the end-of-run rollup files.
+pub fn fleet_json(session_id: &str, procs: &[ProcRecord]) -> String {
+  let groups = fleet_groups(procs);
+  let verdict_json = match fleet_verdict(&groups) {
+    None => "null".to_string(),
+    Some(v) => {
+      let grades = v
+        .grades
+        .iter()
+        .map(|(grade, n)| format!("{{ \"grade\": {}, \"count\": {n} }}", json::quote(grade)))
+        .collect::<Vec<_>>()
+        .join(", ");
+      format!(
+        "{{ \"routes\": {}, \"ok\": {}, \"fail\": {}, \"pending\": {}, \"mean_score\": {}, \"findings_total\": {}, \"grades\": [{grades}] }}",
+        v.routes,
+        v.ok,
+        v.fail,
+        v.pending,
+        v.mean_score.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
+        v.findings_total,
+      )
+    }
+  };
+  let groups_json = groups.iter().map(|g| group_rollup_json(g).trim_end().to_string()).collect::<Vec<_>>().join(", ");
+  format!("{{ \"session\": {}, \"verdict\": {verdict_json}, \"groups\": [{groups_json}] }}", json::quote(session_id),)
 }
 
 fn opt_json_str(s: Option<&str>) -> String {
@@ -241,6 +275,79 @@ fn parse_result_summary(path: &str) -> Option<ResultSummary> {
       _ => None,
     });
   Some(ResultSummary { message, grade, comments_count, issues_found })
+}
+
+/// Job-level roll-up across every fleet group: the whole-run view of a matrix review
+/// fleet. Descriptive only — scsh reports the numbers (route counts, grade histogram,
+/// mean score) and leaves any approval bar to the caller, consistent with scsh having
+/// no built-in comparison language.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FleetVerdict {
+  /// Total routes across all fleet groups.
+  pub routes: usize,
+  pub ok: usize,
+  pub fail: usize,
+  /// Routes not yet settled (running or waiting) — the verdict is partial while > 0.
+  pub pending: usize,
+  /// Grade histogram, highest score first (unrecognized grades trail alphabetically).
+  pub grades: Vec<(String, usize)>,
+  /// Mean over graded routes on the excellent=5 · good=4 · average=3 · poor=2 · bad=1
+  /// scale; `None` until at least one route reports a recognized grade.
+  pub mean_score: Option<f64>,
+  /// Issues plus comments reported across all routes.
+  pub findings_total: u64,
+}
+
+/// Score for the shared reviewer grade vocabulary; `None` for anything else.
+pub fn grade_score(grade: &str) -> Option<u8> {
+  match grade {
+    "excellent" => Some(5),
+    "good" => Some(4),
+    "average" => Some(3),
+    "poor" => Some(2),
+    "bad" => Some(1),
+    _ => None,
+  }
+}
+
+/// Aggregate every group's routes into one [`FleetVerdict`]; `None` without fleet groups.
+pub fn fleet_verdict(groups: &[FleetGroup]) -> Option<FleetVerdict> {
+  if groups.is_empty() {
+    return None;
+  }
+  let mut verdict =
+    FleetVerdict { routes: 0, ok: 0, fail: 0, pending: 0, grades: Vec::new(), mean_score: None, findings_total: 0 };
+  let mut histogram: BTreeMap<String, usize> = BTreeMap::new();
+  let mut score_sum = 0u64;
+  let mut score_n = 0u64;
+  for r in groups.iter().flat_map(|g| g.routes.iter()) {
+    verdict.routes += 1;
+    match r.status {
+      ProcStatus::Ok | ProcStatus::Graceful => verdict.ok += 1,
+      ProcStatus::Fail => verdict.fail += 1,
+      ProcStatus::Running | ProcStatus::Waiting => verdict.pending += 1,
+      ProcStatus::Skipped => {}
+    }
+    if let Some(grade) = &r.grade {
+      *histogram.entry(grade.clone()).or_default() += 1;
+      if let Some(score) = grade_score(grade) {
+        score_sum += u64::from(score);
+        score_n += 1;
+      }
+    }
+    let findings = r.issues_found.or(r.comments_count).unwrap_or(0);
+    verdict.findings_total = verdict.findings_total.saturating_add(findings);
+  }
+  if score_n > 0 {
+    verdict.mean_score = Some(score_sum as f64 / score_n as f64);
+  }
+  let mut grades: Vec<(String, usize)> = histogram.into_iter().collect();
+  grades.sort_by(|a, b| {
+    let rank = |g: &str| grade_score(g).map(|s| u8::MAX - s).unwrap_or(u8::MAX);
+    rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0))
+  });
+  verdict.grades = grades;
+  Some(verdict)
 }
 
 pub fn summarize_group(skill_source: &str, routes: &[FleetRoute]) -> String {
@@ -329,6 +436,65 @@ mod tests {
     std::fs::write(&flat, r#"{"grade":"poor","result":{"grade":"excellent","issues_found":9}}"#).unwrap();
     assert_eq!(parse_result_summary(&flat.to_string_lossy()).unwrap().grade.as_deref(), Some("poor"));
     let _ = std::fs::remove_dir_all(dir);
+  }
+
+  fn verdict_route(status: ProcStatus, grade: Option<&str>, issues: Option<u64>) -> FleetRoute {
+    FleetRoute {
+      proc_index: 0,
+      route: "r".into(),
+      harness: "h".into(),
+      model: None,
+      status,
+      elapsed: None,
+      detail: None,
+      grade: grade.map(str::to_string),
+      comments_count: None,
+      issues_found: issues,
+      result_message: None,
+    }
+  }
+
+  fn verdict_group(routes: Vec<FleetRoute>) -> FleetGroup {
+    FleetGroup { skill_source: "review".into(), routes, summary: String::new() }
+  }
+
+  #[test]
+  fn fleet_verdict_aggregates_grades_across_groups() {
+    let groups = vec![
+      verdict_group(vec![
+        verdict_route(ProcStatus::Ok, Some("excellent"), Some(1)),
+        verdict_route(ProcStatus::Ok, Some("good"), Some(2)),
+      ]),
+      verdict_group(vec![
+        verdict_route(ProcStatus::Ok, Some("excellent"), None),
+        verdict_route(ProcStatus::Fail, None, None),
+        verdict_route(ProcStatus::Running, None, None),
+      ]),
+    ];
+    let v = fleet_verdict(&groups).unwrap();
+    assert_eq!((v.routes, v.ok, v.fail, v.pending), (5, 3, 1, 1));
+    // Histogram is ordered highest score first.
+    assert_eq!(v.grades, vec![("excellent".to_string(), 2), ("good".to_string(), 1)]);
+    // (5 + 4 + 5) / 3
+    assert!((v.mean_score.unwrap() - 14.0 / 3.0).abs() < 1e-9);
+    assert_eq!(v.findings_total, 3);
+  }
+
+  #[test]
+  fn fleet_verdict_handles_no_groups_and_unrecognized_grades() {
+    assert_eq!(fleet_verdict(&[]), None);
+    // An off-vocabulary grade shows in the histogram (after scored grades) but never
+    // skews the mean.
+    let groups = vec![verdict_group(vec![
+      verdict_route(ProcStatus::Ok, Some("stellar"), None),
+      verdict_route(ProcStatus::Ok, Some("good"), None),
+    ])];
+    let v = fleet_verdict(&groups).unwrap();
+    assert_eq!(v.grades, vec![("good".to_string(), 1), ("stellar".to_string(), 1)]);
+    assert!((v.mean_score.unwrap() - 4.0).abs() < 1e-9);
+    // No recognized grade at all → no mean.
+    let ungraded = vec![verdict_group(vec![verdict_route(ProcStatus::Ok, None, None)])];
+    assert_eq!(fleet_verdict(&ungraded).unwrap().mean_score, None);
   }
 
   #[test]

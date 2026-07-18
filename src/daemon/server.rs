@@ -1005,6 +1005,18 @@ fn route(
       (200, super::setup::setup_json(runtime), "application/json", false)
     }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
+    // Fleet aggregation for scripts and reduce steps: per-skill rollups (the same shape
+    // as the end-of-run `<skill>-rollup.json` files) plus the job-level verdict, computed
+    // live so it also serves mid-run.
+    path if path.starts_with("/api/v1/session/") && path.ends_with("/fleet") => {
+      let id = path.strip_prefix("/api/v1/session/").unwrap_or("").strip_suffix("/fleet").unwrap_or("");
+      let store = lock_store(store);
+      if let Some(s) = store.sessions.get(id) {
+        (200, crate::fleet::fleet_json(&s.id, &s.procs), "application/json", false)
+      } else {
+        (404, "{\"error\":\"not found\"}".into(), "application/json", false)
+      }
+    }
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
       let store = lock_store(store);
@@ -3080,6 +3092,90 @@ mod tests {
     assert!(!mutated);
     assert!(body.contains(crate::version::pkg_version()), "endpoint omits the version: {body}");
     assert!(body.contains("\"version\""), "{body}");
+  }
+
+  #[test]
+  fn fleet_endpoint_serves_rollups_and_job_verdict() {
+    use crate::daemon::model::{ProcKind, ProcRecord, ProcStatus, Session};
+    let route_proc = |index: usize, source: &str, route: &str| ProcRecord {
+      index,
+      previous_attempt: None,
+      kind: ProcKind::Skill,
+      label: format!("{source}-{route}"),
+      status: ProcStatus::Ok,
+      note: None,
+      detail: Some("done".into()),
+      fail_reason: None,
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some(source.into()),
+      route: Some(route.into()),
+      result_path: None,
+      annotate_target: None,
+      harness: Some("claude".into()),
+      skill_name: Some(format!("{source}-{route}")),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(1.0),
+      lines: vec![],
+    };
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    lock_store(&store).sessions.insert(
+      "flapi1".into(),
+      Session {
+        id: "flapi1".into(),
+        started_at: 1,
+        ended_at: Some(10),
+        profile: Some("default".into()),
+        kind: Some("profile".into()),
+        repo: "/tmp/repo".into(),
+        branch: "main".into(),
+        last_seen_at: 10,
+        client_connected: false,
+        run_pid: None,
+        skills: vec![],
+        procs: vec![
+          route_proc(0, "conventions-reviewer", "opus"),
+          route_proc(1, "conventions-reviewer", "codex"),
+          route_proc(2, "testing-reviewer", "opus"),
+          route_proc(3, "testing-reviewer", "codex"),
+        ],
+        workflow: None,
+        parent_session: None,
+        supervisor: Default::default(),
+      },
+    );
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    let req = HttpRequest {
+      method: "GET".into(),
+      path: "/api/v1/session/flapi1/fleet".into(),
+      body: String::new(),
+      headers: Vec::new(),
+    };
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    assert_eq!(status, 200);
+    assert_eq!(content_type, "application/json");
+    assert!(!mutated);
+    // The payload is real JSON with the verdict and both per-skill rollups.
+    assert!(parse(&body).is_ok(), "fleet payload parses as JSON: {body}");
+    assert!(body.contains("\"session\": \"flapi1\""), "{body}");
+    assert!(body.contains("\"routes\": 4") && body.contains("\"ok\": 4"), "job verdict counts routes: {body}");
+    assert!(body.contains("\"skill_source\": \"conventions-reviewer\""), "{body}");
+    assert!(body.contains("\"skill_source\": \"testing-reviewer\""), "{body}");
+    // No result files here → the verdict reports no mean rather than inventing one.
+    assert!(body.contains("\"mean_score\": null"), "{body}");
+
+    let missing = HttpRequest {
+      method: "GET".into(),
+      path: "/api/v1/session/zzzzzz/fleet".into(),
+      body: String::new(),
+      headers: Vec::new(),
+    };
+    let (status, _, _, _) = route(&missing, &store, &prune, &ws_dirty);
+    assert_eq!(status, 404);
   }
 
   #[test]
