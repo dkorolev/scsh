@@ -4,7 +4,7 @@
 # Keep this file under ~15KB (APPLE_CONTAINER_DOCKERFILE_SOFT_LIMIT): Apple Containers
 # sends the Dockerfile in a gRPC header (16KB hard limit) and larger files fail with
 # "Stream unexpectedly closed" (apple/container#735). scsh also comment-strips at build
-# time for Apple; heredoc *code* still counts toward the limit.
+# time for Apple; shell code embedded in RUN instructions still counts toward the limit.
 # PLATFORM-AGNOSTIC: arch resolved at build via dpkg --print-architecture.
 # Shared base scsh-base; harness stages install their CLI last.
 #
@@ -130,83 +130,85 @@ ENV PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:$PATH
 ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log
 ENV TERM=xterm-256color
 
-RUN cat > /usr/local/bin/scsh-tui-record <<'SCSH_TUI_RECORD'
-#!/bin/sh
-set -u
-cols=$1; rows=$2; quit=$3; submit=$4; result=$5; cmd=$6
-# SCSH_RUN_LOG lives under the bind-mounted repo tmp/; create it so tuidebug/cast
-# never fail with "Directory nonexistent" when the mount is empty or late.
-mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true
-dbg="$SCSH_RUN_LOG.tuidebug"
-exit_file="$SCSH_RUN_LOG.exit"
-log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }
-
-case "$result" in /*) : ;; *) result="$(pwd)/$result" ;; esac
-
-log "start cols=$cols rows=$rows quit=$quit result=$result cwd=$(pwd) pid=$$"
-log "result_exists_at_start=$([ -f "$result" ] && echo YES || echo NO)"
-
-pane_cmd="trap 'ec=\$?; echo \$ec > \"$exit_file\"; echo pane_exit=\$ec >> \"$dbg\"' EXIT; \
-trap 'echo pane_signal=TERM >> \"$dbg\"; for p in /proc/[0-9]*; do echo \"  \$p \$(cat \$p/comm 2>/dev/null)\" >> \"$dbg\"; done' TERM; \
-trap 'echo pane_signal=INT  >> \"$dbg\"' INT; \
-trap 'echo pane_signal=HUP  >> \"$dbg\"; exit 129' HUP; \
-n=0; while :; do $cmd; ec=\$?; \
-if [ -f \"$result\" ] || [ \$n -ge 2 ]; then exit \$ec; fi; \
-n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"
-
-tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"
-log "tmux new-session rc=$?"
-tmux set -t scsh status off >/dev/null 2>&1 || true
-
-if [ "$submit" = enter ]; then
-  ( sleep 8; tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (1)"
-    sleep 10; [ -f "$result" ] || { tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (2)"; }
-  ) >/dev/null 2>&1 &
-fi
-
-{
-  while tmux has-session -t scsh 2>/dev/null; do
-    if [ -f "$result" ]; then
-      log "watcher: result appeared -> quit via $quit"
-      sleep 4
-      case "$quit" in
-        slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
-        slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;
-        double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
-      esac
-      i=0
-      while tmux has-session -t scsh 2>/dev/null && [ "$i" -lt 12 ]; do
-        i=$((i+1))
-        if [ "$i" -eq 6 ]; then
-          log "watcher: quit ignored for 6s -> re-send $quit"
-          case "$quit" in
-            slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;
-            slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;
-            double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;
-          esac
-        fi
-        sleep 1
-      done
-      if tmux has-session -t scsh 2>/dev/null; then
-        tmux kill-session -t scsh 2>/dev/null || true
-        log "watcher: killed session (harness ignored quit)"
-      else
-        log "watcher: session ended after quit"
-      fi
-      break
-    fi
-    sleep 2
-  done
-  log "watcher: exit (session gone or killed)"
-} >/dev/null 2>&1 &
-
-asciinema rec -q --overwrite -f asciicast-v3 --window-size "${cols}x${rows}" \
-  -c 'tmux attach -r -t scsh' "$SCSH_RUN_LOG.cast"
-log "asciinema exited rc=$?"
-wait
-log "done"
-SCSH_TUI_RECORD
-RUN chmod 0755 /usr/local/bin/scsh-tui-record
+# Use only the classic Dockerfile grammar here. Podman 4.9 / Buildah 1.33 treat
+# Dockerfile heredoc bodies as top-level instructions (for example `set -u` as SET).
+RUN printf '%s\n' \
+  '#!/bin/sh' \
+  'set -u' \
+  'cols=$1; rows=$2; quit=$3; submit=$4; result=$5; cmd=$6' \
+  '# SCSH_RUN_LOG lives under the bind-mounted repo tmp/; create it so tuidebug/cast' \
+  '# never fail with "Directory nonexistent" when the mount is empty or late.' \
+  'mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true' \
+  'dbg="$SCSH_RUN_LOG.tuidebug"' \
+  'exit_file="$SCSH_RUN_LOG.exit"' \
+  'log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }' \
+  '' \
+  'case "$result" in /*) : ;; *) result="$(pwd)/$result" ;; esac' \
+  '' \
+  'log "start cols=$cols rows=$rows quit=$quit result=$result cwd=$(pwd) pid=$$"' \
+  'log "result_exists_at_start=$([ -f "$result" ] && echo YES || echo NO)"' \
+  '' \
+  'pane_cmd="trap '"'"'ec=\$?; echo \$ec > \"$exit_file\"; echo pane_exit=\$ec >> \"$dbg\"'"'"' EXIT; \' \
+  'trap '"'"'echo pane_signal=TERM >> \"$dbg\"; for p in /proc/[0-9]*; do echo \"  \$p \$(cat \$p/comm 2>/dev/null)\" >> \"$dbg\"; done'"'"' TERM; \' \
+  'trap '"'"'echo pane_signal=INT  >> \"$dbg\"'"'"' INT; \' \
+  'trap '"'"'echo pane_signal=HUP  >> \"$dbg\"; exit 129'"'"' HUP; \' \
+  'n=0; while :; do $cmd; ec=\$?; \' \
+  'if [ -f \"$result\" ] || [ \$n -ge 2 ]; then exit \$ec; fi; \' \
+  'n=\$((n+1)); echo pane_relaunch=\$n after_ec=\$ec >> \"$dbg\"; sleep 1; done"' \
+  '' \
+  'tmux -f /dev/null new-session -d -x "$cols" -y "$rows" -s scsh "$pane_cmd"' \
+  'log "tmux new-session rc=$?"' \
+  'tmux set -t scsh status off >/dev/null 2>&1 || true' \
+  '' \
+  'if [ "$submit" = enter ]; then' \
+  '  ( sleep 8; tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (1)"' \
+  '    sleep 10; [ -f "$result" ] || { tmux send-keys -t scsh Enter 2>/dev/null; log "submitter: sent Enter (2)"; }' \
+  '  ) >/dev/null 2>&1 &' \
+  'fi' \
+  '' \
+  '{' \
+  '  while tmux has-session -t scsh 2>/dev/null; do' \
+  '    if [ -f "$result" ]; then' \
+  '      log "watcher: result appeared -> quit via $quit"' \
+  '      sleep 4' \
+  '      case "$quit" in' \
+  '        slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;' \
+  '        slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;' \
+  '        double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;' \
+  '      esac' \
+  '      i=0' \
+  '      while tmux has-session -t scsh 2>/dev/null && [ "$i" -lt 12 ]; do' \
+  '        i=$((i+1))' \
+  '        if [ "$i" -eq 6 ]; then' \
+  '          log "watcher: quit ignored for 6s -> re-send $quit"' \
+  '          case "$quit" in' \
+  '            slash-exit)    tmux send-keys -t scsh -l /exit; sleep 1; tmux send-keys -t scsh Enter ;;' \
+  '            slash-quit)    tmux send-keys -t scsh -l /quit; sleep 1; tmux send-keys -t scsh Enter ;;' \
+  '            double-ctrl-c) tmux send-keys -t scsh C-c;      sleep 1; tmux send-keys -t scsh C-c   ;;' \
+  '          esac' \
+  '        fi' \
+  '        sleep 1' \
+  '      done' \
+  '      if tmux has-session -t scsh 2>/dev/null; then' \
+  '        tmux kill-session -t scsh 2>/dev/null || true' \
+  '        log "watcher: killed session (harness ignored quit)"' \
+  '      else' \
+  '        log "watcher: session ended after quit"' \
+  '      fi' \
+  '      break' \
+  '    fi' \
+  '    sleep 2' \
+  '  done' \
+  '  log "watcher: exit (session gone or killed)"' \
+  '} >/dev/null 2>&1 &' \
+  '' \
+  'asciinema rec -q --overwrite -f asciicast-v3 --window-size "${cols}x${rows}" \' \
+  '  -c '"'"'tmux attach -r -t scsh'"'"' "$SCSH_RUN_LOG.cast"' \
+  'log "asciinema exited rc=$?"' \
+  'wait' \
+  'log "done"' \
+  > /usr/local/bin/scsh-tui-record && \
+  chmod 0755 /usr/local/bin/scsh-tui-record
 
 # --- OpenCode harness image (install harness last) ---
 FROM scsh-base AS scsh-opencode
