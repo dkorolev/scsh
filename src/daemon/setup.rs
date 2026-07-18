@@ -26,9 +26,11 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
     Harness::Claude => {
       &[CatalogModel { id: "sonnet", kind: "primary" }, CatalogModel { id: "claude-opus-4-8", kind: "builtin" }]
     }
-    Harness::Codex => {
-      &[CatalogModel { id: "gpt-5.6-luna", kind: "primary" }, CatalogModel { id: "gpt-5.6-terra", kind: "builtin" }]
-    }
+    Harness::Codex => &[
+      CatalogModel { id: "gpt-5.6-luna", kind: "primary" },
+      CatalogModel { id: "gpt-5.6-terra", kind: "builtin" },
+      CatalogModel { id: "gpt-5.6-sol", kind: "builtin" },
+    ],
     Harness::Grok => {
       &[CatalogModel { id: "grok-build", kind: "primary" }, CatalogModel { id: "grok-4.5", kind: "builtin" }]
     }
@@ -263,6 +265,11 @@ mod tests {
       assert_eq!(primary_model_id(h), id, "{h:?}");
     }
     assert!(!Harness::ALL.into_iter().flat_map(catalog_models).any(|model| model.id.contains("mini")));
+  }
+
+  #[test]
+  fn codex_catalog_offers_sol_as_a_builtin() {
+    assert!(catalog_models(Harness::Codex).iter().any(|m| m.id == "gpt-5.6-sol" && m.kind == "builtin"));
   }
 
   #[test]
