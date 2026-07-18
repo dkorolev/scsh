@@ -7313,8 +7313,7 @@ fn install_from_repo(root: &Path, overwrite: bool, url: &str) -> Result<InstallC
 
 /// Clone one source repo shallowly into a unique scratch directory. The caller owns cleanup.
 fn clone_skill_source(url: &str) -> Result<PathBuf, i32> {
-  let nanos =
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+  let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
   let clone = std::env::temp_dir().join(format!("scsh-installskills-{}-{nanos}", std::process::id()));
   let _ = std::fs::remove_dir_all(&clone); // clear any stale dir from a crashed run
   let cloned = Command::new("git")
