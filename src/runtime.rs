@@ -503,7 +503,9 @@ pub fn harness_command(
         tui.push_str(" --model ");
         tui.push_str(&shell_quote(m));
       }
-      tui.push(' ');
+      // Prompt after `--`, like Cursor's: a DirectPrompt body opening with Markdown
+      // frontmatter (`---`) would otherwise be parsed as an unknown option and exit the CLI.
+      tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Auto, result, term)
     }
@@ -521,7 +523,9 @@ pub fn harness_command(
         tui.push_str(" -c ");
         tui.push_str(&shell_quote(&format!("model_reasoning_effort={e}")));
       }
-      tui.push(' ');
+      // Prompt after `--`, like Cursor's: a DirectPrompt body opening with Markdown
+      // frontmatter (`---`) would otherwise be parsed as an unknown option and exit the CLI.
+      tui.push_str(" -- ");
       tui.push_str(&shell_quote(&prompt));
       // `/quit` ends the codex TUI cleanly at its prompt; Ctrl-C first INTERRUPTS the
       // conversation (the recording ended on a "conversation interrupted" banner). The
@@ -541,8 +545,10 @@ pub fn harness_command(
         tui.push_str(" --effort ");
         tui.push_str(&shell_quote(e));
       }
-      tui.push(' ');
-      tui.push_str(&shell_quote(&prompt)); // positional initial prompt
+      // Positional initial prompt, after `--` like Cursor's: a DirectPrompt body opening with
+      // Markdown frontmatter (`---`) would otherwise be parsed as an unknown option and exit.
+      tui.push_str(" -- ");
+      tui.push_str(&shell_quote(&prompt));
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::DoubleCtrlC, TuiSubmit::Auto, result, term)
     }
     Harness::Cursor => {
@@ -2705,6 +2711,21 @@ TAG
     assert!(!cmd.contains("capture-pane"), "got: {cmd}");
     assert!(!cmd.contains("send-keys"), "got: {cmd}");
     assert!(cmd.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""), "got: {cmd}");
+
+    let frontmatter = harness_command(
+      Harness::Claude,
+      Some("sonnet"),
+      None,
+      "build",
+      "tmp/build.json",
+      crate::config::Terminal::default(),
+      &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
+    );
+    assert!(
+      frontmatter.contains("claude --permission-mode bypassPermissions --model sonnet -- ")
+        && frontmatter.contains("name: build"),
+      "frontmatter must be positional, never parsed as an option: {frontmatter}"
+    );
   }
 
   #[test]
@@ -2742,6 +2763,21 @@ TAG
     assert!(bare.contains("codex --dangerously-bypass-approvals-and-sandbox"));
     assert!(!bare.contains(" -m "));
     assert!(bare.ends_with("2>&1 | tee \"${SCSH_RUN_LOG}\""));
+
+    let frontmatter = harness_command(
+      Harness::Codex,
+      Some("gpt-5.6-luna"),
+      None,
+      "build",
+      "tmp/build.json",
+      crate::config::Terminal::default(),
+      &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
+    );
+    assert!(
+      frontmatter.contains("codex --dangerously-bypass-approvals-and-sandbox -m gpt-5.6-luna -- ")
+        && frontmatter.contains("name: build"),
+      "frontmatter must be positional, never parsed as an option: {frontmatter}"
+    );
   }
 
   #[test]
@@ -2777,6 +2813,20 @@ TAG
     assert!(bare.contains("grok --always-approve"), "got: {bare}");
     assert!(!bare.contains(" --effort "));
     assert!(!bare.contains(" -m "));
+
+    let frontmatter = harness_command(
+      Harness::Grok,
+      None,
+      None,
+      "build",
+      "tmp/build.json",
+      crate::config::Terminal::default(),
+      &crate::config::SkillDelivery::DirectPrompt("---\nname: build\n---\nDo the work.".into()),
+    );
+    assert!(
+      frontmatter.contains("grok --always-approve -- ") && frontmatter.contains("name: build"),
+      "frontmatter must be positional, never parsed as an option: {frontmatter}"
+    );
   }
 
   #[test]
