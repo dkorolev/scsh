@@ -12,12 +12,14 @@ mod layout;
 mod proc;
 mod session;
 mod session_export;
+mod stats;
 mod workflow;
 
 pub use cast::{cast_player_page, PLAYER_CSS, PLAYER_JS};
 pub use index::{index_page, index_page_for, index_page_with_filter, parse_index_filter, IndexTab};
 pub use session::session_page;
 pub(crate) use session_export::{session_export_page, CastExport};
+pub use stats::stats_json;
 
 #[cfg(test)]
 mod tests {

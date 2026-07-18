@@ -950,7 +950,7 @@ fn route(
       let html = html::index_page(&lock_store(store));
       (200, html, "text/html; charset=utf-8", false)
     }
-    path @ ("/run" | "/jobs" | "/projects" | "/setup" | "/images") => {
+    path @ ("/run" | "/jobs" | "/projects" | "/stats" | "/setup" | "/images") => {
       let tab = html::IndexTab::from_path(path).unwrap_or(html::IndexTab::Run);
       let html = html::index_page_for(&lock_store(store), None, tab);
       (200, html, "text/html; charset=utf-8", false)
@@ -1021,6 +1021,9 @@ fn route(
       (200, super::setup::setup_json(runtime), "application/json", false)
     }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
+    // Flaky-route dashboard data: reliability + latency percentiles per route and per
+    // skill × route, aggregated from the durable stats file (no store state involved).
+    "/api/v1/stats" => (200, html::stats_json(), "application/json", false),
     // Fleet aggregation for scripts and reduce steps: per-skill rollups (the same shape
     // as the end-of-run `<skill>-rollup.json` files) plus the job-level verdict, computed
     // live so it also serves mid-run.
@@ -3201,6 +3204,54 @@ mod tests {
     };
     let (status, _, _, _) = route(&missing, &store, &prune, &ws_dirty);
     assert_eq!(status, 404);
+  }
+
+  #[test]
+  fn stats_endpoint_serves_flakiness_json() {
+    let _env = crate::runtime::test_env_lock();
+    let file = std::env::temp_dir().join(format!("scsh-stats-api-{}.jsonl", crate::runtime::random_nonce_6()));
+    let prev = std::env::var_os(crate::stats::STATS_FILE_ENV);
+    std::env::set_var(crate::stats::STATS_FILE_ENV, &file);
+    crate::stats::record(&crate::stats::StatRecord {
+      ts: 1000,
+      kind: "skill".into(),
+      session: "abc".into(),
+      repo: "/r".into(),
+      branch: "b".into(),
+      profile: None,
+      skill: Some("add-claude".into()),
+      skill_source: Some("add".into()),
+      harness: Some("claude".into()),
+      model: None,
+      effort: None,
+      outcome: Some("ok".into()),
+      fail_reason: None,
+      attempts: 1,
+      duration_secs: 4.0,
+      commits: 0,
+      loc_added: 0,
+      loc_deleted: 0,
+      skills_total: None,
+      skills_failed: None,
+    });
+
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    let req =
+      HttpRequest { method: "GET".into(), path: "/api/v1/stats".into(), body: String::new(), headers: Vec::new() };
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    assert_eq!((status, content_type, mutated), (200, "application/json", false));
+    assert!(parse(&body).is_ok(), "stats payload parses as JSON: {body}");
+    assert!(body.contains("\"routes\"") && body.contains("\"skills\""), "{body}");
+    assert!(body.contains("\"p95_secs\": 4.000"), "percentiles ride along: {body}");
+    assert!(body.contains("\"fail_pct\": 0.00"), "{body}");
+
+    let _ = std::fs::remove_file(&file);
+    match prev {
+      Some(v) => std::env::set_var(crate::stats::STATS_FILE_ENV, v),
+      None => std::env::remove_var(crate::stats::STATS_FILE_ENV),
+    }
   }
 
   #[test]

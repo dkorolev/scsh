@@ -1872,6 +1872,60 @@ fn client_js_wires_force_stop() {
 }
 
 /// Accessibility hardening: confirm-dialog focus management, the full ARIA tab pattern,
+#[test]
+fn stats_tab_renders_the_flaky_route_dashboard() {
+  let _env = crate::runtime::test_env_lock();
+  let file = std::env::temp_dir().join(format!("scsh-stats-tab-{}.jsonl", crate::runtime::random_nonce_6()));
+  let prev = std::env::var_os(crate::stats::STATS_FILE_ENV);
+  std::env::set_var(crate::stats::STATS_FILE_ENV, &file);
+  let rec = |outcome: &str, secs: f64| crate::stats::StatRecord {
+    ts: 1000,
+    kind: "skill".into(),
+    session: "abc".into(),
+    repo: "/r".into(),
+    branch: "b".into(),
+    profile: Some("code-review".into()),
+    skill: Some("testing-reviewer-cursor-auto".into()),
+    skill_source: Some("testing-reviewer".into()),
+    harness: Some("cursor".into()),
+    model: Some("auto".into()),
+    effort: None,
+    outcome: Some(outcome.into()),
+    fail_reason: (outcome == "fail").then(|| "container_timeout".to_string()),
+    attempts: 1,
+    duration_secs: secs,
+    commits: 0,
+    loc_added: 0,
+    loc_deleted: 0,
+    skills_total: None,
+    skills_failed: None,
+  };
+  crate::stats::record(&rec("ok", 10.0));
+  crate::stats::record(&rec("fail", 60.0));
+
+  let store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let html = super::index_page_for(&store, None, super::IndexTab::Stats);
+  assert!(html.contains(r#"data-tab="stats""#), "Stats tab button present: {html}");
+  assert!(html.contains("Route reliability"), "route table present");
+  assert!(html.contains("Skill × route"), "skill × route table present");
+  assert!(html.contains("cursor · auto"), "route key rendered");
+  assert!(html.contains("testing-reviewer — cursor · auto"), "skill × route key rendered");
+  assert!(html.contains(r#"class="stats-fail-high""#), "a 50% failure rate wears the loud color");
+  assert!(html.contains("<code>container_timeout</code> ×1"), "top failure reason named: {html}");
+  assert!(html.contains("durations exclude cache hits"), "the cache-exclusion contract is stated");
+
+  // Without any stats file the tab explains itself instead of rendering an empty table.
+  std::fs::remove_file(&file).unwrap();
+  let empty = super::index_page_for(&store, None, super::IndexTab::Stats);
+  assert!(empty.contains("No run statistics yet"), "empty state: {empty}");
+  assert!(!empty.contains(r#"<table class="stats-table">"#), "no empty table");
+
+  match prev {
+    Some(v) => std::env::set_var(crate::stats::STATS_FILE_ENV, v),
+    None => std::env::remove_var(crate::stats::STATS_FILE_ENV),
+  }
+}
+
 /// live-region copy feedback, reduced-motion-gated scrolling and micro-transitions, and
 /// breadcrumb truncation on narrow viewports.
 #[test]
@@ -1886,7 +1940,7 @@ fn dashboard_a11y_contracts_hold() {
   //    arrow-key navigation, and a roving tabindex.
   let html = super::index_page(&Store::new(DaemonMode::Persistent, 7274, 1));
   assert!(html.contains(r#"<nav class="tabs" role="tablist">"#), "the tabs nav is a tablist");
-  assert_eq!(html.matches(r#"role="tabpanel""#).count(), 4, "every panel is a tabpanel");
+  assert_eq!(html.matches(r#"role="tabpanel""#).count(), 5, "every panel is a tabpanel");
   assert!(html.contains(r#"aria-labelledby="tabbtn-run""#), "panels are labelled by their tabs");
   assert!(html.contains(r#"aria-selected="true""#), "the active tab is selected server-side");
   assert!(js.contains("'ArrowRight'"), "arrow keys walk the tablist");

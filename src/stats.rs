@@ -279,6 +279,99 @@ pub fn aggregate_skills(records: &[&StatRecord]) -> SkillAggregate {
   agg
 }
 
+/// One flakiness-dashboard row: reliability and latency profile of a group of skill runs
+/// (grouped by route, or by skill × route). Cache hits count as runs but never contribute
+/// to failure rate, retry count, or the duration percentiles — a cache hit says nothing
+/// about how the route behaves when it actually executes.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct FlakinessRow {
+  pub key: String,
+  pub runs: usize,
+  pub ok: usize,
+  pub failed: usize,
+  pub cached: usize,
+  /// Executed runs that needed more than one attempt.
+  pub retried: usize,
+  pub p50_secs: f64,
+  pub p95_secs: f64,
+  /// Newest record's timestamp — "when did this route last run".
+  pub last_ts: u64,
+  /// Most frequent `fail_reason` among the failures, with its count.
+  pub top_fail_reason: Option<(String, usize)>,
+}
+
+impl FlakinessRow {
+  /// Failures as a percentage of executed (non-cached) runs; 0 when nothing executed.
+  pub fn fail_pct(&self) -> f64 {
+    let executed = self.ok + self.failed;
+    if executed == 0 {
+      0.0
+    } else {
+      self.failed as f64 * 100.0 / executed as f64
+    }
+  }
+}
+
+/// Group skill rows by `key_of` and profile each group's flakiness. Rows come back
+/// flakiest first (failure rate, then executed volume, then key) — the dashboard order.
+pub fn flakiness_rows(records: &[StatRecord], key_of: impl Fn(&StatRecord) -> String) -> Vec<FlakinessRow> {
+  use std::collections::BTreeMap;
+  let mut groups: BTreeMap<String, Vec<&StatRecord>> = BTreeMap::new();
+  for r in records.iter().filter(|r| r.kind == "skill") {
+    groups.entry(key_of(r)).or_default().push(r);
+  }
+  let mut out = Vec::with_capacity(groups.len());
+  for (key, rows) in groups {
+    let mut row = FlakinessRow { key, ..Default::default() };
+    let mut durations = Vec::new();
+    let mut reasons: BTreeMap<&str, usize> = BTreeMap::new();
+    for r in rows {
+      row.runs += 1;
+      row.last_ts = row.last_ts.max(r.ts);
+      match r.outcome.as_deref() {
+        Some("cached") => {
+          row.cached += 1;
+          continue;
+        }
+        Some("ok") => row.ok += 1,
+        _ => {
+          row.failed += 1;
+          if let Some(reason) = r.fail_reason.as_deref().filter(|s| !s.is_empty()) {
+            *reasons.entry(reason).or_default() += 1;
+          }
+        }
+      }
+      if r.attempts > 1 {
+        row.retried += 1;
+      }
+      durations.push(r.duration_secs);
+    }
+    durations.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    row.p50_secs = percentile(&durations, 0.50);
+    row.p95_secs = percentile(&durations, 0.95);
+    // Ties break toward the first-seen reason (BTreeMap order), so the pick is stable.
+    row.top_fail_reason = reasons.into_iter().max_by_key(|(_, n)| *n).map(|(reason, n)| (reason.to_string(), n));
+    out.push(row);
+  }
+  out.sort_by(|a, b| {
+    b.fail_pct()
+      .partial_cmp(&a.fail_pct())
+      .unwrap_or(std::cmp::Ordering::Equal)
+      .then_with(|| (b.ok + b.failed).cmp(&(a.ok + a.failed)))
+      .then_with(|| a.key.cmp(&b.key))
+  });
+  out
+}
+
+/// Nearest-rank percentile over an ascending-sorted slice; 0 for an empty one.
+fn percentile(sorted: &[f64], q: f64) -> f64 {
+  if sorted.is_empty() {
+    return 0.0;
+  }
+  let rank = ((q * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
+  sorted[rank - 1]
+}
+
 impl StatRecord {
   pub fn loc_total(&self) -> u64 {
     self.loc_added + self.loc_deleted
@@ -322,6 +415,51 @@ mod tests {
       skills_total: None,
       skills_failed: None,
     }
+  }
+
+  #[test]
+  fn flakiness_rows_profile_failure_rate_percentiles_and_top_reason() {
+    let mut records: Vec<StatRecord> = Vec::new();
+    // Ten executed runs for one route: 8 ok (1..=8s), 2 failed, one retry, plus a cache
+    // hit that must not dilute anything.
+    for i in 1..=8 {
+      records.push(sample_skill("ok", i as f64, 0, 0, if i == 1 { 2 } else { 1 }));
+    }
+    for secs in [9.0, 10.0] {
+      records.push(sample_skill("fail", secs, 0, 0, 1));
+    }
+    records.push(sample_skill("cached", 0.0, 0, 0, 1));
+    // A second, spotless route sorts below the flaky one.
+    let mut clean = sample_skill("ok", 3.0, 0, 0, 1);
+    clean.harness = Some("claude".into());
+    clean.model = Some("claude-opus-4-8".into());
+    records.push(clean);
+    // Run rows are ignored outright.
+    records.push(StatRecord { kind: "run".into(), ..sample_skill("ok", 99.0, 0, 0, 1) });
+
+    let rows = flakiness_rows(&records, |r| r.route_label());
+    assert_eq!(rows.len(), 2);
+    let flaky = &rows[0];
+    assert!(flaky.key.starts_with("codex"), "flakiest first: {}", flaky.key);
+    assert_eq!((flaky.runs, flaky.ok, flaky.failed, flaky.cached, flaky.retried), (11, 8, 2, 1, 1));
+    assert!((flaky.fail_pct() - 20.0).abs() < 1e-9);
+    // Nearest-rank over 1..=10 seconds: p50 = 5s, p95 = 10s.
+    assert!((flaky.p50_secs - 5.0).abs() < 1e-9, "p50: {}", flaky.p50_secs);
+    assert!((flaky.p95_secs - 10.0).abs() < 1e-9, "p95: {}", flaky.p95_secs);
+    assert_eq!(flaky.top_fail_reason, Some(("container_timeout".into(), 2)));
+    let clean = &rows[1];
+    assert_eq!((clean.failed, clean.top_fail_reason.is_none()), (0, true));
+    assert!((clean.fail_pct() - 0.0).abs() < 1e-9);
+  }
+
+  #[test]
+  fn flakiness_handles_empty_and_all_cached_groups() {
+    assert!(flakiness_rows(&[], |r| r.route_label()).is_empty());
+    // All-cached: runs counted, no failure rate, zero percentiles.
+    let rows = flakiness_rows(&[sample_skill("cached", 0.0, 0, 0, 1)], |r| r.route_label());
+    assert_eq!((rows[0].runs, rows[0].cached, rows[0].ok + rows[0].failed), (1, 1, 0));
+    assert!((rows[0].fail_pct() - 0.0).abs() < 1e-9);
+    assert!((rows[0].p95_secs - 0.0).abs() < 1e-9);
   }
 
   #[test]

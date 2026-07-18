@@ -61,6 +61,7 @@ pub enum IndexTab {
   Run,
   Jobs,
   Projects,
+  Stats,
   Setup,
 }
 
@@ -73,6 +74,7 @@ impl IndexTab {
       "/" | "/run" => Some(Self::Run),
       "/jobs" => Some(Self::Jobs),
       "/projects" => Some(Self::Projects),
+      "/stats" => Some(Self::Stats),
       "/setup" | "/images" => Some(Self::Setup),
       _ => None,
     }
@@ -83,6 +85,7 @@ impl IndexTab {
       Self::Run => None,
       Self::Jobs => Some(("/jobs", "jobs")),
       Self::Projects => Some(("/projects", "projects")),
+      Self::Stats => Some(("/stats", "stats")),
       Self::Setup => Some(("/setup", "setup")),
     }
   }
@@ -133,6 +136,8 @@ tabindex=\"{run_i}\" class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
 tabindex=\"{jobs_i}\" class=\"tab{jobs_a}\" data-tab=\"jobs\">Jobs</button>\
 <button id=\"tabbtn-projects\" role=\"tab\" aria-selected=\"{proj_s}\" aria-controls=\"tab-projects\" \
 tabindex=\"{proj_i}\" class=\"tab{proj_a}\" data-tab=\"projects\">Projects</button>\
+<button id=\"tabbtn-stats\" role=\"tab\" aria-selected=\"{stats_s}\" aria-controls=\"tab-stats\" \
+tabindex=\"{stats_i}\" class=\"tab{stats_a}\" data-tab=\"stats\">Stats</button>\
 <button id=\"tabbtn-setup\" role=\"tab\" aria-selected=\"{setup_s}\" aria-controls=\"tab-setup\" \
 tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
@@ -147,27 +152,33 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </div>\n\
 </section>\n\
 <section class=\"tab-panel{proj_p}\" id=\"tab-projects\" role=\"tabpanel\" aria-labelledby=\"tabbtn-projects\">\n{dirs}</section>\n\
+<section class=\"tab-panel{stats_p}\" id=\"tab-stats\" role=\"tabpanel\" aria-labelledby=\"tabbtn-stats\">\n{stats}</section>\n\
 <section class=\"tab-panel{setup_p}\" id=\"tab-setup\" role=\"tabpanel\" aria-labelledby=\"tabbtn-setup\">\n{images}</section>\n",
     run_a = active(IndexTab::Run),
     jobs_a = active(IndexTab::Jobs),
     proj_a = active(IndexTab::Projects),
+    stats_a = active(IndexTab::Stats),
     setup_a = active(IndexTab::Setup),
     run_s = selected(IndexTab::Run),
     jobs_s = selected(IndexTab::Jobs),
     proj_s = selected(IndexTab::Projects),
+    stats_s = selected(IndexTab::Stats),
     setup_s = selected(IndexTab::Setup),
     run_i = tabindex(IndexTab::Run),
     jobs_i = tabindex(IndexTab::Jobs),
     proj_i = tabindex(IndexTab::Projects),
+    stats_i = tabindex(IndexTab::Stats),
     setup_i = tabindex(IndexTab::Setup),
     run_p = active(IndexTab::Run),
     jobs_p = active(IndexTab::Jobs),
     proj_p = active(IndexTab::Projects),
+    stats_p = active(IndexTab::Stats),
     setup_p = active(IndexTab::Setup),
     rows = rows,
     harness_stops = harness_stop_strip(store, now),
     dirs = dirs_panel(store, now, filter.as_ref()),
     start = start_panel(),
+    stats = super::stats::stats_panel(),
     images = images_panel()
   );
   wrap_page("scsh", port, None, tab.crumb(), "", &body)

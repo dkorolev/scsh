@@ -3250,6 +3250,7 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
     id = normalizeTab(id);
     if (id === 'jobs') return '/jobs';
     if (id === 'projects') return '/projects';
+    if (id === 'stats') return '/stats';
     if (id === 'setup') return '/setup';
     return '/'; // run
   }
@@ -3258,6 +3259,7 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
     const p = (location.pathname || '/').replace(/\/+$/, '') || '/';
     if (p === '/jobs') return 'jobs';
     if (p === '/projects') return 'projects';
+    if (p === '/stats') return 'stats';
     if (p === '/setup' || p === '/images') return 'setup';
     if (p === '/run' || p === '/') return 'run';
     // Legacy bookmarks: /#tab=dirs → projects, etc.
