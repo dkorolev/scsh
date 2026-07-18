@@ -269,10 +269,10 @@ impl Server {
           self.dirty.store(true, Ordering::Relaxed);
           self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(dead_sessions);
         }
-        self.ws_hub.broadcast(json);
+        self.ws_hub.broadcast_tick(&json);
         if probe_casts {
-          for msg in probe_growth_messages(&casts, &mut cast_probes) {
-            self.ws_hub.broadcast(msg);
+          for ((session, proc_index), msg) in probe_growth_messages(&casts, &mut cast_probes) {
+            self.ws_hub.broadcast_growth(&session, proc_index, &msg);
           }
         }
         if include_sessions {
@@ -469,11 +469,11 @@ fn handle_connection(
   let req = read_request(&mut stream)?;
   if websocket::wants_upgrade(&req.method, &req.path, &req.headers) {
     websocket::accept_handshake(&mut stream, &req.headers)?;
-    let rx = ws_hub.subscribe();
+    let mailbox = ws_hub.subscribe();
     // A fresh client needs a full snapshot on its first tick — on a quiet daemon nothing
     // else would ever mark the store dirty, and the page would get light ticks forever.
     ws_dirty.store(true, Ordering::Relaxed);
-    websocket::serve(stream, rx);
+    websocket::serve(stream, mailbox);
     return Ok((false, None));
   }
   let bare_path = req.path.split('?').next().unwrap_or("");

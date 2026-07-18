@@ -1,9 +1,9 @@
 //! WebSocket upgrade, frames, and broadcast hub for the session browser.
 
+use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use crate::sha1::sha1_digest;
@@ -11,7 +11,47 @@ use crate::sha1::sha1_digest;
 const WS_MAGIC: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 pub struct Hub {
-  clients: Mutex<Vec<Sender<String>>>,
+  clients: Mutex<Vec<Arc<Mailbox>>>,
+}
+
+/// One client's outbound slots — latest-wins, never a queue. Every message the hub sends
+/// is a full-state snapshot (a tick supersedes the previous tick; a cast-growth notice
+/// carries the recording's current total, superseding earlier notices for the same proc),
+/// so a reader that cannot keep up — a browser behind an SSH tunnel — coalesces to the
+/// freshest state instead of replaying history: the old unbounded per-client channel
+/// buffered every 500ms tick during a stall and the page fast-forwarded through the
+/// backlog (uptime visibly racing) while the pipe carried nothing but stale snapshots.
+/// The serve loop's blocking socket write is the only in-flight message, so a slow client
+/// is never more than one message plus one socket buffer behind — no ack protocol needed.
+pub struct Mailbox {
+  state: Mutex<MailboxState>,
+  ready: Condvar,
+}
+
+#[derive(Default)]
+struct MailboxState {
+  /// Latest full-state tick; replaced on every broadcast, never appended.
+  tick: Option<String>,
+  /// Latest cast-growth notice per `(session, proc)`; replaced per key.
+  growth: BTreeMap<(String, usize), String>,
+  /// Set by the serve loop on disconnect so the next broadcast prunes this client.
+  closed: bool,
+}
+
+impl Mailbox {
+  /// The next message to write: the tick first (the whole-page state, freshest wins),
+  /// then growth notices in key order.
+  fn take_next(state: &mut MailboxState) -> Option<String> {
+    if let Some(tick) = state.tick.take() {
+      return Some(tick);
+    }
+    let key = state.growth.keys().next().cloned()?;
+    state.growth.remove(&key)
+  }
+
+  fn close(&self) {
+    self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+  }
 }
 
 impl Hub {
@@ -19,15 +59,35 @@ impl Hub {
     Arc::new(Hub { clients: Mutex::new(Vec::new()) })
   }
 
-  pub fn subscribe(self: &Arc<Self>) -> mpsc::Receiver<String> {
-    let (tx, rx) = mpsc::channel();
-    self.clients.lock().unwrap().push(tx);
-    rx
+  pub fn subscribe(self: &Arc<Self>) -> Arc<Mailbox> {
+    let mailbox = Arc::new(Mailbox { state: Mutex::new(MailboxState::default()), ready: Condvar::new() });
+    self.clients.lock().unwrap().push(Arc::clone(&mailbox));
+    mailbox
   }
 
-  pub fn broadcast(&self, msg: String) {
+  /// Replace every client's pending tick with this one.
+  pub fn broadcast_tick(&self, msg: &str) {
+    self.deliver(|state| state.tick = Some(msg.to_string()));
+  }
+
+  /// Replace every client's pending growth notice for this proc.
+  pub fn broadcast_growth(&self, session: &str, proc_index: usize, msg: &str) {
+    self.deliver(|state| {
+      state.growth.insert((session.to_string(), proc_index), msg.to_string());
+    });
+  }
+
+  fn deliver(&self, mut put: impl FnMut(&mut MailboxState)) {
     let mut clients = self.clients.lock().unwrap();
-    clients.retain(|tx| tx.send(msg.clone()).is_ok());
+    clients.retain(|mailbox| {
+      let mut state = mailbox.state.lock().unwrap_or_else(|e| e.into_inner());
+      if state.closed {
+        return false;
+      }
+      put(&mut state);
+      mailbox.ready.notify_one();
+      true
+    });
   }
 
   /// How many subscribers are (or recently were) connected — dead ones linger only until
@@ -64,7 +124,7 @@ Sec-WebSocket-Accept: {accept}\r\n\r\n"
   stream.write_all(resp.as_bytes())
 }
 
-pub fn serve(mut stream: TcpStream, rx: mpsc::Receiver<String>) {
+pub fn serve(mut stream: TcpStream, mailbox: Arc<Mailbox>) {
   stream.set_read_timeout(Some(POLL_READ_TIMEOUT)).ok();
   loop {
     match read_client_frame(&mut stream) {
@@ -75,16 +135,27 @@ pub fn serve(mut stream: TcpStream, rx: mpsc::Receiver<String>) {
       Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
       Err(_) => break,
     }
-    match rx.recv_timeout(Duration::from_millis(100)) {
-      Ok(msg) => {
-        if write_text_frame(&mut stream, &msg).is_err() {
-          break;
+    // Take the freshest pending message, waiting briefly to keep the read-poll cadence.
+    // The state lock is released before the socket write: a slow write must never block
+    // broadcasts — that is exactly when the mailbox needs to keep coalescing.
+    let msg = {
+      let mut state = mailbox.state.lock().unwrap_or_else(|e| e.into_inner());
+      match Mailbox::take_next(&mut state) {
+        Some(msg) => Some(msg),
+        None => {
+          let (mut state, _) =
+            mailbox.ready.wait_timeout(state, Duration::from_millis(100)).unwrap_or_else(|e| e.into_inner());
+          Mailbox::take_next(&mut state)
         }
       }
-      Err(RecvTimeoutError::Timeout) => {}
-      Err(RecvTimeoutError::Disconnected) => break,
+    };
+    if let Some(msg) = msg {
+      if write_text_frame(&mut stream, &msg).is_err() {
+        break;
+      }
     }
   }
+  mailbox.close();
 }
 
 fn write_text_frame(stream: &mut TcpStream, payload: &str) -> std::io::Result<()> {
@@ -269,6 +340,47 @@ mod tests {
       }
       Err(mpsc::RecvTimeoutError::Disconnected) => panic!("test thread exited without result"),
     }
+  }
+
+  #[test]
+  fn mailbox_keeps_only_the_latest_tick() {
+    let hub = Hub::new();
+    let mailbox = hub.subscribe();
+    hub.broadcast_tick("tick-1");
+    hub.broadcast_tick("tick-2");
+    hub.broadcast_tick("tick-3");
+    let mut state = mailbox.state.lock().unwrap();
+    assert_eq!(Mailbox::take_next(&mut state).as_deref(), Some("tick-3"), "a slow client skips stale ticks");
+    assert_eq!(Mailbox::take_next(&mut state), None, "history is never queued");
+  }
+
+  #[test]
+  fn mailbox_coalesces_growth_per_proc_and_sends_the_tick_first() {
+    let hub = Hub::new();
+    let mailbox = hub.subscribe();
+    hub.broadcast_growth("sess01", 0, "growth-a-old");
+    hub.broadcast_growth("sess01", 0, "growth-a-new");
+    hub.broadcast_growth("sess01", 3, "growth-b");
+    hub.broadcast_tick("tick");
+    let mut state = mailbox.state.lock().unwrap();
+    assert_eq!(Mailbox::take_next(&mut state).as_deref(), Some("tick"), "the whole-page tick goes out first");
+    assert_eq!(
+      Mailbox::take_next(&mut state).as_deref(),
+      Some("growth-a-new"),
+      "the same proc coalesces to its latest notice"
+    );
+    assert_eq!(Mailbox::take_next(&mut state).as_deref(), Some("growth-b"), "distinct procs each keep one");
+    assert_eq!(Mailbox::take_next(&mut state), None);
+  }
+
+  #[test]
+  fn closed_mailbox_is_pruned_on_the_next_broadcast() {
+    let hub = Hub::new();
+    let mailbox = hub.subscribe();
+    assert_eq!(hub.client_count(), 1);
+    mailbox.close();
+    hub.broadcast_tick("tick");
+    assert_eq!(hub.client_count(), 0, "a disconnected client is dropped, not accumulated");
   }
 
   #[test]
