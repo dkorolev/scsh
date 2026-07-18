@@ -6868,6 +6868,9 @@ fn install_skills(overwrite: bool, sources: &[String], global: bool) -> i32 {
     hint(&format!("commit or stash them first, then re-run:  {}", bold("git add -A && git commit -m \"wip\"")));
     return 1;
   }
+  if reject_repo_skill_host_copies(&root) {
+    return 1;
+  }
   // Make the repo run-ready: installed skills write their result + cache under the repo's tmp/,
   // so ensure it's gitignored (append-only, exactly as init-demo-project does).
   match ensure_tmp_gitignored(&root) {
@@ -6965,17 +6968,57 @@ fn install_skills_global(overwrite: bool, sources: &[String]) -> i32 {
     return 1;
   }
 
+  // Resolve every incoming skill name before writing anything. An agent-local real copy with
+  // the same name would shadow the canonical global skill forever: neither install command may
+  // claim success in that state. Source repos are cloned once here and retained for the install
+  // below, so this preflight does not double the network work.
+  let mut incoming: std::collections::BTreeSet<String> = global_skill_names(&home).into_iter().collect();
+  if reject_agent_local_skill_copies(&home, &incoming) {
+    return 1;
+  }
+  let mut clones: Vec<(String, PathBuf)> = Vec::new();
+  if sources.is_empty() {
+    incoming.extend(bundled_skill_names());
+  } else {
+    for url in sources {
+      let clone = match clone_skill_source(url) {
+        Ok(path) => path,
+        Err(code) => {
+          remove_skill_source_clones(&clones);
+          return code;
+        }
+      };
+      match installable_skill_names(url, &clone) {
+        Ok(names) => incoming.extend(names),
+        Err(code) => {
+          let _ = std::fs::remove_dir_all(&clone);
+          remove_skill_source_clones(&clones);
+          return code;
+        }
+      }
+      clones.push((url.clone(), clone));
+    }
+  }
+  if reject_agent_local_skill_copies(&home, &incoming) {
+    remove_skill_source_clones(&clones);
+    return 1;
+  }
+
   let mut counts = InstallCounts::default();
   if sources.is_empty() {
     counts.merge(install_bundled(&home, overwrite));
   } else {
-    for url in sources {
-      match install_from_repo(&home, overwrite, url) {
+    for (url, clone) in &clones {
+      match install_from_cloned_repo(&home, overwrite, url, clone) {
         Ok(c) => counts.merge(c),
-        Err(code) => return code,
+        Err(code) => {
+          remove_skill_source_clones(&clones);
+          return code;
+        }
       }
     }
   }
+  remove_skill_source_clones(&clones);
 
   let any = report_install_counts(&counts, sources, true);
   let links = link_agent_global_skills(&home);
@@ -6990,6 +7033,110 @@ fn install_skills_global(overwrite: bool, sources: &[String]) -> i32 {
     hint("delivery-pipeline skills install from source: scsh installskills --global https://github.com/dkorolev/beautiful-skills");
   }
   0
+}
+
+/// Names already owned by the canonical global store. Include these in every global-install
+/// preflight, not only the names arriving from this invocation: the command must not leave any
+/// previously installed skill shadowed by an agent-local real copy.
+fn global_skill_names(scsh_home: &Path) -> Vec<String> {
+  let mut names: Vec<String> = std::fs::read_dir(scsh_home.join(".skills"))
+    .map(|entries| {
+      entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("SKILL.md").is_file())
+        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .filter(|name| !name.starts_with(INTERNAL_PREFIX))
+        .collect()
+    })
+    .unwrap_or_default();
+  names.sort();
+  names
+}
+
+/// Names shipped in the no-URL bundle, derived from the same paths used by the installer.
+fn bundled_skill_names() -> Vec<String> {
+  config::bundled_skills()
+    .iter()
+    .filter_map(|(rel, _)| Path::new(rel).parent()?.file_name()?.to_str().map(str::to_string))
+    .filter(|name| !name.starts_with(INTERNAL_PREFIX))
+    .collect()
+}
+
+/// Reject real per-skill copies in agent discovery directories. A real agent `skills/` root is
+/// valid because it may contain personal skills, but every scsh-owned child must either be
+/// absent (and therefore linkable) or already be a symlink. Returning true means the caller must
+/// stop before changing the canonical store.
+#[cfg(unix)]
+fn reject_agent_local_skill_copies(scsh_home: &Path, names: &std::collections::BTreeSet<String>) -> bool {
+  const AGENT_DIRS: &[&str] = &[".claude", ".cursor", ".codex", ".opencode", ".agents"];
+  let Some(user_home) = std::env::var_os("HOME").filter(|value| !value.is_empty()).map(PathBuf::from) else {
+    return false;
+  };
+  let mut conflicts = Vec::new();
+  for agent in AGENT_DIRS {
+    let skills_dir = user_home.join(agent).join("skills");
+    let Ok(root_meta) = skills_dir.symlink_metadata() else { continue };
+    if root_meta.file_type().is_symlink() || !root_meta.is_dir() {
+      continue;
+    }
+    for name in names {
+      let path = skills_dir.join(name);
+      let Ok(meta) = path.symlink_metadata() else { continue };
+      if !meta.file_type().is_symlink() {
+        conflicts.push(path);
+      }
+    }
+  }
+  conflicts.sort();
+  if conflicts.is_empty() {
+    return false;
+  }
+  fail("agent skill directories contain local copies that shadow canonical global skills");
+  for path in &conflicts {
+    hint(&format!("local copy: {}", display_path(path)));
+  }
+  hint(&format!(
+    "move or remove each local copy, then rerun; scsh will link the missing paths to {}",
+    display_path(&scsh_home.join(".skills"))
+  ));
+  true
+}
+
+#[cfg(not(unix))]
+fn reject_agent_local_skill_copies(_scsh_home: &Path, _names: &std::collections::BTreeSet<String>) -> bool {
+  false
+}
+
+/// A repository has one canonical `.skills/` tree; every harness discovery path must therefore
+/// be absent or a symlink. Refuse before touching `.gitignore`, `.skills/`, or `.scsh.yml` when a
+/// real path would prevent that invariant.
+#[cfg(unix)]
+fn reject_repo_skill_host_copies(root: &Path) -> bool {
+  const HOSTS: &[&str] = &[".opencode/skills", ".claude/skills", ".cursor/skills", ".agents/skills", ".codex/skills"];
+  let mut conflicts = Vec::new();
+  for host in HOSTS {
+    let path = root.join(host);
+    let Ok(meta) = path.symlink_metadata() else { continue };
+    if !meta.file_type().is_symlink() {
+      conflicts.push(path);
+    }
+  }
+  conflicts.sort();
+  if conflicts.is_empty() {
+    return false;
+  }
+  fail("agent skill discovery paths contain local copies instead of symlinks to .skills");
+  for path in &conflicts {
+    hint(&format!("local path: {}", display_path(path)));
+  }
+  hint("move or remove each local path, then rerun; scsh will link the missing paths to .skills");
+  true
+}
+
+#[cfg(not(unix))]
+fn reject_repo_skill_host_copies(_root: &Path) -> bool {
+  false
 }
 
 /// Symlink every globally-installed skill (`$SCSH_HOME/.skills/<name>`, minus `internal-*`)
@@ -7158,7 +7305,17 @@ const INTERNAL_PREFIX: &str = "internal-";
 /// `.skills/<name>/` directory is installed (still skipping `internal-*`). Returns
 /// `Err(code)` on a clone failure, an invalid source manifest, or no installable skills.
 fn install_from_repo(root: &Path, overwrite: bool, url: &str) -> Result<InstallCounts, i32> {
-  let clone = std::env::temp_dir().join(format!("scsh-installskills-{}-{}", std::process::id(), now_secs()));
+  let clone = clone_skill_source(url)?;
+  let result = install_from_cloned_repo(root, overwrite, url, &clone);
+  let _ = std::fs::remove_dir_all(&clone);
+  result
+}
+
+/// Clone one source repo shallowly into a unique scratch directory. The caller owns cleanup.
+fn clone_skill_source(url: &str) -> Result<PathBuf, i32> {
+  let nanos =
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+  let clone = std::env::temp_dir().join(format!("scsh-installskills-{}-{nanos}", std::process::id()));
   let _ = std::fs::remove_dir_all(&clone); // clear any stale dir from a crashed run
   let cloned = Command::new("git")
     .args(["clone", "--depth", "1", url])
@@ -7172,15 +7329,77 @@ fn install_from_repo(root: &Path, overwrite: bool, url: &str) -> Result<InstallC
     let _ = std::fs::remove_dir_all(&clone);
     return Err(1);
   }
+  Ok(clone)
+}
 
+/// Install from an already-cloned source repo.
+fn install_from_cloned_repo(root: &Path, overwrite: bool, url: &str, clone: &Path) -> Result<InstallCounts, i32> {
   let manifest = clone.join(".scsh.yml");
-  let result = if manifest.is_file() {
-    install_from_manifest(root, overwrite, url, &clone, &manifest)
+  if manifest.is_file() {
+    install_from_manifest(root, overwrite, url, clone, &manifest)
   } else {
-    install_all_skill_dirs(root, overwrite, url, &clone)
-  };
-  let _ = std::fs::remove_dir_all(&clone);
-  result
+    install_all_skill_dirs(root, overwrite, url, clone)
+  }
+}
+
+/// Return the installable skill names from a cloned source without modifying the destination.
+/// This mirrors the manifest/no-manifest shipping rules used by the installer.
+fn installable_skill_names(url: &str, clone: &Path) -> Result<Vec<String>, i32> {
+  let manifest = clone.join(".scsh.yml");
+  let mut names = Vec::new();
+  if manifest.is_file() {
+    let src_text = match std::fs::read_to_string(&manifest) {
+      Ok(text) => text,
+      Err(error) => {
+        fail(&format!("{url}: could not read its .scsh.yml: {error}"));
+        return Err(1);
+      }
+    };
+    let cfg = match config::validate(&src_text) {
+      Ok(config) => config,
+      Err(errors) => {
+        fail(&format!(
+          "{url}: its .scsh.yml does not match the schema ({} problem{})",
+          errors.len(),
+          plural(errors.len())
+        ));
+        for error in &errors {
+          hint(error);
+        }
+        return Err(1);
+      }
+    };
+    for skill in cfg.skills {
+      if skill.autoinstall
+        && !skill.name.starts_with(INTERNAL_PREFIX)
+        && clone.join(".skills").join(&skill.name).join("SKILL.md").is_file()
+      {
+        names.push(skill.name);
+      }
+    }
+  } else if let Ok(entries) = std::fs::read_dir(clone.join(".skills")) {
+    names.extend(
+      entries
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.join("SKILL.md").is_file())
+        .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .filter(|name| !name.starts_with(INTERNAL_PREFIX)),
+    );
+  }
+  names.sort();
+  names.dedup();
+  if names.is_empty() {
+    fail(&format!("{url}: no installable skills found"));
+    return Err(1);
+  }
+  Ok(names)
+}
+
+fn remove_skill_source_clones(clones: &[(String, PathBuf)]) {
+  for (_, clone) in clones {
+    let _ = std::fs::remove_dir_all(clone);
+  }
 }
 
 /// Install every `.skills/<name>/` directory in the clone — the behavior when the source

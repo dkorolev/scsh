@@ -349,6 +349,28 @@ fn installskills_is_idempotent_and_updateskills_overwrites() {
 }
 
 #[test]
+fn repo_install_commands_refuse_real_harness_skill_paths_before_writing() {
+  for command in ["installskills", "updateskills"] {
+    let d = unique_dir("rshadow");
+    git_init(&d);
+    let local_copy = d.join(".cursor/skills/my-local-copy");
+    std::fs::create_dir_all(&local_copy).unwrap();
+    std::fs::write(local_copy.join("SKILL.md"), "# local copy\n").unwrap();
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "add local skill copy"]);
+
+    let result = scsh(&d, &[command]);
+
+    assert_eq!(result.code, 1, "{command} must reject the real host path; got: {}", result.out);
+    assert!(result.out.contains("instead of symlinks"), "{command} should explain the invariant; got: {}", result.out);
+    assert!(result.out.contains(".cursor/skills"), "{command} should name the conflict; got: {}", result.out);
+    assert!(!d.join(".skills").exists(), "{command} wrote skills before refusing");
+    assert!(!d.join(".scsh.yml").exists(), "{command} wrote a manifest before refusing");
+    assert!(!d.join(".gitignore").exists(), "{command} changed .gitignore before refusing");
+  }
+}
+
+#[test]
 fn installskills_global_installs_under_scsh_home_and_links_agents() {
   // Global install needs NO git repo — run it from a plain directory.
   let d = unique_dir("ginstall");
@@ -450,6 +472,58 @@ fn a_real_agent_skills_dir_is_linked_into_not_replaced() {
   let link = skills.join("sanity-reviewer");
   assert!(link.symlink_metadata().expect("per-skill link").file_type().is_symlink(), "skills link in one by one");
   assert!(link.join("SKILL.md").is_file(), "per-skill link resolves");
+}
+
+#[test]
+fn global_install_commands_refuse_agent_local_skill_copies_before_writing() {
+  for command in ["installskills", "updateskills"] {
+    let d = unique_dir("gshadowdir");
+    let home = unique_dir("gshadowhome");
+    let local_copy = home.join(".cursor/skills/sanity-reviewer");
+    std::fs::create_dir_all(&local_copy).unwrap();
+    std::fs::write(local_copy.join("SKILL.md"), "# stale local copy\n").unwrap();
+    let scsh_home = home.join(".scsh");
+    let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+
+    let result = scsh_env(&d, &[command, "--global"], &envs);
+
+    assert_eq!(result.code, 1, "{command} must reject the shadow copy; got: {}", result.out);
+    assert!(result.out.contains("local copies"), "{command} should explain the invariant; got: {}", result.out);
+    assert!(result.out.contains("~/.cursor/skills/sanity-reviewer"), "{command} should name it; got: {}", result.out);
+    assert!(result.out.contains("move or remove"), "{command} should explain recovery; got: {}", result.out);
+    assert!(!scsh_home.join(".skills/sanity-reviewer/SKILL.md").exists(), "{command} wrote a skill before refusing");
+    assert!(!scsh_home.join(".scsh.yml").exists(), "{command} wrote the manifest before refusing");
+  }
+}
+
+#[test]
+fn global_source_install_refuses_an_incoming_agent_local_copy_before_writing() {
+  let source = unique_dir("gshadowsource");
+  git_init(&source);
+  std::fs::create_dir_all(source.join(".skills/remote-reviewer")).unwrap();
+  std::fs::write(source.join(".skills/remote-reviewer/SKILL.md"), "# canonical remote reviewer\n").unwrap();
+  std::fs::write(
+    source.join(".scsh.yml"),
+    "skills:\n  remote-reviewer:\n    harness: codex\n    result: tmp/remote-reviewer.md\n",
+  )
+  .unwrap();
+  git(&source, &["add", "-A"]);
+  git(&source, &["commit", "-qm", "ship remote reviewer"]);
+
+  let d = unique_dir("gshadowincomingdir");
+  let home = unique_dir("gshadowincominghome");
+  let local_copy = home.join(".cursor/skills/remote-reviewer");
+  std::fs::create_dir_all(&local_copy).unwrap();
+  std::fs::write(local_copy.join("SKILL.md"), "# stale local reviewer\n").unwrap();
+  let scsh_home = home.join(".scsh");
+  let envs = [("HOME", home.to_str().unwrap()), ("SCSH_HOME", scsh_home.to_str().unwrap())];
+
+  let result = scsh_env(&d, &["installskills", "--global", source.to_str().unwrap()], &envs);
+
+  assert_eq!(result.code, 1, "source install must reject the incoming shadow copy; got: {}", result.out);
+  assert!(result.out.contains("~/.cursor/skills/remote-reviewer"), "source collision must be named: {}", result.out);
+  assert!(!scsh_home.join(".skills/remote-reviewer/SKILL.md").exists(), "source skill was written before refusal");
+  assert!(!scsh_home.join(".scsh.yml").exists(), "manifest was written before refusal");
 }
 
 #[test]
