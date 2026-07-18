@@ -865,20 +865,28 @@ fn validate_skill(name: &str, fields: &[(String, Node)], errors: &mut Vec<String
 /// Parse one optional positive-integer seconds field (`timeout`, `inactivity_timeout`),
 /// pushing schema errors under `skills.<name>.<key>`. Absent key ⇒ `None`.
 fn parse_positive_secs(fm: &BTreeMap<&str, &Node>, name: &str, key: &str, errors: &mut Vec<String>) -> Option<u64> {
+  parse_positive_secs_at(fm, &format!("skills.{name}"), key, errors)
+}
+
+/// Same as [`parse_positive_secs`] with a caller-supplied full path prefix — shared with
+/// the harness-definition step parser, whose errors live under `steps.<id>`, not `skills.`.
+pub(crate) fn parse_positive_secs_at(
+  fm: &BTreeMap<&str, &Node>, prefix: &str, key: &str, errors: &mut Vec<String>,
+) -> Option<u64> {
   match fm.get(key).copied() {
     None => None,
     Some(Node::Map(_)) => {
-      errors.push(format!("'skills.{name}.{key}' must be an integer number of seconds, not a mapping"));
+      errors.push(format!("'{prefix}.{key}' must be an integer number of seconds, not a mapping"));
       None
     }
     Some(Node::Scalar(s)) => match s.trim().parse::<u64>() {
       Ok(n) if n >= 1 => Some(n),
       Ok(_) => {
-        errors.push(format!("'skills.{name}.{key}' must be a positive number of seconds"));
+        errors.push(format!("'{prefix}.{key}' must be a positive number of seconds"));
         None
       }
       Err(_) => {
-        errors.push(format!("'skills.{name}.{key}' must be an integer number of seconds (got '{}')", s.trim()));
+        errors.push(format!("'{prefix}.{key}' must be an integer number of seconds (got '{}')", s.trim()));
         None
       }
     },
