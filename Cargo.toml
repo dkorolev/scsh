@@ -2,6 +2,11 @@
 name = "scsh"
 version = "1.29.12"
 edition = "2021"
+# Strictest requirement in the dependency graph (redb 4.1 needs 1.89); pinned so any
+# cargo new enough to parse the manifests (1.85+) reports that scsh itself needs 1.89
+# instead of blaming a dependency. Older cargo dies parsing redb's edition-2024 manifest
+# before reading this field — the README's toolchain note covers that case.
+rust-version = "1.89"
 description = "Scoped Skills Helper — preflight a git repo and run its scoped skills in ephemeral containers."
 license = "MIT"
 repository = "https://github.com/dkorolev/scsh"

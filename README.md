@@ -398,7 +398,9 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 
 ## What you need
 
-- A **Rust toolchain** (`cargo`) to build the binary.
+- A **Rust toolchain** (`cargo`) **1.89 or newer** to build the binary — install via
+  [rustup](https://rustup.rs). Distro-packaged toolchains (e.g. Ubuntu's `apt install cargo`)
+  are typically older and fail the build.
 - **`git`** on your `PATH`.
 - A **container runtime**: Apple `container` → Docker → Podman on macOS; Docker → Podman on Linux.
 - **Network** only for a real `scsh run` (it pulls the base image and installs
