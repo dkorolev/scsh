@@ -3203,6 +3203,22 @@ fn workflow_graph_renders_builtin_shapes() {
   assert!(js.contains("const fit = wfFitZoom(scroller, stage);"), "bounds recompute from the live viewport");
   assert!(js.contains("zoomOut.disabled"), "the zoom-out control advertises when Fit is the lower bound");
   assert!(js.contains("scroller.scrollTop = 0"), "Fit resets both scroll axes before CSS centers the graph");
+  assert!(js.contains("const zoomAt = "), "wheel and double-click zoom share one pointer-anchored path");
+  assert!(
+    js.contains("(scroller.scrollLeft + px) * ratio - px"),
+    "zooming keeps the content under the pointer stationary"
+  );
+  assert!(
+    js.contains("zoomAt(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1), ev.clientX, ev.clientY)"),
+    "pinch zoom anchors at the pointer, not the viewport center"
+  );
+  assert!(js.contains("addEventListener('dblclick'"), "double-clicking empty graph area zooms in at that point");
+  assert!(
+    js.contains("ev.target.closest('a.wf-node, a.wf-jump, button')"),
+    "double-clicking a node or control keeps its own meaning"
+  );
+  assert!(js.contains("__scshWfInitialFitDone"), "the job page opens on the fitted graph, once per page load");
+  assert!(js.contains("__scshWfExpandFitDone"), "first large-view entry per viewport size fits the graph");
   assert!(flat_html.contains("display: flex"), "the graph viewport can center spare space on either axis");
   assert!(flat_html.contains("margin: auto"), "the stage centers only along axes with spare room");
   assert!(
