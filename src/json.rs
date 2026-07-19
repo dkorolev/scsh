@@ -127,6 +127,30 @@ pub fn write(v: &Value) -> String {
   }
 }
 
+/// Serialize a [`Value`] as human-readable two-space-indented JSON — the canonical on-disk
+/// form for stored results. Same value semantics as [`write`]; only whitespace differs.
+/// [`quote`] passes non-ASCII through unescaped, so round-tripping an agent's result through
+/// this writer also normalizes any \uXXXX escape noise into readable text.
+pub fn write_pretty(v: &Value) -> String {
+  fn go(v: &Value, indent: usize) -> String {
+    let pad = "  ".repeat(indent);
+    let inner = "  ".repeat(indent + 1);
+    match v {
+      Value::Array(a) if !a.is_empty() => {
+        let items: Vec<String> = a.iter().map(|x| format!("{inner}{}", go(x, indent + 1))).collect();
+        format!("[\n{}\n{pad}]", items.join(",\n"))
+      }
+      Value::Object(o) if !o.is_empty() => {
+        let fields: Vec<String> =
+          o.iter().map(|(k, x)| format!("{inner}{}: {}", quote(k), go(x, indent + 1))).collect();
+        format!("{{\n{}\n{pad}}}", fields.join(",\n"))
+      }
+      other => write(other),
+    }
+  }
+  format!("{}\n", go(v, 0))
+}
+
 struct Parser<'a> {
   b: &'a [u8],
   i: usize,
@@ -284,6 +308,17 @@ fn utf8_len(first: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn write_pretty_indents_and_keeps_non_ascii_readable() {
+    let v = parse(r#"{"a":[1,2],"b":{"c":"\u201cquoted\u201d"},"empty":[],"none":{}}"#).unwrap();
+    let pretty = write_pretty(&v);
+    assert_eq!(
+      pretty,
+      "{\n  \"a\": [\n    1,\n    2\n  ],\n  \"b\": {\n    \"c\": \"\u{201c}quoted\u{201d}\"\n  },\n  \"empty\": [],\n  \"none\": {}\n}\n"
+    );
+    assert_eq!(write(&parse(&pretty).unwrap()), write(&v), "pretty output round-trips to the same value");
+  }
+
   use super::*;
 
   #[test]

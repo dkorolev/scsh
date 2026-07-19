@@ -16,7 +16,11 @@ pub fn route_name<'a>(skill_name: &'a str, skill_source: &str) -> Option<&'a str
   skill_name.strip_prefix(skill_source).and_then(|rest| rest.strip_prefix('-')).filter(|r| !r.is_empty())
 }
 
-/// Copy a skill's result JSON into `$SCSH_HOME/sessions/<id>/results/<invocation>.json`.
+/// Copy a skill's result JSON into `$SCSH_HOME/sessions/<id>/results/<invocation>.json`,
+/// canonicalized to pretty two-space-indented JSON with non-ASCII left readable — agents write
+/// whatever their serializer produces (compact, \uXXXX-escaped), and this store is the
+/// human-facing copy every later reader (job page, resume, cache replay) sees. A result that
+/// does not parse is copied byte-for-byte instead — never lost to a formatting nicety.
 pub fn persist_skill_result(session_id: &str, skill_name: &str, host_result: &Path) -> Option<String> {
   if !host_result.is_file() {
     return None;
@@ -25,7 +29,15 @@ pub fn persist_skill_result(session_id: &str, skill_name: &str, host_result: &Pa
   std::fs::create_dir_all(&dir).ok()?;
   let safe = skill_name.replace('/', "_");
   let dest = dir.join(format!("{safe}.json"));
-  std::fs::copy(host_result, &dest).ok()?;
+  let canonical = std::fs::read_to_string(host_result)
+    .ok()
+    .and_then(|raw| crate::json::parse(&raw).ok().map(|v| crate::json::write_pretty(&v)));
+  match canonical {
+    Some(pretty) => std::fs::write(&dest, pretty).ok()?,
+    None => {
+      std::fs::copy(host_result, &dest).ok()?;
+    }
+  }
   Some(dest.to_string_lossy().into_owned())
 }
 
@@ -367,6 +379,33 @@ pub fn summarize_group(skill_source: &str, routes: &[FleetRoute]) -> String {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn persist_canonicalizes_parseable_results_and_copies_unparseable_ones_verbatim() {
+    let home = std::env::temp_dir().join(format!("scsh-persist-{}", std::process::id()));
+    let prev = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", &home);
+    let src_dir = home.join("src");
+    std::fs::create_dir_all(&src_dir).unwrap();
+
+    let compact = src_dir.join("ok.json");
+    std::fs::write(&compact, "{\"result\":{\"grade\":\"good\"},\"note\":\"\\u201chi\\u201d\"}").unwrap();
+    let stored = persist_skill_result("prstst", "decide", &compact).unwrap();
+    let body = std::fs::read_to_string(&stored).unwrap();
+    assert!(body.contains("\n  \"result\": {"), "stored copy is pretty-printed: {body}");
+    assert!(body.contains("\u{201c}hi\u{201d}"), "escape noise becomes readable text: {body}");
+
+    let broken = src_dir.join("broken.json");
+    std::fs::write(&broken, "not json at all").unwrap();
+    let stored = persist_skill_result("prstst", "broken", &broken).unwrap();
+    assert_eq!(std::fs::read_to_string(&stored).unwrap(), "not json at all", "unparseable results copy verbatim");
+
+    let _ = std::fs::remove_dir_all(&home);
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+  }
+
   use super::*;
   use crate::daemon::{ProcKind, ProcStatus};
 
