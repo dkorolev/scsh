@@ -418,14 +418,25 @@ impl Store {
 
   pub fn insert_session(&mut self, id: String, session: Session) {
     self.sessions.insert(id, session);
-    trim_sessions_to_cap(&mut self.sessions);
+    trim_sessions_to_cap(&mut self.sessions, crate::now_secs());
   }
 }
 
-/// Drop oldest sessions when the map exceeds [`MAX_STORED_SESSIONS`] (same rule as `insert_session`).
-pub fn trim_sessions_to_cap(sessions: &mut std::collections::BTreeMap<String, Session>) {
+/// Drop oldest FINISHED sessions when the map exceeds [`MAX_STORED_SESSIONS`] (same rule as
+/// `insert_session`). Running sessions are never evicted, whatever their age: a long-running
+/// job must stay addressable (its page, its fleet endpoint, its live board) for its whole
+/// life, even while shorter sessions churn past the cap — losing a LIVE job's state to a
+/// storage nicety is data loss, not cleanup. A session that died without settling stops
+/// reading as running once its liveness deadline passes, so the exemption cannot grow the
+/// store without bound.
+pub fn trim_sessions_to_cap(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64) {
   while sessions.len() > MAX_STORED_SESSIONS {
-    let Some(old_id) = sessions.iter().min_by_key(|(_, s)| s.started_at).map(|(id, _)| id.clone()) else {
+    let Some(old_id) = sessions
+      .iter()
+      .filter(|(_, s)| s.lifecycle_status(now) != SessionLifecycle::Running)
+      .min_by_key(|(_, s)| s.started_at)
+      .map(|(id, _)| id.clone())
+    else {
       break;
     };
     sessions.remove(&old_id);
@@ -659,6 +670,48 @@ mod tests {
       result_path: None,
       annotate_target: None,
     }
+  }
+
+  fn stored_session(id: &str, started_at: u64, ended_at: Option<u64>, last_seen_at: u64) -> Session {
+    Session {
+      id: id.into(),
+      started_at,
+      ended_at,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+    }
+  }
+
+  #[test]
+  fn store_trim_never_evicts_a_running_session() {
+    let now = 10_000;
+    let mut sessions = std::collections::BTreeMap::new();
+    // The OLDEST session in the store is a long-running live job (fresh last_seen, work started).
+    let mut live = stored_session("live-old", 1, None, now);
+    live.procs = vec![test_proc(ProcStatus::Running)];
+    sessions.insert("live-old".to_string(), live);
+    // A dead-without-settling session past its liveness deadline: evictable despite no ended_at.
+    sessions.insert("wedged".to_string(), stored_session("wedged", 2, None, 2));
+    for i in 0..MAX_STORED_SESSIONS {
+      let id = format!("done-{i:04}");
+      sessions.insert(id.clone(), stored_session(&id, 100 + i as u64, Some(200 + i as u64), 200 + i as u64));
+    }
+    trim_sessions_to_cap(&mut sessions, now);
+    assert_eq!(sessions.len(), MAX_STORED_SESSIONS);
+    assert!(sessions.contains_key("live-old"), "a RUNNING session survives the cap whatever its age");
+    assert!(!sessions.contains_key("wedged"), "a wedged session past its deadline is evictable");
+    assert!(!sessions.contains_key("done-0000"), "the oldest finished session went next");
+    assert!(sessions.contains_key(&format!("done-{:04}", MAX_STORED_SESSIONS - 1)));
   }
 
   #[test]
