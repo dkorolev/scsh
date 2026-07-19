@@ -310,7 +310,7 @@ fn installskills_installs_skill_and_symlinks() {
     assert!(std::fs::read_to_string(&p).unwrap().contains(&format!("name: {name}")));
   }
   let manifest = std::fs::read_to_string(d.join(".scsh.yml")).expect("bundled profiles should be installed");
-  assert_eq!(manifest.matches("      codex-terra:").count(), 5, "one Terra route per reviewer; got: {manifest}");
+  assert_eq!(manifest.matches("      codex-spark:").count(), 5, "one Spark route per reviewer; got: {manifest}");
   assert_eq!(manifest.matches("      claude-opus-4-8:").count(), 5, "one Opus route per reviewer; got: {manifest}");
   assert_eq!(manifest.matches("      cursor-auto:").count(), 5, "one Cursor route per reviewer; got: {manifest}");
   // The bundle carries NO copy of the delivery-pipeline skill families — they live in

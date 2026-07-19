@@ -23,13 +23,16 @@ pub fn catalog_models(harness: Harness) -> &'static [CatalogModel] {
       CatalogModel { id: "openai/gpt-5.6-luna", kind: "primary" },
       CatalogModel { id: "openai/gpt-5.6-terra", kind: "builtin" },
     ],
-    Harness::Claude => {
-      &[CatalogModel { id: "sonnet", kind: "primary" }, CatalogModel { id: "claude-opus-4-8", kind: "builtin" }]
-    }
+    Harness::Claude => &[
+      CatalogModel { id: "sonnet", kind: "primary" },
+      CatalogModel { id: "claude-opus-4-8", kind: "builtin" },
+      CatalogModel { id: "claude-fable-5", kind: "builtin" },
+    ],
     Harness::Codex => &[
       CatalogModel { id: "gpt-5.6-luna", kind: "primary" },
       CatalogModel { id: "gpt-5.6-terra", kind: "builtin" },
       CatalogModel { id: "gpt-5.6-sol", kind: "builtin" },
+      CatalogModel { id: "gpt-5.6-spark", kind: "builtin" },
     ],
     Harness::Grok => {
       &[CatalogModel { id: "grok-build", kind: "primary" }, CatalogModel { id: "grok-4.5", kind: "builtin" }]
@@ -270,6 +273,14 @@ mod tests {
   #[test]
   fn codex_catalog_offers_sol_as_a_builtin() {
     assert!(catalog_models(Harness::Codex).iter().any(|m| m.id == "gpt-5.6-sol" && m.kind == "builtin"));
+  }
+
+  #[test]
+  fn gorgeous_pipeline_models_are_catalog_builtins() {
+    // The pipeline's Fable orchestration/fix routes and Spark reviewer lanes must be
+    // offered by the Setup catalog alongside the models they run next to.
+    assert!(catalog_models(Harness::Claude).iter().any(|m| m.id == "claude-fable-5" && m.kind == "builtin"));
+    assert!(catalog_models(Harness::Codex).iter().any(|m| m.id == "gpt-5.6-spark" && m.kind == "builtin"));
   }
 
   #[test]
