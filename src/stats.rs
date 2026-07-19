@@ -82,7 +82,14 @@ pub fn sum_numstat(numstat: &str) -> (u64, u64) {
 }
 
 fn git_capture(root: &Path, args: &[&str]) -> Option<String> {
-  let out = std::process::Command::new("git").arg("-C").arg(root).args(args).output().ok()?;
+  let out = std::process::Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .arg("-C")
+    .arg(root)
+    .args(args)
+    .output()
+    .ok()?;
   if !out.status.success() {
     return None;
   }
