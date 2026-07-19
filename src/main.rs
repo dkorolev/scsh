@@ -1753,6 +1753,7 @@ fn extract_step_outputs(
       {
         json::write(value)
       }
+      (harness_def::OutputType::Object, json::Value::Object(_)) => json::write(value),
       (harness_def::OutputType::Enum, json::Value::String(value)) => {
         return Err(format!("output '{}' must be one of: {} (got '{value}')", f.name, f.choices.join(", ")));
       }
@@ -1764,6 +1765,9 @@ fn extract_step_outputs(
       }
       (harness_def::OutputType::StringList, _) => {
         return Err(format!("output '{}' must be an array of strings", f.name));
+      }
+      (harness_def::OutputType::Object, _) => {
+        return Err(format!("output '{}' must be a JSON object", f.name));
       }
     };
     out.insert(f.name.clone(), rendered);
@@ -8568,7 +8572,7 @@ fn print_help_defs() {
       prompt: |            intent only — scsh appends the machine I/O contract
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
-        n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`)
+        n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`) | string_list | object
       needs: a, b          DAG edges — steps whose completion this step waits for
       when:                gate — run only if every condition holds (else the step is skipped)
         a.kind: code       scalar = equality; or one operator: eq/ne/lt/lte/gt/gte/in
@@ -8752,6 +8756,22 @@ mod tests {
     )
     .unwrap_err();
     assert!(extra.contains("undeclared field") && extra.contains("comment_count"));
+  }
+
+  #[test]
+  fn object_outputs_accept_json_objects_and_reject_everything_else() {
+    let outputs =
+      [harness_def::OutputField { name: "routes".into(), ty: harness_def::OutputType::Object, choices: vec![] }];
+    let contract = WorkflowResultContract { outputs: &outputs, require_do_while_repeat: false };
+    let valid =
+      extract_step_outputs(r#"{"routes":{"conventions-opus":{"grade":"good","comments":[]}}}"#, contract).unwrap();
+    assert_eq!(
+      valid.get("routes").map(String::as_str),
+      Some(r#"{"conventions-opus":{"grade":"good","comments":[]}}"#),
+      "objects forward downstream as compact JSON"
+    );
+    let wrong = extract_step_outputs(r#"{"routes":"a prose blob"}"#, contract).unwrap_err();
+    assert!(wrong.contains("must be a JSON object"), "{wrong}");
   }
 
   #[test]

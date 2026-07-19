@@ -292,9 +292,10 @@ steps:
       every grade to be excellent or good, more excellent than good, and mean score at
       least 4.5. On iteration 2 and later the INITIAL_* variables are deliberately blank —
       round-0 reviews are obsolete history: PREVIOUS_APPROVED is the scorekeeper's verdict
-      on the latest full review round and PREVIOUS_FEEDBACK is that round's complete
-      report; adopt PREVIOUS_APPROVED as the approval verdict and build the change request
-      strictly from PREVIOUS_FEEDBACK. Either way: set SCSH_LOOP_BREAK true when approved;
+      on the latest full review round and PREVIOUS_FEEDBACK is that round's structured
+      report — a JSON object {mean, counts, routes} carrying each route's grade and
+      verbatim comments; adopt PREVIOUS_APPROVED as the approval verdict and build the
+      change request strictly from PREVIOUS_FEEDBACK's routes. Either way: set SCSH_LOOP_BREAK true when approved;
       otherwise set it false and fill `change_request` with the consolidated change
       request as a list of strings — one entry per requested change, each shaped
       exactly as "[severity] area: what to change and why", nothing outside that
@@ -615,10 +616,12 @@ steps:
       poor=2. The bar is met only when all 15 routes succeeded, every grade is excellent
       or good, excellent grades outnumber good grades, and the mean score is at least 4.5.
       `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any reviewer suggestion that violates this invariant.
-      Do not change files or commit. Put `met` or `not met` in `verdict`. Put the
-      complete round report in `feedback`: begin with `Round verdict: met` or
-      `Round verdict: not met`, then include every profile/route grade and its comments
-      verbatim in clearly labeled sections. Set `approved` to the boolean result. Set
+      Do not change files or commit. Put `met` or `not met` in `verdict`. Set `approved`
+      to the boolean result. Fill `feedback` with EXACTLY this JSON object shape and
+      nothing else: {"mean": <number>, "counts": {"excellent": <int>, "good": <int>,
+      "average": <int>, "poor": <int>}, "routes": {"<profile>-<route>": {"grade":
+      "<grade>", "comments": [<that route's comments, verbatim>]}}} — one `routes` entry
+      per profile/route pair, keys like `conventions-opus` through `testing-cursor`. Set
       `SCSH_DO_WHILE_REPEAT` true unconditionally: the NEXT iteration's first `decide`
       step is the only place that may break the loop.
     output:
@@ -629,5 +632,5 @@ steps:
       verdict:
         type: string
       feedback:
-        type: string
+        type: object
     commits: false

@@ -98,6 +98,10 @@ pub enum OutputType {
   Enum,
   /// A JSON array containing only strings.
   StringList,
+  /// A JSON object with arbitrary (JSON) field values — for structured payloads a flat
+  /// scalar cannot carry, e.g. a per-route review summary. Forwarded downstream as its
+  /// compact JSON encoding.
+  Object,
 }
 
 impl OutputType {
@@ -108,6 +112,7 @@ impl OutputType {
       "bool" => Some(OutputType::Bool),
       "enum" => Some(OutputType::Enum),
       "string_list" => Some(OutputType::StringList),
+      "object" => Some(OutputType::Object),
       _ => None,
     }
   }
@@ -120,6 +125,7 @@ impl OutputType {
       OutputType::Bool => "bool",
       OutputType::Enum => "enum",
       OutputType::StringList => "array of strings",
+      OutputType::Object => "JSON object",
     }
   }
 }
@@ -1693,6 +1699,10 @@ mod tests {
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
     assert_eq!(collect.do_while.as_deref(), Some("decide"));
     assert!(collect.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT" && o.ty == OutputType::Bool));
+    assert!(
+      collect.outputs.iter().any(|o| o.name == "feedback" && o.ty == OutputType::Object),
+      "the round report is a structured object, not a prose blob"
+    );
 
     // The bundled route standard, both batches: 5 profiles × (Opus 4.8, Codex Terra, Cursor Auto).
     let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
