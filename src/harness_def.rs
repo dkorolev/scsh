@@ -1661,8 +1661,13 @@ mod tests {
     let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
     assert_eq!(fix.needs, vec!["decide".to_string()]);
     assert!(fix.commits, "fixes come back as commits");
-    assert_eq!(fix.agent.harness, crate::config::Harness::Codex);
-    assert_eq!(fix.agent.model.as_deref(), Some("gpt-5.6-sol"));
+    assert_eq!(
+      fix.commit_identity,
+      CommitIdentity::Runner,
+      "review fixes are authored by the runner, not the notes bot"
+    );
+    assert_eq!(fix.agent.harness, crate::config::Harness::Claude);
+    assert_eq!(fix.agent.model.as_deref(), Some("claude-opus-4-8"));
     assert_eq!(fix.inactivity_timeout, Some(3600), "a healthy fix pass outlives the default novelty window");
     assert!(fix.task.body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
     assert!(
@@ -1674,6 +1679,12 @@ mod tests {
     // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
     assert!(decide.break_loop);
+    assert_eq!(decide.agent.harness, crate::config::Harness::Codex);
+    assert_eq!(decide.agent.model.as_deref(), Some("gpt-5.6-terra"));
+    assert!(
+      decide.task.body().contains("SCSH_LOOP_ITERATION"),
+      "decide branches on the loop iteration, not on env-var emptiness"
+    );
     assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
     assert_eq!(collect.do_while.as_deref(), Some("decide"));

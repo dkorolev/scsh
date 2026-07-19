@@ -282,19 +282,23 @@ steps:
       INITIAL_TESTING_CURSOR: initial_testing_cursor.grade
       INITIAL_TESTING_CURSOR_COMMENTS: initial_testing_cursor.comments
     agent:
-      harness: cursor
-      model: auto
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
     prompt: |
-      You are the first and deciding step of a review loop. When PREVIOUS_APPROVED is
-      non-empty, it and PREVIOUS_FEEDBACK describe the preceding in-loop review batch.
-      Otherwise score the 15 INITIAL_* grades and matching *_COMMENTS JSON arrays:
-      excellent=5, good=4, average=3, poor=2. Approval requires every grade to be
-      excellent or good, more excellent than good, and mean score at least 4.5. Set
-      SCSH_LOOP_BREAK true when approved. Otherwise set it false and put a clear
-      consolidated change request in `change_request`. Comments may lead with a severity
-      tag ([blocking]/[should-fix]/[nit]): the change request must address every
-      [blocking] comment first, and [nit]-only comments are stylistic unless they hide a
-      real bug. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
+      You are the first and deciding step of a review loop. SCSH_LOOP_ITERATION is the
+      1-based loop iteration. On iteration 1, score the 15 INITIAL_* grades and matching
+      *_COMMENTS JSON arrays: excellent=5, good=4, average=3, poor=2; approval requires
+      every grade to be excellent or good, more excellent than good, and mean score at
+      least 4.5. On iteration 2 and later the INITIAL_* variables are deliberately blank —
+      round-0 reviews are obsolete history: PREVIOUS_APPROVED is the scorekeeper's verdict
+      on the latest full review round and PREVIOUS_FEEDBACK is that round's complete
+      report; adopt PREVIOUS_APPROVED as the approval verdict and build the change request
+      strictly from PREVIOUS_FEEDBACK. Either way: set SCSH_LOOP_BREAK true when approved;
+      otherwise set it false and put a clear consolidated change request in
+      `change_request`. Comments may lead with a severity tag
+      ([blocking]/[should-fix]/[nit]): the change request must address every [blocking]
+      comment first, and [nit]-only comments are stylistic unless they hide a real bug. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
       reviewer suggestion that violates this invariant. Do not change files or commit.
     output:
       SCSH_LOOP_BREAK:
@@ -308,8 +312,8 @@ steps:
     inputs:
       FEEDBACK: decide.change_request
     agent:
-      harness: codex
-      model: gpt-5.6-sol
+      harness: claude
+      model: claude-opus-4-8
     # The heaviest step in the loop: one agent absorbing feedback from 15 reviewer routes.
     # A healthy fix pass routinely thinks and edits quietly for longer than the default
     # 30-minute novelty window, so it gets a doubled one.
@@ -342,6 +346,7 @@ steps:
       actions:
         type: string
     commits: true
+    commit-identity: runner
 
   review_conventions_opus:
     needs: fix
