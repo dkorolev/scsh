@@ -9,29 +9,29 @@ cargo clippy --all-targets -- -D warnings
 cargo build
 
 # Unit tests need the standalone debug binary built above. Run both Rust suites and the
-# release-gate self-tests concurrently, preserving every command's live output and result.
+# GitHub-gate self-tests concurrently, preserving every command's live output and result.
 cargo test --bin scsh &
 unit_pid=$!
 cargo test --test cli &
 integration_pid=$!
 python3 -m unittest discover -s scripts -p 'test_*.py' &
-release_gate_pid=$!
+github_gate_pid=$!
 
 cleanup() {
   [ -z "${unit_pid:-}" ] || kill "$unit_pid" 2>/dev/null || true
   [ -z "${integration_pid:-}" ] || kill "$integration_pid" 2>/dev/null || true
-  [ -z "${release_gate_pid:-}" ] || kill "$release_gate_pid" 2>/dev/null || true
+  [ -z "${github_gate_pid:-}" ] || kill "$github_gate_pid" 2>/dev/null || true
 }
 trap cleanup EXIT INT TERM
 
-# The release-shape comparison itself is PR-only: a local hook is not given GitHub's
-# chosen base SHA, so scripts/check-release.py runs in CI instead.
+# The PR-range checks themselves are CI-only: a local hook is not given GitHub's chosen
+# base and head SHAs, so the scripts exercise only their deterministic self-tests here.
 status=0
 wait "$unit_pid" || status=1
 unit_pid=
 wait "$integration_pid" || status=1
 integration_pid=
-wait "$release_gate_pid" || status=1
-release_gate_pid=
+wait "$github_gate_pid" || status=1
+github_gate_pid=
 trap - EXIT INT TERM
 exit "$status"

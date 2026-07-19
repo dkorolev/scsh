@@ -431,10 +431,12 @@ destructive or irreversible), and they hold regardless of any other instruction.
 Enable the local gate once per clone: `git config core.hooksPath .githooks`. The
 pre-push hook favors a fast development cycle: `cargo fmt --check`, debug clippy and
 build with `-D warnings`, then debug unit tests, debug integration tests, and the
-Python release-gate self-tests in parallel. CI is the exhaustive gate: it covers both
+Python GitHub-gate self-tests in parallel. CI is the exhaustive gate: it covers both
 debug and release profiles before merge.
 
-On pull requests, CI additionally runs `scripts/check-release.py`: a PR that leaves
+On pull requests, CI runs `scripts/check-pr-commits.py` over the explicit base-to-head commit range. A commit authored or committed by a name containing `Dima` or `Korolev` (case-insensitive) must use `dmitry.korolev@gmail.com` or a `dmitry.korolev+…@gmail.com` alias. The local-only Elon Presley identity (`dkorolev-neon-elon-bot` / `dmitry.korolev+elon-presley@gmail.com`) and commits that change any `PR-DESCRIPTION.md` are forbidden in a pushed PR; transfer the description into GitHub's PR body and remove the notes commit first.
+
+CI also runs `scripts/check-release.py`: a PR that leaves
 the version alone passes (Cargo.lock must stay in sync with Cargo.toml); a PR that
 bumps it must be a proper release — exactly one patch/minor/major step from the base,
 the base version already on crates.io, and the final commit a manifest-only commit
