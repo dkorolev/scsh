@@ -1660,6 +1660,32 @@ fn resolve_input(
   resolve_ref(reference, def, state).or_else(|| resolve_ref(reference, def, loop_prev)).unwrap_or_default()
 }
 
+/// Resolve a step's env inputs for this wave. Steps inside a do-while body additionally get
+/// `SCSH_LOOP_ITERATION` (1-based), and from iteration 2 on their loop-external step inputs bind
+/// to the empty string: data from outside the body is round-0 history, and a later iteration
+/// re-reading it would re-litigate findings the loop has already addressed (`params.*` inputs
+/// are run constants and stay bound). The loop-carried channel — inputs bound to steps inside
+/// the body — stays live through `loop_prev`.
+fn step_loop_inputs(
+  step: &harness_def::Step, def: &harness_def::HarnessDef, state: &std::collections::HashMap<String, StepState>,
+  loop_prev: &std::collections::HashMap<String, StepState>, loop_body: Option<&[String]>, iteration: usize,
+) -> Vec<(String, String)> {
+  let mut inputs: Vec<(String, String)> = Vec::new();
+  for b in &step.inputs {
+    let stale = iteration >= 2
+      && loop_body.is_some_and(|body| match &b.source {
+        harness_def::Ref::StepField { step: src, .. } => !body.iter().any(|inside| inside == src),
+        harness_def::Ref::Param(_) => false,
+      });
+    let value = if stale { String::new() } else { resolve_input(&b.source, def, state, loop_prev) };
+    inputs.push((b.name.clone(), value));
+  }
+  if loop_body.is_some() {
+    inputs.push(("SCSH_LOOP_ITERATION".to_string(), iteration.to_string()));
+  }
+  inputs
+}
+
 /// Parse a step's result JSON into its exact top-level fields. Workflow output is a strict
 /// machine boundary: duplicate keys are rejected rather than silently choosing one value.
 fn parse_result_object(content: &str) -> Result<std::collections::HashMap<String, json::Value>, String> {
@@ -2352,12 +2378,10 @@ fn run_workflow(
     let mut run_ids: Vec<String> = Vec::new();
     let mut restored_runs: Vec<(String, SkillRun)> = Vec::new();
     for s in &to_run {
-      let mut inputs: Vec<(String, String)> = Vec::new();
-      for b in &s.inputs {
-        inputs.push((b.name.clone(), resolve_input(&b.source, def, &state, &loop_prev)));
-      }
       let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
       let iteration = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
+      let loop_body = do_while_end_for.get(&s.id).and_then(|end| do_while_bodies.get(end)).map(Vec::as_slice);
+      let inputs = step_loop_inputs(s, def, &state, &loop_prev, loop_body, iteration);
       let run_id = if let Some(end) = do_while_end_for.get(&s.id) {
         format!("{}-while-{}-{iteration}", s.id, end)
       } else {
@@ -9685,6 +9709,38 @@ Subject: [PATCH] add: 2 + 3 = 5
       StepState { skipped: false, outputs: [("feedback".to_string(), "current".to_string())].into() },
     );
     assert_eq!(resolve_input(&feedback, &def, &state, &loop_prev), "current", "live state beats the carried value");
+  }
+
+  #[test]
+  fn loop_iterations_blank_round_zero_inputs_and_carry_the_iteration_number() {
+    let (_, src) = harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "gorgeous-pipeline").unwrap();
+    let def = harness_def::validate("gorgeous-pipeline", src, harness_def::DefSource::Builtin).unwrap();
+    let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
+    let end = def.steps.iter().find(|s| s.id == "collect").unwrap();
+    let body: Vec<String> = harness_def::do_while_body(&def.steps, end).into_iter().map(str::to_string).collect();
+    let mut state = std::collections::HashMap::new();
+    state.insert(
+      "initial_conventions_opus".to_string(),
+      StepState { skipped: false, outputs: [("grade".to_string(), "excellent".to_string())].into() },
+    );
+    let mut loop_prev = std::collections::HashMap::new();
+    loop_prev.insert(
+      "collect".to_string(),
+      StepState { skipped: false, outputs: [("feedback".to_string(), "round report".to_string())].into() },
+    );
+    let get = |v: &[(String, String)], k: &str| v.iter().find(|(n, _)| n == k).map(|(_, x)| x.clone()).unwrap();
+
+    let one = step_loop_inputs(decide, &def, &state, &loop_prev, Some(&body), 1);
+    assert_eq!(get(&one, "INITIAL_CONVENTIONS_OPUS"), "excellent", "iteration 1 reads the round-0 reviews");
+    assert_eq!(get(&one, "SCSH_LOOP_ITERATION"), "1");
+
+    let two = step_loop_inputs(decide, &def, &state, &loop_prev, Some(&body), 2);
+    assert_eq!(get(&two, "INITIAL_CONVENTIONS_OPUS"), "", "round-0 reviews are history from iteration 2 on");
+    assert_eq!(get(&two, "PREVIOUS_FEEDBACK"), "round report", "the loop-carried channel stays live");
+    assert_eq!(get(&two, "SCSH_LOOP_ITERATION"), "2");
+
+    let outside = step_loop_inputs(decide, &def, &state, &loop_prev, None, 2);
+    assert!(!outside.iter().any(|(n, _)| n == "SCSH_LOOP_ITERATION"), "non-loop steps see no iteration variable");
   }
 
   #[test]
