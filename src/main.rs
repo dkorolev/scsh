@@ -5782,15 +5782,36 @@ fn collect_skill_result(root: &Path, run_dir: &Path, result: &str, secs: u64) ->
 }
 
 /// Run `git -C <dir> <args>` and return its trimmed stdout on success.
+/// Run `git -C <dir> <args>` and capture stdout. Inherited `GIT_DIR`/`GIT_WORK_TREE`/
+/// `GIT_INDEX_FILE` are stripped: git exports them to hook and `rebase --exec` children, and
+/// an inherited `GIT_DIR` overrides `-C` discovery — scsh invoked from a pre-push hook would
+/// otherwise operate on the caller's repo instead of the one it was pointed at.
 fn git_capture(dir: &std::path::Path, args: &[&str]) -> Option<String> {
-  let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+  let out = Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_INDEX_FILE")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .output()
+    .ok()?;
   out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Run `git -C <dir> <args>` for its exit status only, swallowing its output (so a
 /// cherry-pick conflict doesn't spill onto the terminal). `true` on success.
 fn git_status_ok(dir: &std::path::Path, args: &[&str]) -> bool {
-  Command::new("git").arg("-C").arg(dir).args(args).output().map(|o| o.status.success()).unwrap_or(false)
+  Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_INDEX_FILE")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .output()
+    .map(|o| o.status.success())
+    .unwrap_or(false)
 }
 
 /// The caller repo's current branch name (for the "rebased onto <branch>" line);
@@ -9805,6 +9826,19 @@ Subject: [PATCH] add: 2 + 3 = 5
 
     let outside = step_loop_inputs(decide, &def, &state, &loop_prev, None, 2);
     assert!(!outside.iter().any(|(n, _)| n == "SCSH_LOOP_ITERATION"), "non-loop steps see no iteration variable");
+  }
+
+  #[test]
+  fn inherited_git_dir_never_hijacks_explicit_repo_targets() {
+    // git exports GIT_DIR to hook and `rebase --exec` children, and an inherited GIT_DIR
+    // overrides `-C` discovery — this is how a test suite run under `git rebase --exec`
+    // once committed fixture history into the enclosing checkout.
+    let d = repo("gitdir");
+    let expected = git_capture(&d, &["rev-parse", "--absolute-git-dir"]).unwrap();
+    std::env::set_var("GIT_DIR", "/definitely/not/a/repo");
+    let seen = git_capture(&d, &["rev-parse", "--absolute-git-dir"]);
+    std::env::remove_var("GIT_DIR");
+    assert_eq!(seen.as_deref().map(str::trim), Some(expected.trim()), "-C target wins over inherited GIT_DIR");
   }
 
   #[test]

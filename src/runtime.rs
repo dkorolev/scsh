@@ -1879,6 +1879,8 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
   }
   use std::process::Command;
   Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
     .args(["init", "--bare"])
     .arg(path)
     .stdout(std::process::Stdio::null())
@@ -1947,6 +1949,8 @@ pub fn inject_file_into_bare(
 
   // 1. Write the file content as a blob.
   let mut child = Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
     .arg("-C")
     .arg(bare)
     .args(["hash-object", "-w", "--stdin"])
@@ -1971,6 +1975,8 @@ pub fn inject_file_into_bare(
   let index = bare.join("scsh-inject.index");
   let git_index = |args: &[&str]| -> Result<std::process::Output, String> {
     Command::new("git")
+      .env_remove("GIT_DIR")
+      .env_remove("GIT_WORK_TREE")
       .arg("-C")
       .arg(bare)
       .env("GIT_INDEX_FILE", &index)
@@ -2001,6 +2007,8 @@ pub fn inject_file_into_bare(
   // 3. Commit the tree on top of HEAD and move the branch to it. commit-tree needs an identity,
   // which the bare repo lacks, so pass it explicitly.
   let commit_out = Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
     .arg("-C")
     .arg(bare)
     .args(["commit-tree", &tree, "-p", &head_ref, "-m", "scsh: add harness-definition skill body"])
@@ -2075,6 +2083,9 @@ pub fn git_transport_entry(harness: &str, push_commits: bool, commit_name: &str,
 fn git_ok(dir: &Path, args: &[&str]) -> bool {
   use std::process::Command;
   Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .env_remove("GIT_INDEX_FILE")
     .arg("-C")
     .arg(dir)
     .args(args)
@@ -2100,7 +2111,14 @@ fn git_bare_ok(bare: &Path, args: &[&str]) -> bool {
 
 fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
   use std::process::Command;
-  let out = Command::new("git").arg("-C").arg(dir).args(args).output().ok()?;
+  let out = Command::new("git")
+    .env_remove("GIT_DIR")
+    .env_remove("GIT_WORK_TREE")
+    .arg("-C")
+    .arg(dir)
+    .args(args)
+    .output()
+    .ok()?;
   out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
