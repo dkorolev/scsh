@@ -8578,6 +8578,9 @@ fn print_help_defs() {
         a.kind: code       scalar = equality; or one operator: eq/ne/lt/lte/gt/gte/in
       artifacts: out.txt   extra files written next to $SCSH_RESULT, copied to the session dir
       commits: true        bring the step's commits back onto the caller's branch (packdiff'd)
+      commit-identity:     who authors those commits: `notes` (default — the recognizable scsh
+                           bot, excluded from review as the notes author) or `runner` (the
+                           person running the pipeline, from this repo's git user.name/email)
 "#
   );
   println!();
@@ -8597,6 +8600,10 @@ fn print_help_defs() {
                          — it receives the PREVIOUS iteration's value (empty on round one). This
                          is the loop's data channel: feedback flows between rounds as typed
                          outputs under gitignored tmp/, never as committed files.
+  Loop freshness:        body steps receive `SCSH_LOOP_ITERATION` (1-based). From iteration 2 on,
+                         inputs bound to steps OUTSIDE the body bind to the empty string — data
+                         from before the loop is round-0 history, not current state. The SCSH_
+                         input-name prefix is reserved for scsh.
 "#
   );
   println!();
