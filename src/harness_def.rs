@@ -1094,6 +1094,12 @@ fn validate_step_inputs(id: &str, node: Option<&Node>, errors: &mut Vec<String>)
       errors.push(format!("'steps.{id}.inputs': '{name}' is not a valid variable name"));
       continue;
     }
+    if name.starts_with("SCSH_") {
+      errors.push(format!(
+        "'steps.{id}.inputs': '{name}' — the SCSH_ prefix is reserved for variables scsh injects (e.g. SCSH_LOOP_ITERATION, SCSH_RESULT)"
+      ));
+      continue;
+    }
     let src = match node {
       Node::Scalar(s) => s.trim(),
       Node::Map(_) => {
@@ -1790,6 +1796,27 @@ mod tests {
     );
     let err = validate("t", &wrong_type, DefSource::Repo).unwrap_err();
     assert!(err.iter().any(|e| e.contains("SCSH_LOOP_BREAK must have type bool")), "{err:?}");
+  }
+
+  #[test]
+  fn scsh_prefixed_input_names_are_reserved() {
+    let yml = r#"description: "reserved"
+steps:
+  one:
+    agent:
+      harness: claude
+    prompt: do it
+    inputs:
+      SCSH_LOOP_ITERATION: params.X
+    output:
+      done:
+        type: bool
+params:
+  X:
+    description: x
+"#;
+    let err = validate("wf", yml, DefSource::Builtin).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("SCSH_ prefix is reserved")), "{err:?}");
   }
 
   #[test]
