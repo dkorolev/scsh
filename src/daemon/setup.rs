@@ -421,7 +421,7 @@ fn ensure_setup_tests_project() -> Result<std::path::PathBuf, String> {
 
 fn scaffold_setup_tests_project(path: &std::path::Path) -> Result<(), String> {
   let git = |args: &[&str]| -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git_command()
       .arg("-C")
       .arg(path)
       .args(args)

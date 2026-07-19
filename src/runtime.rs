@@ -6,6 +6,7 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 
 use crate::config::Harness;
 
@@ -874,7 +875,6 @@ pub fn image_build_fingerprint(dockerfile: &str, target: &str, uid: u32, gid: u3
 
 /// Read the fingerprint label from an existing harness image, if present.
 pub fn image_inspect_fingerprint(runtime: &str, tag: &str) -> Option<String> {
-  use std::process::Command;
   let out = if runtime == "container" {
     Command::new("container").args(["image", "inspect", tag]).output().ok()?
   } else {
@@ -1253,7 +1253,7 @@ pub fn run_command(
 /// docker, podman, and Apple `container` all support `inspect <name>`, but Apple's exits 0
 /// with an empty `[]` for a missing container — so require a non-empty JSON result too.
 pub fn container_named_exists(runtime: &str, name: &str) -> bool {
-  use std::process::{Command, Stdio};
+  use std::process::Stdio;
   if name.is_empty() {
     return false;
   }
@@ -1877,10 +1877,7 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
   if let Some(parent) = path.parent() {
     std::fs::create_dir_all(parent).map_err(|e| format!("could not create {}: {e}", parent.display()))?;
   }
-  use std::process::Command;
-  Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
+  crate::git_command()
     .args(["init", "--bare"])
     .arg(path)
     .stdout(std::process::Stdio::null())
@@ -1939,7 +1936,7 @@ pub fn inject_file_into_bare(
   bare: &Path, rel_path: &str, content: &str, commit_name: &str, commit_email: &str,
 ) -> Result<(), String> {
   use std::io::Write;
-  use std::process::{Command, Stdio};
+  use std::process::Stdio;
 
   // Commits land on the branch HEAD points at, so the default clone checkout includes the file.
   let head_ref = git_stdout(bare, &["symbolic-ref", "HEAD"])
@@ -1948,9 +1945,7 @@ pub fn inject_file_into_bare(
     .ok_or_else(|| format!("could not read HEAD of {}", bare.display()))?;
 
   // 1. Write the file content as a blob.
-  let mut child = Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
+  let mut child = crate::git_command()
     .arg("-C")
     .arg(bare)
     .args(["hash-object", "-w", "--stdin"])
@@ -1974,9 +1969,7 @@ pub fn inject_file_into_bare(
   // 2. Build a tree = HEAD's tree + the new file, using a throwaway index (a bare repo has none).
   let index = bare.join("scsh-inject.index");
   let git_index = |args: &[&str]| -> Result<std::process::Output, String> {
-    Command::new("git")
-      .env_remove("GIT_DIR")
-      .env_remove("GIT_WORK_TREE")
+    crate::git_command()
       .arg("-C")
       .arg(bare)
       .env("GIT_INDEX_FILE", &index)
@@ -2006,9 +1999,7 @@ pub fn inject_file_into_bare(
 
   // 3. Commit the tree on top of HEAD and move the branch to it. commit-tree needs an identity,
   // which the bare repo lacks, so pass it explicitly.
-  let commit_out = Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
+  let commit_out = crate::git_command()
     .arg("-C")
     .arg(bare)
     .args(["commit-tree", &tree, "-p", &head_ref, "-m", "scsh: add harness-definition skill body"])
@@ -2081,11 +2072,7 @@ pub fn git_transport_entry(harness: &str, push_commits: bool, commit_name: &str,
 }
 
 fn git_ok(dir: &Path, args: &[&str]) -> bool {
-  use std::process::Command;
-  Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
-    .env_remove("GIT_INDEX_FILE")
+  crate::git_command()
     .arg("-C")
     .arg(dir)
     .args(args)
@@ -2097,8 +2084,7 @@ fn git_ok(dir: &Path, args: &[&str]) -> bool {
 }
 
 fn git_bare_ok(bare: &Path, args: &[&str]) -> bool {
-  use std::process::Command;
-  Command::new("git")
+  crate::git_command()
     .arg("--git-dir")
     .arg(bare)
     .args(args)
@@ -2110,15 +2096,7 @@ fn git_bare_ok(bare: &Path, args: &[&str]) -> bool {
 }
 
 fn git_stdout(dir: &Path, args: &[&str]) -> Option<String> {
-  use std::process::Command;
-  let out = Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .ok()?;
+  let out = crate::git_command().arg("-C").arg(dir).args(args).output().ok()?;
   out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
@@ -3303,37 +3281,36 @@ TAG
 
   #[test]
   fn push_transport_refs_maps_origin_branches_to_heads() {
-    use std::process::Command;
     let tmp = std::env::temp_dir().join(format!("scsh-push-transport-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let root = tmp.join("root");
     let bare = tmp.join("bare.git");
-    Command::new("git").args(["init", "-q"]).arg(&root).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
+    crate::git_command().args(["init", "-q"]).arg(&root).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
     std::fs::write(root.join("f"), "x").unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "init"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
-    Command::new("git")
+    crate::git_command().args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["commit", "-qm", "init"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
+    crate::git_command()
       .args(["-C"])
       .arg(&root)
       .args(["remote", "add", "origin", "https://example.invalid/scsh.git"])
       .status()
       .unwrap();
-    Command::new("git")
+    crate::git_command()
       .args(["-C"])
       .arg(&root)
       .args(["update-ref", "refs/remotes/origin/main", "HEAD"])
       .status()
       .unwrap();
     std::fs::write(root.join("f"), "y").unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
     push_transport_refs(&root, &bare).unwrap();
-    let show = Command::new("git").args(["-C"]).arg(&bare).args(["show-ref"]).output().unwrap();
+    let show = crate::git_command().args(["-C"]).arg(&bare).args(["show-ref"]).output().unwrap();
     let refs = String::from_utf8_lossy(&show.stdout);
     assert!(refs.contains("refs/heads/main"), "expected refs/heads/main in bare, got:\n{refs}");
     assert!(refs.contains("refs/heads/feature"), "expected feature branch in bare, got:\n{refs}");
@@ -3343,47 +3320,46 @@ TAG
 
   #[test]
   fn push_transport_refs_uses_local_main_not_stale_origin() {
-    use std::process::Command;
     let tmp = std::env::temp_dir().join(format!("scsh-push-main-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
     let root = tmp.join("root");
     let bare = tmp.join("bare.git");
     let work = tmp.join("work");
-    Command::new("git").args(["init", "-q"]).arg(&root).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
+    crate::git_command().args(["init", "-q"]).arg(&root).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["config", "user.email", "t@example.com"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["config", "user.name", "t"]).status().unwrap();
     std::fs::write(root.join("f"), "stale").unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "stale"]).status().unwrap();
-    let stale = Command::new("git").args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["commit", "-qm", "stale"]).status().unwrap();
+    let stale = crate::git_command().args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
     let stale = String::from_utf8_lossy(&stale.stdout).trim().to_string();
     std::fs::write(root.join("f"), "base").unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "base"]).status().unwrap();
-    let base_sha = Command::new("git").args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["commit", "-qm", "base"]).status().unwrap();
+    let base_sha = crate::git_command().args(["-C"]).arg(&root).args(["rev-parse", "HEAD"]).output().unwrap();
     let base_sha = String::from_utf8_lossy(&base_sha.stdout).trim().to_string();
-    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
-    Command::new("git")
+    crate::git_command().args(["-C"]).arg(&root).args(["branch", "-M", "main"]).status().unwrap();
+    crate::git_command()
       .args(["-C"])
       .arg(&root)
       .args(["remote", "add", "origin", "https://example.invalid/scsh.git"])
       .status()
       .unwrap();
-    Command::new("git")
+    crate::git_command()
       .args(["-C"])
       .arg(&root)
       .args(["update-ref", "refs/remotes/origin/main", &stale])
       .status()
       .unwrap();
     std::fs::write(root.join("f"), "feature").unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
-    Command::new("git").args(["-C"]).arg(&root).args(["branch", "-f", "main", &base_sha]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["add", "f"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["commit", "-qm", "feature"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["checkout", "-q", "-b", "feature"]).status().unwrap();
+    crate::git_command().args(["-C"]).arg(&root).args(["branch", "-f", "main", &base_sha]).status().unwrap();
     push_transport_refs(&root, &bare).unwrap();
-    Command::new("git").args(["clone", "-q"]).arg(&bare).arg(&work).status().unwrap();
-    let origin_main = Command::new("git").args(["-C"]).arg(&work).args(["rev-parse", "origin/main"]).output().unwrap();
+    crate::git_command().args(["clone", "-q"]).arg(&bare).arg(&work).status().unwrap();
+    let origin_main = crate::git_command().args(["-C"]).arg(&work).args(["rev-parse", "origin/main"]).output().unwrap();
     let origin_main = String::from_utf8_lossy(&origin_main.stdout).trim().to_string();
     assert_eq!(origin_main, base_sha, "origin/main must match force-updated local main");
     assert_ne!(origin_main, stale, "must not use stale refs/remotes/origin/main");

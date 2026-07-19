@@ -1742,7 +1742,7 @@ fn projects_create_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, Stri
 /// contract every `scsh run` preflight requires (committed, clean, scratch ignored).
 fn scaffold_project(path: &std::path::Path) -> Result<(), String> {
   let git = |args: &[&str]| -> Result<(), String> {
-    let out = std::process::Command::new("git")
+    let out = crate::git_command()
       .arg("-C")
       .arg(path)
       .args(args)
@@ -3933,10 +3933,7 @@ mod tests {
     let path = crate::daemon::paths::projects_dir().join("demo-1");
     assert!(path.join(".git").is_dir() && path.join("tmp").is_dir());
     assert!(std::fs::read_to_string(path.join(".gitignore")).unwrap().contains("/tmp"));
-    let log = std::process::Command::new("git")
-      .args(["-C", &path.to_string_lossy(), "log", "--format=%s|%an"])
-      .output()
-      .unwrap();
+    let log = crate::git_command().args(["-C", &path.to_string_lossy(), "log", "--format=%s|%an"]).output().unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), format!("Init.|{}", crate::SCSH_COMMIT_NAME));
 
     // A bare (slash-free) name in the open box resolves under $SCSH_HOME/projects/.
@@ -4894,7 +4891,7 @@ mod tests {
     let dir = std::env::temp_dir().join(format!("scsh-repos-{tag}-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
     let git = |args: &[&str]| {
-      assert!(std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap().success());
+      assert!(crate::git_command().args(args).current_dir(&dir).status().unwrap().success());
     };
     git(&["init", "-q", "."]);
     git(&["config", "user.email", "t@example.com"]);
@@ -4926,7 +4923,7 @@ mod tests {
     std::fs::create_dir_all(&skill).unwrap();
     std::fs::write(skill.join("SKILL.md"), "# big-beautiful-build\n\nDeliver the FEATURE completely.\n").unwrap();
     let git = |args: &[&str]| {
-      assert!(std::process::Command::new("git").args(args).current_dir(dir).status().unwrap().success());
+      assert!(crate::git_command().args(args).current_dir(dir).status().unwrap().success());
     };
     git(&["add", "-A"]);
     git(&["commit", "-q", "-m", "install big-beautiful-build"]);
@@ -5430,9 +5427,7 @@ mod tests {
     // used to spawn a doomed run and leave a hidden "running" session.
     let dir = std::env::temp_dir().join(format!("scsh-noscratch-{}", crate::runtime::random_nonce_6()));
     std::fs::create_dir_all(&dir).unwrap();
-    let git = |args: &[&str]| {
-      assert!(std::process::Command::new("git").args(args).current_dir(&dir).status().unwrap().success())
-    };
+    let git = |args: &[&str]| assert!(crate::git_command().args(args).current_dir(&dir).status().unwrap().success());
     git(&["init", "-q", "."]);
     git(&["config", "user.email", "t@e.com"]);
     git(&["config", "user.name", "t"]);

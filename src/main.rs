@@ -2968,13 +2968,7 @@ fn uncommitted_changes(root: &std::path::Path) -> Vec<String> {
 /// repo-root path `tmp` ignored). Checked via `git check-ignore` so every
 /// gitignore source is honored.
 fn tmp_is_gitignored(root: &std::path::Path) -> bool {
-  Command::new("git")
-    .arg("-C")
-    .arg(root)
-    .args(["check-ignore", "-q", "tmp"])
-    .status()
-    .map(|s| s.success())
-    .unwrap_or(false)
+  git_command().arg("-C").arg(root).args(["check-ignore", "-q", "tmp"]).status().map(|s| s.success()).unwrap_or(false)
 }
 
 /// `scsh list` / `scsh ls` — the inventory: every skill grouped by profile (the reserved
@@ -5280,7 +5274,7 @@ impl GitTransport {
     let port = runtime::pick_ephemeral_port()?;
     let base = run_dir.to_string_lossy();
     let pid_file = run_dir.join("scsh-git-daemon.pid");
-    let status = Command::new("git")
+    let status = git_command()
       .args([
         "daemon",
         "--detach",
@@ -5369,7 +5363,7 @@ fn materialize_branches(run_dir: &std::path::Path) {
     None => return,
   };
   for b in runtime::local_branches_to_create(&refs, current.trim()) {
-    let _ = Command::new("git")
+    let _ = git_command()
       .arg("-C")
       .arg(run_dir)
       .args(["branch", "--force", &b, &format!("origin/{b}")])
@@ -5782,36 +5776,29 @@ fn collect_skill_result(root: &Path, run_dir: &Path, result: &str, secs: u64) ->
 }
 
 /// Run `git -C <dir> <args>` and return its trimmed stdout on success.
+/// The ONE way scsh spawns `git`: a Command with inherited `GIT_DIR`/`GIT_WORK_TREE`/
+/// `GIT_INDEX_FILE` stripped. git exports those to hook and `rebase --exec` children, and an
+/// inherited `GIT_DIR` overrides `-C`/cwd discovery — scsh (or its test suite) running under
+/// a hook would otherwise operate on the hook's repository instead of the one it targets.
+pub(crate) fn git_command() -> std::process::Command {
+  let mut cmd = std::process::Command::new("git");
+  cmd.env_remove("GIT_DIR").env_remove("GIT_WORK_TREE").env_remove("GIT_INDEX_FILE");
+  cmd
+}
+
 /// Run `git -C <dir> <args>` and capture stdout. Inherited `GIT_DIR`/`GIT_WORK_TREE`/
 /// `GIT_INDEX_FILE` are stripped: git exports them to hook and `rebase --exec` children, and
 /// an inherited `GIT_DIR` overrides `-C` discovery — scsh invoked from a pre-push hook would
 /// otherwise operate on the caller's repo instead of the one it was pointed at.
 fn git_capture(dir: &std::path::Path, args: &[&str]) -> Option<String> {
-  let out = Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
-    .env_remove("GIT_INDEX_FILE")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .ok()?;
+  let out = git_command().arg("-C").arg(dir).args(args).output().ok()?;
   out.status.success().then(|| String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 /// Run `git -C <dir> <args>` for its exit status only, swallowing its output (so a
 /// cherry-pick conflict doesn't spill onto the terminal). `true` on success.
 fn git_status_ok(dir: &std::path::Path, args: &[&str]) -> bool {
-  Command::new("git")
-    .env_remove("GIT_DIR")
-    .env_remove("GIT_WORK_TREE")
-    .env_remove("GIT_INDEX_FILE")
-    .arg("-C")
-    .arg(dir)
-    .args(args)
-    .output()
-    .map(|o| o.status.success())
-    .unwrap_or(false)
+  git_command().arg("-C").arg(dir).args(args).output().map(|o| o.status.success()).unwrap_or(false)
 }
 
 /// The caller repo's current branch name (for the "rebased onto <branch>" line);
@@ -6788,12 +6775,12 @@ fn init_demo() -> i32 {
 /// `Err` carries git's message when nothing can be committed or git refuses (e.g.
 /// no `user.name`/`user.email` configured) — init then tells the user to commit.
 fn commit_scaffold(root: &Path, paths: &[String], message: &str) -> Result<(), String> {
-  let add = Command::new("git").arg("-C").arg(root).arg("add").arg("--").args(paths).output();
+  let add = git_command().arg("-C").arg(root).arg("add").arg("--").args(paths).output();
   let add = add.map_err(|e| format!("git add: {e}"))?;
   if !add.status.success() {
     return Err(String::from_utf8_lossy(&add.stderr).trim().to_string());
   }
-  let out = Command::new("git")
+  let out = git_command()
     .arg("-C")
     .arg(root)
     .args(["commit", "-q", "-m", message])
@@ -7320,7 +7307,7 @@ fn clone_skill_source(url: &str) -> Result<PathBuf, i32> {
   let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
   let clone = std::env::temp_dir().join(format!("scsh-installskills-{}-{nanos}", std::process::id()));
   let _ = std::fs::remove_dir_all(&clone); // clear any stale dir from a crashed run
-  let cloned = Command::new("git")
+  let cloned = git_command()
     .args(["clone", "--depth", "1", url])
     .arg(&clone)
     .output()
@@ -7786,10 +7773,8 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 }
 
 fn git_root() -> Result<PathBuf, String> {
-  let out = Command::new("git")
-    .args(["rev-parse", "--show-toplevel"])
-    .output()
-    .map_err(|e| format!("failed to run git: {e}"))?;
+  let out =
+    git_command().args(["rev-parse", "--show-toplevel"]).output().map_err(|e| format!("failed to run git: {e}"))?;
   if !out.status.success() {
     return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
   }
@@ -9384,7 +9369,7 @@ steps:
   fn clone_and_commit(src: &Path, tag: &str, file: &str, contents: &str, msg: &str) -> PathBuf {
     let d = mt_dir(tag);
     assert!(
-      Command::new("git")
+      git_command()
         .args(["clone", "-q", &src.to_string_lossy(), &d.to_string_lossy()])
         .status()
         .map(|s| s.success())
@@ -9487,7 +9472,7 @@ steps:
     let base = head(&caller);
 
     let rewritten = mt_dir("workflow-rewrite-run");
-    assert!(Command::new("git")
+    assert!(git_command()
       .args(["clone", "-q", &caller.to_string_lossy(), &rewritten.to_string_lossy()])
       .status()
       .unwrap()
@@ -9507,7 +9492,7 @@ steps:
     assert_eq!(git_capture(&caller, &["rev-parse", &branch]).unwrap().trim(), tip);
 
     let next = mt_dir("workflow-next-wave");
-    assert!(Command::new("git")
+    assert!(git_command()
       .args(["clone", "-q", &caller.to_string_lossy(), &next.to_string_lossy()])
       .status()
       .unwrap()
@@ -9526,7 +9511,7 @@ steps:
     let caller = repo("noop-caller");
     let base = head(&caller);
     let d = mt_dir("noop-clone");
-    assert!(Command::new("git")
+    assert!(git_command()
       .args(["clone", "-q", &caller.to_string_lossy(), &d.to_string_lossy()])
       .status()
       .unwrap()
