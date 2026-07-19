@@ -293,7 +293,10 @@ steps:
       excellent=5, good=4, average=3, poor=2. Approval requires every grade to be
       excellent or good, more excellent than good, and mean score at least 4.5. Set
       SCSH_LOOP_BREAK true when approved. Otherwise set it false and put a clear
-      consolidated change request in `change_request`. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
+      consolidated change request in `change_request`. Comments may lead with a severity
+      tag ([blocking]/[should-fix]/[nit]): the change request must address every
+      [blocking] comment first, and [nit]-only comments are stylistic unless they hide a
+      real bug. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
       reviewer suggestion that violates this invariant. Do not change files or commit.
     output:
       SCSH_LOOP_BREAK:
