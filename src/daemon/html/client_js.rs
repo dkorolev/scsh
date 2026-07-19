@@ -2016,7 +2016,20 @@ function initWorkflowGraph() {
       if (focusButton) expand.focus({ preventScroll: true });
     }
     // The modal changes both available dimensions. Re-apply the lower bound after layout.
-    requestAnimationFrame(() => applyZoom(workflowZoom));
+    // The first large-view entry at a given viewport size fits the graph; after that the
+    // viewer's chosen zoom wins, keyed per size so a resized window fits fresh once.
+    requestAnimationFrame(() => {
+      if (expanded && scroller) {
+        const key = scroller.clientWidth + 'x' + scroller.clientHeight;
+        window.__scshWfExpandFitDone = window.__scshWfExpandFitDone || {};
+        if (!window.__scshWfExpandFitDone[key]) {
+          window.__scshWfExpandFitDone[key] = true;
+          fit();
+          return;
+        }
+      }
+      applyZoom(workflowZoom);
+    });
   };
   const applyZoom = next => {
     const fit = wfFitZoom(scroller, stage);
@@ -2038,11 +2051,32 @@ function initWorkflowGraph() {
     scroller.scrollLeft = 0;
     scroller.scrollTop = 0;
   };
+  // Zoom anchored at a viewport point: the content under the pointer stays put. CSS zoom
+  // scales the scroll content linearly, so re-anchoring is pure arithmetic on the offsets.
+  const zoomAt = (next, clientX, clientY) => {
+    if (!scroller) { applyZoom(next); return; }
+    const rect = scroller.getBoundingClientRect();
+    const px = clientX - rect.left;
+    const py = clientY - rect.top;
+    const prev = workflowZoom;
+    applyZoom(next);
+    if (workflowZoom === prev) return;
+    const ratio = workflowZoom / prev;
+    scroller.scrollLeft = (scroller.scrollLeft + px) * ratio - px;
+    scroller.scrollTop = (scroller.scrollTop + py) * ratio - py;
+  };
   // Global modal handlers must always act on the current graph node. Live job updates preserve
   // this card when possible, but a late graph mount can still introduce it after page load.
   // Expose the closure on the node instead of capturing a stale element in a document listener.
   root.__scshApplyWorkflowExpanded = applyExpanded;
-  applyZoom(workflowZoom);
+  // The page opens on the fitted graph. Only the first mount per page load fits: live
+  // updates remount the card, and a remount must keep the zoom the viewer chose.
+  if (!window.__scshWfInitialFitDone) {
+    window.__scshWfInitialFitDone = true;
+    fit();
+  } else {
+    applyZoom(workflowZoom);
+  }
   zoomOut?.addEventListener('click', () => applyZoom(workflowZoom - 0.1));
   root.querySelector('[data-wf-zoom-in]')?.addEventListener('click', () => applyZoom(workflowZoom + 0.1));
   reset?.addEventListener('click', () => applyZoom(1));
@@ -2107,12 +2141,21 @@ function initWorkflowGraph() {
     ev.preventDefault();
     ev.stopPropagation();
     if (ev.ctrlKey || ev.metaKey) {
-      applyZoom(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1));
+      // Trackpad pinch arrives as ctrlKey wheel events: zoom toward the fingers, not the
+      // viewport center.
+      zoomAt(workflowZoom + (ev.deltaY < 0 ? 0.1 : -0.1), ev.clientX, ev.clientY);
       return;
     }
     scroller.scrollLeft += ev.deltaX;
     scroller.scrollTop += ev.deltaY;
   }, { passive: false });
+  scroller?.addEventListener('dblclick', ev => {
+    // Double-clicking a node or control keeps its own meaning; empty graph area zooms in
+    // at the clicked point.
+    if (ev.target.closest('a.wf-node, a.wf-jump, button')) return;
+    ev.preventDefault();
+    zoomAt(workflowZoom * 1.5, ev.clientX, ev.clientY);
+  });
   root.addEventListener('click', (ev) => {
     const jump = ev.target.closest('a.wf-jump');
     if (jump && root.contains(jump)) {
