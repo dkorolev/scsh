@@ -35,6 +35,7 @@ interface Review {
 
 interface Issue {
   commit: string;       // SHA of the commit to amend
+  severity: "blocking" | "should-fix" | "nit";  // argued by failure direction — see Finding discipline
   file: string;         // path; "PR-DESCRIPTION.md" for PR-definition findings; "<commit>" when no single file applies
   line: number;         // line number; 0 when the finding is commit- or PR-level, not line-specific
   description: string;  // what the problem is
@@ -42,9 +43,19 @@ interface Issue {
 }
 ```
 
-When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string naming the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
+When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string that leads with its severity in brackets and names the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
 
 With no issues, emit `issues: []` and grade accordingly (typically `excellent`).
+
+## Finding discipline
+
+- **Severity is argued, not asserted.** Set each issue's `severity` by its failure direction: silent-and-permanent escalates — data lost with no error, a broken emitted contract, a defeated CI gate; loud, transient, or self-healing downgrades. Name the direction in the description ("fail-closed, so a nit"). `blocking` is rare and earned; most findings on a healthy branch are `should-fix` or `nit`. The severity mix, not the raw count, drives the grade.
+
+- **Pre-existing issues are out of scope.** If the problem exists on `origin/main` in code this diff does not touch, it is not a finding against this branch — at most one `nit` noting it as a pre-existing follow-up, and it never lowers the grade.
+
+- **One root cause, one finding.** Anchor it at its clearest site and list the other affected locations inside the description; never file the same defect once per line it manifests on.
+
+- **Cite your evidence.** When a finding rests on a checkable claim — a symbol does not exist, two bodies are byte-identical, nothing calls this function — check it by reading or searching (`grep`, `git log`) and say so in the description. Reading and searching only; the no-execute rule stands.
 
 ## Repository guidelines — read first
 
@@ -60,7 +71,9 @@ Never request, recommend, or create a `PR-DESCRIPTION.md` section for verificati
 
 - **Unrelated changes bundled together** — two or more independent changes in one branch. Suggest splitting into separate pull requests. This is your core call: different commits, different PRs.
 
-- **PR description presentation** — `PR-DESCRIPTION.md` must lead with the big picture and then descend into the details. Flag a description that buries the point, is out of order, or is hard to follow. (Whether it is *accurate* is also checked here when no other reviewer owns it; whether it is *justified* belongs to justification-reviewer.)
+- **Undisclosed collateral changes** — a threshold loosened, a timeout grown, a default flipped, a gate re-baselined, riding inside a PR about something else and absent from `PR-DESCRIPTION.md`. The change may be fine; the silence is the finding. The remedy is a sentence of disclosure in the description, not a code change and usually not a split — but an undisclosed weakening of a repo-wide gate is blocking.
+
+- **PR description presentation** — `PR-DESCRIPTION.md` must lead with the big picture and then descend into the details. Flag a description that buries the point, is out of order, or is hard to follow. Also hold it to the diff: every number, threshold, filename, and behavior claim must match the tree — a description that contradicts the diff reads as written against an older head, leaves reviewers reasoning from a false picture, and is blocking; regenerate it against this head. (Whether the change is *justified* belongs to justification-reviewer.)
 
 ## The PR description
 
@@ -76,6 +89,6 @@ Packaging is your focus, not your blinders. While you read the commits and the P
 
 - **Anchoring: commit or PR, not code lines.** Use `line` 0 and `file` `<commit>` or `PR-DESCRIPTION.md` as appropriate. Pinning "split this PR" to a code line is fake precision.
 
-- **Axis: blocking / should-fix / consider** rather than defect severity. Map it into the grade honestly — a branch that should clearly be two PRs is not "good."
+- **Axis: the `severity` field carries it** — blocking / should-fix / nit — rather than defect depth. Map it into the grade honestly — a branch that should clearly be two PRs is not "good."
 
 - **Human-in-the-loop: strong.** You never re-slice commits or split PRs yourself. You surface the structure problem and a human decides.

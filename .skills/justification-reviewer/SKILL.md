@@ -35,6 +35,7 @@ interface Review {
 
 interface Issue {
   commit: string;       // SHA of the commit to amend
+  severity: "blocking" | "should-fix" | "nit";  // argued by failure direction — see Finding discipline
   file: string;         // path; "PR-DESCRIPTION.md" for PR-definition findings; "<commit>" when no single file applies
   line: number;         // line number; 0 when the finding is commit- or PR-level, not line-specific
   description: string;  // what the problem is
@@ -42,9 +43,19 @@ interface Issue {
 }
 ```
 
-When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string naming the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
+When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string that leads with its severity in brackets and names the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
 
 With no issues, emit `issues: []` and grade accordingly (typically `excellent`).
+
+## Finding discipline
+
+- **Severity is argued, not asserted.** Set each issue's `severity` by its failure direction: silent-and-permanent escalates — data lost with no error, a broken emitted contract, a defeated CI gate; loud, transient, or self-healing downgrades. Name the direction in the description ("fail-closed, so a nit"). `blocking` is rare and earned; most findings on a healthy branch are `should-fix` or `nit`. The severity mix, not the raw count, drives the grade.
+
+- **Pre-existing issues are out of scope.** If the problem exists on `origin/main` in code this diff does not touch, it is not a finding against this branch — at most one `nit` noting it as a pre-existing follow-up, and it never lowers the grade.
+
+- **One root cause, one finding.** Anchor it at its clearest site and list the other affected locations inside the description; never file the same defect once per line it manifests on.
+
+- **Cite your evidence.** When a finding rests on a checkable claim — a symbol does not exist, two bodies are byte-identical, nothing calls this function — check it by reading or searching (`grep`, `git log`) and say so in the description. Reading and searching only; the no-execute rule stands.
 
 ## Repository guidelines — read first
 
@@ -68,6 +79,8 @@ You must be able to state, in a single sentence, **what the user can do after th
 
 Lean harder as the diff grows. For large changes, ask plainly: can this be simpler, and is every part of it required by the stated user-facing capability? Complexity that no user-facing change justifies is a finding — say so directly.
 
+**Degenerate paths must earn their cost too.** A retry loop that re-executes a deterministically failing call, an expensive gate — an LLM pass, a full scan — that a benign common input opens needlessly: wasted spend on the path where the feature does nothing is unjustified complexity. Rarely blocking, but state the cost plainly ("two wasted LLM calls per exhausted retry").
+
 ## Correctness and logic
 
 Necessity is not enough — the change must also *appear correct by reading*. Beyond scope, check that the code as written would deliver the user-facing capability it claims: correct logic, edge cases handled, no bug that would make the feature fail in practice. Judge this from the source and diffs alone — never by running it. A capability that is justified but implemented with a logic error still does not give the user what the PR promises — so a correctness or logic bug is a finding here too, and you do not assume another reviewer will catch it.
@@ -78,6 +91,6 @@ Necessity is not enough — the change must also *appear correct by reading*. Be
 
 - **Anchoring: the whole change / the PR description.** Use `line` 0 and `file` `PR-DESCRIPTION.md` or `<commit>`. Your findings are rarely about one line.
 
-- **Axis: blocking / should-fix / consider**, mapped honestly into the grade. A change with no articulable user-facing benefit is not "good."
+- **Axis: the `severity` field carries it** — blocking / should-fix / nit — mapped honestly into the grade. A change with no articulable user-facing benefit is not "good."
 
 - **Human-in-the-loop: strongest.** You never decide unilaterally that a feature is unneeded. You surface the question, sharply, and a human adjudicates it.
