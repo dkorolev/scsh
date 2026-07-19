@@ -1784,6 +1784,36 @@ fn extract_step_outputs(
   Ok(out)
 }
 
+/// One-line completion status for a workflow step, built from its declared outputs in
+/// contract order: scalar fields render as `name: value`, string values clipped to their
+/// first line and 64 characters; list/object fields and empty strings are skipped. `None`
+/// when nothing scalar remains — the caller then falls back to the result path.
+fn workflow_outputs_glimpse(
+  contract: WorkflowResultContract<'_>, outputs: &std::collections::HashMap<String, String>,
+) -> Option<String> {
+  let parts: Vec<String> = contract
+    .outputs
+    .iter()
+    .filter(|f| !matches!(f.ty, harness_def::OutputType::StringList | harness_def::OutputType::Object))
+    .filter_map(|f| {
+      let line = first_line(outputs.get(&f.name)?).trim();
+      if line.is_empty() {
+        return None;
+      }
+      let clipped = match line.char_indices().nth(63) {
+        Some((i, _)) => format!("{}…", &line[..i]),
+        None => line.to_string(),
+      };
+      Some(format!("{}: {clipped}", f.name))
+    })
+    .collect();
+  if parts.is_empty() {
+    None
+  } else {
+    Some(parts.join(" · "))
+  }
+}
+
 /// A prior session's persisted result for `run_id`, when it still validates against the step's
 /// output contract — the restore criterion for `--resume-from`. A result only ever persists
 /// after its run succeeded or failed validation, so "present and valid" is exactly "this step
@@ -4603,7 +4633,9 @@ fn run_one_skill(
       let valid = result_contract.is_none() || workflow_outputs.is_some();
       if valid && restore_cached_result(root, &skill.result, &entry.result).is_ok() {
         let provenance = cache_hit_provenance(entry.cached_at, entry.elapsed);
-        let line = match json::message(&entry.result) {
+        let message = json::message(&entry.result)
+          .or_else(|| result_contract.zip(workflow_outputs.as_ref()).and_then(|(c, o)| workflow_outputs_glimpse(c, o)));
+        let line = match message {
           Some(m) => format!("{}  ({provenance})", first_line(&m)),
           None => format!("({provenance})"),
         };
@@ -4933,7 +4965,8 @@ fn run_one_skill(
       // Cache the result content under this run's key, so an identical future run
       // (same repo content + skill + env) is a hit. Then show the skill's *message*,
       // not just the file (its `result`/`message`/sole field — see json::message),
-      // falling back to the result path; a multi-line message shows its first line.
+      // falling back for workflow steps to a glimpse of their declared scalar outputs,
+      // and only then to the result path; a multi-line message shows its first line.
       let content = match std::fs::read_to_string(&dest) {
         Ok(content) => content,
         Err(error) => {
@@ -4974,7 +5007,8 @@ fn run_one_skill(
           durable_cast.as_deref().map(Path::new),
         );
       }
-      let message = json::message(&content);
+      let message = json::message(&content)
+        .or_else(|| result_contract.zip(workflow_outputs.as_ref()).and_then(|(c, o)| workflow_outputs_glimpse(c, o)));
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
       // Register the durable result before publishing the terminal proc transition. A browser
       // that observes green must already be able to read the exact result that earned it.
@@ -8785,6 +8819,53 @@ mod tests {
     );
     let wrong = extract_step_outputs(r#"{"routes":"a prose blob"}"#, contract).unwrap_err();
     assert!(wrong.contains("must be a JSON object"), "{wrong}");
+  }
+
+  #[test]
+  fn workflow_step_headline_glimpses_declared_scalar_outputs() {
+    // A reviewer step's {grade, comments} has no `result`/`message` field, so without the
+    // glimpse its headline would fall back to the tmp/ result path.
+    let reviewer = [
+      harness_def::OutputField {
+        name: "grade".into(),
+        ty: harness_def::OutputType::Enum,
+        choices: vec!["excellent".into(), "good".into()],
+      },
+      harness_def::OutputField { name: "comments".into(), ty: harness_def::OutputType::StringList, choices: vec![] },
+    ];
+    let contract = WorkflowResultContract { outputs: &reviewer, require_do_while_repeat: false };
+    let outputs = extract_step_outputs(r#"{"grade":"good","comments":["one"]}"#, contract).unwrap();
+    assert_eq!(workflow_outputs_glimpse(contract, &outputs).as_deref(), Some("grade: good"));
+
+    // Scalars keep contract order; string values keep only their first line; list/object
+    // fields never appear.
+    let collect = [
+      harness_def::OutputField { name: "approved".into(), ty: harness_def::OutputType::Bool, choices: vec![] },
+      harness_def::OutputField { name: "verdict".into(), ty: harness_def::OutputType::String, choices: vec![] },
+      harness_def::OutputField { name: "feedback".into(), ty: harness_def::OutputType::Object, choices: vec![] },
+    ];
+    let contract = WorkflowResultContract { outputs: &collect, require_do_while_repeat: false };
+    let outputs = extract_step_outputs(
+      r#"{"approved":false,"verdict":"not met\ndetails follow","feedback":{"mean":4.2}}"#,
+      contract,
+    )
+    .unwrap();
+    assert_eq!(workflow_outputs_glimpse(contract, &outputs).as_deref(), Some("approved: false · verdict: not met"));
+
+    // A long value clips to 64 chars with an ellipsis; an empty string is skipped, and
+    // with nothing scalar left there is no glimpse at all.
+    let decide = [harness_def::OutputField {
+      name: "change_request".into(),
+      ty: harness_def::OutputType::String,
+      choices: vec![],
+    }];
+    let contract = WorkflowResultContract { outputs: &decide, require_do_while_repeat: false };
+    let long = "x".repeat(80);
+    let outputs = extract_step_outputs(&format!(r#"{{"change_request":"{long}"}}"#), contract).unwrap();
+    let expected = format!("change_request: {}…", "x".repeat(63));
+    assert_eq!(workflow_outputs_glimpse(contract, &outputs).as_deref(), Some(expected.as_str()));
+    let outputs = extract_step_outputs(r#"{"change_request":""}"#, contract).unwrap();
+    assert_eq!(workflow_outputs_glimpse(contract, &outputs), None);
   }
 
   #[test]
