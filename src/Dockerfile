@@ -126,6 +126,8 @@ ENV LC_ALL=C.UTF-8
 ENV TZ=${TZ}
 ENV CARGO_HOME=/usr/local/cargo
 ENV RUSTUP_HOME=/usr/local/rustup
+ENV GOFLAGS=-p=2
+ENV GOMAXPROCS=2
 ENV PATH=/usr/local/go/bin:/usr/local/cargo/bin:/usr/local/bin:$PATH
 ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log
 ENV TERM=xterm-256color
