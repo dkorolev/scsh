@@ -3219,6 +3219,27 @@ fn workflow_graph_renders_builtin_shapes() {
   );
   assert!(js.contains("__scshWfInitialFitDone"), "the job page opens on the fitted graph, once per page load");
   assert!(js.contains("__scshWfExpandFitDone"), "first large-view entry per viewport size fits the graph");
+  assert!(js.contains("const animateZoomAt = "), "double-click zoom glides to its target instead of jumping");
+  assert!(
+    js.contains("animateZoomAt(workflowZoom * 1.5, ev.clientX, ev.clientY)"),
+    "double-click zooms through the animated path"
+  );
+  assert!(
+    js.contains("addEventListener('pointerdown'") && js.contains("setPointerCapture"),
+    "mouse drag on empty graph area pans the viewport, tracked through fast drags"
+  );
+  assert!(js.contains("ev.pointerType !== 'mouse'"), "touch keeps the container's native scrolling");
+  assert!(
+    js.contains("block: 'start'") && !js.contains("block: 'nearest'"),
+    "task activation lands on the island's top edge"
+  );
+  assert!(js.contains("det.classList.add('proc-flash')"), "the landed island flashes so the eye finds it");
+  assert!(
+    flat_html.contains("scroll-margin-top: calc(var(--daemon-status-height)"),
+    "the island's top clears the sticky status bar"
+  );
+  assert!(flat_html.contains("@keyframes proc-flash"), "the landing flash is a one-shot brightness pulse");
+  assert!(flat_html.contains("cursor: grab"), "empty graph area advertises mouse-drag panning");
   assert!(flat_html.contains("display: flex"), "the graph viewport can center spare space on either axis");
   assert!(flat_html.contains("margin: auto"), "the stage centers only along axes with spare room");
   assert!(

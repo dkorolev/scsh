@@ -1915,7 +1915,15 @@ function activateProcPanel(det, hash, pushHistory, scroll) {
   det.open = true;
   if (scroll !== false) {
     const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'nearest' });
+    // 'start' lands on the TOP of the island ('nearest' aligned its bottom edge when the
+    // panel sat below the viewport); scroll-margin-top clears the sticky status bar.
+    det.scrollIntoView({ behavior: reduce ? 'auto' : 'smooth', block: 'start' });
+    // A brief brightness flash answers "which island did the page just take me to?".
+    // Remove-then-reflow restarts the animation when the same panel is re-activated.
+    det.classList.remove('proc-flash');
+    void det.offsetWidth;
+    det.classList.add('proc-flash');
+    setTimeout(() => det.classList.remove('proc-flash'), 1100);
   }
   const summary = det.querySelector('summary');
   if (summary) {
@@ -2065,6 +2073,23 @@ function initWorkflowGraph() {
     scroller.scrollLeft = (scroller.scrollLeft + px) * ratio - px;
     scroller.scrollTop = (scroller.scrollTop + py) * ratio - py;
   };
+  // Animated variant for discrete gestures (double-click): glide to the target zoom over a
+  // few frames, keeping the same anchor point, instead of jumping. Wheel/pinch stays
+  // per-event — those gestures are already continuous.
+  const animateZoomAt = (target, clientX, clientY) => {
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce) { zoomAt(target, clientX, clientY); return; }
+    const from = workflowZoom;
+    const start = performance.now();
+    const ms = 200;
+    const step = now => {
+      const t = Math.min(1, (now - start) / ms);
+      const eased = 1 - Math.pow(1 - t, 3);
+      zoomAt(from + (target - from) * eased, clientX, clientY);
+      if (t < 1) requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
+  };
   // Global modal handlers must always act on the current graph node. Live job updates preserve
   // this card when possible, but a late graph mount can still introduce it after page load.
   // Expose the closure on the node instead of capturing a stale element in a document listener.
@@ -2154,7 +2179,36 @@ function initWorkflowGraph() {
     // at the clicked point.
     if (ev.target.closest('a.wf-node, a.wf-jump, button')) return;
     ev.preventDefault();
-    zoomAt(workflowZoom * 1.5, ev.clientX, ev.clientY);
+    animateZoomAt(workflowZoom * 1.5, ev.clientX, ev.clientY);
+  });
+  // Mouse drag on empty graph area pans the viewport — wheel-less mice and rough touchpads
+  // need a way to move around. Touch keeps the container's native scrolling (touch-action);
+  // a 3px dead zone leaves double-click jitter alone.
+  scroller?.addEventListener('pointerdown', ev => {
+    if (ev.pointerType !== 'mouse' || ev.button !== 0) return;
+    if (ev.target.closest('a.wf-node, a.wf-jump, button')) return;
+    ev.preventDefault();
+    const startX = ev.clientX, startY = ev.clientY;
+    const startLeft = scroller.scrollLeft, startTop = scroller.scrollTop;
+    let panning = false;
+    const move = e => {
+      const dx = e.clientX - startX, dy = e.clientY - startY;
+      if (!panning && Math.abs(dx) + Math.abs(dy) < 3) return;
+      panning = true;
+      scroller.classList.add('wf-panning');
+      scroller.scrollLeft = startLeft - dx;
+      scroller.scrollTop = startTop - dy;
+    };
+    const up = () => {
+      scroller.removeEventListener('pointermove', move);
+      scroller.removeEventListener('pointerup', up);
+      scroller.removeEventListener('pointercancel', up);
+      scroller.classList.remove('wf-panning');
+    };
+    try { scroller.setPointerCapture(ev.pointerId); } catch (_) {}
+    scroller.addEventListener('pointermove', move);
+    scroller.addEventListener('pointerup', up);
+    scroller.addEventListener('pointercancel', up);
   });
   root.addEventListener('click', (ev) => {
     const jump = ev.target.closest('a.wf-jump');
