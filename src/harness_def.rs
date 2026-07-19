@@ -1686,6 +1686,10 @@ mod tests {
       "decide branches on the loop iteration, not on env-var emptiness"
     );
     assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
+    assert!(
+      decide.outputs.iter().any(|o| o.name == "change_request" && o.ty == OutputType::StringList),
+      "the change request is a typed list, one entry per requested change"
+    );
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
     assert_eq!(collect.do_while.as_deref(), Some("decide"));
     assert!(collect.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT" && o.ty == OutputType::Bool));
