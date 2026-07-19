@@ -1679,7 +1679,7 @@ mod tests {
       "review fixes are authored by the runner, not the notes bot"
     );
     assert_eq!(fix.agent.harness, crate::config::Harness::Claude);
-    assert_eq!(fix.agent.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(fix.agent.model.as_deref(), Some("claude-fable-5"));
     assert_eq!(fix.inactivity_timeout, Some(3600), "a healthy fix pass outlives the default novelty window");
     assert!(fix.task.body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
     assert!(
@@ -1691,8 +1691,8 @@ mod tests {
     // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
     assert!(decide.break_loop);
-    assert_eq!(decide.agent.harness, crate::config::Harness::Codex);
-    assert_eq!(decide.agent.model.as_deref(), Some("gpt-5.6-terra"));
+    assert_eq!(decide.agent.harness, crate::config::Harness::Claude);
+    assert_eq!(decide.agent.model.as_deref(), Some("claude-fable-5"));
     assert!(
       decide.task.body().contains("SCSH_LOOP_ITERATION"),
       "decide branches on the loop iteration, not on env-var emptiness"
@@ -1710,13 +1710,13 @@ mod tests {
       "the round report is a structured object, not a prose blob"
     );
 
-    // The bundled route standard, both batches: 5 profiles × (Opus 4.8, Codex Terra, Cursor Auto).
+    // The bundled route standard, both batches: 5 profiles × (Opus 4.8, Codex Spark, Cursor Auto).
     let initial: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("initial_")).collect();
     let reviewers: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
     assert_eq!((initial.len(), reviewers.len()), (15, 15));
     for batch in [&initial, &reviewers] {
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_opus")).count(), 5);
-      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_terra")).count(), 5);
+      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_spark")).count(), 5);
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_cursor")).count(), 5);
     }
     let mut actual_reviewer_skills = std::collections::BTreeSet::new();
@@ -1744,8 +1744,9 @@ mod tests {
         "{} explicitly supports the lossless workflow adapter",
         r.id
       );
-      if r.id.ends_with("_terra") {
+      if r.id.ends_with("_spark") {
         assert_eq!(r.agent.harness, crate::config::Harness::Codex);
+        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-spark"));
         assert_eq!(r.agent.effort.as_deref(), Some("high"));
       }
     }

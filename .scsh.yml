@@ -7,9 +7,9 @@ skills:
     timeout: 1200
     result: tmp/code-review-conventions-reviewer-{name}.json
     invocations:
-      codex-terra:
+      codex-spark:
         harness: codex
-        model: gpt-5.6-terra
+        model: gpt-5.6-spark
         effort: high
       claude-opus-4-8:
         harness: claude
@@ -22,9 +22,9 @@ skills:
     timeout: 1200
     result: tmp/code-review-justification-reviewer-{name}.json
     invocations:
-      codex-terra:
+      codex-spark:
         harness: codex
-        model: gpt-5.6-terra
+        model: gpt-5.6-spark
         effort: high
       claude-opus-4-8:
         harness: claude
@@ -37,9 +37,9 @@ skills:
     timeout: 1200
     result: tmp/code-review-reviewability-reviewer-{name}.json
     invocations:
-      codex-terra:
+      codex-spark:
         harness: codex
-        model: gpt-5.6-terra
+        model: gpt-5.6-spark
         effort: high
       claude-opus-4-8:
         harness: claude
@@ -52,9 +52,9 @@ skills:
     timeout: 1200
     result: tmp/code-review-sanity-reviewer-{name}.json
     invocations:
-      codex-terra:
+      codex-spark:
         harness: codex
-        model: gpt-5.6-terra
+        model: gpt-5.6-spark
         effort: high
       claude-opus-4-8:
         harness: claude
@@ -67,9 +67,9 @@ skills:
     timeout: 1200
     result: tmp/code-review-testing-reviewer-{name}.json
     invocations:
-      codex-terra:
+      codex-spark:
         harness: codex
-        model: gpt-5.6-terra
+        model: gpt-5.6-spark
         effort: high
       claude-opus-4-8:
         harness: claude
