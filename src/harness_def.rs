@@ -382,6 +382,22 @@ pub struct Step {
   /// step's run (`inactivity_timeout: 3600`). `None` = the harness default (30m). For
   /// steps whose agent legitimately works quietly for long stretches (a big fix pass).
   pub inactivity_timeout: Option<u64>,
+  /// Who authors this step's `commits: true` work (`commit-identity: runner|notes`). `Notes`
+  /// (the default) is the recognizable scsh bot — the special notes author reviewers exclude
+  /// from review. `Runner` is the human running the pipeline, inferred from the caller repo's
+  /// effective `git config user.name`/`user.email` — so review-addressing code commits are
+  /// theirs and stay reviewable in later rounds instead of vanishing behind the notes exclusion.
+  pub commit_identity: CommitIdentity,
+}
+
+/// Commit authorship for a step's `commits: true` work (see [`Step::commit_identity`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum CommitIdentity {
+  /// The recognizable scsh notes bot (the default) — reviewers exclude its commits as notes.
+  #[default]
+  Notes,
+  /// The human running the pipeline, from the caller repo's effective git identity.
+  Runner,
 }
 
 /// Hard backstop for `do-while` loops — each iteration is a full agent run, so a condition
@@ -820,6 +836,7 @@ fn validate_steps(
       "needs",
       "artifacts",
       "commits",
+      "commit-identity",
       "repeat",
       "do-while",
       "break",
@@ -878,6 +895,21 @@ fn validate_steps(
         false
       }
     };
+    let commit_identity = match fm.get("commit-identity") {
+      None => CommitIdentity::Notes,
+      Some(Node::Scalar(s)) => match s.trim() {
+        "runner" => CommitIdentity::Runner,
+        "notes" => CommitIdentity::Notes,
+        other => {
+          errors.push(format!("'steps.{id}.commit-identity': expected 'runner' or 'notes', got '{other}'"));
+          CommitIdentity::Notes
+        }
+      },
+      Some(_) => {
+        errors.push(format!("'steps.{id}.commit-identity': expected 'runner' or 'notes'"));
+        CommitIdentity::Notes
+      }
+    };
     let repeat = match fm.get("repeat") {
       None => None,
       Some(Node::Scalar(s)) => match s.trim().parse::<usize>() {
@@ -927,6 +959,7 @@ fn validate_steps(
         needs,
         artifacts,
         commits,
+        commit_identity,
         repeat,
         do_while,
         break_loop,

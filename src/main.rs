@@ -1798,6 +1798,7 @@ fn restored_step_result(
 /// result file under the session scratch dir.
 fn step_invocation(
   step: &harness_def::Step, run_id: &str, session_dir_rel: &str, inputs: Vec<(String, String)>,
+  commit_identity: Option<(String, String)>,
 ) -> ResolvedInvocation {
   ResolvedInvocation {
     name: run_id.to_string(),
@@ -1815,6 +1816,7 @@ fn step_invocation(
       .collect(),
     profile: None,
     commits: step.commits,
+    commit_identity,
     result: format!("{session_dir_rel}/{run_id}.json"),
     terminal: config::Terminal::default(),
     delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
@@ -2277,6 +2279,10 @@ fn run_workflow(
   // we refresh it so the next wave's clone sees those commits and its own packdiff range is
   // only what *that* step added (same contract as the flat `build_and_run` path).
   let mut base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  // The host repo's own git identity, resolved once — steps declaring `commit-identity: runner`
+  // author their commits as the person running the pipeline, not as the notes bot.
+  let runner_identity = runner_commit_identity(root);
+  let mut runner_identity_warned = false;
   let original_base = base.clone();
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
   let mut do_while_end_for: HashMap<String, String> = HashMap::new();
@@ -2432,7 +2438,17 @@ fn run_workflow(
           continue;
         }
       }
-      invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs));
+      let commit_identity = match s.commit_identity {
+        harness_def::CommitIdentity::Runner => {
+          if runner_identity.is_none() && !runner_identity_warned {
+            warn("this repo has no git user.name/user.email — 'commit-identity: runner' steps fall back to the scsh bot identity");
+            runner_identity_warned = true;
+          }
+          runner_identity.clone()
+        }
+        harness_def::CommitIdentity::Notes => None,
+      };
+      invs.push(step_invocation(s, &run_id, &session_dir_rel, inputs, commit_identity));
       procs.push(p);
       live_steps.push(s);
       run_ids.push(run_id);
@@ -4648,7 +4664,7 @@ fn run_one_skill(
         return SkillRun::failed(failure::reason::GIT_DAEMON, Some(run_dir_str), None, None);
       }
     }
-  } else if let Err(e) = clone_into(root, &run_dir, source_revision, &spinner) {
+  } else if let Err(e) = clone_into(root, &run_dir, source_revision, skill.commit_identity.as_ref(), &spinner) {
     spinner.finish_fail(failure::reason::CLONE, Some(&e));
     return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, None);
   }
@@ -4753,7 +4769,12 @@ fn run_one_skill(
     &skill.delivery,
   );
   let cmd = if git_transport {
-    runtime::git_transport_entry(&harness, skill.commits, SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL)
+    let (ci_name, ci_email) = skill
+      .commit_identity
+      .as_ref()
+      .map(|(n, e)| (n.as_str(), e.as_str()))
+      .unwrap_or((SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL));
+    runtime::git_transport_entry(&harness, skill.commits, ci_name, ci_email)
   } else {
     harness
   };
@@ -5136,7 +5157,8 @@ fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, Str
 /// local one so the container sees them all. Used when bind-mounting the run dir
 /// (Linux host → Linux container). Skills must not reach out to git remotes.
 fn clone_into(
-  root: &Path, run_dir: &Path, source_revision: Option<&str>, spinner: &ui::screen::Proc,
+  root: &Path, run_dir: &Path, source_revision: Option<&str>, commit_identity: Option<&(String, String)>,
+  spinner: &ui::screen::Proc,
 ) -> Result<(), String> {
   spinner.note("cloning…");
   let cmd = runtime::clone_command(&root.to_string_lossy(), &run_dir.to_string_lossy());
@@ -5151,7 +5173,7 @@ fn clone_into(
   if let Some(revision) = source_revision {
     checkout_workflow_revision(run_dir, revision)?;
   }
-  set_clone_identity(run_dir);
+  set_clone_identity(run_dir, commit_identity);
   spinner.note("checking clone integrity…");
   let fsck = runtime::fsck_command(&run_dir.to_string_lossy());
   spinner.emit("git fsck --no-progress…");
@@ -5309,14 +5331,27 @@ impl Drop for GitTransport {
 pub(crate) const SCSH_COMMIT_NAME: &str = "dkorolev-neon-elon-bot";
 pub(crate) const SCSH_COMMIT_EMAIL: &str = "dmitry.korolev+elon-presley@gmail.com";
 
+/// The caller repo's effective git identity (`git config user.name` / `user.email`) — the
+/// person running the pipeline. Steps declaring `commit-identity: runner` author their commits
+/// as this identity; when either half is unset the caller falls back to the recognizable scsh
+/// bot rather than guessing.
+fn runner_commit_identity(root: &Path) -> Option<(String, String)> {
+  let name = git_capture(root, &["config", "user.name"])?.trim().to_string();
+  let email = git_capture(root, &["config", "user.email"])?.trim().to_string();
+  (!name.is_empty() && !email.is_empty()).then_some((name, email))
+}
+
 /// Give the clone a *local* commit identity so a commit-enabled skill can `git commit`
 /// inside the container — the mounted `.git/config` carries it, and the container's base
-/// image has no global git identity. It is the deliberately recognizable [`SCSH_COMMIT_NAME`]
-/// bot (see its docs). Best-effort; failures never abort the run. (Cherry-picking these
-/// commits back preserves this author; your own identity becomes the committer.)
-fn set_clone_identity(run_dir: &Path) {
-  let _ = git_capture(run_dir, &["config", "user.email", SCSH_COMMIT_EMAIL]);
-  let _ = git_capture(run_dir, &["config", "user.name", SCSH_COMMIT_NAME]);
+/// image has no global git identity. By default it is the deliberately recognizable
+/// [`SCSH_COMMIT_NAME`] bot (see its docs); a step declaring `commit-identity: runner`
+/// overrides it with the pipeline runner's own identity. Best-effort; failures never abort
+/// the run. (Cherry-picking these commits back preserves this author; your own identity
+/// becomes the committer.)
+fn set_clone_identity(run_dir: &Path, identity: Option<&(String, String)>) {
+  let (name, email) = identity.map(|(n, e)| (n.as_str(), e.as_str())).unwrap_or((SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL));
+  let _ = git_capture(run_dir, &["config", "user.email", email]);
+  let _ = git_capture(run_dir, &["config", "user.name", name]);
 }
 
 /// Best-effort: create a local branch for each `origin/*` branch the host-side
@@ -8729,7 +8764,7 @@ mod tests {
       .expect("built-in definition exists")
       .expect("built-in definition validates");
     let step = definition.steps.first().expect("demo has a first step");
-    let invocation = step_invocation(step, "increment", "tmp/scsh/session", Vec::new());
+    let invocation = step_invocation(step, "increment", "tmp/scsh/session", Vec::new(), None);
     let repaired = schema_repair_invocation(&invocation, "result is missing the 'value' field");
     assert_eq!(repaired.name, invocation.name);
     assert_eq!(repaired.result, invocation.result);
@@ -9308,7 +9343,7 @@ steps:
         .unwrap_or(false),
       "clone should succeed"
     );
-    set_clone_identity(&d);
+    set_clone_identity(&d, None);
     std::fs::write(d.join(file), contents).unwrap();
     g(&d, &["add", "-A"]);
     g(&d, &["commit", "-qm", msg]);
@@ -9409,7 +9444,7 @@ steps:
       .status()
       .unwrap()
       .success());
-    set_clone_identity(&rewritten);
+    set_clone_identity(&rewritten, None);
     g(&rewritten, &["reset", "--hard", "HEAD~1"]);
     std::fs::write(rewritten.join("feature.txt"), "authoritative rewrite\n").unwrap();
     g(&rewritten, &["add", "-A"]);
@@ -9486,6 +9521,7 @@ steps:
       env: Vec::new(),
       profile: None,
       commits: false,
+      commit_identity: None,
       result: "tmp/r.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::Repo,
@@ -9665,6 +9701,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       task: harness_def::StepTask::Prompt("p".into()),
       inputs: Vec::new(),
       outputs: Vec::new(),
+      commit_identity: harness_def::CommitIdentity::Notes,
       when: None,
       needs: vec!["add".into()],
       artifacts: vec!["summary.txt".into()],
@@ -9676,7 +9713,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       do_while: None,
       break_loop: false,
     };
-    let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new());
+    let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new(), None);
     // The artifact lands beside the step's result, inside the caller's session scratch dir.
     assert_eq!(inv.result, "tmp/scsh/abcdef/summarize.json");
     assert_eq!(inv.artifacts, vec!["tmp/scsh/abcdef/summary.txt".to_string()]);
@@ -9744,6 +9781,19 @@ Subject: [PATCH] add: 2 + 3 = 5
   }
 
   #[test]
+  fn clone_identity_defaults_to_the_bot_and_honors_the_runner_override() {
+    let d = repo("cident");
+    set_clone_identity(&d, None);
+    assert_eq!(git_capture(&d, &["config", "user.email"]).unwrap().trim(), SCSH_COMMIT_EMAIL);
+    let jane = ("Jane Dev".to_string(), "jane@example.com".to_string());
+    set_clone_identity(&d, Some(&jane));
+    assert_eq!(git_capture(&d, &["config", "user.name"]).unwrap().trim(), "Jane Dev");
+    assert_eq!(git_capture(&d, &["config", "user.email"]).unwrap().trim(), "jane@example.com");
+    // And the runner identity reads back exactly what the repo's own config declares.
+    assert_eq!(runner_commit_identity(&d), Some(jane));
+  }
+
+  #[test]
   fn global_install_lands_in_the_harness_skills_dir_on_both_transports() {
     let base = std::env::temp_dir().join(format!("scsh-global-skill-{}", runtime::random_nonce_6()));
     let inv = |harness: config::Harness| config::ResolvedInvocation {
@@ -9759,6 +9809,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       env: Vec::new(),
       profile: None,
       commits: false,
+      commit_identity: None,
       result: "tmp/greet.json".into(),
       terminal: config::Terminal::default(),
       delivery: config::SkillDelivery::GlobalInstall("# greet\nsay hi\n".into()),

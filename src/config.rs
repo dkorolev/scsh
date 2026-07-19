@@ -129,6 +129,8 @@ pub struct ResolvedInvocation {
   pub env: Vec<EnvVar>,
   pub profile: Option<String>,
   pub commits: bool,
+  /// Commit author for the clone (`None` = the recognizable scsh notes bot).
+  pub commit_identity: Option<(String, String)>,
   pub result: String,
   /// PTY size the harness runs (and is recorded) in — the config's top-level `terminal:`.
   pub terminal: Terminal,
@@ -192,6 +194,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       env: skill.env.clone(),
       profile: skill.profile.clone(),
       commits: skill.commits,
+      commit_identity: None,
       result: skill.result.clone(),
       terminal,
       delivery: SkillDelivery::Repo,
@@ -214,6 +217,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       env: skill.env.clone(),
       profile: route.profile.clone().or_else(|| skill.profile.clone()),
       commits: route.commits.unwrap_or(skill.commits),
+      commit_identity: None,
       result: skill.result.replace("{name}", &route.name),
       terminal,
       delivery: SkillDelivery::Repo,
