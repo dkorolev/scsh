@@ -402,30 +402,31 @@ fn lock_post_tx(inner: &ClientInner) -> Option<Sender<PostJob>> {
 fn poster_loop(port: u16, session_id: String, rx: mpsc::Receiver<PostJob>) {
   let mut line_buf: Vec<(usize, f64, String)> = Vec::new();
   let mut line_bytes = 0usize;
+  let mut conn = DaemonConn::default();
   loop {
     match rx.recv_timeout(LINE_BATCH_INTERVAL) {
       Ok(PostJob::ProcLine { proc, at, line }) => {
         line_bytes += line.len();
         line_buf.push((proc, at, line));
         if line_bytes >= LINE_BATCH_MAX_BYTES {
-          flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
+          flush_lines(&mut conn, port, &session_id, &mut line_buf, &mut line_bytes);
         }
       }
       Ok(PostJob::Send { path, body }) => {
-        flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
-        if !send_post(port, &path, &body) {
+        flush_lines(&mut conn, port, &session_id, &mut line_buf, &mut line_bytes);
+        if !conn.post(port, &path, &body) {
           log_post_failure(&path, None);
         }
       }
       Ok(PostJob::Flush { done }) => {
-        drain_poster_burst(&rx, port, &session_id, &mut line_buf, &mut line_bytes);
+        drain_poster_burst(&rx, &mut conn, port, &session_id, &mut line_buf, &mut line_bytes);
         let _ = done.send(());
       }
       Err(RecvTimeoutError::Timeout) => {
-        flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
+        flush_lines(&mut conn, port, &session_id, &mut line_buf, &mut line_bytes);
       }
       Err(RecvTimeoutError::Disconnected) => {
-        flush_lines(port, &session_id, &mut line_buf, &mut line_bytes);
+        flush_lines(&mut conn, port, &session_id, &mut line_buf, &mut line_bytes);
         break;
       }
     }
@@ -434,34 +435,34 @@ fn poster_loop(port: u16, session_id: String, rx: mpsc::Receiver<PostJob>) {
 
 /// After the explicit flush marker, drain any jobs already queued behind it before acking.
 fn drain_poster_burst(
-  rx: &mpsc::Receiver<PostJob>, port: u16, session_id: &str, line_buf: &mut Vec<(usize, f64, String)>,
-  line_bytes: &mut usize,
+  rx: &mpsc::Receiver<PostJob>, conn: &mut DaemonConn, port: u16, session_id: &str,
+  line_buf: &mut Vec<(usize, f64, String)>, line_bytes: &mut usize,
 ) {
-  flush_lines(port, session_id, line_buf, line_bytes);
+  flush_lines(conn, port, session_id, line_buf, line_bytes);
   loop {
     match rx.try_recv() {
       Ok(PostJob::ProcLine { proc, at, line }) => {
         *line_bytes += line.len();
         line_buf.push((proc, at, line));
         if *line_bytes >= LINE_BATCH_MAX_BYTES {
-          flush_lines(port, session_id, line_buf, line_bytes);
+          flush_lines(conn, port, session_id, line_buf, line_bytes);
         }
       }
       Ok(PostJob::Send { path, body }) => {
-        flush_lines(port, session_id, line_buf, line_bytes);
-        if !send_post(port, &path, &body) {
+        flush_lines(conn, port, session_id, line_buf, line_bytes);
+        if !conn.post(port, &path, &body) {
           log_post_failure(&path, None);
         }
       }
       Ok(PostJob::Flush { done }) => {
-        flush_lines(port, session_id, line_buf, line_bytes);
+        flush_lines(conn, port, session_id, line_buf, line_bytes);
         let _ = done.send(());
       }
       Err(TryRecvError::Empty) => break,
       Err(TryRecvError::Disconnected) => break,
     }
   }
-  flush_lines(port, session_id, line_buf, line_bytes);
+  flush_lines(conn, port, session_id, line_buf, line_bytes);
 }
 
 fn group_line_buf(buf: &[(usize, f64, String)]) -> Vec<(usize, Vec<(f64, String)>)> {
@@ -480,12 +481,14 @@ fn group_line_buf(buf: &[(usize, f64, String)]) -> Vec<(usize, Vec<(f64, String)
   groups
 }
 
-fn flush_lines(port: u16, session_id: &str, buf: &mut Vec<(usize, f64, String)>, bytes: &mut usize) {
+fn flush_lines(
+  conn: &mut DaemonConn, port: u16, session_id: &str, buf: &mut Vec<(usize, f64, String)>, bytes: &mut usize,
+) {
   if buf.is_empty() {
     return;
   }
   for (proc, chunk) in group_line_buf(buf) {
-    if !send_lines_bulk(port, session_id, proc, &chunk) {
+    if !send_lines_bulk(conn, port, session_id, proc, &chunk) {
       log_post_failure("/api/v1/proc/lines", Some(proc));
     }
   }
@@ -493,7 +496,9 @@ fn flush_lines(port: u16, session_id: &str, buf: &mut Vec<(usize, f64, String)>,
   *bytes = 0;
 }
 
-fn send_lines_bulk(port: u16, session_id: &str, proc_index: usize, lines: &[(f64, String)]) -> bool {
+fn send_lines_bulk(
+  conn: &mut DaemonConn, port: u16, session_id: &str, proc_index: usize, lines: &[(f64, String)],
+) -> bool {
   if lines.is_empty() {
     return true;
   }
@@ -501,7 +506,7 @@ fn send_lines_bulk(port: u16, session_id: &str, proc_index: usize, lines: &[(f64
     lines.iter().map(|(at, text)| format!("{{ \"at\": {at}, \"line\": {} }}", quote(text))).collect();
   let body =
     format!("{{ \"session\": {}, \"proc\": {}, \"lines\": [{}] }}", quote(session_id), proc_index, entries.join(", "));
-  send_post(port, "/api/v1/proc/lines", &body)
+  conn.post(port, "/api/v1/proc/lines", &body)
 }
 
 fn send_post(port: u16, path: &str, body: &str) -> bool {
@@ -529,6 +534,148 @@ Connection: close\r\n\r\n\
     return false;
   }
   resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")
+}
+
+/// The poster thread's reusable keep-alive connection to the daemon. A running job posts
+/// events and line batches constantly; a connection per POST parked thousands of loopback
+/// sockets in TIME_WAIT and could exhaust the machine's ephemeral ports. One connection
+/// carries every post; the daemon idle-closes it after a few quiet seconds and the next
+/// post reconnects.
+#[derive(Default)]
+struct DaemonConn {
+  stream: Option<TcpStream>,
+}
+
+impl DaemonConn {
+  fn post(&mut self, port: u16, path: &str, body: &str) -> bool {
+    let req = format!(
+      "POST {path} HTTP/1.1\r\n\
+Host: 127.0.0.1\r\n\
+Content-Type: application/json\r\n\
+Content-Length: {len}\r\n\r\n\
+{body}",
+      len = body.len()
+    );
+    // A post on a reused connection can race the daemon's idle close, and only a race the
+    // server provably never processed may retry on a fresh connection:
+    //  - the WRITE failed — the request is incomplete on the wire, an incomplete request
+    //    cannot be routed, and dropping our socket guarantees it never completes;
+    //  - the READ died before ANY response byte with a disconnect error (see
+    //    `unprocessed_disconnect` for the per-OS shapes this takes).
+    // A fresh-connection failure, a mid-response error, or a timeout is never retried — a
+    // slow daemon may still process the request, and a duplicate would corrupt the store.
+    // Known residual window, accepted deliberately: a daemon that DIES between reading the
+    // full request and writing the first response byte is indistinguishable from the idle
+    // close, so that one post could be applied twice across the daemon generations. The
+    // idle-close race happens constantly (every >5s gap between posts); a daemon death
+    // inside a sub-millisecond handler is vanishingly rare, and without the retry every
+    // idle-close race would LOSE a post instead. See DAEMON-KEEPALIVE.md.
+    for _ in 0..2 {
+      let reused = self.stream.is_some();
+      let Some(stream) = self.connect(port) else {
+        return false;
+      };
+      if stream.write_all(req.as_bytes()).is_err() {
+        self.stream = None;
+        if reused {
+          continue;
+        }
+        return false;
+      }
+      match read_keep_alive_response(stream) {
+        Ok((ok, close)) => {
+          if close {
+            self.stream = None;
+          }
+          return ok;
+        }
+        Err(e) => {
+          self.stream = None;
+          if !(reused && unprocessed_disconnect(&e)) {
+            return false;
+          }
+        }
+      }
+    }
+    false
+  }
+
+  fn connect(&mut self, port: u16) -> Option<&mut TcpStream> {
+    if self.stream.is_none() {
+      let stream =
+        TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(500)).ok()?;
+      stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
+      stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
+      self.stream = Some(stream);
+    }
+    self.stream.as_mut()
+  }
+}
+
+/// True for read errors proving the server closed the connection before sending any
+/// response byte. The same idle-close race surfaces differently per OS: a clean FIN reads
+/// as zero bytes (mapped to `UnexpectedEof`), but Linux and Windows commonly answer a write
+/// on a server-closed socket with an RST, so the read fails `ConnectionReset` (or
+/// `ConnectionAborted`/`BrokenPipe`) instead. Timeouts are deliberately absent — a slow
+/// daemon may still process the request. Callers only see these kinds when zero response
+/// bytes arrived (`read_keep_alive_response` demotes later failures to `InvalidData`).
+fn unprocessed_disconnect(e: &std::io::Error) -> bool {
+  matches!(
+    e.kind(),
+    std::io::ErrorKind::UnexpectedEof
+      | std::io::ErrorKind::ConnectionReset
+      | std::io::ErrorKind::ConnectionAborted
+      | std::io::ErrorKind::BrokenPipe
+  )
+}
+
+/// Read exactly one HTTP response off a keep-alive connection: headers, then the body the
+/// Content-Length header promises — never to EOF, which would block forever on a live
+/// connection. Returns (status-is-200, server-asked-close). Raw error kinds pass through
+/// only while ZERO response bytes have arrived (the retryable stale-connection shapes);
+/// once any byte arrived the server may have processed the request, so every later failure
+/// is demoted to `InvalidData`, which is never retried.
+fn read_keep_alive_response(stream: &mut TcpStream) -> std::io::Result<(bool, bool)> {
+  use std::io::Read;
+  let mut buf = Vec::new();
+  let mut chunk = [0u8; 4096];
+  let header_end = loop {
+    if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+      break end;
+    }
+    if buf.len() > 64 * 1024 {
+      return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "response headers too large"));
+    }
+    let n = match stream.read(&mut chunk) {
+      Ok(n) => n,
+      Err(e) if buf.is_empty() => return Err(e),
+      Err(_) => return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "connection failed mid-response")),
+    };
+    if n == 0 {
+      let kind = if buf.is_empty() { std::io::ErrorKind::UnexpectedEof } else { std::io::ErrorKind::InvalidData };
+      return Err(std::io::Error::new(kind, "connection closed mid-response"));
+    }
+    buf.extend_from_slice(&chunk[..n]);
+  };
+  let head = String::from_utf8_lossy(&buf[..header_end]).to_ascii_lowercase();
+  let content_length = head
+    .lines()
+    .find_map(|line| line.strip_prefix("content-length:"))
+    .and_then(|v| v.trim().parse::<usize>().ok())
+    .unwrap_or(0);
+  let close = head.lines().any(|line| line.trim() == "connection: close");
+  let mut have = buf.len() - (header_end + 4);
+  while have < content_length {
+    let n = stream
+      .read(&mut chunk)
+      .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "connection failed mid-body"))?;
+    if n == 0 {
+      return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "connection closed mid-body"));
+    }
+    have += n;
+  }
+  let ok = head.starts_with("http/1.1 200") || head.starts_with("http/1.0 200");
+  Ok((ok, close))
 }
 
 /// The real scsh binary to re-exec (`__daemon-serve`, and the daemon's `build-images` spawn).
@@ -655,5 +802,128 @@ mod tests {
     assert_eq!(groups[2].1.len(), 2);
     assert_eq!(groups[2].1[0].1, "second");
     assert_eq!(groups[2].1[1].1, "third");
+  }
+
+  /// Read one HTTP request off a test-server socket (headers, then the Content-Length body).
+  fn read_test_request(s: &mut TcpStream) -> Vec<u8> {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+      if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        let head = String::from_utf8_lossy(&buf[..end]).to_ascii_lowercase();
+        let need = head
+          .lines()
+          .find_map(|l| l.strip_prefix("content-length:"))
+          .and_then(|v| v.trim().parse::<usize>().ok())
+          .unwrap_or(0);
+        if buf.len() >= end + 4 + need {
+          return buf;
+        }
+      }
+      let n = s.read(&mut chunk).expect("read request");
+      assert!(n > 0, "client closed mid-request");
+      buf.extend_from_slice(&chunk[..n]);
+    }
+  }
+
+  const KEEP_ALIVE_200: &[u8] =
+    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: keep-alive\r\n\r\nok";
+
+  #[test]
+  fn keep_alive_responses_are_framed_and_the_connection_is_reused() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+      // ONE connection serves two posts back to back; a client reading to EOF would hang.
+      let (mut s, _) = listener.accept().unwrap();
+      for _ in 0..2 {
+        read_test_request(&mut s);
+        s.write_all(KEEP_ALIVE_200).unwrap();
+      }
+    });
+    let mut conn = DaemonConn::default();
+    assert!(conn.post(port, "/api/v1/ping", "{}"), "first post served");
+    assert!(conn.stream.is_some(), "keep-alive response leaves the connection cached");
+    assert!(conn.post(port, "/api/v1/ping", "{}"), "second post rides the same connection");
+    server.join().unwrap();
+  }
+
+  #[test]
+  fn stale_idle_closed_connection_is_replaced_with_one_safe_retry() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+      // First connection: serve one post, then idle-close (the daemon's 5s timeout).
+      let (mut s, _) = listener.accept().unwrap();
+      read_test_request(&mut s);
+      s.write_all(KEEP_ALIVE_200).unwrap();
+      drop(s);
+      // The retry arrives on a fresh connection and is served.
+      let (mut s, _) = listener.accept().unwrap();
+      read_test_request(&mut s);
+      s.write_all(KEEP_ALIVE_200).unwrap();
+    });
+    let mut conn = DaemonConn::default();
+    assert!(conn.post(port, "/api/v1/ping", "{}"), "first post served");
+    // The cached connection is now dead server-side; the next post must detect the EOF
+    // (nothing was processed) and succeed via exactly one fresh-connection retry.
+    assert!(conn.post(port, "/api/v1/ping", "{}"), "stale connection replaced transparently");
+    server.join().unwrap();
+  }
+
+  #[test]
+  fn unprocessed_disconnect_covers_each_os_reset_shape_but_never_timeouts() {
+    use std::io::{Error, ErrorKind};
+    // A clean FIN reads as zero bytes (macOS commonly); Linux and Windows answer a write
+    // on a server-closed socket with an RST, surfacing as a reset instead.
+    for kind in
+      [ErrorKind::UnexpectedEof, ErrorKind::ConnectionReset, ErrorKind::ConnectionAborted, ErrorKind::BrokenPipe]
+    {
+      assert!(unprocessed_disconnect(&Error::new(kind, "x")), "{kind:?} proves nothing was processed");
+    }
+    // A slow daemon may still process the request — retrying a timeout could double-post.
+    for kind in [ErrorKind::WouldBlock, ErrorKind::TimedOut, ErrorKind::InvalidData] {
+      assert!(!unprocessed_disconnect(&Error::new(kind, "x")), "{kind:?} must never retry");
+    }
+  }
+
+  #[test]
+  fn a_connection_lost_mid_response_is_not_retried() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+      // Serve one full response (primes the cached connection), then die mid-headers on
+      // the second post: the server may already have processed it, so no retry.
+      let (mut s, _) = listener.accept().unwrap();
+      read_test_request(&mut s);
+      s.write_all(KEEP_ALIVE_200).unwrap();
+      read_test_request(&mut s);
+      s.write_all(b"HTTP/1.1 2").unwrap();
+    });
+    let mut conn = DaemonConn::default();
+    assert!(conn.post(port, "/api/v1/ping", "{}"));
+    assert!(!conn.post(port, "/api/v1/ping", "{}"), "a partial response fails without a retry");
+    assert!(conn.stream.is_none(), "the broken connection is dropped");
+    server.join().unwrap();
+  }
+
+  #[test]
+  fn a_close_labeled_response_drops_the_cached_connection() {
+    use std::io::Write;
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = std::thread::spawn(move || {
+      let (mut s, _) = listener.accept().unwrap();
+      read_test_request(&mut s);
+      s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").unwrap();
+    });
+    let mut conn = DaemonConn::default();
+    assert!(conn.post(port, "/api/v1/ping", "{}"));
+    assert!(conn.stream.is_none(), "a Connection: close response is not reused");
+    server.join().unwrap();
   }
 }

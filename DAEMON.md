@@ -10,6 +10,11 @@ remote caller gets an explicit `403` denial ("scsh daemon serves the local machi
 rather than a silent connection refusal, but it turns away every non-loopback peer before
 reading the request — only clients on the host itself are ever served.
 
+Connections are HTTP/1.1 **keep-alive** — browsers, the CLI's event poster, and the API all
+reuse them instead of burning a TCP connection (and a TIME_WAIT socket) per request. The
+full connection contract, including the WebSocket exception and the client's single safe
+retry, is in [`DAEMON-KEEPALIVE.md`](DAEMON-KEEPALIVE.md).
+
 ## Commands
 
 ```console

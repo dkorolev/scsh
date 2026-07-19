@@ -216,8 +216,8 @@ mod tests {
     let _ = stop();
     ensure_for_run().expect("ensure_for_run");
     wait_daemon_mode(port, DaemonMode::Ephemeral);
-    // Twenty concurrent one-shot requests (every response is Connection: close, so each
-    // is its own connection — a job page's fetch burst). The accept loop must drain the
+    // Twenty concurrent one-shot requests (each asks Connection: close, so each is its
+    // own connection — the worst-case fetch burst). The accept loop must drain the
     // whole backlog per tick: one-accept-per-100ms-tick would need two full seconds.
     let start = std::time::Instant::now();
     let clients: Vec<_> = (0..20)
@@ -237,6 +237,66 @@ mod tests {
     }
     let elapsed = start.elapsed();
     assert!(elapsed < std::time::Duration::from_millis(1500), "20-connection burst took {elapsed:?}");
+  }
+
+  /// One HTTP response read off a keep-alive test connection: status line + headers, then
+  /// exactly the Content-Length body — reading to EOF would block on a live connection.
+  fn read_framed_response(s: &mut std::net::TcpStream) -> String {
+    use std::io::Read;
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 4096];
+    let header_end = loop {
+      if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+        break end;
+      }
+      let n = s.read(&mut chunk).expect("read response");
+      assert!(n > 0, "connection closed before a full response");
+      buf.extend_from_slice(&chunk[..n]);
+    };
+    let head = String::from_utf8_lossy(&buf[..header_end]).to_string();
+    let content_length = head
+      .lines()
+      .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap()))
+      .unwrap_or(0);
+    while buf.len() - (header_end + 4) < content_length {
+      let n = s.read(&mut chunk).expect("read body");
+      assert!(n > 0, "connection closed mid-body");
+      buf.extend_from_slice(&chunk[..n]);
+    }
+    String::from_utf8_lossy(&buf).into_owned()
+  }
+
+  #[test]
+  fn daemon_keeps_a_connection_alive_across_requests_and_honors_close() {
+    let _spawn = DAEMON_SPAWN_LOCK.lock().unwrap();
+    let port = unused_local_port();
+    let _env = RestoreDaemonPortEnv::set(port);
+    let _guard = EphemeralDaemonGuard { port };
+    let _ = stop();
+    ensure_for_run().expect("ensure_for_run");
+    wait_daemon_mode(port, DaemonMode::Ephemeral);
+    use std::io::{Read, Write};
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("connect");
+    // Two requests ride the same connection; each response is framed and keeps it open.
+    for _ in 0..2 {
+      s.write_all(b"GET /api/v1/version HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+      let resp = read_framed_response(&mut s);
+      assert!(resp.starts_with("HTTP/1.1 200"), "keep-alive request served: {resp}");
+      assert!(resp.to_ascii_lowercase().contains("connection: keep-alive"), "connection stays open: {resp}");
+    }
+    // An explicit Connection: close is honored: response, then EOF.
+    s.write_all(b"GET /api/v1/version HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n").unwrap();
+    let mut rest = String::new();
+    s.read_to_string(&mut rest).expect("read to close");
+    assert!(rest.starts_with("HTTP/1.1 200"), "final request served: {rest}");
+    assert!(rest.to_ascii_lowercase().contains("connection: close"), "close is labeled: {rest}");
+    // An HTTP/1.0 request closes by default — such clients may frame the response by EOF.
+    let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("reconnect");
+    s.write_all(b"GET /api/v1/version HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+    let mut old = String::new();
+    s.read_to_string(&mut old).expect("read to close");
+    assert!(old.starts_with("HTTP/1.1 200"), "1.0 request served: {old}");
+    assert!(old.to_ascii_lowercase().contains("connection: close"), "1.0 closes by default: {old}");
   }
 
   #[test]

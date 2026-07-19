@@ -158,11 +158,11 @@ impl Server {
 
     loop {
       // Drain the whole accept backlog every tick. A single accept per 100ms tick capped
-      // the daemon at ten connections a second — and every request is its own connection
-      // (responses are `Connection: close`) — so a job page's burst of fetches, or the
-      // same page through an SSH tunnel, serialized at 100ms per request. The cap only
-      // guards the housekeeping below from a connection flood; a browser burst is drained
-      // in one pass.
+      // the daemon at ten connections a second, so a job page's burst of fetches, or the
+      // same page through an SSH tunnel, serialized at 100ms per request. Connections are
+      // keep-alive (browsers and the CLI poster reuse them), but a fresh page load still
+      // opens several at once. The cap only guards the housekeeping below from a
+      // connection flood; a browser burst is drained in one pass.
       for _ in 0..ACCEPT_BURST_CAP {
         match listener.accept() {
           Ok((stream, _)) => {
@@ -173,17 +173,11 @@ impl Server {
             let dirty_sessions = Arc::clone(&self.dirty_sessions);
             let ws_hub = Arc::clone(&self.ws_hub);
             std::thread::spawn(move || {
-              let (mutated, session_id) = catch_unwind(AssertUnwindSafe(|| {
-                handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty).unwrap_or((false, None))
-              }))
-              .unwrap_or((false, None));
-              if mutated {
-                dirty.store(true, Ordering::Relaxed);
-                ws_dirty.store(true, Ordering::Relaxed);
-                if let Some(id) = session_id {
-                  dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
-                }
-              }
+              // Dirty flags are set inside the per-request loop: a keep-alive connection
+              // outlives its mutations, which must be visible immediately, not at close.
+              let _ = catch_unwind(AssertUnwindSafe(|| {
+                let _ = handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty, &dirty, &dirty_sessions);
+              }));
             });
           }
           Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
@@ -447,10 +441,26 @@ fn peer_is_local(peer: SocketAddr) -> bool {
   peer.ip().is_loopback()
 }
 
+/// How long a keep-alive connection may sit idle between requests before the daemon closes
+/// it. Also bounds a slow request's header/body read. Browsers and the CLI poster reconnect
+/// transparently after an idle close.
+const KEEP_ALIVE_IDLE: Duration = Duration::from_secs(5);
+
+/// True when the request asks the server to close after this response. HTTP/1.1 defaults to
+/// keep-alive; per-connection sockets parked half the machine's ephemeral ports in TIME_WAIT
+/// (a browser fetch burst, or a run's poster thread, each request its own connection).
+fn connection_close(headers: &[(String, String)]) -> bool {
+  // The Connection header is a comma-separated token list ("close, upgrade"); missing the
+  // `close` token would leave an EOF-framed client hanging until the idle timeout.
+  headers.iter().any(|(n, v)| {
+    n.eq_ignore_ascii_case("connection") && v.split(',').any(|token| token.trim().eq_ignore_ascii_case("close"))
+  })
+}
+
 fn handle_connection(
   mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
-  ws_dirty: &AtomicBool,
-) -> std::io::Result<(bool, Option<String>)> {
+  ws_dirty: &AtomicBool, dirty: &AtomicBool, dirty_sessions: &Mutex<std::collections::HashSet<String>>,
+) -> std::io::Result<()> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
   // The daemon serves the local machine only. Turn away any non-loopback peer here — before
@@ -461,60 +471,72 @@ fn handle_connection(
     peer => {
       let from = peer.map(|p| p.ip().to_string()).unwrap_or_else(|_| "an unknown address".to_string());
       let body = format!("scsh daemon serves the local machine only.\nThis request came from {from} and was denied.\n");
-      write_response(&mut stream, 403, &body, "text/plain; charset=utf-8")?;
-      return Ok((false, None));
+      write_response(&mut stream, 403, &body, "text/plain; charset=utf-8", true)?;
+      return Ok(());
     }
   }
-  stream.set_read_timeout(Some(Duration::from_secs(5)))?;
-  let req = read_request(&mut stream)?;
-  if websocket::wants_upgrade(&req.method, &req.path, &req.headers) {
-    websocket::accept_handshake(&mut stream, &req.headers)?;
-    let mailbox = ws_hub.subscribe();
-    // A fresh client needs a full snapshot on its first tick — on a quiet daemon nothing
-    // else would ever mark the store dirty, and the page would get light ticks forever.
-    ws_dirty.store(true, Ordering::Relaxed);
-    websocket::serve(stream, mailbox);
-    return Ok((false, None));
+  stream.set_read_timeout(Some(KEEP_ALIVE_IDLE))?;
+  // Requests ride one keep-alive connection until the client closes, asks to close, or the
+  // idle timeout fires. Every response is Content-Length-framed, so the boundary is exact.
+  loop {
+    let req = match read_request(&mut stream) {
+      Ok(req) => req,
+      // Client close, idle timeout, or a malformed request all end the connection quietly.
+      Err(_) => return Ok(()),
+    };
+    if websocket::wants_upgrade(&req.method, &req.path, &req.headers) {
+      websocket::accept_handshake(&mut stream, &req.headers)?;
+      let mailbox = ws_hub.subscribe();
+      // A fresh client needs a full snapshot on its first tick — on a quiet daemon nothing
+      // else would ever mark the store dirty, and the page would get light ticks forever.
+      ws_dirty.store(true, Ordering::Relaxed);
+      websocket::serve(stream, mailbox);
+      return Ok(());
+    }
+    // HTTP/1.0 has no keep-alive by default and its clients may frame responses by EOF;
+    // 1.1 defaults to keep-alive unless the request carries a `close` token.
+    let close = req.http1_0 || connection_close(&req.headers);
+    let bare_path = req.path.split('?').next().unwrap_or("");
+    if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/chapters") {
+      let (status, body) = chapters_response(bare_path, store);
+      write_response(&mut stream, status, &body, "application/json", close)?;
+    } else if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/export.html") {
+      let (status, body, disposition) = export_response(bare_path, store);
+      write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
+    } else if req.method == "GET"
+      && (req.path.starts_with("/job/") || req.path.starts_with("/session/"))
+      && bare_path.ends_with("/export.html")
+    {
+      let (status, body, disposition) = session_export_response(bare_path, store);
+      write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
+    } else if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
+      let (status, body, disposition) = cast_response(&req.path, store);
+      write_download_response(
+        &mut stream,
+        status,
+        &body,
+        "application/x-asciicast; charset=utf-8",
+        disposition.as_deref(),
+        close,
+      )?;
+    } else if req.method == "GET" && req.path.starts_with("/diff/") {
+      let (status, body, disposition) = diff_response(&req.path, store);
+      write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
+    } else {
+      let (status, body, content_type, mutated) = route(&req, store, prune, ws_dirty);
+      write_response(&mut stream, status, &body, content_type, close)?;
+      if mutated {
+        dirty.store(true, Ordering::Relaxed);
+        ws_dirty.store(true, Ordering::Relaxed);
+        if let Some(id) = mutated_session_id(&req) {
+          dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).insert(id);
+        }
+      }
+    }
+    if close {
+      return Ok(());
+    }
   }
-  let bare_path = req.path.split('?').next().unwrap_or("");
-  if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/chapters") {
-    let (status, body) = chapters_response(bare_path, store);
-    write_response(&mut stream, status, &body, "application/json")?;
-    return Ok((false, None));
-  }
-  if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/export.html") {
-    let (status, body, disposition) = export_response(bare_path, store);
-    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
-    return Ok((false, None));
-  }
-  if req.method == "GET"
-    && (req.path.starts_with("/job/") || req.path.starts_with("/session/"))
-    && bare_path.ends_with("/export.html")
-  {
-    let (status, body, disposition) = session_export_response(bare_path, store);
-    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
-    return Ok((false, None));
-  }
-  if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
-    let (status, body, disposition) = cast_response(&req.path, store);
-    write_download_response(
-      &mut stream,
-      status,
-      &body,
-      "application/x-asciicast; charset=utf-8",
-      disposition.as_deref(),
-    )?;
-    return Ok((false, None));
-  }
-  if req.method == "GET" && req.path.starts_with("/diff/") {
-    let (status, body, disposition) = diff_response(&req.path, store);
-    write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref())?;
-    return Ok((false, None));
-  }
-  let (status, body, content_type, mutated) = route(&req, store, prune, ws_dirty);
-  write_response(&mut stream, status, &body, content_type)?;
-  let session_id = if mutated { mutated_session_id(&req) } else { None };
-  Ok((mutated, session_id))
 }
 
 /// The `session` field of a mutating API POST body (all session-touching endpoints carry it),
@@ -797,8 +819,14 @@ struct HttpRequest {
   path: String,
   body: String,
   headers: Vec<(String, String)>,
+  /// The request line said `HTTP/1.0` — such clients predate keep-alive and may read the
+  /// response to EOF, so the connection closes after answering them.
+  http1_0: bool,
 }
 
+/// Read exactly one HTTP request. The connection is strictly ping-pong (request, response,
+/// request, …) — clients here never pipeline, and any extra bytes a read happens to pull in
+/// past the framed request would be discarded, not replayed to the next `read_request`.
 fn read_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
   let mut buf = Vec::new();
   let mut chunk = [0u8; 4096];
@@ -831,6 +859,12 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
     buf.extend_from_slice(&chunk[..n]);
   }
 
+  // A clean client close between keep-alive requests reads zero bytes; without this it
+  // would parse as an empty `GET /` and the connection loop would serve a dead socket.
+  if buf.is_empty() {
+    return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "connection closed"));
+  }
+
   let header_end = header_end.unwrap_or(buf.len());
   let text = String::from_utf8_lossy(&buf[..header_end]);
   let mut lines = text.split("\r\n");
@@ -838,6 +872,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
   let parts: Vec<&str> = first.split_whitespace().collect();
   let method = parts.first().unwrap_or(&"GET").to_string();
   let path = parts.get(1).unwrap_or(&"/").to_string();
+  let http1_0 = parts.get(2).is_some_and(|v| v.eq_ignore_ascii_case("HTTP/1.0"));
 
   let mut headers = Vec::new();
   for line in lines {
@@ -860,7 +895,7 @@ fn read_request(stream: &mut TcpStream) -> std::io::Result<HttpRequest> {
   } else {
     String::new()
   };
-  Ok(HttpRequest { method, path, body, headers })
+  Ok(HttpRequest { method, path, body, headers, http1_0 })
 }
 
 fn find_header_end(buf: &[u8]) -> Option<usize> {
@@ -2965,7 +3000,9 @@ fn parse_skills_array(obj: &[(String, Value)]) -> Vec<SkillMeta> {
     .collect()
 }
 
-fn write_response(stream: &mut TcpStream, status: u16, body: &str, content_type: &str) -> std::io::Result<()> {
+fn write_response(
+  stream: &mut TcpStream, status: u16, body: &str, content_type: &str, close: bool,
+) -> std::io::Result<()> {
   let status_text = match status {
     200 => "OK",
     400 => "Bad Request",
@@ -2974,11 +3011,12 @@ fn write_response(stream: &mut TcpStream, status: u16, body: &str, content_type:
     405 => "Method Not Allowed",
     _ => "Error",
   };
+  let connection = if close { "close" } else { "keep-alive" };
   let resp = format!(
     "HTTP/1.1 {status} {status_text}\r\n\
 Content-Type: {content_type}\r\n\
 Content-Length: {}\r\n\
-Connection: close\r\n\r\n\
+Connection: {connection}\r\n\r\n\
 {body}",
     body.len()
   );
@@ -2990,7 +3028,7 @@ Connection: close\r\n\r\n\
 /// pages): the given content type on 200 plus an optional Content-Disposition (the
 /// attachment variants). 404 bodies are text.
 fn write_download_response(
-  stream: &mut TcpStream, status: u16, body: &str, ok_content_type: &str, disposition: Option<&str>,
+  stream: &mut TcpStream, status: u16, body: &str, ok_content_type: &str, disposition: Option<&str>, close: bool,
 ) -> std::io::Result<()> {
   let status_text = if status == 200 { "OK" } else { "Not Found" };
   let content_type = if status == 200 { ok_content_type } else { "text/plain" };
@@ -2998,11 +3036,12 @@ fn write_download_response(
     Some(d) => format!("Content-Disposition: {d}\r\n"),
     None => String::new(),
   };
+  let connection = if close { "close" } else { "keep-alive" };
   let resp = format!(
     "HTTP/1.1 {status} {status_text}\r\n\
 Content-Type: {content_type}\r\n\
 {disposition_header}Content-Length: {}\r\n\
-Connection: close\r\n\r\n\
+Connection: {connection}\r\n\r\n\
 {body}",
     body.len()
   );
@@ -3032,12 +3071,24 @@ mod tests {
   }
 
   #[test]
+  fn connection_close_reads_the_header_as_a_token_list() {
+    let h = |v: &str| vec![("Connection".to_string(), v.to_string())];
+    assert!(connection_close(&h("close")));
+    assert!(connection_close(&h("Close")), "token match is case-insensitive");
+    assert!(connection_close(&h("close, upgrade")), "close inside a token list still closes");
+    assert!(connection_close(&h("keep-alive, close")));
+    assert!(!connection_close(&h("keep-alive")));
+    assert!(!connection_close(&h("closed")), "only the exact token, not a prefix");
+    assert!(!connection_close(&[]), "HTTP/1.1 defaults to keep-alive");
+  }
+
+  #[test]
   fn write_response_labels_forbidden() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let handle = thread::spawn(move || {
       let (mut server, _) = listener.accept().unwrap();
-      write_response(&mut server, 403, "denied\n", "text/plain; charset=utf-8").unwrap();
+      write_response(&mut server, 403, "denied\n", "text/plain; charset=utf-8", true).unwrap();
     });
     let mut client = std::net::TcpStream::connect(addr).unwrap();
     let mut buf = String::new();
@@ -3103,8 +3154,13 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
     let ws_dirty = AtomicBool::new(false);
-    let req =
-      HttpRequest { method: "GET".into(), path: "/api/v1/version".into(), body: String::new(), headers: Vec::new() };
+    let req = HttpRequest {
+      method: "GET".into(),
+      path: "/api/v1/version".into(),
+      body: String::new(),
+      headers: Vec::new(),
+      http1_0: false,
+    };
     let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
     assert_eq!(status, 200);
     assert_eq!(content_type, "application/json");
@@ -3182,6 +3238,7 @@ mod tests {
       path: "/api/v1/session/flapi1/fleet".into(),
       body: String::new(),
       headers: Vec::new(),
+      http1_0: false,
     };
     let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
     assert_eq!(status, 200);
@@ -3201,6 +3258,7 @@ mod tests {
       path: "/api/v1/session/zzzzzz/fleet".into(),
       body: String::new(),
       headers: Vec::new(),
+      http1_0: false,
     };
     let (status, _, _, _) = route(&missing, &store, &prune, &ws_dirty);
     assert_eq!(status, 404);
@@ -3238,8 +3296,13 @@ mod tests {
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
     let ws_dirty = AtomicBool::new(false);
-    let req =
-      HttpRequest { method: "GET".into(), path: "/api/v1/stats".into(), body: String::new(), headers: Vec::new() };
+    let req = HttpRequest {
+      method: "GET".into(),
+      path: "/api/v1/stats".into(),
+      body: String::new(),
+      headers: Vec::new(),
+      http1_0: false,
+    };
     let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
     assert_eq!((status, content_type, mutated), (200, "application/json", false));
     assert!(parse(&body).is_ok(), "stats payload parses as JSON: {body}");
@@ -3265,6 +3328,7 @@ mod tests {
         path: format!("{api}?runtime=not-a-runtime-xyz"),
         body: String::new(),
         headers: Vec::new(),
+        http1_0: false,
       };
       let (status, body, _, _) = route(&req, &store, &prune, &ws_dirty);
       assert_eq!(status, 200, "{api}");
