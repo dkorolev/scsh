@@ -35,6 +35,7 @@ interface Review {
 
 interface Issue {
   commit: string;       // SHA of the commit to amend
+  severity: "blocking" | "should-fix" | "nit";  // argued by failure direction — see Finding discipline
   file: string;         // path; "PR-DESCRIPTION.md" for PR-definition findings; "<commit>" when no single file applies
   line: number;         // line number; 0 when the finding is commit- or PR-level, not line-specific
   description: string;  // what the problem is
@@ -42,9 +43,19 @@ interface Issue {
 }
 ```
 
-When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string naming the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
+When scsh appends a workflow-specific `## Output` contract after this skill, that appended contract replaces only the JSON shape above. Preserve every finding in the workflow's declared fields; when it requests `comments`, encode each issue as one self-contained string that leads with its severity in brackets and names the commit, file, line, description, and suggestion. All review rules in this skill remain unchanged.
 
 With no issues, emit `issues: []` and grade accordingly (typically `excellent`).
+
+## Finding discipline
+
+- **Severity is argued, not asserted.** Set each issue's `severity` by its failure direction: silent-and-permanent escalates — data lost with no error, a broken emitted contract, a defeated CI gate; loud, transient, or self-healing downgrades. Name the direction in the description ("fail-closed, so a nit"). `blocking` is rare and earned; most findings on a healthy branch are `should-fix` or `nit`. The severity mix, not the raw count, drives the grade.
+
+- **Pre-existing issues are out of scope.** If the problem exists on `origin/main` in code this diff does not touch, it is not a finding against this branch — at most one `nit` noting it as a pre-existing follow-up, and it never lowers the grade.
+
+- **One root cause, one finding.** Anchor it at its clearest site and list the other affected locations inside the description; never file the same defect once per line it manifests on.
+
+- **Cite your evidence.** When a finding rests on a checkable claim — a symbol does not exist, two bodies are byte-identical, nothing calls this function — check it by reading or searching (`grep`, `git log`) and say so in the description. Reading and searching only; the no-execute rule stands.
 
 ## Repository guidelines — read first
 
@@ -58,6 +69,8 @@ Never request, recommend, or create a `PR-DESCRIPTION.md` section for verificati
 
 The repo's documented standards (linter/formatter *configs* and style guides you **read**, never invoke; `CONTRIBUTING`; editor config) **and** its de facto patterns (how the surrounding code is actually written). "Maximums" — line length, file size, function length, parameter counts — are conventions and belong to you. Judge them by reading; do not run the tools that enforce them.
 
+**Copies and mirrors are conventions.** A near-verbatim copy of logic, a constant hand-maintained in two places, a contract mirrored across surfaces — a serialization struct and its counterpart, a parser and its twin, a config key its sibling files all carry — the de facto standard is that they move together. A new copy, or a change that touches one side of a mirror and not the other, is a deviation under the decision rule below: name the shared helper or constant (minimal change), or require the comment justifying why the copies must stay separate. Frame the finding as future drift ("when one twin is edited, the other silently disagrees"), never as aesthetics — and do not demand unification of code that only looks similar but differs for real.
+
 ## Decision rule for every deviation
 
 For each deviation, exactly one of these is the finding:
@@ -70,7 +83,7 @@ There is no silent third option. A rule is either followed, given a minimal-chan
 
 ## Verify comments match the code
 
-Flag in-code comments and commit messages that no longer match what the code does — a stale or wrong comment is a convention failure.
+Flag in-code comments and commit messages that no longer match what the code does — a stale or wrong comment is a convention failure. Absolutes the code does not earn — "impossible", "never", "guaranteed", "exactly once" where the mechanism is merely unlikely or at-most-once — are stale-comment findings too; the fix is honest wording, not code.
 
 ## Notes are not code
 
@@ -86,6 +99,6 @@ Beyond conventions, you also flag correctness and logic bugs in the code under r
 
 - **Anchoring: file + line.** Your findings are almost always at a location.
 
-- **Grading:** use the full range — you produce volume, and the grade should reflect how far the branch drifts from the standard, not just whether it compiles.
+- **Grading:** use the full range — you produce volume, and the grade should reflect how far the branch drifts from the standard, not just whether it compiles. Weigh by severity: a page of nits is still `good`; one blocking finding is not.
 
 - **Human-in-the-loop:** report only. Even an obviously mechanical fix is a suggestion, never an applied edit.
