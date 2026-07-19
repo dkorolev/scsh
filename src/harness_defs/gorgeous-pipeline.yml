@@ -189,9 +189,7 @@ steps:
         type: string_list
 
   initial_sanity_cursor:
-    # Cursor Auto currently sustains three concurrent agents reliably. Pair the five Cursor
-    # reviewers into three lanes while Claude and Codex still run their full fleets in parallel.
-    needs: initial_justification_cursor
+    needs: prepare
     agent:
       harness: cursor
       model: auto
@@ -231,7 +229,7 @@ steps:
         type: string_list
 
   initial_testing_cursor:
-    needs: initial_conventions_cursor
+    needs: prepare
     agent:
       harness: cursor
       model: auto
@@ -504,8 +502,7 @@ steps:
     commits: false
 
   review_sanity_cursor:
-    # Keep this review round to the same three concurrent Cursor lanes as the initial round.
-    needs: review_justification_cursor
+    needs: fix
     agent:
       harness: cursor
       model: auto
@@ -548,7 +545,7 @@ steps:
     commits: false
 
   review_testing_cursor:
-    needs: review_conventions_cursor
+    needs: fix
     agent:
       harness: cursor
       model: auto
