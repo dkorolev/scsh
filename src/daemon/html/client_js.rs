@@ -297,12 +297,13 @@ function harnessChipsHtml(jobId, session) {
 function chipCountHtml(n) {
   return '<span class="chip-count" data-tip="' + n + ' run' + (n === 1 ? '' : 's') + ' in this job">' + n + '</span>';
 }
-function indexRowHtml(id, session, nowUnix) {
+function indexRowHtml(id, session, nowUnix, overflow) {
   const lifecycle = sessionLifecycle(session, nowUnix);
   const profile = session.profile || 'default';
   const n = (session.procs || []).length;
   const duration = sessionDurationLabel(session, nowUnix, lifecycle);
-  return '<tr data-session-id="' + esc(id) + '"><td><a class="job-id" href="/job/' + esc(id) + '">' + esc(id) + '</a></td>' +
+  return '<tr' + (overflow ? ' class="jobs-overflow"' : '') +
+    ' data-session-id="' + esc(id) + '"><td><a class="job-id" href="/job/' + esc(id) + '">' + esc(id) + '</a></td>' +
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
@@ -556,6 +557,39 @@ function setDaemonStatus(kind, label, uptime) {
   lbl.textContent = label;
   up.textContent = uptime != null ? fmtUptime(uptime) : '';
 }
+// Jobs-table pagination: how many rows are revealed right now. Grows by a page per
+// "Show N more" click and survives live re-renders. Mirrors JOBS_PAGE_SIZE in index.rs.
+const JOBS_PAGE = 50;
+let jobsVisible = JOBS_PAGE;
+// Mirrors jobs_load_more_row in index.rs — keep the markup identical.
+function jobsLoadMoreRowHtml(hidden) {
+  const step = Math.min(hidden, JOBS_PAGE);
+  const of = hidden > step ? ' of ' + hidden : '';
+  return '<tr class="jobs-more-row"><td colspan="7">' +
+    '<button type="button" class="chamfer btn btn--cyan btn--sm jobs-load-more">' +
+    '<span>Show ' + step + ' more' + of + '</span></button></td></tr>';
+}
+(function initJobsLoadMore() {
+  document.addEventListener('click', (e) => {
+    const btn = e.target && e.target.closest ? e.target.closest('.jobs-load-more') : null;
+    if (!btn) return;
+    jobsVisible += JOBS_PAGE;
+    // Reveal in place — this works on the server-rendered table before the first live
+    // tick, and the next renderIndex rebuilds with the same revealed count.
+    const body = document.getElementById('sessions-body');
+    if (!body) return;
+    let left = 0;
+    body.querySelectorAll('tr.jobs-overflow').forEach((row, i) => {
+      if (i < JOBS_PAGE) row.classList.remove('jobs-overflow');
+      else left++;
+    });
+    const moreRow = body.querySelector('tr.jobs-more-row');
+    if (moreRow) {
+      if (left > 0) moreRow.outerHTML = jobsLoadMoreRowHtml(left);
+      else moreRow.remove();
+    }
+  });
+})();
 function renderIndex(sessions, nowUnix) {
   const body = document.getElementById('sessions-body');
   if (!body || sessions == null) return;
@@ -580,11 +614,14 @@ function renderIndex(sessions, nowUnix) {
   body.querySelectorAll('tr[data-session-id]').forEach(row => {
     existing.set(row.getAttribute('data-session-id'), row);
   });
+  const hidden = Math.max(0, ids.length - jobsVisible);
+  const rowsHtml = ids.map((id, i) => indexRowHtml(id, filtered[id], nowUnix, i >= jobsVisible)).join('') +
+    (hidden > 0 ? jobsLoadMoreRowHtml(hidden) : '');
   if (existing.size === 0) {
-    body.innerHTML = ids.map(id => indexRowHtml(id, filtered[id], nowUnix)).join('');
+    body.innerHTML = rowsHtml;
     return;
   }
-  const nextHtml = ids.map(id => indexRowHtml(id, filtered[id], nowUnix)).join('');
+  const nextHtml = rowsHtml;
   if (body.innerHTML !== nextHtml) {
     body.innerHTML = nextHtml;
   } else {
