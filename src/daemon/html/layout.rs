@@ -443,6 +443,9 @@ pub(crate) const PAGE_CSS: &str = r#"
     display: flex;
     overscroll-behavior: contain; touch-action: pan-x pan-y;
     scrollbar-width: none;
+    /* Empty graph area is mouse-draggable; the cursor advertises it (nodes and controls
+       keep their own pointer cursor). */
+    cursor: grab;
     /* Visible overflow cue when the graph is wider than the viewport (overlay scrollbars). */
     background:
       linear-gradient(90deg, var(--bg) 30%, transparent) left center / 1.25rem 100% no-repeat,
@@ -453,6 +456,7 @@ pub(crate) const PAGE_CSS: &str = r#"
     background-attachment: local, local, scroll, scroll, local;
   }
   .workflow-scroll::-webkit-scrollbar { display: none; }
+  .workflow-scroll.wf-panning { cursor: grabbing; user-select: none; }
   /* Inset outline: the chamfer clip would swallow one drawn outside the box. */
   .workflow-scroll:focus-visible { outline: 2px solid var(--cyan); outline-offset: -2px; }
   /* Auto margins center each axis independently, and collapse to zero on an overflowing axis.
@@ -676,6 +680,9 @@ pub(crate) const PAGE_CSS: &str = r#"
       var(--accent) 0 calc(var(--cut) + var(--accent-w)),
       var(--proc-border, var(--border)) 0);
     margin-bottom: 0.6rem; padding: 0.35rem 0.65rem;
+    /* Task activation scrolls to the island's TOP; the margin keeps it clear of the
+       sticky status bar instead of sliding underneath it. */
+    scroll-margin-top: calc(var(--daemon-status-height) + 0.5rem);
   }
   details.proc::before {
     background: var(--surface);
@@ -690,6 +697,12 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc.terminating { --accent: var(--orange); }
   details.proc.waiting { --accent: var(--cyan); }
   details.proc.skipped { --accent: var(--text-muted); }
+  /* Landing flash: activating a task briefly brightens its island so the eye finds where
+     the scroll went. Brightness, not outline/box-shadow — those break under the chamfer
+     clip-path. The implicit from/to frames are the unfiltered island. */
+  details.proc.proc-flash { animation: proc-flash 1s ease-out; }
+  @keyframes proc-flash { 30% { filter: brightness(1.55); } }
+  @media (prefers-reduced-motion: reduce) { details.proc.proc-flash { animation: none; } }
   summary {
     cursor: pointer; list-style: none; display: flex; gap: 0.5rem;
     align-items: baseline; flex-wrap: wrap; padding: 0.25rem 0;
