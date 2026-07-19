@@ -100,19 +100,25 @@ pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> Str
   index_page_for(store, filter, IndexTab::Projects)
 }
 
+/// Rows shown in the Jobs table before the "Show N more" button. The store holds up to two
+/// hundred sessions and the list is running-first, so everything below the first page is
+/// history. Mirrored by `JOBS_PAGE` in the client JS.
+pub(crate) const JOBS_PAGE_SIZE: usize = 50;
+
 pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab) -> String {
   let port = store.port;
   let now = now_unix_secs();
   let filter_repo = filter.as_ref().map(|f| f.repo_path());
   let sessions = sessions_for_index(&store.sessions, now);
+  let listed: Vec<&Session> =
+    sessions.into_iter().filter(|s| filter_repo.as_ref().is_none_or(|want| &s.repo == want)).collect();
   let mut rows = String::new();
-  for session in sessions {
-    if let Some(ref want) = filter_repo {
-      if &session.repo != want {
-        continue;
-      }
-    }
-    rows.push_str(&index_session_row(session, now));
+  for (i, session) in listed.iter().enumerate() {
+    rows.push_str(&index_session_row(session, now, i >= JOBS_PAGE_SIZE));
+  }
+  let hidden = listed.len().saturating_sub(JOBS_PAGE_SIZE);
+  if hidden > 0 {
+    rows.push_str(&jobs_load_more_row(hidden));
   }
   if rows.is_empty() {
     rows = if filter.is_some() {
@@ -578,7 +584,20 @@ fn repo_display_label(repo: &str, projects_root: &str) -> String {
   }
 }
 
-fn index_session_row(session: &Session, now: u64) -> String {
+/// The tbody row carrying the "Show N more" button when the Jobs table overflows its first
+/// page. Clicking reveals the next page of `jobs-overflow` rows in place — the rows are all
+/// served, only unrevealed. Mirrored byte-for-byte by `jobsLoadMoreRowHtml` in the client JS.
+fn jobs_load_more_row(hidden: usize) -> String {
+  let step = hidden.min(JOBS_PAGE_SIZE);
+  let of = if hidden > step { format!(" of {hidden}") } else { String::new() };
+  format!(
+    "<tr class=\"jobs-more-row\"><td colspan=\"7\">\
+<button type=\"button\" class=\"chamfer btn btn--cyan btn--sm jobs-load-more\">\
+<span>Show {step} more{of}</span></button></td></tr>\n"
+  )
+}
+
+fn index_session_row(session: &Session, now: u64, overflow: bool) -> String {
   let lifecycle = session.lifecycle_status(now);
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
@@ -598,11 +617,12 @@ fn index_session_row(session: &Session, now: u64) -> String {
   );
   let duration = index_duration_label(session, now, lifecycle);
   format!(
-    "<tr data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/job/{id}\">{id}</a></td>\
+    "<tr{overflow} data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/job/{id}\">{id}</a></td>\
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
 <td>{profile}</td><td class=\"session-procs-cell\"><span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span>{chips}</td><td class=\"dim repo-path session-repo-path\"><button type=\"button\" class=\"repo-copy\" data-copy-value=\"{repo}\" data-tip=\"{repo}\" aria-label=\"Copy full repository path\">{repo}</button></td></tr>\n",
+    overflow = if overflow { " class=\"jobs-overflow\"" } else { "" },
     id = id,
     status = status,
     started = started,

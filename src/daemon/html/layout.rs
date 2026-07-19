@@ -749,6 +749,9 @@ pub(crate) const PAGE_CSS: &str = r#"
   .session-procs-cell .chip-count { display: inline-block; min-width: 1.7rem; margin-right: 0.4rem; text-align: right; }
   .chip-overflow { margin-left: 0.35rem; color: var(--text-muted); font-variant-numeric: tabular-nums; }
   #sessions-body td, #sessions-body th { white-space: nowrap; }
+  /* Jobs beyond the first page are served but unrevealed until "Show N more". */
+  tr.jobs-overflow { display: none; }
+  .jobs-more-row td { text-align: center; padding: 0.6rem 0 0.3rem; }
   /* Long repo paths keep their TAIL visible (rtl flips the ellipsis to the front). */
   td.repo-path {
     max-width: 34ch; overflow: hidden; text-overflow: ellipsis;

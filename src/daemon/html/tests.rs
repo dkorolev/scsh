@@ -777,6 +777,68 @@ fn index_page_shows_colored_harness_chips_per_proc() {
 }
 
 #[test]
+fn jobs_table_paginates_beyond_the_first_page() {
+  use super::index::JOBS_PAGE_SIZE;
+  // The page embeds the client JS, which mirrors the pagination markup as string
+  // literals — every assertion below scopes to the served tbody, not the whole page.
+  fn tbody(html: &str) -> &str {
+    let start = html.find("id=\"sessions-body\"").expect("jobs tbody");
+    &html[start..start + html[start..].find("</tbody>").expect("tbody closes")]
+  }
+  // A single page renders every row plainly — no hidden rows, no button.
+  let html = super::index_page(&store_with_cast_proc(ProcStatus::Ok));
+  assert!(!tbody(&html).contains("jobs-overflow"), "one job needs no pagination: {}", tbody(&html));
+  assert!(!tbody(&html).contains("jobs-more-row"), "one job raises no Show-more row: {}", tbody(&html));
+
+  // Fifty-seven jobs past the page boundary: they are all served, the overflow is
+  // class-hidden, and one button row reveals the next page ("Show 50 more of 57").
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let base = store.sessions.remove("castab").unwrap();
+  for i in 0..(JOBS_PAGE_SIZE + 57) {
+    let mut s = base.clone();
+    s.id = format!("pg{i:04}");
+    s.started_at = 1000 + i as u64;
+    s.last_seen_at = s.started_at;
+    s.ended_at = Some(s.started_at + 1);
+    store.sessions.insert(s.id.clone(), s);
+  }
+  let html = super::index::index_page_for(&store, None, super::index::IndexTab::Jobs);
+  let rows = tbody(&html);
+  assert_eq!(
+    rows.matches("<tr class=\"jobs-overflow\" data-session-id").count(),
+    57,
+    "rows past the first page are served hidden"
+  );
+  assert_eq!(
+    rows.matches("<tr data-session-id").count(),
+    JOBS_PAGE_SIZE,
+    "exactly one page of rows is revealed on first paint"
+  );
+  assert_eq!(rows.matches("jobs-more-row").count(), 1, "one Show-more row: {rows}");
+  assert!(rows.contains("<span>Show 50 more of 57</span>"), "the button counts a full step and the total: {rows}");
+  // Fewer hidden than a page: the button names the exact remainder, with no "of" tail.
+  let mut small = store_with_cast_proc(ProcStatus::Ok);
+  let base = small.sessions.remove("castab").unwrap();
+  for i in 0..(JOBS_PAGE_SIZE + 3) {
+    let mut s = base.clone();
+    s.id = format!("sm{i:04}");
+    s.started_at = 1000 + i as u64;
+    s.last_seen_at = s.started_at;
+    s.ended_at = Some(s.started_at + 1);
+    small.sessions.insert(s.id.clone(), s);
+  }
+  let html = super::index::index_page_for(&small, None, super::index::IndexTab::Jobs);
+  assert!(tbody(&html).contains("<span>Show 3 more</span>"), "a short remainder is named exactly: {}", tbody(&html));
+  // The live renderer mirrors the page size, the row markup, and the reveal wiring.
+  let js = live_client_js();
+  assert_eq!(JOBS_PAGE_SIZE, 50, "the JS mirror below pins the same number");
+  assert!(js.contains("const JOBS_PAGE = 50"), "client page size mirrors JOBS_PAGE_SIZE");
+  assert!(js.contains("function jobsLoadMoreRowHtml"), "client mirrors the Show-more row");
+  assert!(js.contains("initJobsLoadMore"), "clicking the button reveals the next page in place");
+  assert!(js.contains("i >= jobsVisible"), "live re-renders keep the revealed count");
+}
+
+#[test]
 fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);
   let html = super::index_page(&store);
