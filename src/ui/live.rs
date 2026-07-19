@@ -57,7 +57,6 @@ pub enum Sty {
   Bold,
   Cyan,
   Green,
-  Orange,
   Red,
 }
 
@@ -304,7 +303,7 @@ fn glyph(status: Status, frame: u64) -> Seg {
     Status::Queued => Seg::new("·", Sty::Dim),
     Status::Running => Seg::new(FRAMES[(frame as usize) % FRAMES.len()], Sty::Cyan),
     Status::Ok => Seg::new("✓", Sty::Green),
-    Status::Graceful => Seg::new("!", Sty::Orange),
+    Status::Graceful => Seg::new("!", Sty::Green),
     Status::Fail => Seg::new("✗", Sty::Red),
     Status::Skipped => Seg::new("⊘", Sty::Dim),
   }
@@ -334,7 +333,7 @@ fn header_row_framed(i: usize, p: &Proc, frame: u64) -> Row {
   if let Some(t) = tail.filter(|t| !t.is_empty()) {
     let sty = match p.status {
       Status::Fail => Sty::Red,
-      Status::Graceful => Sty::Orange,
+      Status::Graceful => Sty::Green,
       _ => Sty::Dim,
     };
     segs.push(Seg::new("  ", Sty::Plain));

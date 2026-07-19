@@ -429,7 +429,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-running { color: var(--orange); }
   .wf-leg-terminating { color: var(--orange); }
   .wf-leg-done { color: var(--green); }
-  .wf-leg-graceful { color: var(--orange); }
+  .wf-leg-graceful { color: var(--cyan); }
   .wf-leg-failed { color: var(--red); }
   .wf-leg-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
@@ -568,8 +568,8 @@ pub(crate) const PAGE_CSS: &str = r#"
     .toast { transition: opacity 0.22s ease, transform 0.22s ease; }
   }
   .wf-node.wf-done { --accent: var(--green); }
-  .wf-node.wf-graceful { --accent: var(--orange); }
-  .wf-node.wf-graceful .wf-state { color: var(--orange); }
+  .wf-node.wf-graceful { --accent: var(--cyan); }
+  .wf-node.wf-graceful .wf-state { color: var(--cyan); }
   .wf-node.wf-done .wf-state, .wf-node.wf-done .wf-id { color: var(--green); }
   .wf-node.wf-failed { --accent: var(--red); }
   .wf-node.wf-failed .wf-state, .wf-node.wf-failed .wf-id { color: var(--red); }
@@ -653,7 +653,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .fleet-compare th { color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
   .fleet-compare tr:last-child td { border-bottom: 0; }
   .fleet-row.ok .glyph { color: var(--green); }
-  .fleet-row.graceful .glyph { color: var(--orange); }
+  .fleet-row.graceful .glyph { color: var(--cyan); }
   .fleet-row.fail .glyph { color: var(--red); }
   .fleet-harness { font-size: 0.75rem; margin-top: 0.1rem; }
   .fleet-jump {
@@ -684,7 +684,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   details.proc[open] { --proc-border: #3a4558; }
   /* Status lives on the left accent stripe (same language as the purple meta card). */
   details.proc.ok { --accent: var(--green); }
-  details.proc.graceful { --accent: var(--orange); }
+  details.proc.graceful { --accent: var(--cyan); }
   details.proc.fail { --accent: var(--red); }
   details.proc.running { --accent: var(--orange); }
   details.proc.terminating { --accent: var(--orange); }
@@ -708,13 +708,13 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* Label (and fleet glyphs) still tint with status; the row bar carries the primary cue. */
   details.proc.fail summary .label { color: var(--red); }
   details.proc.ok summary .label { color: var(--green); }
-  details.proc.graceful summary .label { color: var(--orange); }
+  details.proc.graceful summary .label { color: var(--cyan); }
   details.proc.running summary .label { color: var(--orange); }
   details.proc.terminating summary .label { color: var(--orange); }
   details.proc.waiting summary .label { color: var(--cyan); }
   .fail .glyph { color: var(--red); }
   .ok .glyph { color: var(--green); }
-  .graceful .glyph { color: var(--orange); }
+  .graceful .glyph { color: var(--cyan); }
   /* Running is ORANGE everywhere (nodes, rows, legend); cyan stays for waiting. */
   .running .glyph { color: var(--orange); }
   .waiting .glyph { color: var(--cyan); }

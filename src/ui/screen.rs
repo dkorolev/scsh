@@ -717,7 +717,6 @@ fn sty(s: Sty) -> Style {
     Sty::Bold => Style::new().bold(),
     Sty::Cyan => Style::new().cyan(),
     Sty::Green => Style::new().green().bold(),
-    Sty::Orange => Style::new().yellow().bold(),
     Sty::Red => Style::new().red().bold(),
   }
 }
@@ -741,7 +740,7 @@ fn summary_line(label: &str, status: Status, elapsed: f64, detail: Option<&str>)
   }
   let (glyph, ok) = match status {
     Status::Fail => (style("✗").red().bold(), false),
-    Status::Graceful => (style("!").yellow().bold(), true),
+    Status::Graceful => (style("!").green().bold(), true),
     _ => (style("✓").green().bold(), true),
   };
   let mut line = format!("{glyph} {}  {}", style(label).bold(), style(format_elapsed(elapsed)).dim());
