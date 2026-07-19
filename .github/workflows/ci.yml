@@ -23,8 +23,15 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: Release-shape gate self-tests
+      - name: GitHub gate self-tests
         run: python3 -m unittest discover -s scripts -p 'test_*.py' -v
+
+      - name: Pull-request commit policy
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 scripts/check-pr-commits.py "$BASE_SHA" "$HEAD_SHA"
 
       # PRs only: on main there is no base to compare against, and with auto-publish a
       # merged bump IS on crates.io moments later. The gate passes untouched-version PRs
