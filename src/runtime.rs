@@ -344,6 +344,10 @@ pub fn cursor_container_auth_ready() -> bool {
 /// working tree. The home is set in the image (see `src/Dockerfile`).
 pub const AGENT_REPO: &str = "/home/agent/repo";
 
+/// Apple Container gives each Linux VM 1 GiB by default; harness workloads need a little more
+/// headroom while still keeping the per-run allocation explicit and bounded.
+const APPLE_CONTAINER_MEMORY: &str = "1536M";
+
 /// opencode's data dir (`XDG_DATA_HOME`), RELATIVE to the repo, where scsh drops the forwarded
 /// Per-run log path the harness tees every line of its output to, RELATIVE to the repo. It
 /// lives under the gitignored `tmp/` (so it is never an untracked file); on the host it is
@@ -1213,6 +1217,10 @@ pub fn run_command(
   command: &str, repo_mount: RepoMountMode,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
+  if runtime == "container" {
+    v.push("--memory".into());
+    v.push(APPLE_CONTAINER_MEMORY.into());
+  }
   if runtime == "podman" {
     v.push("--userns=keep-id".into());
   }
@@ -2496,6 +2504,8 @@ TAG
     assert!(df.contains("ARG TZ=UTC") && df.contains("ENV TZ=${TZ}"));
     // The Go/Rust toolchains the agent uses are on PATH.
     assert!(df.contains("/usr/local/go/bin") && df.contains("/usr/local/cargo/bin"));
+    assert!(df.contains("ENV GOFLAGS=-p=2"), "Go package builds must use at most two workers");
+    assert!(df.contains("ENV GOMAXPROCS=2"), "Go processes must use at most two OS threads concurrently");
   }
 
   #[test]
@@ -3138,6 +3148,8 @@ TAG
         "--rm",
         "--name",
         "run-s",
+        "--memory",
+        "1536M",
         "-v",
         "/tmp/run/tmp:/home/agent/repo/tmp",
         "scsh-opencode:latest",
