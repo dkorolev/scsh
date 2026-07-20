@@ -1709,7 +1709,7 @@ fn open_validated_repo(abs: &str, store: &Arc<Mutex<Store>>, created: bool) -> (
   // scratch) — the UI uses this to disable Start and say why, so no doomed job is ever started.
   let blockers = crate::def_run_blockers(&root);
   let runnable = blockers.is_empty();
-  let clean = !blockers.iter().any(|b| b.contains("uncommitted"));
+  let clean = !blockers.iter().any(|b| matches!(b, crate::DefRunBlocker::Dirty(_)));
   let discovery = crate::harness_def::discover(&root);
   let repo = root.to_string_lossy().into_owned();
   let now = now_unix_secs();
@@ -1718,7 +1718,7 @@ fn open_validated_repo(abs: &str, store: &Arc<Mutex<Store>>, created: bool) -> (
     s.touch(now);
     s.open_repo(OpenRepo { path: repo.clone(), opened_at: now, clean: runnable });
   }
-  let blockers_arr: Vec<String> = blockers.iter().map(|b| quote(b)).collect();
+  let blockers_arr: Vec<String> = blockers.iter().map(|b| quote(&b.message())).collect();
   let body = format!(
     "{{\"ok\":true,\"created\":{created},\"repo\":{},\"runnable\":{},\"clean\":{},\"blockers\":[{}],\"defs\":[{}],\"global\":[{}]}}",
     quote(&repo),
@@ -2032,7 +2032,8 @@ fn plan_job_request(
   };
   let blockers = crate::def_run_blockers(&root);
   if !blockers.is_empty() {
-    return Err((400, err_body(&format!("repository not ready: {}", blockers.join("; "))), false));
+    let why: Vec<String> = blockers.iter().map(|b| b.message()).collect();
+    return Err((400, err_body(&format!("repository not ready: {}", why.join("; "))), false));
   }
 
   // Validate what will run, and pre-plan its tasks — pre-populated on the session so its
