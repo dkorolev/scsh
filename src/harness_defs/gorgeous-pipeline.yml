@@ -4,14 +4,20 @@
 # cycles on the job page instead of living in a chat session. No scaffolding: the branch
 # already carries the work. `prepare` writes or updates PR-DESCRIPTION.md from the branch's
 # own history, the first 15-route batch reviews it ONCE, and only then the loop runs:
-# decide -> fix -> 15 reviewers -> collect. `decide`, the first loop step, can break before
-# any fix when the previous batch passed; otherwise it requests changes and another batch
-# runs. Claude Fable 5 owns orchestration (prepare, decide, collect) and the fix step;
-# Opus 4.8, Codex Spark (ChatGPT), and Cursor Auto independently run each of the
-# conventions, justification, reviewability, sanity, and testing profiles — the bundled
+# decide -> fix -> journal -> 15 reviewers -> collect. `decide`, the first loop step, can
+# break before any fix when the previous batch passed; otherwise it requests changes and
+# another batch runs. Opus 4.8 owns orchestration (prepare, decide, collect), the fix step,
+# and journaling; Opus 4.8, Codex Spark (ChatGPT), and Cursor Auto independently run each of
+# the conventions, justification, reviewability, sanity, and testing profiles — the bundled
 # route standard. The bar: 15/15 routes succeed, every grade is excellent or good,
 # excellent outnumbers good, and the mean is at least 4.5. Nothing is pushed: fixes come
 # back as commits on the caller's branch, exactly like every commits-enabled workflow step.
+#
+# `journal` is the loop's memory: whatever `fix` deliberately DECLINED becomes a
+# `PR-DECISION-<topic>.md` file, committed under the notes identity, that the next cycle's
+# reviewers read before grading. A settled question is then argued once instead of
+# re-litigated every round, and packdiff lifts those files off the review page into their
+# own commentable panels rather than leaving them as clutter in the tree.
 #
 # Every reviewer step executes the corresponding canonical reviewer skill, embedded in scsh's
 # install bundle byte-for-byte from this repository's .skills/. scsh appends only the compact
@@ -22,7 +28,7 @@ steps:
   prepare:
     agent:
       harness: claude
-      model: claude-fable-5
+      model: claude-opus-4-8
     prompt: |
       Read this repository's code and the current branch's git history: the commits since
       the branch diverged from the repository's default branch (main or master). Write or
@@ -282,7 +288,7 @@ steps:
       INITIAL_TESTING_CURSOR_COMMENTS: initial_testing_cursor.comments
     agent:
       harness: claude
-      model: claude-fable-5
+      model: claude-opus-4-8
     prompt: |
       You are the first and deciding step of a review loop. SCSH_LOOP_ITERATION is the
       1-based loop iteration. On iteration 1, score the 15 INITIAL_* grades and matching
@@ -299,7 +305,11 @@ steps:
       exactly as "[severity] area: what to change and why", nothing outside that
       shape. Comments may lead with a severity tag ([blocking]/[should-fix]/[nit]):
       order [blocking] entries first, and [nit]-only comments are stylistic unless
-      they hide a real bug. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
+      they hide a real bug. Read every `PR-DECISION-*.md` at the repository root before
+      building the request: each is a decision already settled on this branch. Drop any
+      comment that merely re-raises a settled decision — forward it only when the
+      reviewer engages that decision's stated reasoning and shows it wrong, and then
+      say so in the entry. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
       reviewer suggestion that violates this invariant. Do not change files or commit.
     output:
       SCSH_LOOP_BREAK:
@@ -314,18 +324,22 @@ steps:
       FEEDBACK: decide.change_request
     agent:
       harness: claude
-      model: claude-fable-5
+      model: claude-opus-4-8
     # The heaviest step in the loop: one agent absorbing feedback from 15 reviewer routes.
     # A healthy fix pass routinely thinks and edits quietly for longer than the default
     # 30-minute novelty window, so it gets a doubled one.
     inactivity_timeout: 3600
     prompt: |
       FEEDBACK is a JSON array of change entries, each "[severity] area: what to change
-      and why". Address EVERY entry: either change the code accordingly, or —
-      when you judge a comment purely stylistic and the current code deliberate — append a
-      short entry to `STYLE-NOTES.md` at the repository root documenting that decision and
-      why the style stays. Never contradict earlier `STYLE-NOTES.md` entries or earlier
-      fixes. Never write the feedback itself to any file. PR-DESCRIPTION.md is a required
+      and why". Address EVERY entry: either change the code accordingly, or — when you
+      judge the current code deliberate and the comment wrong for this change — DECLINE
+      it and report that decision in the `decisions` result field. Read every
+      `PR-DECISION-*.md` at the repository root first: those are decisions already
+      journaled and settled on this branch, and you must never contradict one, nor undo
+      an earlier fix. Do NOT write or edit any `PR-DECISION-*.md`, `STYLE-NOTES.md`, or
+      other decision file yourself — the journal step that runs after you owns them, and
+      a decision file in YOUR commit would be read as code under review. Never write the
+      feedback itself to any file. PR-DESCRIPTION.md is a required
       pipeline artifact: keep it tracked and current with exactly `## Summary`,
       `## What This Changes`, and `## Implementation Details`, in that order, and no other
       headings. Commit your changes with the message `Address review feedback.` Never
@@ -333,25 +347,93 @@ steps:
       results, or checklists; that evidence belongs in committed tests, README, or another
       committed verification document. Narrate your progress in the terminal as you work:
       print one short line when you take up each reviewer profile's feedback and after
-      each meaningful change (a file edited, a STYLE-NOTES decision recorded). A run whose
+      each meaningful change (a file edited, a request declined). A run whose
       screen shows nothing new for too long is treated as stalled and killed — never work
       silently for more than a few minutes at a stretch. Put a one-line summary of the
       whole change set — what changed, how many files, the commit — in the `message`
       result field. Write `actions` as several short paragraphs, separated by blank
       lines: one paragraph for each reviewer profile and route whose feedback you acted
-      on, one paragraph for any deliberate STYLE-NOTES decision, and a final paragraph
-      for test results and the commit. Do not collapse distinct review areas into one
-      paragraph.
+      on, and a final paragraph for test results and the commit. Do not collapse distinct
+      review areas into one paragraph. Fill `decisions` with one entry per request you
+      DECLINED — and nothing else; an empty list is the right answer when you acted on
+      everything. Shape each entry exactly as
+      "[topic] decision — why it stands — what was considered and rejected", where topic
+      is two or three lowercase words that name the subject (`commit history`,
+      `error handling`). Argue the code, never the process: "these commits stay separate
+      because each is independently revertable" is a decision; "no time to re-slice" is
+      not.
     output:
       message:
         type: string
       actions:
         type: string
+      decisions:
+        type: string_list
     commits: true
     commit-identity: runner
 
+  # The loop's memory. Every cycle's declined requests become journaled decisions that
+  # the NEXT cycle's reviewers read before grading, so a settled question is argued once
+  # instead of re-litigated every round. Committed under the notes identity and confined
+  # to `PR-DECISION-*.md`, which is exactly what packdiff lifts off the review page: the
+  # reasoning arrives as its own commentable panel rather than as clutter in the tree.
+  journal:
+    needs: decide, fix
+    inputs:
+      CHANGE_REQUEST: decide.change_request
+      DECLINED: fix.decisions
+      FIX_SUMMARY: fix.message
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    prompt: |
+      You keep this change's decision journal. DECLINED is a JSON array of the review
+      requests the fix step deliberately did not act on, each
+      "[topic] decision — why it stands — what was considered and rejected".
+      CHANGE_REQUEST is the full request list that round, for context only.
+
+      For EVERY entry in DECLINED, write or update `PR-DECISION-<topic>.md` at the
+      repository root, where `<topic>` is the entry's topic in lowercase with spaces
+      replaced by dashes (`commit history` -> `PR-DECISION-commit-history.md`). One file
+      per topic: when a later cycle revisits a topic you already journaled, REWRITE that
+      file so it reads as one settled decision — never append a second opinion, never
+      keep a dated log of how the thinking evolved. Each file is exactly:
+
+      ```
+      # <Topic, capitalized>
+
+      **Decision.** One sentence, in the present tense, stating what stands.
+
+      **Why.** Two to four sentences of reasoning that will still make sense to someone
+      reading this in a year with no memory of the review.
+
+      **Considered and rejected.** What the alternative was and the concrete cost that
+      ruled it out. Omit this section only when there was genuinely no alternative.
+
+      **Raised by.** Which reviewer profiles asked for the change.
+      ```
+
+      Bottom line up front, always: a reader who stops after **Decision.** must already
+      know what was decided. Be exhaustive about the reasoning and ruthless about
+      length — no preamble, no restating the request, no hedging, nothing about the
+      pipeline or the review process itself. A decision is about the CODE.
+
+      When DECLINED is empty, change nothing and commit nothing.
+
+      Touch ONLY `PR-DECISION-*.md` files at the repository root. Never edit code, tests,
+      `PR-DESCRIPTION.md`, or any other file in this step, and never delete a decision
+      file that a previous cycle wrote — a commit that touches anything else stops being
+      notes and lands in the review as code. Commit with the message
+      `Journal review decisions.` Put a one-line summary — how many decisions, which
+      topics — in the `message` field.
+    output:
+      message:
+        type: string
+    commits: true
+    commit-identity: notes
+
   review_conventions_opus:
-    needs: fix
+    needs: journal
     agent:
       harness: claude
       model: claude-opus-4-8
@@ -365,7 +447,7 @@ steps:
     commits: false
 
   review_conventions_spark:
-    needs: fix
+    needs: journal
     agent:
       harness: codex
       model: gpt-5.6-spark
@@ -380,7 +462,7 @@ steps:
     commits: false
 
   review_conventions_cursor:
-    needs: fix
+    needs: journal
     agent:
       harness: cursor
       model: auto
@@ -394,7 +476,7 @@ steps:
     commits: false
 
   review_justification_opus:
-    needs: fix
+    needs: journal
     agent:
       harness: claude
       model: claude-opus-4-8
@@ -408,7 +490,7 @@ steps:
     commits: false
 
   review_justification_spark:
-    needs: fix
+    needs: journal
     agent:
       harness: codex
       model: gpt-5.6-spark
@@ -423,7 +505,7 @@ steps:
     commits: false
 
   review_justification_cursor:
-    needs: fix
+    needs: journal
     agent:
       harness: cursor
       model: auto
@@ -437,7 +519,7 @@ steps:
     commits: false
 
   review_reviewability_opus:
-    needs: fix
+    needs: journal
     agent:
       harness: claude
       model: claude-opus-4-8
@@ -451,7 +533,7 @@ steps:
     commits: false
 
   review_reviewability_spark:
-    needs: fix
+    needs: journal
     agent:
       harness: codex
       model: gpt-5.6-spark
@@ -466,7 +548,7 @@ steps:
     commits: false
 
   review_reviewability_cursor:
-    needs: fix
+    needs: journal
     agent:
       harness: cursor
       model: auto
@@ -480,7 +562,7 @@ steps:
     commits: false
 
   review_sanity_opus:
-    needs: fix
+    needs: journal
     agent:
       harness: claude
       model: claude-opus-4-8
@@ -494,7 +576,7 @@ steps:
     commits: false
 
   review_sanity_spark:
-    needs: fix
+    needs: journal
     agent:
       harness: codex
       model: gpt-5.6-spark
@@ -509,7 +591,7 @@ steps:
     commits: false
 
   review_sanity_cursor:
-    needs: fix
+    needs: journal
     agent:
       harness: cursor
       model: auto
@@ -523,7 +605,7 @@ steps:
     commits: false
 
   review_testing_opus:
-    needs: fix
+    needs: journal
     agent:
       harness: claude
       model: claude-opus-4-8
@@ -537,7 +619,7 @@ steps:
     commits: false
 
   review_testing_spark:
-    needs: fix
+    needs: journal
     agent:
       harness: codex
       model: gpt-5.6-spark
@@ -552,7 +634,7 @@ steps:
     commits: false
 
   review_testing_cursor:
-    needs: fix
+    needs: journal
     agent:
       harness: cursor
       model: auto
@@ -575,7 +657,7 @@ steps:
     do-while: decide
     agent:
       harness: claude
-      model: claude-fable-5
+      model: claude-opus-4-8
     inputs:
       GRADE_CONVENTIONS_OPUS: review_conventions_opus.grade
       COMMENTS_CONVENTIONS_OPUS: review_conventions_opus.comments

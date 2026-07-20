@@ -1661,7 +1661,7 @@ mod tests {
     let def = builtin("gorgeous-pipeline");
     // No scaffolding step: the branch already carries the work, so the pipeline
     // starts at `prepare`.
-    assert_eq!(def.steps.len(), 34);
+    assert_eq!(def.steps.len(), 35);
     assert!(def.steps.iter().all(|s| s.id != "implement"), "no scaffolding step");
 
     let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
       "review fixes are authored by the runner, not the notes bot"
     );
     assert_eq!(fix.agent.harness, crate::config::Harness::Claude);
-    assert_eq!(fix.agent.model.as_deref(), Some("claude-fable-5"));
+    assert_eq!(fix.agent.model.as_deref(), Some("claude-opus-4-8"));
     assert_eq!(fix.inactivity_timeout, Some(3600), "a healthy fix pass outlives the default novelty window");
     assert!(fix.task.body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
     assert!(
@@ -1687,12 +1687,56 @@ mod tests {
       "one-line changes summary — the job-page headline"
     );
     assert!(fix.outputs.iter().any(|o| o.name == "actions" && o.ty == OutputType::String));
+    assert!(
+      fix.outputs.iter().any(|o| o.name == "decisions" && o.ty == OutputType::StringList),
+      "declined requests come back typed, for the journal step to record"
+    );
+    let fix_words = fix.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+      !fix_words.contains("append a short entry to `STYLE-NOTES.md`"),
+      "declining is journaled as a decision now, not appended to a notes file in the tree"
+    );
+    assert!(
+      fix_words.contains("Do NOT write or edit any `PR-DECISION-*.md`"),
+      "the fix commit carries code only — a decision file in it would read as code under review"
+    );
+
+    // The journal: the loop's memory. Declined requests become `PR-DECISION-*.md` notes
+    // that the NEXT cycle's reviewers read, so a settled question is argued once.
+    let journal = def.steps.iter().find(|s| s.id == "journal").unwrap();
+    assert_eq!(journal.needs, vec!["decide".to_string(), "fix".to_string()]);
+    assert!(journal.commits, "journaled decisions land as a commit on the caller's branch");
+    assert_eq!(
+      journal.commit_identity,
+      CommitIdentity::Notes,
+      "decisions are the change's notes — the identity packdiff lifts off the review page"
+    );
+    let journal_words = journal.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(journal_words.contains("PR-DECISION-<topic>.md"), "the journal names the file convention");
+    assert!(journal_words.contains("Bottom line up front"), "decisions are BLUF-first");
+    assert!(
+      journal_words.contains("Touch ONLY `PR-DECISION-*.md` files"),
+      "a commit touching anything else stops being notes and lands in the review as code"
+    );
+    assert!(
+      journal_words.contains("When DECLINED is empty, change nothing and commit nothing"),
+      "a clean cycle journals nothing"
+    );
+
+    // Every in-loop reviewer grades the tree AFTER the journal, so the decisions are on
+    // disk when they read; the round-zero batch still fans out from prepare.
+    let in_loop: Vec<&Step> = def.steps.iter().filter(|s| s.id.starts_with("review_")).collect();
+    assert_eq!(in_loop.len(), 15, "five profiles across three harnesses");
+    assert!(
+      in_loop.iter().all(|s| s.needs == vec!["journal".to_string()]),
+      "in-loop reviewers read the journal the fix cycle just wrote"
+    );
 
     // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
     assert!(decide.break_loop);
     assert_eq!(decide.agent.harness, crate::config::Harness::Claude);
-    assert_eq!(decide.agent.model.as_deref(), Some("claude-fable-5"));
+    assert_eq!(decide.agent.model.as_deref(), Some("claude-opus-4-8"));
     assert!(
       decide.task.body().contains("SCSH_LOOP_ITERATION"),
       "decide branches on the loop iteration, not on env-var emptiness"
