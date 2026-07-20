@@ -76,7 +76,7 @@ fn run(args: &[String]) -> i32 {
       if cli.json {
         list_profiles_json(cli.override_dot_scsh_yml.as_deref())
       } else {
-        preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref())
+        preflight_then(Action::List, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), None)
       }
     }
     Mode::CheckProfile => check_profile_cmd(profile, cli.override_dot_scsh_yml.as_deref()),
@@ -84,8 +84,12 @@ fn run(args: &[String]) -> i32 {
     Mode::Run => match cli.def.as_deref() {
       // The daemon's "start a job" passes the session id it pre-created so its deep link and
       // the one-job-per-repo guard are authoritative before this child registers.
-      Some(name) => preflight_then_def(name, cli.failures.session.as_deref(), cli.resume_from.as_deref()),
-      None => preflight_then(Action::Run, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref()),
+      Some(name) => {
+        preflight_then_def(name, cli.failures.session.as_deref(), cli.resume_from.as_deref(), cli.base.as_deref())
+      }
+      None => {
+        preflight_then(Action::Run, profile, cli.verbose, cli.override_dot_scsh_yml.as_deref(), cli.base.as_deref())
+      }
     },
     // Hidden: a self-contained demo of the live board (no container/model needed), used by the
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
@@ -812,6 +816,10 @@ struct Cli {
   /// (default `~/.scsh`) instead of into the current repo — no git repo required. See
   /// [`install_skills_global`].
   global: bool,
+  /// `run --base <ref>`: point the run clone's mainline branch at `<ref>`, so a skill's
+  /// in-container `origin/main..HEAD` is exactly base-vs-HEAD. The caller's own repository
+  /// is never touched. See [`resolve_run_base`].
+  base: Option<String>,
 }
 
 /// Filters and output flags shared by `scsh failures` and `scsh stats`.
@@ -858,6 +866,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut retries: Option<u32> = None;
   let mut override_dot_scsh_yml: Option<PathBuf> = None;
   let mut global = false;
+  let mut base: Option<String> = None;
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
@@ -1176,6 +1185,17 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         override_dot_scsh_yml = Some(PathBuf::from(path));
         None
       }
+      // Diff against an arbitrary base without moving the caller's own `main`:
+      // the run clone's mainline is repointed here, the caller's repository is not.
+      "--base" => {
+        i += 1;
+        let spec = args.get(i).ok_or("--base needs a git ref, e.g. --base origin/main")?;
+        if spec.trim().is_empty() {
+          return Err("--base ref must not be empty".into());
+        }
+        base = Some(spec.trim().to_string());
+        None
+      }
       "--verbose" | "-v" => {
         verbose = true;
         None
@@ -1307,6 +1327,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if override_dot_scsh_yml.is_some() && def.is_some() {
     return Err("--override-dot-scsh-yml and --def are mutually exclusive".into());
   }
+  if base.is_some() && !matches!(mode, Mode::Run) {
+    return Err("--base only applies to 'run' (e.g. `scsh run code-review --base origin/main`)".into());
+  }
   Ok(Cli {
     mode,
     profile,
@@ -1327,6 +1350,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
     retries,
     override_dot_scsh_yml,
     global,
+    base,
   })
 }
 
@@ -1466,7 +1490,7 @@ fn preflight_runtime_engine(is_run: bool) -> Result<Runtime, i32> {
 /// same repo-hygiene + runtime preflight applies, but the config steps are replaced by
 /// definition discovery and env-parameter validation. The definition's `task` body is
 /// materialized into each run clone as `.skills/<name>/SKILL.md`, so the repo stays clean.
-fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&str>) -> i32 {
+fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&str>, base: Option<&str>) -> i32 {
   // git installed → inside a repo → runnable (committed, clean, a gitignored scratch dir). A def
   // run accepts either `tmp/` or `.harness/tmp` as the scratch root, so it does not reuse the
   // `.scsh.yml` preflight (which requires `tmp/` specifically).
@@ -1492,6 +1516,16 @@ fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&st
     hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
     return 1;
   }
+  // Resolve the base before any image or container work: a bad ref costs one git
+  // command here instead of a whole fleet running against the wrong (or an empty) range.
+  let base = match base.map(|spec| resolve_run_base(&root, spec)).transpose() {
+    Ok(b) => b,
+    Err(e) => {
+      fail(&e);
+      hint(&format!("name a commit this repo already has, e.g. {}", bold("--base origin/main")));
+      return 1;
+    }
+  };
   let scratch = scratch_root(&root).unwrap_or("tmp");
 
   let discovery = harness_def::discover(&root);
@@ -1545,7 +1579,7 @@ fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&st
   // A workflow definition runs through the DAG orchestrator; a flat one goes through the
   // existing matrix expander below.
   if def.is_workflow() {
-    return run_workflow(&rt, &root, &def, session, resume_from);
+    return run_workflow(&rt, &root, &def, session, resume_from, base.as_ref());
   }
   if resume_from.is_some() {
     fail(&format!("'{name}' is a flat definition — --resume-from only applies to workflow definitions (steps:)"));
@@ -1594,7 +1628,7 @@ fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&st
   }
 
   let session_id = session.filter(|s| !s.is_empty()).map(str::to_string).unwrap_or_else(daemon::new_session_id);
-  build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition")
+  build_and_run(&rt, &root, &runnable, Some(name), &session_id, "definition", base.as_ref())
 }
 
 /// One step's state once it has been decided: either skipped (its `when` was false, or a step it
@@ -2020,7 +2054,7 @@ fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: us
 #[allow(clippy::too_many_arguments)]
 fn run_workflow_step_with_retries(
   invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
-  initial_proc: ui::screen::Proc, ui: &ui::screen::LiveUi, base: Option<&str>,
+  initial_proc: ui::screen::Proc, ui: &ui::screen::LiveUi, caller_tip: Option<&str>, base: Option<&RunBase>,
   daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
 ) -> SkillRun {
   let contract = WorkflowResultContract {
@@ -2044,7 +2078,8 @@ fn run_workflow_step_with_retries(
       root,
       secs,
       proc.clone(),
-      base,
+      caller_tip,
+      caller_tip,
       base,
       Some(contract),
       daemon_client.clone(),
@@ -2232,6 +2267,7 @@ fn ensure_workflow_images(
 /// branch from the prior run, so nothing is re-integrated.
 fn run_workflow(
   rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>, resume_from: Option<&str>,
+  base: Option<&RunBase>,
 ) -> i32 {
   use std::collections::HashMap;
   ui::signals::install();
@@ -2261,7 +2297,9 @@ fn run_workflow(
   // daemon's to see. For daemon-spawned jobs this rewrites the same values it passed in.
   let recipe_params: Vec<(String, String)> =
     def.params.iter().filter_map(|p| std::env::var(&p.name).ok().map(|v| (p.name.clone(), v))).collect();
-  daemon::write_start_recipe(&session_id, Some(&def.name), None, &recipe_params);
+  // Record the RESOLVED base commit, not the ref the caller typed: a restart days later must
+  // review against the same commit even if `origin/main` has moved on since.
+  daemon::write_start_recipe(&session_id, Some(&def.name), None, &recipe_params, base.map(|b| b.sha.as_str()));
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
@@ -2312,12 +2350,12 @@ fn run_workflow(
   // Tip of the caller's branch before each wave. Commit-enabled steps rebase onto this, then
   // we refresh it so the next wave's clone sees those commits and its own packdiff range is
   // only what *that* step added (same contract as the flat `build_and_run` path).
-  let mut base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let mut caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
   // The host repo's own git identity, resolved once — steps declaring `commit-identity: runner`
   // author their commits as the person running the pipeline, not as the notes bot.
   let runner_identity = runner_commit_identity(root);
   let mut runner_identity_warned = false;
-  let original_base = base.clone();
+  let original_caller_tip = caller_tip.clone();
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
   let mut do_while_end_for: HashMap<String, String> = HashMap::new();
   let mut do_while_bodies: HashMap<String, Vec<String>> = HashMap::new();
@@ -2497,11 +2535,12 @@ fn run_workflow(
         .zip(live_steps.iter())
         .map(|((inv, p), step)| {
           let dc = daemon_client.clone();
-          let base_ref = base.as_deref();
+          let caller_tip_ref = caller_tip.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
           scope.spawn(move || {
-            let run = run_workflow_step_with_retries(inv, step, rt, root, secs, p, ui_ref, base_ref, dc, sid);
+            let run =
+              run_workflow_step_with_retries(inv, step, rt, root, secs, p, ui_ref, caller_tip_ref, base, dc, sid);
             (id, run)
           })
         })
@@ -2599,7 +2638,7 @@ fn run_workflow(
         }
       }
       if s.commits {
-        if let (Some(b), Some(clone)) = (base.as_deref(), run.clone_dir.as_ref()) {
+        if let (Some(b), Some(clone)) = (caller_tip.as_deref(), run.clone_dir.as_ref()) {
           let inv = invs.iter().find(|i| i.name == *run_id).expect("invocation for step in this wave");
           match integrate_commits(root, clone, b, &s.id, &stamp) {
             Ok(None) => {}
@@ -2610,8 +2649,8 @@ fn run_workflow(
                 plural(count),
                 current_branch(root)
               ));
-              base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
-              if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+              caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+              if let (Some(from), Some(to)) = (original_caller_tip.as_deref(), caller_tip.as_deref()) {
                 pack_job_diff(root, &session_id, from, to);
               }
               // The browser reveals its all-commits link when the first step diff is
@@ -2624,9 +2663,9 @@ fn run_workflow(
                 // history. The caller branch stays untouched for safety, but this saved
                 // tip is now the workflow's authoritative revision: every dependent wave
                 // must clone it rather than independently guessing which branch to inspect.
-                base = Some(tip.clone());
+                caller_tip = Some(tip.clone());
               }
-              if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+              if let (Some(from), Some(to)) = (original_caller_tip.as_deref(), caller_tip.as_deref()) {
                 pack_job_diff(root, &session_id, from, to);
               }
               warn(&format!(
@@ -2659,7 +2698,7 @@ fn run_workflow(
     fail(&msg);
     return 1;
   }
-  if let (Some(from), Some(to)) = (original_base.as_deref(), base.as_deref()) {
+  if let (Some(from), Some(to)) = (original_caller_tip.as_deref(), caller_tip.as_deref()) {
     pack_job_diff(root, &session_id, from, to);
   }
   ok(&format!(
@@ -2692,7 +2731,9 @@ fn doctor_preflight(rt: &Runtime) {
   }
 }
 
-fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override_yml: Option<&Path>) -> i32 {
+fn preflight_then(
+  action: Action, profile: Option<&str>, verbose: bool, override_yml: Option<&Path>, base: Option<&str>,
+) -> i32 {
   // The preflight checks run quietly on success and collapse into one compact
   // summary line (see CONTRIBUTING "Output style"); only failures speak up, each
   // with an actionable ✗/→. A real run is ordered repo-hygiene-first:
@@ -2711,6 +2752,17 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
   let (cfg, override_skills_root) = match resolve_config_for_run(&root, override_yml, profile) {
     Ok(v) => v,
     Err(code) => return code,
+  };
+
+  // Resolve the base before any image or container work: a bad ref costs one git
+  // command here instead of a whole fleet running against the wrong (or an empty) range.
+  let base = match base.map(|spec| resolve_run_base(&root, spec)).transpose() {
+    Ok(b) => b,
+    Err(e) => {
+      fail(&e);
+      hint(&format!("name a commit this repo already has, e.g. {}", bold("--base origin/main")));
+      return 1;
+    }
   };
 
   // a container runtime is available and, for a run, its engine is up.
@@ -2787,7 +2839,7 @@ fn preflight_then(action: Action, profile: Option<&str>, verbose: bool, override
         return 1;
       }
       let session_id = daemon::new_session_id();
-      build_and_run(&rt, &root, &runnable, profile, &session_id, "profile")
+      build_and_run(&rt, &root, &runnable, profile, &session_id, "profile", base.as_ref())
     }
   }
 }
@@ -3777,9 +3829,10 @@ impl Drop for DaemonSession {
   }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_and_run(
   rt: &Runtime, root: &std::path::Path, skills: &[&ResolvedInvocation], profile: Option<&str>, session: &str,
-  kind: &str,
+  kind: &str, base: Option<&RunBase>,
 ) -> i32 {
   ui::signals::install();
 
@@ -3824,7 +3877,7 @@ fn build_and_run(
       hint(&format!("swept {swept} stale run dir{} from /tmp", plural(swept)));
     }
   }
-  let base = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
+  let caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|s| s.trim().to_string());
 
   let needs_opencode = skills.iter().any(|s| s.harness == config::Harness::Opencode);
   let needs_claude = skills.iter().any(|s| s.harness == config::Harness::Claude);
@@ -4016,7 +4069,7 @@ fn build_and_run(
     return code;
   }
 
-  let base_ref = base.as_deref();
+  let caller_tip_ref = caller_tip.as_deref();
   for p in &skill_procs {
     p.note("starting…");
   }
@@ -4040,7 +4093,8 @@ fn build_and_run(
           loop {
             attempts += 1;
             let attempt_started = std::time::Instant::now();
-            let mut run = run_one_skill(skill, rt, root, secs, proc, base_ref, None, None, dc.clone(), session_ref);
+            let mut run =
+              run_one_skill(skill, rt, root, secs, proc, caller_tip_ref, None, base, None, dc.clone(), session_ref);
             run.duration_secs = attempt_started.elapsed().as_secs_f64();
             run.proc_index = proc_index;
             run.attempts = attempts;
@@ -4278,7 +4332,7 @@ fn build_and_run(
   //    are fetched from the LOCAL clone path — not from GitHub — and cherry-picked onto
   //    the caller's branch. Only when commits: true AND the skill actually committed.
   //    Commits that don't apply cleanly are saved to scsh/incoming/<skill>-… instead.
-  if let Some(base) = &base {
+  if let Some(caller_tip) = &caller_tip {
     let stamp = runtime::format_utc_timestamp(secs);
     for (skill, o) in skills.iter().zip(outcomes.iter()) {
       if !skill.commits {
@@ -4287,7 +4341,7 @@ fn build_and_run(
       // A live clone integrates its commits directly; a commit-enabled cache HIT replays
       // the commits journaled in the cache, so a hit reproduces the commit, not just the result.
       let integration = if let Some(clone) = &o.clone_dir {
-        integrate_commits(root, clone, base, &skill.name, &stamp)
+        integrate_commits(root, clone, caller_tip, &skill.name, &stamp)
       } else if let Some(patch) = &o.cached_commits {
         apply_cached_commits(root, patch, &skill.name, &stamp)
       } else {
@@ -4316,7 +4370,7 @@ fn build_and_run(
       }
     }
     if let Some(head) = git_capture(root, &["rev-parse", "HEAD"]) {
-      pack_job_diff(root, &session_id, base, head.trim());
+      pack_job_diff(root, &session_id, caller_tip, head.trim());
     }
   }
 
@@ -4601,9 +4655,10 @@ fn wait_for_inner_harness_result(run_dir: &Path, result_rel: &str, commits: bool
 /// through its phases and finishing it ✓/✗. Returns the structured outcome.
 #[allow(clippy::too_many_arguments)]
 fn run_one_skill(
-  skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc, base: Option<&str>,
-  source_revision: Option<&str>, result_contract: Option<WorkflowResultContract<'_>>,
-  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
+  skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc,
+  caller_tip: Option<&str>, source_revision: Option<&str>, base: Option<&RunBase>,
+  result_contract: Option<WorkflowResultContract<'_>>, daemon_client: Option<std::sync::Arc<daemon::Client>>,
+  session_id: &str,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -4626,7 +4681,7 @@ fn run_one_skill(
   // Content-addressed cache: if this exact repo content + skill + env was run before,
   // restore the cached result and finish — no clone, no container, no commit. (The key
   // is computed from the caller's committed state, which is what the clone would be.)
-  let key = cache_key_at(root, skill, &env, source_revision);
+  let key = cache_key_at(root, skill, &env, source_revision, base);
   if let Some(key) = &key {
     if let Some(entry) = cache_lookup(root, key) {
       let workflow_outputs = result_contract.and_then(|contract| extract_step_outputs(&entry.result, contract).ok());
@@ -4683,7 +4738,7 @@ fn run_one_skill(
   let git_transport = runtime::uses_git_transport(&rt.name);
   let mut git_daemon = None;
   if git_transport {
-    if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, source_revision, &spinner) {
+    if let Err(e) = prepare_git_transport(root, &run_dir, skill.commits, source_revision, base, &spinner) {
       spinner.finish_fail(failure::reason::GIT_TRANSPORT, Some(&e));
       return SkillRun::failed(failure::reason::GIT_TRANSPORT, Some(run_dir_str), None, None);
     }
@@ -4694,7 +4749,7 @@ fn run_one_skill(
         return SkillRun::failed(failure::reason::GIT_DAEMON, Some(run_dir_str), None, None);
       }
     }
-  } else if let Err(e) = clone_into(root, &run_dir, source_revision, skill.commit_identity.as_ref(), &spinner) {
+  } else if let Err(e) = clone_into(root, &run_dir, source_revision, skill.commit_identity.as_ref(), base, &spinner) {
     spinner.finish_fail(failure::reason::CLONE, Some(&e));
     return SkillRun::failed(failure::reason::CLONE, Some(run_dir_str), None, None);
   }
@@ -4996,8 +5051,11 @@ fn run_one_skill(
       if let Some(key) = &key {
         // Journal a commit-enabled skill's new commits (base..clone-HEAD) as a patch
         // alongside the result, so a future cache hit can replay them.
-        let commits =
-          if skill.commits { base.and_then(|b| commit_patch(&runtime::commits_fetch_path(&run_dir), b)) } else { None };
+        let commits = if skill.commits {
+          caller_tip.and_then(|b| commit_patch(&runtime::commits_fetch_path(&run_dir), b))
+        } else {
+          None
+        };
         cache_store(
           root,
           key,
@@ -5190,7 +5248,7 @@ fn prepare_run_dir(secs: u64, skill: &str, runtime: &str) -> Result<PathBuf, Str
 /// (Linux host → Linux container). Skills must not reach out to git remotes.
 fn clone_into(
   root: &Path, run_dir: &Path, source_revision: Option<&str>, commit_identity: Option<&(String, String)>,
-  spinner: &ui::screen::Proc,
+  base: Option<&RunBase>, spinner: &ui::screen::Proc,
 ) -> Result<(), String> {
   spinner.note("cloning…");
   let cmd = runtime::clone_command(&root.to_string_lossy(), &run_dir.to_string_lossy());
@@ -5202,6 +5260,12 @@ fn clone_into(
     });
   }
   materialize_branches(run_dir);
+  // After the local branches exist, move the mainline onto the requested base — the
+  // container's `origin/<branch>` then resolves to exactly the commit the caller named.
+  if let Some(base) = base {
+    spinner.emit(&format!("base: {} → {}", base.branch, &base.sha[..base.sha.len().min(12)]));
+    runtime::pin_clone_base(run_dir, base.branch, &base.sha)?;
+  }
   if let Some(revision) = source_revision {
     checkout_workflow_revision(run_dir, revision)?;
   }
@@ -5247,7 +5311,8 @@ fn materialize_skill_body(run_dir: &Path, _git_transport: bool, skill: &Resolved
 /// macOS Apple Container push IN: host `git push` into a bare transport repo; the container
 /// clones from a short-lived `git daemon` (Linux-owned `.git`). Only `run_dir/tmp` is mounted.
 fn prepare_git_transport(
-  root: &Path, run_dir: &Path, commits: bool, source_revision: Option<&str>, spinner: &ui::screen::Proc,
+  root: &Path, run_dir: &Path, commits: bool, source_revision: Option<&str>, base: Option<&RunBase>,
+  spinner: &ui::screen::Proc,
 ) -> Result<(), String> {
   std::fs::create_dir_all(run_dir.join("tmp"))
     .map_err(|e| format!("could not create {}: {e}", run_dir.join("tmp").display()))?;
@@ -5257,6 +5322,12 @@ fn prepare_git_transport(
     spinner.emit(&format!("git push failed: {e}"));
     e
   })?;
+  // The push mirrored the host's heads; overwrite the mainline with the requested review
+  // base so the container clones a bare whose `<branch>` is already the base commit.
+  if let Some(base) = base {
+    spinner.emit(&format!("base: {} → {}", base.branch, &base.sha[..base.sha.len().min(12)]));
+    runtime::pin_transport_base(&bare, base.branch, &base.sha)?;
+  }
   if let Some(revision) = source_revision {
     select_transport_workflow_revision(&bare, revision)?;
   }
@@ -5384,6 +5455,40 @@ fn set_clone_identity(run_dir: &Path, identity: Option<&(String, String)>) {
   let (name, email) = identity.map(|(n, e)| (n.as_str(), e.as_str())).unwrap_or((SCSH_COMMIT_NAME, SCSH_COMMIT_EMAIL));
   let _ = git_capture(run_dir, &["config", "user.email", email]);
   let _ = git_capture(run_dir, &["config", "user.name", name]);
+}
+
+/// A resolved `--base <ref>`: which mainline branch a run pins, and the commit it pins it
+/// to. Resolved ONCE on the host, before any clone, so every skill in the run measures from
+/// the same commit and a bad ref fails the run instead of each container. Distinct from a
+/// run's `caller_tip`, which is where the caller's branch stood when the run began and is
+/// what commit-enabled steps rebase onto.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RunBase {
+  /// The branch repointed inside each run clone — `main`, or `master` when that is the
+  /// repository's mainline. A skill reads it as `origin/<branch>` in the container.
+  branch: &'static str,
+  /// The full commit the branch is moved to.
+  sha: String,
+}
+
+/// Resolve `--base <ref>` against the caller's repository. Every failure is refused
+/// here, with the fix, rather than producing an empty or nonsensical diff in fifteen
+/// containers: an unknown ref, a repository whose mainline is neither `main` nor `master`,
+/// and the case where the checked-out branch IS the mainline (whose diff against itself is
+/// empty by construction).
+fn resolve_run_base(root: &Path, spec: &str) -> Result<RunBase, String> {
+  let sha = git_capture(root, &["rev-parse", "--verify", "--quiet", &format!("{spec}^{{commit}}")])
+    .map(|s| s.trim().to_string())
+    .filter(|s| !s.is_empty())
+    .ok_or_else(|| format!("--base '{spec}' is not a commit in this repository"))?;
+  let heads = git_capture(root, &["for-each-ref", "--format=%(refname:short)", "refs/heads"]).unwrap_or_default();
+  let branch = runtime::base_branch(&heads)
+    .ok_or_else(|| "--base needs a local 'main' or 'master' branch — this repository has neither".to_string())?;
+  let current = git_capture(root, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap_or_default().trim().to_string();
+  if current == branch {
+    return Err(format!("--base cannot be used while on '{branch}' — it is the branch being pinned"));
+  }
+  Ok(RunBase { branch, sha })
 }
 
 /// Best-effort: create a local branch for each `origin/*` branch the host-side
@@ -6061,13 +6166,14 @@ fn cache_dir(root: &Path) -> PathBuf {
 /// read (e.g. a repo with no commit yet) — then the run is simply not cached.
 #[cfg(test)]
 fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) -> Option<String> {
-  cache_key_at(root, skill, env, None)
+  cache_key_at(root, skill, env, None, None)
 }
 
 /// Workflow variant of [`cache_key`]: hash the authoritative carried revision rather than
 /// the caller branch, which may intentionally remain untouched after a history rewrite.
 fn cache_key_at(
   root: &Path, skill: &ResolvedInvocation, env: &[(String, String)], source_revision: Option<&str>,
+  base: Option<&RunBase>,
 ) -> Option<String> {
   // Declared artifacts are side FILES; the cache journals only the result content (plus
   // commits), so a hit could not reproduce them — artifact-bearing steps always run live.
@@ -6092,6 +6198,12 @@ fn cache_key_at(
   // the invocation — so hash it here, so changing a definition's prompt busts the cache.
   if let Some(body) = skill.delivery.body() {
     blob.push_str(&format!("body={}\n", sha256::sha256_hex(body.as_bytes())));
+  }
+  // A pinned base changes what the skill SEES (`origin/<branch>..HEAD`) without
+  // changing the repo tree, so it must key the cache. Appended only when pinning is in play,
+  // so keys cached by ordinary runs stay valid.
+  if let Some(base) = base {
+    blob.push_str(&format!("base={}={}\n", base.branch, base.sha));
   }
   // Hash the resolved input environment — every param and (for a workflow) every value bound
   // from an upstream step's output. This is what makes different inputs a cache MISS. SCSH_RESULT
@@ -8255,7 +8367,7 @@ fn print_help_run() {
   println!("{} {}", h_head("run"), console::style("\u{2014} run scoped skills in parallel").bold());
   println!();
   println!("{}", h_head("Synopsis"));
-  println!("{}", h_dim("  scsh run [profile…] [--override-dot-scsh-yml <path>]"));
+  println!("{}", h_dim("  scsh run [profile…] [--override-dot-scsh-yml <path>] [--base <ref>]"));
   println!();
   println!("{}", h_head("Discover what to run (before `run`)"));
   help_row("scsh list", "Every skill by profile — result path, harness, env (human-readable).");
@@ -8270,6 +8382,17 @@ fn print_help_run() {
   println!("{}", h_dim("  Without the flag, a profile the repo's .scsh.yml does not declare falls back to the"));
   println!("{}", h_dim("  global manifest $SCSH_HOME/.scsh.yml (installed by `scsh installskills --global`);"));
   println!("{}", h_dim("  the repo's own config always wins for the profiles it declares."));
+  println!();
+  println!("{}", h_head("Base commit (what the clone's mainline points at)"));
+  help_row("--base <ref>", "Point the run clone's `main` (or `master`) at <ref> for this run only.");
+  println!("{}", h_dim("  A skill that reads the committed range `origin/main..HEAD` — every reviewer does"));
+  println!("{}", h_dim("  — otherwise sees whatever your local `main` happens to point at. This pins it."));
+  println!("{}", h_dim("  Your own repository is never touched — only the throwaway clone is repointed."));
+  println!("{}", h_dim("  <ref> is any git revision this repo ALREADY has: a commit sha (full or short),"));
+  println!("{}", h_dim("  a branch, a tag (annotated tags are peeled), or a form like HEAD~3. Nothing is"));
+  println!("{}", h_dim("  fetched, so `origin/main` is only as fresh as your last fetch."));
+  println!("{}", h_dim("  Refused up front when <ref> is not a commit here, when the repo has neither a"));
+  println!("{}", h_dim("  `main` nor a `master` branch, or when you are ON that branch (an empty range)."));
   println!();
   println!("{}", h_head("Profile selection"));
   println!("{}", h_dim("  Skills with no `profile:` belong to the reserved `default` profile."));
@@ -9115,6 +9238,75 @@ mod tests {
     assert!(run_file.is_file(), "a matching *file* (not a dir) is left alone");
 
     std::fs::remove_dir_all(&base).unwrap();
+  }
+
+  #[test]
+  fn base_flag_parses_and_is_run_only() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert_eq!(cli(&["run", "code-review", "--base", "origin/main"]).unwrap().base.as_deref(), Some("origin/main"));
+    // Works with a definition run too — that is the gorgeous-pipeline case.
+    assert_eq!(cli(&["run", "--def", "greet", "--base", "abc123"]).unwrap().base.as_deref(), Some("abc123"));
+    // An ordinary run leaves it unset, so nothing about today's behavior changes.
+    assert_eq!(cli(&["run"]).unwrap().base, None);
+    // A missing or empty value, and any non-run command, are refused.
+    assert!(cli(&["run", "--base"]).is_err());
+    assert!(cli(&["run", "--base", "  "]).is_err());
+    assert!(cli(&["list", "--base", "origin/main"]).is_err());
+  }
+
+  #[test]
+  fn resolve_run_base_refuses_bad_refs_and_the_mainline_itself() {
+    let tmp = std::env::temp_dir().join(format!("scsh-resolve-base-{}-{}", std::process::id(), now_secs()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let git = |args: &[&str]| {
+      git_command().arg("-C").arg(&tmp).args(args).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap();
+    };
+    git_command().args(["init", "-q"]).arg(&tmp).status().unwrap();
+    git(&["config", "user.email", "reviewer@example.invalid"]);
+    git(&["config", "user.name", "reviewer"]);
+    std::fs::write(tmp.join("f"), "base").unwrap();
+    git(&["add", "f"]);
+    git(&["commit", "-qm", "base"]);
+    git(&["branch", "-M", "main"]);
+    let base_sha = git_capture(&tmp, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+
+    // On main itself: reviewing main against main is an empty range, so it is refused.
+    let on_main = resolve_run_base(&tmp, &base_sha).unwrap_err();
+    assert!(on_main.contains("cannot be used while on 'main'"), "{on_main}");
+
+    git(&["checkout", "-q", "-b", "feature"]);
+    std::fs::write(tmp.join("f"), "feature").unwrap();
+    git(&["add", "f"]);
+    git(&["commit", "-qm", "feature"]);
+
+    // From the feature branch the base resolves, naming the branch the clone will repoint.
+    let resolved = resolve_run_base(&tmp, &base_sha).unwrap();
+    assert_eq!(resolved.branch, "main");
+    assert_eq!(resolved.sha, base_sha);
+
+    // ANY git revision naming a commit this repository already has is accepted, and every
+    // spelling of the same commit resolves to the same sha — so `--base` is documented as
+    // taking a sha, a branch, or a tag without any of them being a special case. The
+    // annotated tag matters: it is a tag OBJECT, peeled to its commit by `^{commit}`.
+    git(&["tag", "lightweight"]);
+    git(&["tag", "-a", "annotated", "-m", "annotated", &base_sha]);
+    git(&["branch", "elsewhere", &base_sha]);
+    let short = git_capture(&tmp, &["rev-parse", "--short", &base_sha]).unwrap().trim().to_string();
+    for spec in [short.as_str(), "main", "elsewhere", "annotated", "HEAD~1"] {
+      assert_eq!(resolve_run_base(&tmp, spec).unwrap().sha, base_sha, "'{spec}' names the base commit");
+    }
+    // A lightweight tag on the feature tip is a different commit — still accepted, proving
+    // the base need not be an ancestor-shaped "upstream" ref, just a commit that exists.
+    assert_ne!(resolve_run_base(&tmp, "lightweight").unwrap().sha, base_sha);
+
+    // An unknown ref is refused by name, before any container work.
+    let unknown = resolve_run_base(&tmp, "no-such-ref").unwrap_err();
+    assert!(unknown.contains("no-such-ref"), "{unknown}");
+    // Nothing is fetched: a ref that exists only on a remote is not a commit here.
+    assert!(resolve_run_base(&tmp, "origin/main").is_err());
+
+    let _ = std::fs::remove_dir_all(&tmp);
   }
 
   #[test]

@@ -51,7 +51,7 @@ pub fn workload_of_repo(root: &Path) -> Workload {
 }
 
 fn merge_base(root: &Path) -> Option<String> {
-  for base in ["main", "master"] {
+  for base in crate::runtime::MAINLINE_BRANCHES {
     if git_capture(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{base}")]).is_none() {
       continue;
     }
