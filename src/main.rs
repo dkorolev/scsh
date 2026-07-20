@@ -1511,9 +1511,11 @@ fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&st
   if !blockers.is_empty() {
     fail("this repository is not ready to run a harness definition");
     for b in &blockers {
-      hint(b);
+      hint(&b.message());
+      for f in b.fixes() {
+        hint(&f);
+      }
     }
-    hint(&format!("get a ready-to-run project in one command: {}", bold("scsh init-demo-project")));
     return 1;
   }
   // Resolve the base before any image or container work: a bad ref costs one git
@@ -1651,21 +1653,76 @@ fn scratch_root(root: &Path) -> Option<&'static str> {
   }
 }
 
+/// One reason a `scsh run --def` would refuse. Typed rather than prose so callers react to the
+/// KIND — the browser reports cleanliness separately from readiness — instead of matching on
+/// wording that then cannot be improved without breaking them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum DefRunBlocker {
+  /// Nothing committed yet: a run clones committed state, so there would be nothing to clone.
+  NoCommits,
+  /// Uncommitted work, carrying the offending paths — a run would silently not contain it.
+  Dirty(Vec<String>),
+  /// Neither `tmp/` nor `.harness/tmp` is gitignored, so a run has nowhere to write results.
+  NoScratchDir,
+}
+
+/// How many offending paths a dirty-tree blocker spells out before summarizing the rest.
+const DIRTY_PATHS_SHOWN: usize = 10;
+
+impl DefRunBlocker {
+  /// What is wrong, as one line.
+  pub(crate) fn message(&self) -> String {
+    match self {
+      DefRunBlocker::NoCommits => "the repository has no commits yet (scsh runs a clone of committed state)".into(),
+      DefRunBlocker::Dirty(paths) => {
+        format!("the working tree has {} uncommitted change{}", paths.len(), plural(paths.len()))
+      }
+      DefRunBlocker::NoScratchDir => {
+        "neither tmp/ nor .harness/tmp is gitignored (scsh needs a gitignored scratch dir)".into()
+      }
+    }
+  }
+
+  /// The concrete way out, as the `→` lines that follow the message. A dirty tree names the
+  /// files it is actually talking about: "1 uncommitted change" alone sends people hunting,
+  /// and — because committing is what unblocks the run — leaves them crediting whatever they
+  /// happened to commit with having been a prerequisite.
+  pub(crate) fn fixes(&self) -> Vec<String> {
+    match self {
+      DefRunBlocker::NoCommits => {
+        vec![format!("make the first commit: {}", bold("git add -A && git commit -m \"initial\""))]
+      }
+      DefRunBlocker::Dirty(paths) => {
+        let mut out: Vec<String> = paths.iter().take(DIRTY_PATHS_SHOWN).map(|p| format!("uncommitted: {p}")).collect();
+        if paths.len() > DIRTY_PATHS_SHOWN {
+          out.push(format!("\u{2026}and {} more", paths.len() - DIRTY_PATHS_SHOWN));
+        }
+        out.push(format!("commit or stash them, then re-run: {}", bold("git add -A && git commit -m \"wip\"")));
+        out
+      }
+      DefRunBlocker::NoScratchDir => vec![
+        format!("add a {} line to .gitignore (that is the repo's own tmp/, not the system one)", bold("/tmp")),
+        format!("or scaffold a ready-to-run project: {}", bold("scsh init-demo-project")),
+      ],
+    }
+  }
+}
+
 /// Reasons a `scsh run --def` would refuse in `root` (empty ⇒ runnable): no commit to clone, a
 /// dirty working tree, or no gitignored scratch dir. Shared by the CLI preflight and the daemon
 /// so the browser never accepts — or starts — a job the run itself would reject. Assumes `root`
 /// is a git repository root.
-pub(crate) fn def_run_blockers(root: &Path) -> Vec<String> {
+pub(crate) fn def_run_blockers(root: &Path) -> Vec<DefRunBlocker> {
   let mut out = Vec::new();
   if git_capture(root, &["rev-parse", "--verify", "HEAD"]).is_none() {
-    out.push("the repository has no commits yet (scsh runs a clone of committed state)".into());
+    out.push(DefRunBlocker::NoCommits);
   }
   let dirty = uncommitted_changes(root);
   if !dirty.is_empty() {
-    out.push(format!("the working tree has {} uncommitted change{}", dirty.len(), plural(dirty.len())));
+    out.push(DefRunBlocker::Dirty(dirty));
   }
   if scratch_root(root).is_none() {
-    out.push("neither tmp/ nor .harness/tmp is gitignored (scsh needs a gitignored scratch dir)".into());
+    out.push(DefRunBlocker::NoScratchDir);
   }
   out
 }
@@ -9307,6 +9364,32 @@ mod tests {
     assert!(resolve_run_base(&tmp, "origin/main").is_err());
 
     let _ = std::fs::remove_dir_all(&tmp);
+  }
+
+  #[test]
+  fn a_dirty_tree_blocker_names_the_files_and_says_to_commit_them() {
+    // The whole point: "1 uncommitted change" with no path is what made people believe a
+    // *different skill* was a prerequisite, when all that unblocked the run was committing.
+    let one = DefRunBlocker::Dirty(vec!["PR-DESCRIPTION.md".into()]);
+    assert_eq!(one.message(), "the working tree has 1 uncommitted change");
+    let fixes = one.fixes();
+    assert!(fixes.iter().any(|f| f.contains("PR-DESCRIPTION.md")), "names the offending file: {fixes:?}");
+    assert!(fixes.iter().any(|f| f.contains("commit or stash")), "says how to clear it: {fixes:?}");
+    // No blocker sends a real repository to init-demo-project; only a missing scratch dir
+    // mentions it, and then only as the alternative to editing .gitignore.
+    assert!(!fixes.iter().any(|f| f.contains("init-demo-project")), "{fixes:?}");
+    assert!(!DefRunBlocker::NoCommits.fixes().iter().any(|f| f.contains("init-demo-project")));
+    assert!(DefRunBlocker::NoScratchDir.fixes().iter().any(|f| f.contains("init-demo-project")));
+
+    // Long lists are capped, with the remainder summarized rather than dropped silently.
+    let many: Vec<String> = (0..DIRTY_PATHS_SHOWN + 3).map(|i| format!("f{i}")).collect();
+    let fixes = DefRunBlocker::Dirty(many).fixes();
+    assert_eq!(fixes.iter().filter(|f| f.starts_with("uncommitted: ")).count(), DIRTY_PATHS_SHOWN);
+    assert!(fixes.iter().any(|f| f.contains("and 3 more")), "{fixes:?}");
+    assert_eq!(
+      DefRunBlocker::Dirty(vec!["a".into(), "b".into()]).message(),
+      "the working tree has 2 uncommitted changes"
+    );
   }
 
   #[test]
