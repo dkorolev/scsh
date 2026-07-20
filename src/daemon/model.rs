@@ -430,16 +430,44 @@ impl Store {
 /// reading as running once its liveness deadline passes, so the exemption cannot grow the
 /// store without bound.
 pub fn trim_sessions_to_cap(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64) {
-  while sessions.len() > MAX_STORED_SESSIONS {
+  trim_sessions_to(sessions, now, MAX_STORED_SESSIONS)
+}
+
+/// [`trim_sessions_to_cap`] against an explicit cap, so the eviction ORDER can be tested
+/// without building two hundred sessions per case.
+fn trim_sessions_to(sessions: &mut std::collections::BTreeMap<String, Session>, now: u64, cap: usize) {
+  while sessions.len() > cap {
+    // Annotation sessions are artifacts OF a job, not jobs, so they are evicted first:
+    // annotating one job dozens of times must never push other people's jobs out of the
+    // store. Within each tier the oldest finished session goes, as before. Orphans — a
+    // child whose parent already left — lead, since nothing can reach them any more.
     let Some(old_id) = sessions
       .iter()
       .filter(|(_, s)| s.lifecycle_status(now) != SessionLifecycle::Running)
-      .min_by_key(|(_, s)| s.started_at)
+      .min_by_key(|(_, s)| {
+        let tier = match s.parent_session.as_deref() {
+          Some(parent) if !sessions.contains_key(parent) => 0u8,
+          Some(_) => 1,
+          None => 2,
+        };
+        (tier, s.started_at)
+      })
       .map(|(id, _)| id.clone())
     else {
       break;
     };
     sessions.remove(&old_id);
+    // A job's annotations belong to it: once the job is gone they are unreachable from
+    // any page, so they leave with it instead of lingering as orphans.
+    let orphaned: Vec<String> = sessions
+      .iter()
+      .filter(|(_, s)| s.parent_session.as_deref() == Some(old_id.as_str()))
+      .filter(|(_, s)| s.lifecycle_status(now) != SessionLifecycle::Running)
+      .map(|(id, _)| id.clone())
+      .collect();
+    for id in orphaned {
+      sessions.remove(&id);
+    }
   }
 }
 
@@ -1093,6 +1121,66 @@ mod tests {
     assert_eq!(store.sessions.len(), MAX_STORED_SESSIONS);
     assert!(!store.sessions.contains_key("000000"));
     assert!(store.sessions.contains_key(&format!("{MAX_STORED_SESSIONS:06}")));
+  }
+
+  #[test]
+  fn annotations_are_evicted_before_the_jobs_they_belong_to() {
+    let session = |id: &str, at: u64, parent: Option<&str>| Session {
+      id: id.into(),
+      started_at: at,
+      ended_at: Some(at + 1),
+      profile: parent.map(|_| "annotate".to_string()),
+      kind: None,
+      repo: "/r".into(),
+      branch: "main".into(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at: at,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+      parent_session: parent.map(str::to_string),
+      supervisor: Default::default(),
+    };
+    let mut store = Store::new(DaemonMode::Persistent, DEFAULT_PORT, 0);
+    // The oldest session in the store is a real job; a much NEWER annotation of another
+    // job is the one that must go. Annotating a job hundreds of times is what filled a
+    // real store — 180 of 200 sessions — and it must not cost anyone their jobs.
+    store.insert_session("oldjob".into(), session("oldjob", 1, None));
+    store.insert_session("livejob".into(), session("livejob", 2, None));
+    for i in 0..(MAX_STORED_SESSIONS - 2) {
+      let id = format!("ann{i:04}");
+      store.insert_session(id.clone(), session(&id, 1000 + i as u64, Some("livejob")));
+    }
+    assert_eq!(store.sessions.len(), MAX_STORED_SESSIONS);
+    // One more annotation: an annotation is dropped, never one of the two jobs.
+    store.insert_session("annnew".into(), session("annnew", 9000, Some("livejob")));
+    assert_eq!(store.sessions.len(), MAX_STORED_SESSIONS);
+    assert!(store.sessions.contains_key("oldjob"), "the oldest JOB outlives newer annotations");
+    assert!(store.sessions.contains_key("livejob"));
+    assert!(!store.sessions.contains_key("ann0000"), "the oldest annotation went instead");
+
+    // Same rule at small scale, and both jobs survive: annotations go first even when
+    // they are the NEWEST sessions in the store and the jobs are the oldest.
+    let mut small: std::collections::BTreeMap<String, Session> = Default::default();
+    small.insert("parent".into(), session("parent", 1, None));
+    small.insert("kid1".into(), session("kid1", 2, Some("parent")));
+    small.insert("kid2".into(), session("kid2", 3, Some("parent")));
+    small.insert("other".into(), session("other", 4, None));
+    trim_sessions_to(&mut small, 10, 2);
+    assert_eq!(
+      small.keys().collect::<Vec<_>>(),
+      vec!["other", "parent"],
+      "the two jobs survive; their annotations are what the cap reclaims"
+    );
+
+    // An orphan — a child whose job already left — is reclaimed ahead of everything,
+    // including a job older than it: nothing can reach it any more.
+    let mut orphans: std::collections::BTreeMap<String, Session> = Default::default();
+    orphans.insert("job".into(), session("job", 1, None));
+    orphans.insert("lost".into(), session("lost", 5, Some("evicted-long-ago")));
+    trim_sessions_to(&mut orphans, 10, 1);
+    assert_eq!(orphans.keys().collect::<Vec<_>>(), vec!["job"], "the orphan goes, the older job stays");
   }
 
   #[test]
