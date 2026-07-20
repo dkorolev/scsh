@@ -2089,18 +2089,40 @@ impl RouteRetryState {
   }
 }
 
-/// Wait out a retry backoff one second at a time, so a browser Force restart on the
-/// pending attempt (or `SCSH_NO_RETRY` never reaching here at all) does not leave the
-/// user staring at a sleeping process. Returns true when the wait was cut short by a
-/// restart request for `proc_index`.
-fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: usize) -> bool {
+/// Why a retry backoff stopped waiting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackoffWake {
+  /// The delay ran out — take the retry.
+  Elapsed,
+  /// The browser asked to restart this proc — take the retry immediately.
+  Restart,
+  /// The job was stopped from the browser — abandon the retry.
+  Cancelled,
+}
+
+/// Wait out a retry backoff one second at a time, so neither a browser Force restart on the
+/// pending attempt nor a stop of the whole job leaves the user staring at a sleeping process.
+///
+/// Checking for cancellation here is what keeps a stopped job stopped. The daemon ends the
+/// session and settles its procs, but it cannot reach into this process; without this the
+/// sleeping route would wake up and register a fresh attempt against a session that is
+/// already over.
+fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: usize) -> BackoffWake {
   for _ in 0..delay_secs {
     if daemon::consume_proc_restart(session_id, proc_index) {
-      return true;
+      return BackoffWake::Restart;
+    }
+    if daemon::session_cancelled(session_id) {
+      return BackoffWake::Cancelled;
     }
     std::thread::sleep(Duration::from_secs(1));
   }
-  false
+  // A zero-length or fully elapsed wait still must not step over a stop.
+  if daemon::session_cancelled(session_id) {
+    BackoffWake::Cancelled
+  } else {
+    BackoffWake::Elapsed
+  }
 }
 
 /// Run one workflow route with the same retry contract as a flat run. Every fresh harness
@@ -2240,8 +2262,15 @@ fn run_workflow_step_with_retries(
         ui::clock::format_elapsed(retry.budget_left_secs() as f64),
         retry.retries_left(),
       ));
-      if backoff_sleep_interruptible(delay, session_id, proc_index) {
-        proc.note("retrying now (browser restart)");
+      match backoff_sleep_interruptible(delay, session_id, proc_index) {
+        BackoffWake::Restart => proc.note("retrying now (browser restart)"),
+        BackoffWake::Cancelled => {
+          proc.note("job stopped — not retrying");
+          proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
+          run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+          return run;
+        }
+        BackoffWake::Elapsed => {}
       }
     } else if decision == RetryDecision::Schema {
       proc.note(&format!("retrying after {reason} (retry {} of {})", retry.retries_used, retry.policy.max_retries));
@@ -3870,6 +3899,10 @@ impl DaemonSession {
       flag.store(false, std::sync::atomic::Ordering::Relaxed);
     }
     if let Some(c) = self.client.take() {
+      // This run is over either way, so its stop marker has done its job. Clearing it here —
+      // the one teardown both the flat and workflow paths pass through — keeps the
+      // cancel-requests dir from collecting a file per stopped job.
+      daemon::clear_session_cancel(c.session_id());
       if self.registered {
         c.finish_session();
         ok(&format!("job {}", c.session_url()));
@@ -4224,8 +4257,15 @@ fn build_and_run(
                 ui::clock::format_elapsed(retry.budget_left_secs() as f64),
                 retry.retries_left(),
               ));
-              if backoff_sleep_interruptible(delay, session_ref, proc_index) {
-                proc.note("retrying now (browser restart)");
+              match backoff_sleep_interruptible(delay, session_ref, proc_index) {
+                BackoffWake::Restart => proc.note("retrying now (browser restart)"),
+                BackoffWake::Cancelled => {
+                  proc.note("job stopped — not retrying");
+                  proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
+                  run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+                  return run;
+                }
+                BackoffWake::Elapsed => {}
               }
             }
           }

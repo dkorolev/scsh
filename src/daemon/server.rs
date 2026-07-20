@@ -1196,6 +1196,9 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
     "/api/v1/deregister" => {
       store.active_clients = store.active_clients.saturating_sub(1);
       let session_id = field_str(&obj, "session").unwrap_or_default();
+      // The runner is signing off, so its cancel marker has no reader left. Clearing it on
+      // both sides of the sign-off keeps the directory empty whichever side gets there first.
+      crate::daemon::clear_session_cancel(&session_id);
       if !session_id.is_empty() {
         if let Some(s) = store.session_mut(&session_id) {
           orphan_containers = s
@@ -1253,6 +1256,14 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         Some(s) => s,
         None => return false,
       };
+      // An ENDED session takes no new work. The run client posts asynchronously, so a retry
+      // attempt the runner queued before a browser stop can arrive after it: admitting that
+      // row would leave a `waiting` proc with no process behind it, and no live path ever
+      // re-settles procs of an ended session (only a daemon restart does). The job would
+      // read as incomplete forever. Dropping the row is correct — the attempt never ran.
+      if s.ended_at.is_some() {
+        return false;
+      }
       let skill_name = field_str(&obj, "skill_name");
       let harness = field_str(&obj, "harness");
       let model = field_str(&obj, "model");
@@ -2176,6 +2187,11 @@ fn start_job_in_repo(
 /// registered) — the captured error is surfaced as a failed row instead of a silent "running".
 fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Option<i32>, stderr_tail: &str) {
   let now = now_unix_secs();
+  // The run process is gone, so nothing will poll its cancel marker again. The runner clears
+  // its own at teardown; this covers the cases where it never got the chance — killed
+  // outright, or already dead when the stop arrived — so the directory does not keep a file
+  // per stopped job. Unconditional: it runs even for a session that ended normally below.
+  crate::daemon::clear_session_cancel(session_id);
   let mut store = lock_store(store);
   let Some(s) = store.sessions.get_mut(session_id) else { return };
   if s.ended_at.is_some() {
@@ -2408,6 +2424,10 @@ fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
     s.client_connected = false;
     s.run_pid = None;
     s.last_seen_at = now;
+    // Tell the run process itself to give up, not just its containers. A route sleeping off
+    // a retry backoff cannot be reached by ending the session — it would wake and register a
+    // fresh attempt — and the SIGTERM below only helps when the PID is known and lands.
+    crate::daemon::request_session_cancel(&session_id);
     // A human's stop IS supervision — the supervisor must never resurrect a job the
     // user explicitly killed.
     if s.supervisor.supervised() && s.supervisor.restarted_as.is_none() {
@@ -3670,10 +3690,15 @@ mod tests {
         },
       );
     }
+    crate::daemon::clear_session_cancel("stop01");
     let (status, body, mutated) = session_stop_response(r#"{"session":"stop01"}"#, &store);
     assert_eq!(status, 200);
     assert!(mutated);
     assert!(body.contains(r#""ok":true"#));
+    // Stopping must reach the RUN PROCESS too, not just the store and the containers: a route
+    // sleeping off a retry backoff polls this marker, and without it would wake up and queue
+    // another attempt against a job the user already killed.
+    assert!(crate::daemon::session_cancelled("stop01"), "a stop asks the runner to give up");
     let guard = store.lock().unwrap();
     let session = guard.sessions.get("stop01").unwrap();
     assert!(session.ended_at.is_some());
@@ -3686,6 +3711,26 @@ mod tests {
     assert_eq!(status2, 200);
     assert!(!mutated2);
     assert!(body2.contains("already_ended"));
+
+    // A retry attempt the runner had ALREADY queued can reach the daemon after the stop —
+    // the run client posts asynchronously, so `proc/add` races `session/stop` and loses.
+    // Such a row must not be admitted as live work: an ended session has no future, and a
+    // `waiting` proc in it would keep the job reading as incomplete forever, with nothing
+    // left running to settle it.
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let admitted = handle_api_post(
+      "/api/v1/proc/add",
+      r#"{"session":"stop01","proc":1,"label":"opencode: doctor (retry)","kind":"skill","skill_name":"doctor","harness":"opencode","previous_attempt":0}"#,
+      &store,
+      &prune,
+    );
+    assert!(!admitted, "an ended session must not accept a new attempt row");
+    let guard = store.lock().unwrap();
+    let session = guard.sessions.get("stop01").unwrap();
+    assert!(!session.has_incomplete_procs(), "the stopped job must not go back to looking incomplete");
+    assert_eq!(session.lifecycle_status(200), SessionLifecycle::Cancelled);
+    drop(guard);
+    crate::daemon::clear_session_cancel("stop01");
   }
 
   #[test]
@@ -5383,9 +5428,13 @@ mod tests {
     let guard = store.lock().unwrap();
     assert!(guard.sessions.get("cliadd").unwrap().ended_at.is_some(), "the stuck CLI job is stopped");
     assert_eq!(guard.sessions.len(), 2, "a fresh job took its place");
+    drop(guard);
     std::fs::remove_file(&stub).ok();
     std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
+    // Restarting stops the old job, which asks its runner to give up. There is no runner in
+    // a unit test, so nothing would otherwise clear the marker this leaves behind.
+    crate::daemon::clear_session_cancel("cliadd");
   }
 
   #[test]
