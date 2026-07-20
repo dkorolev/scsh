@@ -273,6 +273,27 @@ scsh installskills --global
 cd ~/any/repo && scsh probe code-review && scsh run code-review
 ```
 
+**Pinning the base commit.** A skill that reads the committed range `origin/main..HEAD`
+inside its container — every code reviewer does — sees an `origin/main` that is whatever
+your **local** `main` points at. When local `main` is stale, or you want the range measured
+from some other commit entirely, pass **`scsh run … --base <ref>`**: the run clone's `main`
+(or `master`, when that is the repo's mainline) is repointed at `<ref>` for that run only,
+so the range is exactly base-vs-`HEAD`. Your own repository is never touched; nothing is
+fetched. The ref is resolved once, up front, so a typo fails the run instead of fifteen
+containers, and it is refused when the repo has neither a `main` nor a `master` branch or
+when you are standing on that branch (whose diff against itself is empty). A pinned base is
+part of the result cache key, and it survives a daemon job restart.
+
+`<ref>` is **any git revision this repository already has**: a commit sha (full or short), a
+branch, a tag (annotated tags are peeled to their commit), or a form like `HEAD~3`. Nothing
+is fetched, so `origin/main` is only as fresh as your last `git fetch`.
+
+```sh
+scsh run code-review --base origin/main      # the upstream tip, as of your last fetch
+scsh run code-review --base 5b8a5e7          # a specific commit
+scsh run --def gorgeous-pipeline --base v1.38.0   # a release tag
+```
+
 `scsh probe [profile]` is the runtime-free companion: it reports which of the selected skills'
 harness·model routes are actually runnable on this host (agent CLI installed and authenticated,
 opencode models listed), deduped across skills, and exits 0 iff at least one route is — so agents

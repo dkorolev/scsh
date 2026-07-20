@@ -1925,6 +1925,25 @@ pub fn push_transport_refs(root: &Path, bare: &Path) -> Result<(), String> {
   Ok(())
 }
 
+/// Repoint the mainline branch to `sha` in a run's **bind-mounted clone**, so the
+/// container's `origin/<branch>..HEAD` is exactly base-vs-HEAD. Runs after the clone has
+/// materialized its local branches; `--force` because the branch already exists there.
+pub fn pin_clone_base(clone: &Path, branch: &str, sha: &str) -> Result<(), String> {
+  git_ok(clone, &["branch", "--force", branch, sha])
+    .then_some(())
+    .ok_or_else(|| format!("could not point {branch} at the base {sha} in the run clone"))
+}
+
+/// Repoint the mainline branch to `sha` in a run's **bare transport repo**, the Apple
+/// Containers twin of [`pin_clone_base`]. Runs after [`push_transport_refs`] has
+/// mirrored the host's heads, so this overwrites the branch that push just created.
+pub fn pin_transport_base(bare: &Path, branch: &str, sha: &str) -> Result<(), String> {
+  let refname = format!("refs/heads/{branch}");
+  git_bare_ok(bare, &["update-ref", &refname, sha])
+    .then_some(())
+    .ok_or_else(|| format!("could not point {branch} at the base {sha} in {}", bare.display()))
+}
+
 /// Commit a single file into a bare repo's checked-out branch, on top of HEAD, so a container
 /// that clones the transport sees it in its working tree. Previously used to place a synthetic
 /// `SKILL.md` for harness-def runs; those now use [`crate::config::SkillDelivery::DirectPrompt`]
@@ -2044,7 +2063,7 @@ pub fn git_transport_entry(harness: &str, push_commits: bool, commit_name: &str,
      rm -rf /home/agent/.scsh-clone\n\
      cd {repo}\n\
      mkdir -p {repo}/tmp\n\
-     git rev-parse --verify origin/main >/dev/null 2>&1 || {{ echo \"scsh: origin/main missing after git transport clone (point local main at the review base)\" >&2; exit 1; }}\n\
+     git rev-parse --verify origin/main >/dev/null 2>&1 || {{ echo \"scsh: origin/main missing after git transport clone (point local main at the base commit)\" >&2; exit 1; }}\n\
      cur=$(git rev-parse --abbrev-ref HEAD)\n\
      for ref in $(git for-each-ref --format='%(refname:short)' refs/remotes/origin); do\n\
        branch=${{ref#origin/}}\n\
@@ -2120,6 +2139,22 @@ pub fn local_branches_to_create(for_each_ref: &str, current_branch: &str) -> Vec
     }
   }
   out
+}
+
+/// The mainline branch names scsh recognizes, in preference order. Kept in one place so the
+/// base a run pins and the workload `stats` measures can never disagree about which
+/// branch is "main".
+pub const MAINLINE_BRANCHES: [&str; 2] = ["main", "master"];
+
+/// The branch a code review diffs against, given the lines of
+/// `git for-each-ref --format='%(refname:short)' refs/heads`: `main` when the repository has
+/// it, otherwise `master`. `--base` repoints exactly this branch inside the run clone,
+/// so a reviewer's in-container `origin/main..HEAD` becomes base-vs-HEAD. Returns `None` when
+/// the repository calls its mainline something else — the caller then refuses the run with an
+/// actionable message instead of silently reviewing against the wrong base.
+pub fn base_branch(for_each_ref: &str) -> Option<&'static str> {
+  let has = |name: &str| for_each_ref.lines().any(|l| l.trim() == name);
+  MAINLINE_BRANCHES.into_iter().find(|name| has(name))
 }
 
 #[cfg(test)]
@@ -3643,6 +3678,62 @@ TAG
     assert_eq!(local_branches_to_create(refs, "main"), vec!["feature-x", "release"]);
     // nothing to create when only HEAD and the current branch exist.
     assert!(local_branches_to_create("origin/HEAD\norigin/main\n", "main").is_empty());
+  }
+
+  #[test]
+  fn base_branch_prefers_main_then_master() {
+    assert_eq!(base_branch("feature\nmain\nmaster\n"), Some("main"));
+    assert_eq!(base_branch("master\nfeature\n"), Some("master"));
+    // Neither mainline name present: the caller must refuse rather than guess a base.
+    assert_eq!(base_branch("trunk\ndevelop\n"), None);
+    assert_eq!(base_branch(""), None);
+    // A branch whose name merely CONTAINS a mainline name is not the mainline.
+    assert_eq!(base_branch("mainline\nmastermind\n"), None);
+  }
+
+  #[test]
+  fn pinning_the_base_moves_only_the_mainline_branch() {
+    let tmp = std::env::temp_dir().join(format!("scsh-run-base-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let root = tmp.join("root");
+    let bare = tmp.join("bare.git");
+    let git = |dir: &Path, args: &[&str]| {
+      crate::git_command().arg("-C").arg(dir).args(args).status().unwrap();
+    };
+    crate::git_command().args(["init", "-q"]).arg(&root).status().unwrap();
+    git(&root, &["config", "user.email", "reviewer@example.invalid"]);
+    git(&root, &["config", "user.name", "reviewer"]);
+    // main: base commit, then a commit that must NOT be part of the reviewed range.
+    std::fs::write(root.join("f"), "base").unwrap();
+    git(&root, &["add", "f"]);
+    git(&root, &["commit", "-qm", "base"]);
+    git(&root, &["branch", "-M", "main"]);
+    let base_sha = git_stdout(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    std::fs::write(root.join("f"), "moved on").unwrap();
+    git(&root, &["add", "f"]);
+    git(&root, &["commit", "-qm", "main moved on"]);
+    let moved_sha = git_stdout(&root, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    git(&root, &["checkout", "-q", "-b", "feature", &base_sha]);
+    std::fs::write(root.join("f"), "feature").unwrap();
+    git(&root, &["add", "f"]);
+    git(&root, &["commit", "-qm", "feature"]);
+
+    // Bind-mount transport: the clone's main is repointed, the caller's is untouched.
+    let clone = tmp.join("clone");
+    crate::git_command().args(["clone", "-q"]).arg(&root).arg(&clone).status().unwrap();
+    git(&clone, &["branch", "--force", "main", "origin/main"]);
+    pin_clone_base(&clone, "main", &base_sha).unwrap();
+    assert_eq!(git_stdout(&clone, &["rev-parse", "main"]).unwrap().trim(), base_sha);
+    assert_eq!(git_stdout(&root, &["rev-parse", "main"]).unwrap().trim(), moved_sha, "caller repo must not move");
+
+    // Apple Containers transport: the pushed bare gets the same pinned mainline.
+    push_transport_refs(&root, &bare).unwrap();
+    assert_eq!(git_stdout(&bare, &["rev-parse", "main"]).unwrap().trim(), moved_sha, "push mirrors the host first");
+    pin_transport_base(&bare, "main", &base_sha).unwrap();
+    assert_eq!(git_stdout(&bare, &["rev-parse", "main"]).unwrap().trim(), base_sha);
+
+    let _ = std::fs::remove_dir_all(&tmp);
   }
 
   #[test]

@@ -2000,7 +2000,9 @@ fn jobs_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, b
     _ => return (400, err_body("give a repository path"), false),
   };
   let retries = field_num(&obj, "retries").map(|n| n as u32).unwrap_or(crate::daemon::model::DEFAULT_JOB_RETRIES);
-  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, retries, store)
+  // Optional: pin what this job reviews against, exactly like `scsh run --base <ref>`.
+  let base = field_str(&obj, "base").map(|r| r.trim().to_string()).filter(|r| !r.is_empty());
+  start_job_in_repo(&repo_in, def_name, profile_name, read_params(&obj), None, base, retries, store)
 }
 
 /// A validated, ready-to-spawn job: the repo root, what to run, and the planned tasks.
@@ -2075,9 +2077,10 @@ fn plan_job_request(
 /// The shared start path of `jobs/start` and `jobs/restart`: validate the repo, plan the
 /// tasks, enforce one job per repo, spawn the run, pre-create its session, and persist the
 /// start recipe so the job can later be force-restarted.
+#[allow(clippy::too_many_arguments)]
 fn start_job_in_repo(
   repo_in: &str, def_name: Option<String>, profile_name: Option<String>, params: Vec<(String, String)>,
-  resume_from: Option<String>, retries: u32, store: &Arc<Mutex<Store>>,
+  resume_from: Option<String>, base: Option<String>, retries: u32, store: &Arc<Mutex<Store>>,
 ) -> (u16, String, bool) {
   let PlannedJob { root, run_name, planned, kind, workflow, run_args } =
     match plan_job_request(repo_in, &def_name, &profile_name, &params) {
@@ -2111,6 +2114,9 @@ fn start_job_in_repo(
   if let Some(old) = &resume_from {
     cmd.args(["--resume-from", old]);
   }
+  if let Some(base) = &base {
+    cmd.args(["--base", base]);
+  }
   cmd.args(["--session", &session_id]);
   cmd.env(super::paths::PORT_ENV, port.to_string());
   cmd.env("NO_COLOR", "1"); // plain stderr, so a captured error reads cleanly on the session page
@@ -2134,7 +2140,7 @@ fn start_job_in_repo(
         let code = child.wait().ok().and_then(|s| s.code());
         reconcile_finished_job(&store_reap, &sid, code, &tail);
       });
-      write_start_recipe(&session_id, def_name.as_deref(), profile_name.as_deref(), &params);
+      write_start_recipe(&session_id, def_name.as_deref(), profile_name.as_deref(), &params, base.as_deref());
       let mut store = lock_store(store);
       store.touch(now);
       store.insert_session(
@@ -2299,14 +2305,14 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
   };
   // The recipe: what jobs/start recorded, or — for a CLI-started run — the name alone,
   // classified def-vs-profile with the same precedence a fresh start would use.
-  let (def, profile, params) = read_start_recipe(&session_id).unwrap_or_else(|| {
+  let (def, profile, params, base) = read_start_recipe(&session_id).unwrap_or_else(|| {
     let is_def = crate::git_root_of(std::path::Path::new(&repo))
       .map(|root| crate::harness_def::discover(&root).find(&name).is_some())
       .unwrap_or(false);
     if is_def {
-      (Some(name.clone()), None, Vec::new())
+      (Some(name.clone()), None, Vec::new(), None)
     } else {
-      (None, Some(name.clone()), Vec::new())
+      (None, Some(name.clone()), Vec::new(), None)
     }
   });
   // Refuse a doomed restart BEFORE stopping anything: if the respawn cannot start (repo
@@ -2325,7 +2331,7 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
     return (status, out, false);
   }
   let (status, out, mutated) =
-    start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), retries, store);
+    start_job_in_repo(&repo, def, profile, params, resume.then(|| session_id.clone()), base, retries, store);
   // Link the chain: the old session records its replacement, and the fresh session
   // inherits the supervisor state (attempt-incremented) so restart budgets and the
   // job-level breaker span the whole chain rather than resetting per restart.
@@ -2829,7 +2835,7 @@ fn session_start_recipe_path(session_id: &str) -> std::path::PathBuf {
 /// workflow run writes its own (def name + env-resolved params), so every job restarts with
 /// the params it actually ran with.
 pub(crate) fn write_start_recipe(
-  session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)],
+  session_id: &str, def: Option<&str>, profile: Option<&str>, params: &[(String, String)], base: Option<&str>,
 ) {
   let path = session_start_recipe_path(session_id);
   let Some(dir) = path.parent() else { return };
@@ -2841,12 +2847,15 @@ pub(crate) fn write_start_recipe(
     (_, Some(p)) => format!("\"profile\":{}", quote(p)),
     _ => return,
   };
+  // The pinned base is part of WHAT the job ran against, so a restart that dropped it
+  // would quietly re-run against a different base. Absent for the ordinary unpinned run.
+  let base = base.map(|r| format!(",\"base\":{}", quote(r))).unwrap_or_default();
   let params: Vec<String> = params.iter().map(|(k, v)| format!("{}:{}", quote(k), quote(v))).collect();
-  let _ = std::fs::write(&path, format!("{{{what},\"params\":{{{}}}}}", params.join(",")));
+  let _ = std::fs::write(&path, format!("{{{what},\"params\":{{{}}}{base}}}", params.join(",")));
 }
 
-/// A persisted start recipe: `(def, profile, params)`.
-type StartRecipe = (Option<String>, Option<String>, Vec<(String, String)>);
+/// A persisted start recipe: `(def, profile, params, base)`.
+type StartRecipe = (Option<String>, Option<String>, Vec<(String, String)>, Option<String>);
 
 /// The recipe from a session's persisted `start.json`, or `None` when the session has no
 /// (readable) recipe.
@@ -2859,7 +2868,8 @@ fn read_start_recipe(session_id: &str) -> Option<StartRecipe> {
     return None;
   }
   let params = read_params(&obj);
-  Some((def, profile, params))
+  let base = field_str(&obj, "base").filter(|s| !s.is_empty());
+  Some((def, profile, params, base))
 }
 
 /// The routes a named skill profile would run in `root`, mirroring `scsh run <profile>`'s
