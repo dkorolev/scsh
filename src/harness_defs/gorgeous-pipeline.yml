@@ -7,7 +7,7 @@
 # decide -> fix -> journal -> 15 reviewers -> collect. `decide`, the first loop step, can
 # break before any fix when the previous batch passed; otherwise it requests changes and
 # another batch runs. Opus 4.8 owns orchestration (prepare, decide, collect), the fix step,
-# and journaling; Opus 4.8, Codex Spark (ChatGPT), and Cursor Auto independently run each of
+# and journaling; Opus 4.8, Codex Terra, and Cursor Auto independently run each of
 # the conventions, justification, reviewability, sanity, and testing profiles — the bundled
 # route standard. The bar: 15/15 routes succeed, every grade is excellent or good,
 # excellent outnumbers good, and the mean is at least 4.5. Nothing is pushed: fixes come
@@ -59,11 +59,11 @@ steps:
       comments:
         type: string_list
 
-  initial_conventions_spark:
+  initial_conventions_terra:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: conventions-reviewer
     output:
@@ -99,11 +99,11 @@ steps:
       comments:
         type: string_list
 
-  initial_justification_spark:
+  initial_justification_terra:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: justification-reviewer
     output:
@@ -139,11 +139,11 @@ steps:
       comments:
         type: string_list
 
-  initial_reviewability_spark:
+  initial_reviewability_terra:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: reviewability-reviewer
     output:
@@ -179,11 +179,11 @@ steps:
       comments:
         type: string_list
 
-  initial_sanity_spark:
+  initial_sanity_terra:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: sanity-reviewer
     output:
@@ -219,11 +219,11 @@ steps:
       comments:
         type: string_list
 
-  initial_testing_spark:
+  initial_testing_terra:
     needs: prepare
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: testing-reviewer
     output:
@@ -248,42 +248,42 @@ steps:
 
   decide:
     needs: |-
-      initial_conventions_opus, initial_conventions_spark, initial_conventions_cursor,
-      initial_justification_opus, initial_justification_spark, initial_justification_cursor,
-      initial_reviewability_opus, initial_reviewability_spark, initial_reviewability_cursor,
-      initial_sanity_opus, initial_sanity_spark, initial_sanity_cursor,
-      initial_testing_opus, initial_testing_spark, initial_testing_cursor
+      initial_conventions_opus, initial_conventions_terra, initial_conventions_cursor,
+      initial_justification_opus, initial_justification_terra, initial_justification_cursor,
+      initial_reviewability_opus, initial_reviewability_terra, initial_reviewability_cursor,
+      initial_sanity_opus, initial_sanity_terra, initial_sanity_cursor,
+      initial_testing_opus, initial_testing_terra, initial_testing_cursor
     inputs:
       PREVIOUS_APPROVED: collect.approved
       PREVIOUS_FEEDBACK: collect.feedback
       INITIAL_CONVENTIONS_OPUS: initial_conventions_opus.grade
       INITIAL_CONVENTIONS_OPUS_COMMENTS: initial_conventions_opus.comments
-      INITIAL_CONVENTIONS_SPARK: initial_conventions_spark.grade
-      INITIAL_CONVENTIONS_SPARK_COMMENTS: initial_conventions_spark.comments
+      INITIAL_CONVENTIONS_TERRA: initial_conventions_terra.grade
+      INITIAL_CONVENTIONS_TERRA_COMMENTS: initial_conventions_terra.comments
       INITIAL_CONVENTIONS_CURSOR: initial_conventions_cursor.grade
       INITIAL_CONVENTIONS_CURSOR_COMMENTS: initial_conventions_cursor.comments
       INITIAL_JUSTIFICATION_OPUS: initial_justification_opus.grade
       INITIAL_JUSTIFICATION_OPUS_COMMENTS: initial_justification_opus.comments
-      INITIAL_JUSTIFICATION_SPARK: initial_justification_spark.grade
-      INITIAL_JUSTIFICATION_SPARK_COMMENTS: initial_justification_spark.comments
+      INITIAL_JUSTIFICATION_TERRA: initial_justification_terra.grade
+      INITIAL_JUSTIFICATION_TERRA_COMMENTS: initial_justification_terra.comments
       INITIAL_JUSTIFICATION_CURSOR: initial_justification_cursor.grade
       INITIAL_JUSTIFICATION_CURSOR_COMMENTS: initial_justification_cursor.comments
       INITIAL_REVIEWABILITY_OPUS: initial_reviewability_opus.grade
       INITIAL_REVIEWABILITY_OPUS_COMMENTS: initial_reviewability_opus.comments
-      INITIAL_REVIEWABILITY_SPARK: initial_reviewability_spark.grade
-      INITIAL_REVIEWABILITY_SPARK_COMMENTS: initial_reviewability_spark.comments
+      INITIAL_REVIEWABILITY_TERRA: initial_reviewability_terra.grade
+      INITIAL_REVIEWABILITY_TERRA_COMMENTS: initial_reviewability_terra.comments
       INITIAL_REVIEWABILITY_CURSOR: initial_reviewability_cursor.grade
       INITIAL_REVIEWABILITY_CURSOR_COMMENTS: initial_reviewability_cursor.comments
       INITIAL_SANITY_OPUS: initial_sanity_opus.grade
       INITIAL_SANITY_OPUS_COMMENTS: initial_sanity_opus.comments
-      INITIAL_SANITY_SPARK: initial_sanity_spark.grade
-      INITIAL_SANITY_SPARK_COMMENTS: initial_sanity_spark.comments
+      INITIAL_SANITY_TERRA: initial_sanity_terra.grade
+      INITIAL_SANITY_TERRA_COMMENTS: initial_sanity_terra.comments
       INITIAL_SANITY_CURSOR: initial_sanity_cursor.grade
       INITIAL_SANITY_CURSOR_COMMENTS: initial_sanity_cursor.comments
       INITIAL_TESTING_OPUS: initial_testing_opus.grade
       INITIAL_TESTING_OPUS_COMMENTS: initial_testing_opus.comments
-      INITIAL_TESTING_SPARK: initial_testing_spark.grade
-      INITIAL_TESTING_SPARK_COMMENTS: initial_testing_spark.comments
+      INITIAL_TESTING_TERRA: initial_testing_terra.grade
+      INITIAL_TESTING_TERRA_COMMENTS: initial_testing_terra.comments
       INITIAL_TESTING_CURSOR: initial_testing_cursor.grade
       INITIAL_TESTING_CURSOR_COMMENTS: initial_testing_cursor.comments
     agent:
@@ -446,11 +446,11 @@ steps:
         type: string_list
     commits: false
 
-  review_conventions_spark:
+  review_conventions_terra:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: conventions-reviewer
     output:
@@ -489,11 +489,11 @@ steps:
         type: string_list
     commits: false
 
-  review_justification_spark:
+  review_justification_terra:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: justification-reviewer
     output:
@@ -532,11 +532,11 @@ steps:
         type: string_list
     commits: false
 
-  review_reviewability_spark:
+  review_reviewability_terra:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: reviewability-reviewer
     output:
@@ -575,11 +575,11 @@ steps:
         type: string_list
     commits: false
 
-  review_sanity_spark:
+  review_sanity_terra:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: sanity-reviewer
     output:
@@ -618,11 +618,11 @@ steps:
         type: string_list
     commits: false
 
-  review_testing_spark:
+  review_testing_terra:
     needs: journal
     agent:
       harness: codex
-      model: gpt-5.6-spark
+      model: gpt-5.6-terra
       effort: high
     skill: testing-reviewer
     output:
@@ -649,11 +649,11 @@ steps:
 
   collect:
     needs: |-
-      review_conventions_opus, review_conventions_spark, review_conventions_cursor,
-      review_justification_opus, review_justification_spark, review_justification_cursor,
-      review_reviewability_opus, review_reviewability_spark, review_reviewability_cursor,
-      review_sanity_opus, review_sanity_spark, review_sanity_cursor,
-      review_testing_opus, review_testing_spark, review_testing_cursor
+      review_conventions_opus, review_conventions_terra, review_conventions_cursor,
+      review_justification_opus, review_justification_terra, review_justification_cursor,
+      review_reviewability_opus, review_reviewability_terra, review_reviewability_cursor,
+      review_sanity_opus, review_sanity_terra, review_sanity_cursor,
+      review_testing_opus, review_testing_terra, review_testing_cursor
     do-while: decide
     agent:
       harness: claude
@@ -661,38 +661,38 @@ steps:
     inputs:
       GRADE_CONVENTIONS_OPUS: review_conventions_opus.grade
       COMMENTS_CONVENTIONS_OPUS: review_conventions_opus.comments
-      GRADE_CONVENTIONS_SPARK: review_conventions_spark.grade
-      COMMENTS_CONVENTIONS_SPARK: review_conventions_spark.comments
+      GRADE_CONVENTIONS_TERRA: review_conventions_terra.grade
+      COMMENTS_CONVENTIONS_TERRA: review_conventions_terra.comments
       GRADE_CONVENTIONS_CURSOR: review_conventions_cursor.grade
       COMMENTS_CONVENTIONS_CURSOR: review_conventions_cursor.comments
       GRADE_JUSTIFICATION_OPUS: review_justification_opus.grade
       COMMENTS_JUSTIFICATION_OPUS: review_justification_opus.comments
-      GRADE_JUSTIFICATION_SPARK: review_justification_spark.grade
-      COMMENTS_JUSTIFICATION_SPARK: review_justification_spark.comments
+      GRADE_JUSTIFICATION_TERRA: review_justification_terra.grade
+      COMMENTS_JUSTIFICATION_TERRA: review_justification_terra.comments
       GRADE_JUSTIFICATION_CURSOR: review_justification_cursor.grade
       COMMENTS_JUSTIFICATION_CURSOR: review_justification_cursor.comments
       GRADE_REVIEWABILITY_OPUS: review_reviewability_opus.grade
       COMMENTS_REVIEWABILITY_OPUS: review_reviewability_opus.comments
-      GRADE_REVIEWABILITY_SPARK: review_reviewability_spark.grade
-      COMMENTS_REVIEWABILITY_SPARK: review_reviewability_spark.comments
+      GRADE_REVIEWABILITY_TERRA: review_reviewability_terra.grade
+      COMMENTS_REVIEWABILITY_TERRA: review_reviewability_terra.comments
       GRADE_REVIEWABILITY_CURSOR: review_reviewability_cursor.grade
       COMMENTS_REVIEWABILITY_CURSOR: review_reviewability_cursor.comments
       GRADE_SANITY_OPUS: review_sanity_opus.grade
       COMMENTS_SANITY_OPUS: review_sanity_opus.comments
-      GRADE_SANITY_SPARK: review_sanity_spark.grade
-      COMMENTS_SANITY_SPARK: review_sanity_spark.comments
+      GRADE_SANITY_TERRA: review_sanity_terra.grade
+      COMMENTS_SANITY_TERRA: review_sanity_terra.comments
       GRADE_SANITY_CURSOR: review_sanity_cursor.grade
       COMMENTS_SANITY_CURSOR: review_sanity_cursor.comments
       GRADE_TESTING_OPUS: review_testing_opus.grade
       COMMENTS_TESTING_OPUS: review_testing_opus.comments
-      GRADE_TESTING_SPARK: review_testing_spark.grade
-      COMMENTS_TESTING_SPARK: review_testing_spark.comments
+      GRADE_TESTING_TERRA: review_testing_terra.grade
+      COMMENTS_TESTING_TERRA: review_testing_terra.comments
       GRADE_TESTING_CURSOR: review_testing_cursor.grade
       COMMENTS_TESTING_CURSOR: review_testing_cursor.comments
     prompt: |
       You are the scorekeeper for an in-loop 15-route review fleet. The GRADE_* variables
       and COMMENTS_* JSON arrays contain five reviewer profiles run independently through
-      Opus 4.8, Codex Spark, and Cursor Auto. Scores: excellent=5, good=4, average=3,
+      Opus 4.8, Codex Terra, and Cursor Auto. Scores: excellent=5, good=4, average=3,
       poor=2. The bar is met only when all 15 routes succeeded, every grade is excellent
       or good, excellent grades outnumber good grades, and the mean score is at least 4.5.
       `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any reviewer suggestion that violates this invariant.

@@ -1760,7 +1760,7 @@ mod tests {
     assert_eq!((initial.len(), reviewers.len()), (15, 15));
     for batch in [&initial, &reviewers] {
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_opus")).count(), 5);
-      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_spark")).count(), 5);
+      assert_eq!(batch.iter().filter(|r| r.id.ends_with("_terra")).count(), 5);
       assert_eq!(batch.iter().filter(|r| r.id.ends_with("_cursor")).count(), 5);
     }
     let mut actual_reviewer_skills = std::collections::BTreeSet::new();
@@ -1788,9 +1788,9 @@ mod tests {
         "{} explicitly supports the lossless workflow adapter",
         r.id
       );
-      if r.id.ends_with("_spark") {
+      if r.id.ends_with("_terra") {
         assert_eq!(r.agent.harness, crate::config::Harness::Codex);
-        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-spark"));
+        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-terra"));
         assert_eq!(r.agent.effort.as_deref(), Some("high"));
       }
     }
