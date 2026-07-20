@@ -28,7 +28,7 @@ git -C "$REPO" commit -q --allow-empty -m init
 
 ## Lifecycle rules
 
-The daemon is the source of truth for job lifecycle; the browser does not invent a second outcome from a shorter timer.
+The daemon is the source of truth for job lifecycle; the browser does not invent a second outcome from a shorter timer. These are the job-level rules; the per-process states they are derived from — and every path that settles one — are in [`DAEMON-PROCS.md`](DAEMON-PROCS.md).
 
 - A registered job is `running` while it has up to 30 seconds to start its first process.
 - If no process starts within 30 seconds, the job is `failed`.

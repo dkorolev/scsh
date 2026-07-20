@@ -86,6 +86,36 @@ pub fn consume_proc_restart(session_id: &str, proc_index: usize) -> bool {
   std::fs::remove_file(proc_restart_marker(session_id, proc_index)).is_ok()
 }
 
+/// A marker asking the owning `scsh run` to abandon the whole job: the daemon writes it when
+/// a human stops the session, and the runner checks it before waiting out — or acting on — a
+/// retry backoff. The same cross-process file trick as [`proc_restart_marker`], and for the
+/// same reason: there is no daemon→runner channel. Without it, cancellation rides entirely on
+/// SIGTERM reaching the run process, and a route sleeping off a backoff keeps retrying into a
+/// session the daemon has already ended.
+pub fn session_cancel_marker(session_id: &str) -> PathBuf {
+  daemon_dir().join("cancel-requests").join(session_id)
+}
+
+/// Daemon side: record that this job was stopped. Best-effort — a failed write only means
+/// cancellation falls back to the signal path, exactly as before this marker existed.
+pub fn request_session_cancel(session_id: &str) -> bool {
+  let path = session_cancel_marker(session_id);
+  path.parent().is_some_and(|dir| std::fs::create_dir_all(dir).is_ok()) && std::fs::write(&path, b"").is_ok()
+}
+
+/// Runner side: has this job been stopped? A PEEK, not a consume — every route of a fleet
+/// must see it, so the marker outlives the first reader and is cleared once by
+/// [`clear_session_cancel`] when the run tears down.
+pub fn session_cancelled(session_id: &str) -> bool {
+  !session_id.is_empty() && session_cancel_marker(session_id).exists()
+}
+
+/// Runner side: drop this job's cancel marker at teardown, so the directory does not
+/// accumulate one file per stopped run.
+pub fn clear_session_cancel(session_id: &str) {
+  let _ = std::fs::remove_file(session_cancel_marker(session_id));
+}
+
 /// True when TCP connects to the daemon's localhost port within a short timeout.
 pub fn daemon_port_reachable(port: u16) -> bool {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().expect("valid localhost address");
@@ -282,5 +312,28 @@ mod tests {
   fn session_url_format() {
     let u = session_url(7274, "abcdef");
     assert_eq!(u, "http://127.0.0.1:7274/job/abcdef");
+  }
+
+  #[test]
+  fn a_session_cancel_marker_is_peeked_by_every_route_and_cleared_once() {
+    let id = format!("cancel-test-{}", std::process::id());
+    clear_session_cancel(&id);
+    assert!(!session_cancelled(&id), "no marker, no cancellation");
+
+    assert!(request_session_cancel(&id));
+    // A PEEK, not a consume: a fleet's routes each poll this independently, so the marker
+    // must survive every reader — a consuming check would cancel exactly one route.
+    assert!(session_cancelled(&id));
+    assert!(session_cancelled(&id));
+    assert!(session_cancelled(&id));
+
+    clear_session_cancel(&id);
+    assert!(!session_cancelled(&id), "teardown clears it");
+    // Clearing twice is fine — teardown can run after an already-cleaned run.
+    clear_session_cancel(&id);
+
+    // An empty session id never reads as cancelled: a run with no daemon client must not
+    // mistake the cancel-requests directory itself for a stop request.
+    assert!(!session_cancelled(""));
   }
 }

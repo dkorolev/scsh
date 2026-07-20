@@ -13,7 +13,9 @@ reading the request — only clients on the host itself are ever served.
 Connections are HTTP/1.1 **keep-alive** — browsers, the CLI's event poster, and the API all
 reuse them instead of burning a TCP connection (and a TIME_WAIT socket) per request. The
 full connection contract, including the WebSocket exception and the client's single safe
-retry, is in [`DAEMON-KEEPALIVE.md`](DAEMON-KEEPALIVE.md).
+retry, is in [`DAEMON-KEEPALIVE.md`](DAEMON-KEEPALIVE.md). The proc state machine the job
+pages render — what each state means, who may set it, every path that makes one terminal, and
+how a job's own status is derived from them — is in [`DAEMON-PROCS.md`](DAEMON-PROCS.md).
 
 ## Commands
 
