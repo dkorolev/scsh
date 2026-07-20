@@ -51,6 +51,20 @@ fn scsh(dir: &Path, args: &[&str]) -> Run {
   scsh_env(dir, args, &[])
 }
 
+/// One free port for this test binary's whole run, so every spawned `scsh` shares one
+/// throwaway ephemeral daemon instead of the developer's. Bound once and released
+/// immediately: the daemon that starts here is the only thing that will want it.
+fn cli_tests_daemon_port() -> u16 {
+  use std::sync::OnceLock;
+  static PORT: OnceLock<u16> = OnceLock::new();
+  *PORT.get_or_init(|| {
+    std::net::TcpListener::bind("127.0.0.1:0")
+      .and_then(|l| l.local_addr())
+      .map(|a| a.port())
+      .expect("a free loopback port for the tests' own daemon")
+  })
+}
+
 /// Like [`scsh`], with extra environment variables — the global-install tests pin `HOME`
 /// and `SCSH_HOME` to throwaway dirs so they never touch the developer's real ~/.scsh.
 fn scsh_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
@@ -62,6 +76,14 @@ fn scsh_env(dir: &Path, args: &[&str], envs: &[(&str, &str)]) -> Run {
   // Tests that exercise the global manifest pass their own SCSH_HOME.
   if !envs.iter().any(|(k, _)| *k == "SCSH_HOME") {
     cmd.env("SCSH_HOME", std::env::temp_dir().join("scsh-cli-tests-home"));
+  }
+  // …and off the developer's DAEMON. `SCSH_HOME` moves the store directory but not the
+  // port, so a test that reaches `scsh run` used to register its throwaway session with
+  // whatever daemon owned 7274 — the developer's — and its temp-repo jobs then crowded
+  // real work out of the Jobs tab. Tests get their own port (and so their own ephemeral
+  // daemon), which also keeps concurrent test binaries from sharing one.
+  if !envs.iter().any(|(k, _)| *k == "SCSH_DAEMON_PORT") {
+    cmd.env("SCSH_DAEMON_PORT", cli_tests_daemon_port().to_string());
   }
   for (k, v) in envs {
     cmd.env(k, v);
