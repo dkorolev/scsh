@@ -267,6 +267,7 @@ separately. Model probes run only when you click <strong>Test</strong> (real pro
 <a href="#" id="setup-refresh">refresh</a>
 <button type="button" class="chamfer btn btn--cyan btn--sm" id="setup-test-all" title="One primary smoke model per ready harness"><span>Test all defaults</span></button>
 </div>
+<div id="setup-engine" class="chamfer blockers" hidden></div>
 <p id="setup-summary" class="setup-summary dim">checking agents…</p>
 <div id="setup-cards" class="setup-cards">{cards}</div>
 </div>

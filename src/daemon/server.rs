@@ -1528,6 +1528,16 @@ fn images_json(runtime_override: Option<&str>) -> String {
     },
   };
   let available_json: Vec<String> = available.iter().map(|r| quote(r)).collect();
+  // Installed is not running. With the engine down every inspect fails, so report the
+  // engine as the problem rather than a full inventory of "missing" images.
+  if !crate::ui::engine::is_running(&rt_name) {
+    let name = crate::ui::engine::display_name(&rt_name);
+    let msg = match crate::ui::engine::start_command(&rt_name, crate::ui::Os::current()) {
+      Some(cmd) => format!("{name} is installed but not running — start it with `{cmd}`, then refresh"),
+      None => format!("{name} is installed but not running"),
+    };
+    return format!("{{ \"error\": {} }}", quote(&msg));
+  }
   let rows: Vec<String> = crate::runtime::image_statuses(&rt_name)
     .iter()
     .map(|s| {
