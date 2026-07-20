@@ -978,6 +978,26 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(html.contains("image-action-cell"), "skeleton rows reserve the per-row action cell");
 }
 
+/// An installed-but-stopped container engine is a distinct state from "no runtime found",
+/// and the Setup tab has to name it — with the command that fixes it — instead of showing
+/// five red "Needs build" cards over buttons that cannot work.
+#[test]
+fn setup_panel_surfaces_a_stopped_container_engine() {
+  let store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let html = super::index_page(&store);
+  assert!(html.contains("id=\"setup-engine\""), "banner mount point above the cards");
+  assert!(html.contains("id=\"setup-engine\" class=\"chamfer blockers\" hidden"), "starts hidden");
+  let js = live_client_js();
+  assert!(js.contains("function renderEngineBanner"), "banner renderer");
+  assert!(js.contains("is installed but not running"), "wording matches the CLI preflight");
+  assert!(js.contains("start_command"), "banner shows the exact command to type");
+  assert!(js.contains("setup-engine-retry"), "banner offers a refresh once started");
+  assert!(js.contains("'blocked'"), "cards drop their actions when the engine is down");
+  assert!(js.contains("readiness unknown until the engine starts"), "summary stays honest");
+  // The stopped state must never render as a red "missing"/"needs build" claim.
+  assert!(js.contains("session-status cancelled\"><span>unknown"), "unknown image badge is not red");
+}
+
 #[test]
 fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   let store = Store::new(DaemonMode::Persistent, 7274, 1);

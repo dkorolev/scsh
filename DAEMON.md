@@ -292,7 +292,9 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   Descriptive only — scsh reports the numbers and leaves any approval bar to the caller
 - `GET /api/v1/images` — JSON status of every scsh image (base + one per harness) on the
   detected runtime: exists, up-to-date (fingerprint match), created, size (created/size are
-  `null` on Apple `container`, which has no inspect formatter)
+  `null` on Apple `container`, which has no inspect formatter). An engine that is installed
+  but not running degrades to `{"error": "…is installed but not running — start it with
+  `<cmd>`, then refresh"}` rather than an inventory of images it could not inspect
 - `POST /api/v1/images/build` — body `{"harnesses": [name…], "rebuild_base": bool, "force":
   bool}` (all optional; no harnesses = all). Spawns a detached `scsh build-images --session
   <id>`, pre-creates that session, and returns `{"ok":true,"session":id}` so the caller can
@@ -535,6 +537,45 @@ the same view a run's build rows get. Builds are TUI-first: each image build run
 a host `asciinema` PTY so Docker BuildKit / Apple `container` show their native progress,
 and the session page embeds the cast player (identical to a skill recording).
 
+## A stopped container engine
+
+Runtime detection is a `which` on `$PATH`: it answers *is the binary installed*, not *is the
+engine up*. Those come apart routinely — Apple `container` needs `container system start`
+after a reboot, Docker Desktop needs launching, a Podman machine needs starting.
+
+`GET /api/v1/setup` therefore probes liveness (the same `ui::engine::is_running` check the
+CLI runs before every `scsh run`) and reports it:
+
+```json
+"engine": { "running": false, "runtime": "container",
+            "name": "Apple container", "start_command": "container system start" }
+```
+
+When the engine is down the Setup tab shows one banner above the cards — *"Apple container
+is installed but not running. Start it with `container system start`, then refresh"* — and
+everything below it goes honest rather than alarming:
+
+- every harness card reads **Engine stopped** (`overall: "unknown"`), not **Needs build**;
+- image rows stay listed but read **unknown**, and their checkboxes and Build buttons are
+  disabled, as are **Test all defaults** and the bulk build buttons;
+- the summary counters stay at zero and say *readiness unknown until the engine starts*.
+
+This matters because the naive behavior is actively misleading. With the engine down every
+`image inspect` fails, so inspecting for real reports all six images as `exists: false` —
+which renders as a red **Needs build** badge on every card over a **Build** button that
+cannot possibly succeed. One unreachable engine is the truth; six missing images is a
+fabrication. So scsh skips the inspects entirely when the engine is down.
+
+scsh does **not** start the engine for you. Starting a machine-level service as a side
+effect of loading a browser tab is a surprise, it races anything that stopped the engine
+deliberately, and it can hang or prompt in ways a page cannot surface. The failure is cheap
+to fix once it is named — naming it is the whole fix.
+
+The advice is runtime-generic: Docker gets `open -a Docker` (macOS) or `sudo systemctl start
+docker` (Linux), Podman gets `podman machine start`. An `SCSH_RUNTIME` scsh has no canned
+advice for reports `"start_command": null` and the banner drops to *"Start it, then
+refresh"* rather than guessing a command.
+
 ## Assumptions
 
 - **Assumed:** Port 7274 is acceptable as the default (`scsh` keypad mnemonic); override
@@ -545,6 +586,11 @@ and the session page embeds the cast player (identical to a skill recording).
   nonce style.
 - **Assumed:** The daemon is best-effort — if it cannot start, `scsh run` still proceeds
   without the browser URL.
+- **Assumed:** A user whose container engine is stopped would rather be told the command
+  than have the daemon run it for them. See *A stopped container engine* above.
+- **Assumed:** One liveness probe per Setup fetch is cheap enough. `GET /api/v1/setup` is
+  event-driven (first paint, tab switch, runtime switch, explicit refresh, post-build) and
+  never polled on a timer, so this adds one short-lived process per user action.
 
 ## Resetting the store
 

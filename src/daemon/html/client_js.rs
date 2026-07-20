@@ -2851,6 +2851,8 @@ function initProcKills(root) {
 }
 // ---- Setup tab (index page only) ----
 function imageStatusBadge(img) {
+  // 'unknown' means the engine is down, not that the image is gone — never red.
+  if (img.status === 'unknown') return '<span class="chamfer session-status cancelled"><span>unknown</span></span>';
   if (!img.exists) return '<span class="chamfer session-status failed"><span>missing</span></span>';
   if (!img.up_to_date) return '<span class="chamfer session-status cancelled"><span>stale</span></span>';
   return '<span class="chamfer session-status completed"><span>up to date</span></span>';
@@ -2953,6 +2955,11 @@ function setupCardActions(h) {
   }
   if (a.kind === 'login' && a.hint) {
     bits.push('<p class="setup-next dim">' + esc(a.hint) + '</p>');
+  }
+  // Engine down: no Build, no Test — both need a live runtime. The banner above the cards
+  // carries the command; the card just says why it is offering nothing.
+  if (a.kind === 'blocked') {
+    bits.push('<p class="setup-next dim">' + esc(a.hint || 'Container engine is not running.') + '</p>');
   }
   if (a.kind === 'test' || a.kind === 'none' || !a.kind) {
     bits.push('<button type="button" class="chamfer btn btn--green btn--sm" data-setup-test="' +
@@ -3173,11 +3180,46 @@ function renderSetupSummary(data) {
   if (s.needs_login) parts.push(s.needs_login + ' need' + (s.needs_login === 1 ? 's' : '') + ' login');
   if (s.not_tested) parts.push(s.not_tested + ' ready to test');
   const agents = s.agents || (data.harnesses || []).length || 0;
+  if (data.engine && !data.engine.running) parts.push('readiness unknown until the engine starts');
   el.textContent = agents + ' agents' + (parts.length ? ' — ' + parts.join(' · ') : '');
   const checked = document.getElementById('setup-checked');
   if (checked && data.checked_at) {
     checked.textContent = 'checked ' + formatDuration(Date.now() / 1000 - data.checked_at) + ' ago';
   }
+}
+// "Installed" only means the binary is on $PATH. When the engine itself is down, say so
+// once, in the one place that unblocks it — the exact command to type — instead of letting
+// every card and row invent its own failure.
+function renderEngineBanner(data) {
+  const box = document.getElementById('setup-engine');
+  if (!box) return;
+  const e = data.engine || {};
+  if (!e.running && data.engine) {
+    const name = e.name || 'The container engine';
+    const cmd = e.start_command
+      ? ' Start it with <code>' + esc(e.start_command) + '</code>, then '
+      : ' Start it, then ';
+    box.innerHTML = '<strong>' + esc(name) + ' is installed but not running.</strong>' + cmd +
+      // The quote and the hash are concatenated, never adjacent: this whole file is one
+      // Rust raw string literal, and that two-character sequence would end it early.
+      '<a href="' + '#' + '" id="setup-engine-retry">refresh</a>.';
+    box.hidden = false;
+    box.querySelector('#setup-engine-retry')?.addEventListener('click', (ev) => {
+      ev.preventDefault();
+      refreshSetup();
+    });
+  } else {
+    box.hidden = true;
+    box.innerHTML = '';
+  }
+  // Nothing buildable or testable until the engine answers.
+  const stopped = !!(data.engine && !e.running);
+  ['setup-test-all', 'images-build-selected', 'images-build-stale', 'images-build-all'].forEach(id => {
+    const b = document.getElementById(id);
+    // 'Build selected' owns its own disabled state (no selection = disabled); only ever
+    // add a reason here, never clear one.
+    if (b && (stopped || id !== 'images-build-selected')) b.disabled = stopped;
+  });
 }
 function renderImagesTable(data) {
   const body = document.getElementById('images-body');
@@ -3195,7 +3237,16 @@ function renderImagesTable(data) {
     return;
   }
   body.innerHTML = (data.images || []).map(imageRowHtml).join('');
-  if (note) note.textContent = data.runtime ? ('runtime: ' + data.runtime) : '';
+  const stopped = !!(data.engine && !data.engine.running);
+  if (note) {
+    note.textContent = stopped
+      ? (data.engine.name || 'the container engine') + ' is not running — image state is unknown'
+      : (data.runtime ? ('runtime: ' + data.runtime) : '');
+  }
+  if (stopped) {
+    // Rows stay visible (§13: no empty limbo) but nothing here can act on a dead engine.
+    body.querySelectorAll('.image-select, .image-build-btn').forEach(el => { el.disabled = true; });
+  }
   wireImageSelectButtons(body);
   wireImageBuildButtons(body);
 }
@@ -3211,6 +3262,7 @@ function renderSetup(data) {
     }
     const summary = document.getElementById('setup-summary');
     if (summary) summary.textContent = data.error;
+    renderEngineBanner(data); // no `engine` field on an error payload — clears any stale banner
     renderImagesTable(data);
     return;
   }
@@ -3222,6 +3274,7 @@ function renderSetup(data) {
   }
   renderSetupSummary(data);
   renderRuntimeSelector(data);
+  renderEngineBanner(data);
   renderImagesTable(data);
 }
 function refreshSetup() {

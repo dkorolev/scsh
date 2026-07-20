@@ -56,8 +56,9 @@ fn liveness_probe(runtime: &str) -> &'static [&'static str] {
 }
 
 /// The command that starts the engine, for the given OS — `None` when scsh has no
-/// canned advice for this runtime name. Best-effort and documented as an
-/// assumption in the README.
+/// canned advice for this runtime name. Best-effort and documented as an assumption
+/// in DAEMON.md ("A stopped container engine"); callers must handle `None` by asking
+/// for a start rather than guessing a command.
 pub fn start_command(runtime: &str, os: Os) -> Option<String> {
   let cmd = match (runtime, os) {
     ("docker", Os::Mac) => "open -a Docker",

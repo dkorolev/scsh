@@ -67,8 +67,13 @@ pub fn validate_custom_model_id(raw: &str) -> Result<String, String> {
   Ok(id.to_string())
 }
 
-fn image_status_word(img: &ImageStatus) -> &'static str {
-  if !img.exists {
+fn image_status_word(img: &ImageStatus, engine_running: bool) -> &'static str {
+  if !engine_running {
+    // A stopped engine answers no inspect, so scsh does not know whether the image is
+    // there. Saying "missing" would be a guess that reads as "click Build" — see
+    // [`unknown_image_statuses`].
+    "unknown"
+  } else if !img.exists {
     "missing"
   } else if !img.up_to_date {
     "stale"
@@ -77,17 +82,48 @@ fn image_status_word(img: &ImageStatus) -> &'static str {
   }
 }
 
-fn image_json(s: &ImageStatus) -> String {
+fn image_json(s: &ImageStatus, engine_running: bool) -> String {
   format!(
     "{{ \"name\": {}, \"tag\": {}, \"exists\": {}, \"up_to_date\": {}, \"status\": {}, \"created\": {}, \"size\": {} }}",
     quote(&s.name),
     quote(&s.tag),
     s.exists,
     s.up_to_date,
-    quote(image_status_word(s)),
+    quote(image_status_word(s, engine_running)),
     s.created.as_deref().map(quote).unwrap_or_else(|| "null".into()),
     s.size.as_deref().map(quote).unwrap_or_else(|| "null".into()),
   )
+}
+
+/// Engine liveness for the browser: is the runtime actually up, and if not, the exact
+/// command that starts it. The CLI answers this before every `scsh run`
+/// (`preflight_runtime_engine`); this is the same answer, shaped for the Setup tab.
+fn engine_json(rt_name: &str, running: bool) -> String {
+  let start = crate::ui::engine::start_command(rt_name, crate::ui::Os::current());
+  format!(
+    "{{ \"running\": {}, \"runtime\": {}, \"name\": {}, \"start_command\": {} }}",
+    running,
+    quote(rt_name),
+    quote(&crate::ui::engine::display_name(rt_name)),
+    start.as_deref().map(quote).unwrap_or_else(|| "null".into()),
+  )
+}
+
+/// Every image scsh knows about, in an explicitly unknown state — what the panel shows
+/// when the engine is installed but stopped.
+///
+/// The alternative is to inspect for real, but a stopped engine fails every single
+/// `image inspect`, so all of them come back `exists: false` and the tab renders a red
+/// "Needs build" badge plus a Build button that cannot work. One unreachable engine is
+/// the truth; N missing images is a fabrication.
+fn unknown_image_statuses() -> Vec<ImageStatus> {
+  let unknown =
+    |name: String, tag: String| ImageStatus { name, tag, exists: false, up_to_date: false, created: None, size: None };
+  let mut out = vec![unknown("base".into(), runtime::BASE_IMAGE_TAG.to_string())];
+  for h in Harness::ALL {
+    out.push(unknown(h.as_str().into(), runtime::image_tag(h)));
+  }
+  out
 }
 
 fn login_json(login: &LoginPreflight) -> String {
@@ -117,8 +153,10 @@ fn models_json(harness: Harness) -> String {
 
 /// Overall harness readiness for Setup (no end-to-end model probes yet on GET).
 /// Never claims full "ready" — that requires passed model tests.
-fn overall_status(image: &ImageStatus, login: &LoginPreflight) -> &'static str {
-  if !image.exists || !image.up_to_date {
+fn overall_status(image: &ImageStatus, login: &LoginPreflight, engine_running: bool) -> &'static str {
+  if !engine_running {
+    "unknown"
+  } else if !image.exists || !image.up_to_date {
     "needs_build"
   } else if login.status != "found" {
     "needs_login"
@@ -132,11 +170,21 @@ fn overall_label(overall: &str) -> &'static str {
     "needs_build" => "Needs build",
     "needs_login" => "Needs login",
     "not_tested" => "Ready to test",
+    "unknown" => "Engine stopped",
     _ => "Unknown",
   }
 }
 
-fn action_json(image: &ImageStatus, login: &LoginPreflight, overall: &str) -> String {
+fn action_json(image: &ImageStatus, login: &LoginPreflight, overall: &str, engine_start: Option<&str>) -> String {
+  // A stopped engine blocks every action on the card — building and probing both need a
+  // live runtime — so the card offers the one command that unblocks them instead.
+  if overall == "unknown" {
+    let hint = match engine_start {
+      Some(cmd) => format!("Start the container engine with `{cmd}`, then refresh."),
+      None => "Start the container engine, then refresh.".to_string(),
+    };
+    return format!("{{ \"kind\": \"blocked\", \"label\": {}, \"hint\": {} }}", quote("Engine stopped"), quote(&hint));
+  }
   match overall {
     "needs_build" => {
       let (kind, label) = if !image.exists { ("build", "Build image") } else { ("update", "Update image") };
@@ -176,8 +224,13 @@ pub fn setup_json(runtime_override: Option<&str>) -> String {
     },
   };
   let available_json: Vec<String> = available.iter().map(|r| quote(r)).collect();
-  let statuses = runtime::image_statuses(&rt_name);
-  let images_json: Vec<String> = statuses.iter().map(image_json).collect();
+  // `available_runtimes` is a `which` on $PATH — it says the binary exists, not that the
+  // engine is up. Probe liveness once here (this GET is event-driven, never polled) and,
+  // when it is down, skip the inspects entirely: they would each fail slowly and lie.
+  let engine_running = crate::ui::engine::is_running(&rt_name);
+  let engine_start = crate::ui::engine::start_command(&rt_name, crate::ui::Os::current());
+  let statuses = if engine_running { runtime::image_statuses(&rt_name) } else { unknown_image_statuses() };
+  let images_json: Vec<String> = statuses.iter().map(|s| image_json(s, engine_running)).collect();
   let base = statuses.iter().find(|s| s.name == "base");
 
   let mut needs_build = 0u32;
@@ -195,10 +248,13 @@ pub fn setup_json(runtime_override: Option<&str>) -> String {
       size: None,
     });
     let login = runtime::harness_login_preflight(h);
-    let overall = overall_status(&img, &login);
+    let overall = overall_status(&img, &login, engine_running);
     match overall {
       "needs_build" => needs_build += 1,
       "needs_login" => needs_login += 1,
+      // "unknown" counts toward nothing: with the engine down scsh cannot say what any
+      // harness needs, and a zeroed summary is honest where a guessed one is not.
+      "unknown" => {}
       _ => not_tested += 1,
     }
     harness_rows.push(format!(
@@ -207,25 +263,26 @@ pub fn setup_json(runtime_override: Option<&str>) -> String {
       quote(h.display_name()),
       quote(overall),
       quote(overall_label(overall)),
-      image_json(&img),
+      image_json(&img, engine_running),
       login_json(&login),
       models_json(h),
-      action_json(&img, &login, overall),
+      action_json(&img, &login, overall, engine_start.as_deref()),
     ));
   }
 
   let checked_at = crate::daemon::paths::now_unix_secs();
   format!(
-    "{{ \"runtime\": {}, \"available\": [{}], \"checked_at\": {}, \"summary\": {{ \"needs_build\": {}, \"needs_login\": {}, \"not_tested\": {}, \"agents\": {} }}, \"harnesses\": [{}], \"base\": {}, \"images\": [{}] }}",
+    "{{ \"runtime\": {}, \"available\": [{}], \"engine\": {}, \"checked_at\": {}, \"summary\": {{ \"needs_build\": {}, \"needs_login\": {}, \"not_tested\": {}, \"agents\": {} }}, \"harnesses\": [{}], \"base\": {}, \"images\": [{}] }}",
     quote(&rt_name),
     available_json.join(", "),
+    engine_json(&rt_name, engine_running),
     checked_at,
     needs_build,
     needs_login,
     not_tested,
     Harness::ALL.len(),
     harness_rows.join(", "),
-    base.map(image_json).unwrap_or_else(|| "null".into()),
+    base.map(|s| image_json(s, engine_running)).unwrap_or_else(|| "null".into()),
     images_json.join(", "),
   )
 }
@@ -239,6 +296,71 @@ mod tests {
     let j = setup_json(Some("not-a-runtime-xyz"));
     assert!(j.contains("\"error\""), "{j}");
     assert!(j.contains("not-a-runtime-xyz"), "{j}");
+  }
+
+  fn image(exists: bool, up_to_date: bool) -> ImageStatus {
+    ImageStatus { name: "claude".into(), tag: "scsh-claude:1".into(), exists, up_to_date, created: None, size: None }
+  }
+
+  fn login(status: &'static str) -> LoginPreflight {
+    LoginPreflight { status, label: status.into(), hint: "sign in".into() }
+  }
+
+  /// The regression this whole path exists for: with the engine down, a ready harness must
+  /// NOT read as "needs build". Every inspect fails when the engine is stopped, and the old
+  /// code turned that into a red badge over a Build button that could not possibly work.
+  #[test]
+  fn a_stopped_engine_reads_as_unknown_not_needs_build() {
+    let ready = image(true, true);
+    assert_eq!(overall_status(&ready, &login("found"), true), "not_tested");
+    assert_eq!(overall_status(&ready, &login("found"), false), "unknown");
+    // Even a genuinely missing image is only "unknown" while the engine cannot answer.
+    assert_eq!(overall_status(&image(false, false), &login("found"), false), "unknown");
+    assert_eq!(overall_status(&image(false, false), &login("found"), true), "needs_build");
+    assert_eq!(overall_label("unknown"), "Engine stopped");
+    assert_eq!(image_status_word(&ready, false), "unknown");
+    assert_eq!(image_status_word(&ready, true), "ready");
+  }
+
+  /// A blocked card offers the start command instead of a button that cannot work.
+  #[test]
+  fn a_stopped_engine_offers_the_start_command_and_no_actions() {
+    let a = action_json(&image(true, true), &login("found"), "unknown", Some("container system start"));
+    assert!(a.contains("\"kind\": \"blocked\""), "{a}");
+    assert!(a.contains("container system start"), "{a}");
+    // Unknown runtimes have no canned command, so the hint degrades rather than lying.
+    let bare = action_json(&image(true, true), &login("found"), "unknown", None);
+    assert!(bare.contains("\"kind\": \"blocked\""), "{bare}");
+    assert!(!bare.contains('`'), "{bare}");
+  }
+
+  /// The placeholder inventory keeps every row visible (no empty limbo) without claiming
+  /// anything about images it could not inspect.
+  #[test]
+  fn unknown_inventory_covers_base_and_every_harness() {
+    let rows = unknown_image_statuses();
+    assert_eq!(rows.len(), Harness::ALL.len() + 1);
+    assert!(rows.iter().any(|s| s.name == "base"));
+    for h in Harness::ALL {
+      assert!(rows.iter().any(|s| s.name == h.as_str()), "{h:?}");
+    }
+    assert!(rows.iter().all(|s| !s.exists && !s.up_to_date && !s.tag.is_empty()));
+    assert!(rows.iter().all(|s| image_status_word(s, false) == "unknown"));
+  }
+
+  /// The payload always carries an `engine` object, so the browser can tell "engine is up"
+  /// from "this daemon is too old to know" (field absent) rather than guessing.
+  #[test]
+  fn engine_json_reports_liveness_and_the_start_command() {
+    let up = engine_json("docker", true);
+    assert!(up.contains("\"running\": true"), "{up}");
+    assert!(up.contains("Docker"), "{up}");
+    let down = engine_json("container", false);
+    assert!(down.contains("\"running\": false"), "{down}");
+    assert!(down.contains("Apple container"), "{down}");
+    assert!(down.contains("container system start"), "{down}");
+    // No canned advice for an SCSH_RUNTIME scsh does not know: null, never a wrong command.
+    assert!(engine_json("nerdctl", false).contains("\"start_command\": null"));
   }
 
   #[test]
