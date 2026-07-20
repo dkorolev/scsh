@@ -656,6 +656,14 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   .fleet-compare th { color: var(--text-muted); font-weight: 600; font-size: 0.75rem; }
   .fleet-compare tr:last-child td { border-bottom: 0; }
+  /* Loop convergence: the cycle-by-cycle score table. Numbers align on the decimal so a
+     column of means reads as a trajectory at a glance. */
+  .rounds-compare td { font-variant-numeric: tabular-nums; }
+  .round-cycle { width: 3.5rem; color: var(--text-muted); }
+  .round-mean { font-weight: 600; }
+  .round-up { color: var(--green); }
+  .round-down { color: var(--red); }
+  .round-met { color: var(--green); font-weight: 600; }
   .fleet-row.ok .glyph { color: var(--green); }
   .fleet-row.graceful .glyph { color: var(--cyan); }
   .fleet-row.fail .glyph { color: var(--red); }

@@ -33,6 +33,9 @@ pub use paths::{
 };
 pub use server::{chapters_sidecar_path, Server};
 pub(crate) use server::{write_start_recipe, INTERNAL_REPO};
+/// Loop-iteration run ids are the job-wide naming scheme for cycles, so readers outside the
+/// daemon (fleet aggregation) parse them through the same function the graph uses.
+pub(crate) use workflow::parse_loop_iteration_id;
 pub use workflow::workflow_meta_from_def;
 
 const ENSURE_ATTEMPTS: usize = 3;

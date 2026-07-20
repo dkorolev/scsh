@@ -212,7 +212,30 @@ pub fn fleet_json(session_id: &str, procs: &[ProcRecord]) -> String {
     }
   };
   let groups_json = groups.iter().map(|g| group_rollup_json(g).trim_end().to_string()).collect::<Vec<_>>().join(", ");
-  format!("{{ \"session\": {}, \"verdict\": {verdict_json}, \"groups\": [{groups_json}] }}", json::quote(session_id),)
+  let rounds_json = job_rounds(procs).iter().map(round_summary_json).collect::<Vec<_>>().join(", ");
+  format!(
+    "{{ \"session\": {}, \"verdict\": {verdict_json}, \"rounds\": [{rounds_json}], \"groups\": [{groups_json}] }}",
+    json::quote(session_id),
+  )
+}
+
+/// One cycle's entry in the fleet payload's `rounds` array.
+fn round_summary_json(r: &RoundSummary) -> String {
+  let counts = r
+    .counts
+    .iter()
+    .map(|(grade, n)| format!("{{ \"grade\": {}, \"count\": {n} }}", json::quote(grade)))
+    .collect::<Vec<_>>()
+    .join(", ");
+  format!(
+    "{{ \"iteration\": {}, \"step\": {}, \"proc\": {}, \"mean\": {}, \"verdict\": {}, \"approved\": {}, \"counts\": [{counts}] }}",
+    r.iteration,
+    json::quote(&r.step),
+    r.proc_index,
+    r.mean.map(|m| m.to_string()).unwrap_or_else(|| "null".into()),
+    opt_json_str(r.verdict.as_deref()),
+    r.approved.map(|a| a.to_string()).unwrap_or_else(|| "null".into()),
+  )
 }
 
 fn opt_json_str(s: Option<&str>) -> String {
@@ -287,6 +310,126 @@ fn parse_result_summary(path: &str) -> Option<ResultSummary> {
       _ => None,
     });
   Some(ResultSummary { message, grade, comments_count, issues_found })
+}
+
+/// One loop cycle's score summary, read from the round-reporting step of that cycle.
+///
+/// Recognized by SHAPE, never by step name: any result carrying a numeric `mean` beside a
+/// `counts` map of grade → count is a round report. A do-while pipeline that scores a review
+/// fleet each cycle declares exactly that as one `object` output, so the report arrives one
+/// level down under the author's own field name — which scsh never needs to know.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoundSummary {
+  /// Loop iteration, 1-based, as parsed from the step's run id.
+  pub iteration: usize,
+  /// Base step id that reported the round (the run id without its loop suffix).
+  pub step: String,
+  pub proc_index: usize,
+  /// Mean score the round reported; `None` when the report carried no usable number.
+  pub mean: Option<f64>,
+  /// Grade histogram for the round, highest score first (the [`fleet_verdict`] order).
+  pub counts: Vec<(String, u64)>,
+  /// The round's own bar verdict, when its step reported one alongside the numbers.
+  pub verdict: Option<String>,
+  pub approved: Option<bool>,
+}
+
+/// One round report parsed out of a result body — a [`RoundSummary`] before the cycle it
+/// belongs to is known.
+#[derive(Debug, Clone, PartialEq)]
+struct RoundReport {
+  mean: Option<f64>,
+  counts: Vec<(String, u64)>,
+  verdict: Option<String>,
+  approved: Option<bool>,
+}
+
+/// The `{mean, counts}` pair inside one object, or `None` when it is not a round report. The
+/// verdict fields stay empty here — they live at the result's top level, which the caller has.
+fn read_round_report(obj: &[(String, json::Value)]) -> Option<RoundReport> {
+  let field = |name: &str| obj.iter().find(|(key, _)| key == name).map(|(_, value)| value);
+  // `counts` is what makes this a round report; a lone `mean` is too weak a signal to
+  // claim an arbitrary result as one.
+  let json::Value::Object(counts) = field("counts")? else { return None };
+  let mut histogram: Vec<(String, u64)> = counts
+    .iter()
+    .filter_map(|(grade, value)| match value {
+      json::Value::Number(n) if n.is_finite() && n.fract() == 0.0 && *n >= 0.0 => Some((grade.clone(), *n as u64)),
+      _ => None,
+    })
+    .filter(|(_, n)| *n > 0)
+    .collect();
+  if histogram.is_empty() {
+    return None;
+  }
+  histogram.sort_by(|a, b| {
+    let rank = |g: &str| grade_score(g).map(|s| u8::MAX - s).unwrap_or(u8::MAX);
+    rank(&a.0).cmp(&rank(&b.0)).then_with(|| a.0.cmp(&b.0))
+  });
+  let mean = match field("mean") {
+    Some(json::Value::Number(n)) if n.is_finite() => Some(*n),
+    _ => None,
+  };
+  Some(RoundReport { mean, counts: histogram, verdict: None, approved: None })
+}
+
+/// Parse one round report out of a stored result body. The `{mean, counts}` pair is read at
+/// the top level, or one level down under any object-valued field (where a declared `object`
+/// output lands); `verdict` and `approved` always come from the top level, where a step's
+/// scalar outputs live. See [`RoundSummary`] for the recognition rule.
+fn parse_round_summary(text: &str) -> Option<RoundReport> {
+  let json::Value::Object(fields) = json::parse(text).ok()? else { return None };
+  let mut report = read_round_report(&fields).or_else(|| {
+    fields.iter().find_map(|(_, value)| match value {
+      json::Value::Object(inner) => read_round_report(inner),
+      _ => None,
+    })
+  })?;
+  let field = |name: &str| fields.iter().find(|(key, _)| key == name).map(|(_, value)| value);
+  report.verdict = match field("verdict") {
+    Some(json::Value::String(value)) if !value.trim().is_empty() => Some(value.clone()),
+    _ => None,
+  };
+  report.approved = match field("approved") {
+    Some(json::Value::Bool(value)) => Some(*value),
+    _ => None,
+  };
+  Some(report)
+}
+
+/// Every loop cycle that reported a score, oldest first — the job's convergence trajectory.
+///
+/// Empty for jobs whose loops report nothing scoreable, and for jobs with no loop at all.
+pub fn job_rounds(procs: &[ProcRecord]) -> Vec<RoundSummary> {
+  let mut rounds: Vec<RoundSummary> = Vec::new();
+  for p in procs {
+    if p.kind != ProcKind::Skill {
+      continue;
+    }
+    let Some(name) = p.skill_name.as_deref() else { continue };
+    let Some((base, _, iteration)) = crate::daemon::parse_loop_iteration_id(name) else { continue };
+    let Some(path) = p.result_path.as_deref() else { continue };
+    let Some(text) = std::fs::read_to_string(path).ok() else { continue };
+    let Some(report) = parse_round_summary(&text) else { continue };
+    let summary = RoundSummary {
+      iteration,
+      step: base.to_string(),
+      proc_index: p.index,
+      mean: report.mean,
+      counts: report.counts,
+      verdict: report.verdict,
+      approved: report.approved,
+    };
+    // A retried cycle registers a second proc for the same iteration; the newest attempt is
+    // that cycle's authoritative score, exactly as `fleet_groups` treats superseded routes.
+    match rounds.iter_mut().find(|r| r.iteration == iteration && r.step == summary.step) {
+      Some(existing) if existing.proc_index < summary.proc_index => *existing = summary,
+      Some(_) => {}
+      None => rounds.push(summary),
+    }
+  }
+  rounds.sort_by_key(|r| r.iteration);
+  rounds
 }
 
 /// Job-level roll-up across every fleet group: the whole-run view of a matrix review
@@ -534,6 +677,112 @@ mod tests {
     // No recognized grade at all → no mean.
     let ungraded = vec![verdict_group(vec![verdict_route(ProcStatus::Ok, None, None)])];
     assert_eq!(fleet_verdict(&ungraded).unwrap().mean_score, None);
+  }
+
+  #[test]
+  fn round_summary_is_recognized_by_shape_wherever_the_report_sits() {
+    // The gorgeous-pipeline shape: the round report is one declared `object` output, so it
+    // lands one level down under the author's own field name — which scsh never knows.
+    let nested = r#"{"approved":false,"verdict":"not met","feedback":{
+      "mean":4.27,"counts":{"excellent":7,"good":6,"average":2,"poor":0},
+      "routes":{"conventions-opus":{"grade":"excellent","comments":[]}}}}"#;
+    let report = parse_round_summary(nested).unwrap();
+    assert_eq!(report.mean, Some(4.27));
+    // Highest score first, and a zero-count grade never becomes a chip.
+    assert_eq!(report.counts, vec![("excellent".into(), 7), ("good".into(), 6), ("average".into(), 2)]);
+    assert_eq!(report.verdict.as_deref(), Some("not met"));
+    assert_eq!(report.approved, Some(false));
+
+    // The same numbers reported flat at the top level parse identically.
+    let flat = r#"{"mean":4.5,"counts":{"good":2},"approved":true,"verdict":"met"}"#;
+    let report = parse_round_summary(flat).unwrap();
+    assert_eq!((report.mean, report.verdict.as_deref(), report.approved), (Some(4.5), Some("met"), Some(true)));
+    assert_eq!(report.counts, vec![("good".into(), 2)]);
+
+    // An off-vocabulary grade still shows, sorted after the known ones.
+    let odd = r#"{"counts":{"stellar":1,"good":1}}"#;
+    let report = parse_round_summary(odd).unwrap();
+    assert_eq!(report.mean, None, "a report may carry counts without a mean");
+    assert_eq!(report.counts, vec![("good".into(), 1), ("stellar".into(), 1)]);
+
+    // Not round reports: no counts at all, counts that hold no usable numbers, and an
+    // ordinary reviewer result. A lone `mean` must not claim an unrelated result.
+    for text in [
+      r#"{"mean":4.27,"verdict":"met"}"#,
+      r#"{"counts":{"excellent":"seven"}}"#,
+      r#"{"counts":{"excellent":0}}"#,
+      r#"{"result":{"grade":"good","issues_found":2},"issues":[]}"#,
+      "not json at all",
+    ] {
+      assert!(parse_round_summary(text).is_none(), "must not read as a round report: {text}");
+    }
+  }
+
+  #[test]
+  fn job_rounds_orders_cycles_and_prefers_the_retried_attempt() {
+    let _env = crate::runtime::test_env_lock();
+    let dir = std::env::temp_dir().join(format!("scsh-rounds-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let write = |name: &str, body: &str| {
+      let path = dir.join(name);
+      std::fs::write(&path, body).unwrap();
+      Some(path.to_string_lossy().into_owned())
+    };
+    let round = |mean: f64, verdict: &str| {
+      format!(r#"{{"verdict":"{verdict}","approved":false,"feedback":{{"mean":{mean},"counts":{{"good":1}}}}}}"#)
+    };
+    let proc = |index: usize, skill: &str, result: Option<String>| ProcRecord {
+      index,
+      previous_attempt: None,
+      label: format!("codex: {skill}"),
+      kind: ProcKind::Skill,
+      status: ProcStatus::Ok,
+      skill_name: Some(skill.into()),
+      harness: Some("codex".into()),
+      model: None,
+      started_at: None,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: vec![],
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some("collect".into()),
+      route: None,
+      result_path: result,
+      annotate_target: None,
+    };
+    let procs = vec![
+      // Registered out of order, to prove the trajectory is sorted by cycle.
+      proc(0, "collect-while-collect-2", write("c2.json", &round(4.10, "not met"))),
+      proc(1, "collect-while-collect-1", write("c1.json", &round(3.60, "not met"))),
+      // A cycle that was retried: the later proc is that cycle's authoritative score.
+      proc(2, "collect-while-collect-3", write("c3-first.json", &round(1.00, "not met"))),
+      proc(3, "collect-while-collect-3", write("c3-retry.json", &round(4.27, "not met"))),
+      // Steps that are not loop cycles, and a cycle whose result is not a round report.
+      proc(4, "prepare", write("prep.json", r#"{"mean":9.9,"counts":{"good":1}}"#)),
+      proc(5, "fix-while-collect-3", write("fix.json", r#"{"message":"applied"}"#)),
+      proc(6, "collect-while-collect-4", None),
+    ];
+    let rounds = job_rounds(&procs);
+    assert_eq!(rounds.iter().map(|r| r.iteration).collect::<Vec<_>>(), vec![1, 2, 3], "cycles, oldest first");
+    assert_eq!(rounds.iter().map(|r| r.mean.unwrap()).collect::<Vec<_>>(), vec![3.60, 4.10, 4.27]);
+    assert_eq!(rounds[2].proc_index, 3, "the retried attempt supersedes the first");
+    assert!(rounds.iter().all(|r| r.step == "collect"));
+    assert_eq!(rounds[0].verdict.as_deref(), Some("not met"));
+
+    // The API payload carries the same trajectory.
+    let payload = fleet_json("rnd001", &procs);
+    assert!(payload.contains("\"rounds\": [{ \"iteration\": 1"), "rounds ride the fleet payload: {payload}");
+    assert!(payload.contains("\"mean\": 4.27"), "{payload}");
+    assert!(crate::json::parse(&payload).is_ok(), "fleet payload stays valid JSON: {payload}");
+
+    // A job with no loop at all reports no rounds.
+    assert!(job_rounds(&[proc(0, "prepare", write("p.json", &round(4.0, "met")))]).is_empty());
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

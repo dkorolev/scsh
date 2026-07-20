@@ -777,6 +777,81 @@ fn index_page_shows_colored_harness_chips_per_proc() {
 }
 
 #[test]
+fn job_page_renders_the_loop_convergence_table() {
+  let _env = crate::runtime::test_env_lock();
+  let dir = std::env::temp_dir().join(format!("scsh-conv-{}", crate::runtime::random_nonce_6()));
+  std::fs::create_dir_all(&dir).unwrap();
+  // Three cycles of a scoring loop: rising, then nearly flat — the xrnvno trajectory that
+  // previously had to be reconstructed from casts by hand.
+  let cycle = |index: usize, iteration: usize, mean: f64, verdict: &str, approved: bool| {
+    let path = dir.join(format!("c{iteration}.json"));
+    std::fs::write(
+      &path,
+      format!(
+        r#"{{"verdict":"{verdict}","approved":{approved},"feedback":{{"mean":{mean},
+        "counts":{{"excellent":7,"good":6,"average":2}}}}}}"#
+      ),
+    )
+    .unwrap();
+    ProcRecord {
+      index,
+      previous_attempt: None,
+      kind: ProcKind::Skill,
+      label: format!("codex: collect (cycle {iteration})"),
+      status: ProcStatus::Ok,
+      note: None,
+      detail: Some("scored".into()),
+      fail_reason: None,
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some("collect".into()),
+      route: None,
+      result_path: Some(path.to_string_lossy().into_owned()),
+      annotate_target: None,
+      harness: Some("codex".into()),
+      skill_name: Some(format!("collect-while-collect-{iteration}")),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(2.0),
+      lines: vec![],
+    }
+  };
+  let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
+  let mut session = store_with_cast_proc(ProcStatus::Ok).sessions.remove("castab").unwrap();
+  session.id = "convrg".into();
+  session.procs =
+    vec![cycle(0, 1, 3.60, "not met", false), cycle(1, 2, 4.10, "not met", false), cycle(2, 3, 4.12, "met", true)];
+  store.sessions.insert("convrg".into(), session);
+
+  let html = session_page(&store, "convrg").expect("session renders");
+  let panel = html
+    .split(r#"class="chamfer fleet fleet-rounds""#)
+    .nth(1)
+    .and_then(|s| s.split("</section>").next())
+    .expect("convergence panel renders");
+  assert!(panel.contains("· <code>collect</code> · 3 cycles"), "the panel names the reporting step: {panel}");
+  assert!(panel.contains("3.60 → 4.12"), "the title states the whole trajectory: {panel}");
+  assert!(panel.contains(r#"<span class="round-mean">3.60</span>"#), "first cycle has no delta: {panel}");
+  assert!(panel.contains(r#"<span class="round-up">▲ +0.50</span>"#), "a rising cycle is green and signed: {panel}");
+  // 4.10 → 4.12 still moves; only sub-0.005 noise reads as flat.
+  assert!(panel.contains(r#"<span class="round-up">▲ +0.02</span>"#), "small real moves still show: {panel}");
+  assert!(panel.contains("excellent ×7 · good ×6 · average ×2"), "grades read highest-first: {panel}");
+  assert!(panel.contains(r#"<span class="round-met">met</span>"#), "a met bar is called out: {panel}");
+  assert!(panel.contains(r#"data-proc="2""#), "each cycle jumps to its own step: {panel}");
+  assert!(html.contains(".round-up { color: var(--green); }"), "the trend colors ship in the stylesheet");
+
+  // A job whose loop reports nothing scoreable renders no convergence panel at all.
+  let plain = store_with_cast_proc(ProcStatus::Ok);
+  assert!(
+    !session_page(&plain, "castab").expect("renders").contains("fleet-rounds"),
+    "no round reports, no panel"
+  );
+  let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn jobs_table_paginates_beyond_the_first_page() {
   use super::index::JOBS_PAGE_SIZE;
   // The page embeds the client JS, which mirrors the pagination markup as string
