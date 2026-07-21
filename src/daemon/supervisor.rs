@@ -56,11 +56,19 @@ fn salt_of(id: &str) -> u64 {
 /// signature. Three consecutive runs dying at the same step for the same reason is a
 /// deterministic failure (or an scsh bug), not a provider incident.
 fn job_failure_signature(s: &Session) -> String {
-  s.procs
+  if let Some(p) = s.procs.iter().find(|p| p.status == ProcStatus::Fail && !s.proc_is_superseded(p)) {
+    return format!("{}|{}", p.skill_name.as_deref().unwrap_or(&p.label), p.fail_reason.as_deref().unwrap_or(""));
+  }
+  // No proc failed, so the job died at the SESSION level — its heartbeat went stale while work
+  // was still in hand. Name the step that was live when that happened. The old constant
+  // "(no failed proc)" was the same string for every such job, which made the breaker read three
+  // unrelated stalls as one deterministic failure repeating, and give up citing no step at all.
+  let stalled = s
+    .procs
     .iter()
-    .find(|p| p.status == ProcStatus::Fail && !s.proc_is_superseded(p))
-    .map(|p| format!("{}|{}", p.skill_name.as_deref().unwrap_or(&p.label), p.fail_reason.as_deref().unwrap_or("")))
-    .unwrap_or_else(|| "(no failed proc)".to_string())
+    .find(|p| matches!(p.status, ProcStatus::Running | ProcStatus::Waiting))
+    .map(|p| p.skill_name.as_deref().unwrap_or(&p.label));
+  format!("{}|{}", stalled.unwrap_or("(no live step)"), "session_stale")
 }
 
 /// Phase one, under the store lock: decide. Returns the ids whose supervisor state
@@ -235,6 +243,27 @@ mod tests {
     assert_eq!(s.supervisor.fail_streak, 1);
     // A second pass changes nothing — the schedule is already set.
     assert!(schedule_pass(&mut store, now + 1).is_empty());
+  }
+
+  /// A job killed by the heartbeat rule has no failed proc, so the signature has to come from
+  /// somewhere else. It used to be the constant "(no failed proc)" — identical for every stalled
+  /// job, which made the breaker count unrelated stalls as one failure repeating and give up
+  /// naming no step at all. It must name the step that was live instead.
+  #[test]
+  fn a_stall_is_signed_by_the_step_that_was_live_not_a_constant() {
+    let now = 1_000_000;
+    let mut stalled = failed_supervised_session("bbbbbb", now);
+    stalled.procs[0].status = ProcStatus::Running;
+    stalled.procs[0].fail_reason = None;
+    stalled.procs[0].elapsed = None;
+    let signature = job_failure_signature(&stalled);
+    assert_eq!(signature, "fix|session_stale", "the stalled step is what identifies the failure");
+    assert!(!signature.contains("no failed proc"), "the old catch-all constant is gone");
+
+    // A different step stalling is a DIFFERENT failure, so it must not extend the streak.
+    let mut elsewhere = stalled.clone();
+    elsewhere.procs[0].skill_name = Some("prepare".into());
+    assert_ne!(job_failure_signature(&elsewhere), signature);
   }
 
   #[test]

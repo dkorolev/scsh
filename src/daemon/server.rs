@@ -253,7 +253,8 @@ impl Server {
         let probe_casts = self.ws_hub.client_count() > 0;
         let (json, casts, dead_sessions) = {
           let mut store = lock_store(&self.store);
-          let dead_sessions = settle_dead_run_pids(&mut store, now);
+          let mut dead_sessions = settle_dead_run_pids(&mut store, now);
+          dead_sessions.extend(settle_out_of_work_sessions(&mut store, now));
           include_sessions |= !dead_sessions.is_empty();
           store.reconcile(now);
           let json = if include_sessions { tick_json(&store, now) } else { tick_json_light(&store, now) };
@@ -426,6 +427,40 @@ fn settle_dead_run_pids(store: &mut Store, now: u64) -> Vec<String> {
     session.client_connected = false;
     session.run_pid = None;
     settle_loaded_incomplete_procs(session);
+    changed.push(id.clone());
+  }
+  changed
+}
+
+/// End sessions that have run out of work while their client is still attached.
+///
+/// [`settle_dead_run_pids`] covers a client that died; the heartbeat deadline covers one that
+/// went silent. Neither sees the case in between: a `scsh run` whose work is finished — or whose
+/// remaining steps can never start — keeps pinging, so its session reads "running" for as long
+/// as the process lingers. That is how a job sat seven hours past its last route.
+///
+/// The end time recorded is when the last proc actually FINISHED, not when this noticed. The
+/// complaint being answered is that a job was over long before it was declared over; stamping
+/// the moment of discovery would write the same lie into the duration.
+fn settle_out_of_work_sessions(store: &mut Store, now: u64) -> Vec<String> {
+  let mut changed = Vec::new();
+  for (id, session) in &mut store.sessions {
+    if session.ended_at.is_some() || session.has_live_proc() {
+      continue;
+    }
+    // A job that has not started work yet is the START_TIMEOUT's business, not this rule's.
+    let Some(finished) = session.last_work_end() else { continue };
+    if now <= finished.saturating_add(crate::daemon::model::SESSION_NO_WORK_TIMEOUT_SECS) {
+      continue;
+    }
+    session.ended_at = Some(finished);
+    session.run_pid = None;
+    crate::failure::log_session_proc(
+      id,
+      "session_out_of_work",
+      "(daemon)",
+      &format!("no proc has been live since {finished}; ending the job at its last proc's finish"),
+    );
     changed.push(id.clone());
   }
   changed
@@ -4726,6 +4761,52 @@ mod tests {
     assert_eq!(session.procs[0].fail_reason.as_deref(), Some(crate::failure::reason::FORCE_RESTARTED));
     assert_eq!(session.procs[1].fail_reason.as_deref(), Some(crate::failure::reason::SESSION_END_INCOMPLETE));
     assert_eq!(session.lifecycle_status(100), crate::daemon::model::SessionLifecycle::Cancelled);
+  }
+
+  /// The hole between the two existing rules: the client is alive and pinging, so neither the
+  /// pid check nor the heartbeat deadline fires, yet nothing is running and nothing can start.
+  #[test]
+  fn a_job_with_no_work_left_is_declared_over_at_its_last_procs_finish() {
+    use crate::daemon::model::SESSION_NO_WORK_TIMEOUT_SECS;
+    let mut done = export_test_proc(0, "claude: fix", None);
+    done.started_at = Some(50);
+    done.elapsed = Some(10.0); // finished at 60
+    let store = store_with_export_session("idlejob", vec![done]);
+    let mut guard = store.lock().unwrap();
+    let session = guard.sessions.get_mut("idlejob").unwrap();
+    session.ended_at = None;
+    session.client_connected = true;
+    session.run_pid = Some(std::process::id());
+    session.last_seen_at = 60 + SESSION_NO_WORK_TIMEOUT_SECS + 100; // still heartbeating happily
+
+    // Inside the window: a long but legitimate gap between steps is left alone.
+    assert!(settle_out_of_work_sessions(&mut guard, 60 + SESSION_NO_WORK_TIMEOUT_SECS).is_empty());
+    assert!(guard.sessions["idlejob"].ended_at.is_none());
+
+    let now = 60 + SESSION_NO_WORK_TIMEOUT_SECS + 100;
+    assert_eq!(settle_out_of_work_sessions(&mut guard, now), vec!["idlejob"]);
+    let session = &guard.sessions["idlejob"];
+    assert_eq!(session.ended_at, Some(60), "ends when the work ended, not when the daemon noticed");
+    assert_eq!(
+      session.lifecycle_status(now),
+      crate::daemon::model::SessionLifecycle::Completed,
+      "every proc succeeded, so the job reads as done rather than failed"
+    );
+  }
+
+  /// A job between steps still owns its session: nothing may end it while a proc is live.
+  #[test]
+  fn a_job_with_a_live_proc_is_never_declared_out_of_work() {
+    use crate::daemon::model::SESSION_NO_WORK_TIMEOUT_SECS;
+    let mut running = export_test_proc(0, "claude: fix", None);
+    running.status = ProcStatus::Running;
+    running.elapsed = None;
+    let store = store_with_export_session("busyjob", vec![running]);
+    let mut guard = store.lock().unwrap();
+    let session = guard.sessions.get_mut("busyjob").unwrap();
+    session.ended_at = None;
+    assert!(settle_out_of_work_sessions(&mut guard, 50 + SESSION_NO_WORK_TIMEOUT_SECS * 10).is_empty());
+    assert!(guard.sessions["busyjob"].ended_at.is_none());
   }
 
   #[test]

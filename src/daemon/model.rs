@@ -21,6 +21,20 @@ pub const SESSION_START_TIMEOUT_SECS: u64 = 30;
 /// same allowance as the harness watchdog so the executor and browser share one running rule.
 pub const SESSION_IDLE_TIMEOUT_SECS: u64 = crate::config::DEFAULT_INACTIVITY_TIMEOUT_SECS;
 
+/// How long a job may hold NO running work at all before it counts as over.
+///
+/// The heartbeat rule above cannot see this case: a `scsh run` whose work is finished (or whose
+/// remaining steps can never start) keeps pinging happily, so `last_seen_at` stays fresh forever
+/// and the browser shows "running" for as long as the process lingers. Observed live: a job sat
+/// this way for seven hours after its last route died.
+///
+/// The bound comes from measurement, not taste. Across the stored history the true whole-job
+/// idle windows — stretches with not one proc live, computed over merged proc intervals rather
+/// than between consecutive starts — are a second at the median and 1057s at the very worst on a
+/// healthy job, while the stuck ones idle for the better part of a day. Twice the idle timeout
+/// sits far above the former and far below the latter.
+pub const SESSION_NO_WORK_TIMEOUT_SECS: u64 = SESSION_IDLE_TIMEOUT_SECS * 2;
+
 /// Maximum sessions retained in daemon state.
 pub const MAX_STORED_SESSIONS: usize = 200;
 
@@ -499,6 +513,24 @@ impl Session {
   /// startup signal; `started_at` and terminal proc states are.
   pub fn has_started_work(&self) -> bool {
     self.procs.iter().any(|p| p.started_at.is_some() || !matches!(p.status, ProcStatus::Waiting))
+  }
+
+  /// Whether any proc could still produce output — the job has work in hand right now.
+  pub(crate) fn has_live_proc(&self) -> bool {
+    self.procs.iter().any(|p| matches!(p.status, ProcStatus::Running | ProcStatus::Waiting))
+  }
+
+  /// When the last proc that actually ran finished. `None` when nothing has run to completion,
+  /// so a job that never started work is never mistaken for one that finished it.
+  pub(crate) fn last_work_end(&self) -> Option<u64> {
+    self
+      .procs
+      .iter()
+      .filter_map(|p| match (p.started_at, p.elapsed) {
+        (Some(start), Some(elapsed)) => Some(start.saturating_add(elapsed as u64)),
+        _ => None,
+      })
+      .max()
   }
 
   pub(crate) fn liveness_deadline(&self) -> u64 {
