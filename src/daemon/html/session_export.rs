@@ -15,7 +15,7 @@
 //! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
 //! commits-diff pages (when present) ride as sandboxed
 //! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
-//! engine and localStorage work — packdiff 0.5.0 document-first review) so the snapshot
+//! engine and localStorage work — packdiff 0.6.0 document-first review) so the snapshot
 //! stays a single file.
 
 use super::escape::esc;
