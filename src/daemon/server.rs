@@ -2210,6 +2210,12 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
   s.ended_at = Some(now);
   s.client_connected = false;
   s.run_pid = None;
+  // Whatever the run was still doing, it is not doing it now. Settle those rows here or
+  // nothing will: this very assignment of `ended_at` is what makes the periodic dead-PID
+  // sweep skip the session from now on, so an unsettled proc would stay mid-flight until
+  // the daemon restarted — rendering as live work, and offering a Force restart the daemon
+  // can only refuse because the run client it would respawn from is gone.
+  settle_loaded_incomplete_procs(s);
   if s.procs.is_empty() {
     let label =
       if s.profile.as_deref() == Some(BUILD_IMAGES_PROFILE) { "build failed to start" } else { "run failed to start" };
@@ -5608,6 +5614,77 @@ mod tests {
     assert_eq!(s.procs[0].status, ProcStatus::Fail);
     assert!(s.procs[0].detail.as_deref().unwrap().contains("gitignored"), "the real error is shown");
     assert_eq!(s.lifecycle_status(60), SessionLifecycle::Failed, "shows as failed, never hidden");
+  }
+
+  #[test]
+  fn reconcile_settles_the_procs_a_dead_run_left_behind() {
+    // A run process that dies mid-flight — crashed, killed, or exited after an API error —
+    // leaves its procs mid-`running`. Ending the session without settling them strands the
+    // job: the dead-PID sweep skips ended sessions, so nothing else ever finishes those rows.
+    // The browser then still renders them as live work and offers a Force restart, which the
+    // daemon can only refuse ("the run client is gone — nothing is left to respawn").
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let live = |index: usize, status: ProcStatus| ProcRecord {
+      index,
+      previous_attempt: None,
+      label: format!("claude: route-{index}"),
+      kind: ProcKind::Skill,
+      status,
+      skill_name: Some(format!("route-{index}")),
+      harness: Some("claude".into()),
+      model: None,
+      started_at: Some(50),
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: Vec::new(),
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+    };
+    let mut done = live(2, ProcStatus::Ok);
+    done.elapsed = Some(7.0);
+    store.lock().unwrap().insert_session(
+      "died".into(),
+      Session {
+        id: "died".into(),
+        started_at: 50,
+        ended_at: None,
+        profile: Some("code-review".into()),
+        kind: None,
+        repo: "/r".into(),
+        branch: "feature".into(),
+        skills: Vec::new(),
+        procs: vec![live(0, ProcStatus::Running), live(1, ProcStatus::Waiting), done],
+        last_seen_at: 50,
+        client_connected: true,
+        run_pid: Some(4242),
+        workflow: None,
+        parent_session: None,
+        supervisor: Default::default(),
+      },
+    );
+    reconcile_finished_job(&store, "died", Some(101), "thread panicked");
+    let guard = store.lock().unwrap();
+    let s = guard.sessions.get("died").unwrap();
+    assert!(s.ended_at.is_some());
+    assert!(!s.has_incomplete_procs(), "nothing may be left mid-flight once the run is gone");
+    for index in [0, 1] {
+      let p = s.procs.iter().find(|p| p.index == index).unwrap();
+      assert_eq!(p.status, ProcStatus::Fail, "proc {index} settled");
+      assert_eq!(p.fail_reason.as_deref(), Some(crate::failure::reason::SESSION_END_INCOMPLETE));
+    }
+    // A proc that genuinely finished keeps its own outcome — settling is not a blanket fail.
+    let finished = s.procs.iter().find(|p| p.index == 2).unwrap();
+    assert_eq!(finished.status, ProcStatus::Ok);
+    assert_eq!(finished.elapsed, Some(7.0));
+    assert_eq!(s.lifecycle_status(60), SessionLifecycle::Cancelled, "ended with only stop-shaped failures");
   }
 
   #[test]
