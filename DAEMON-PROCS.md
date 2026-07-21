@@ -89,14 +89,18 @@ Rules that hold everywhere:
 | Trigger | What it settles | `fail_reason` |
 | --- | --- | --- |
 | Run deregisters normally | `waiting` + `running` procs | `session_end_before_proc_finish` |
+| Run process exits (child watcher reconciles) | `waiting` + `running`, and ends the session | `session_end_before_proc_finish` |
 | Browser stops the job | `waiting` + `running` procs | `force_stopped` |
 | Browser restarts one proc | that proc | `force_restarted` |
 | Dead run PID (periodic sweep) | `waiting` + `running`, and ends the session | `session_end_before_proc_finish` |
 | Daemon restart (store load) | `waiting` + `running` of incomplete sessions | `session_end_before_proc_finish` |
 | Annotation interrupted | that annotate proc | `annotation_interrupted` |
 
-The dead-PID sweep deliberately skips sessions that already ended: a stopped job has no PID
-left to check, and re-settling terminal rows would be a no-op at best.
+Each of the three paths that END a session must also settle it, because ending is what takes
+it out of reach of the others: the periodic dead-PID sweep skips any session with `ended_at`
+set, so a proc left mid-flight by the act of ending would stay that way until the daemon
+restarted. Reconciling a dead run learned this the hard way — it ended sessions without
+settling them, stranding rows the browser then rendered as live work.
 
 ## Job lifecycle is derived, never stored
 
