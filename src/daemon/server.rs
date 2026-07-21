@@ -1241,9 +1241,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
     }
     "/api/v1/ping" => {
       let session_id = field_str(&obj, "session").unwrap_or_default();
-      if let Some(s) = store.session_mut(&session_id) {
-        s.last_seen_at = now;
-      }
+      touch_session_liveness(&mut store, &session_id, now);
       true
     }
     "/api/v1/proc/add" => {
@@ -2999,12 +2997,25 @@ fn deregister_incomplete_detail(p: &ProcRecord) -> String {
   }
 }
 
+/// Record a heartbeat from the owning `scsh run`, and re-assert that its client is attached.
+///
+/// `client_connected` is set by the one-shot `/api/v1/register` at session start, and a daemon
+/// restart deliberately clears it on every restored session. Without this, a job that outlives
+/// a daemon restart is marked detached forever even while its runner keeps posting — and the
+/// flag gates per-route restart on both sides (the daemon refuses, the browser greys the
+/// control out to "Restart unavailable"). A post arriving on an unfinished session IS the
+/// runner, so it is the proof that re-attaches it.
 fn touch_session_liveness(store: &mut Store, session_id: &str, now: u64) {
   if session_id.is_empty() {
     return;
   }
   if let Some(s) = store.session_mut(session_id) {
     s.last_seen_at = now;
+    // A session that already ended stays detached: a late straggler post from a runner that
+    // has deregistered must never resurrect it as live.
+    if s.ended_at.is_none() {
+      s.client_connected = true;
+    }
   }
 }
 
@@ -3589,6 +3600,44 @@ mod tests {
     assert!(!dir.exists(), "eligible run dir should be deleted by the forced pass");
     assert!(prune.lock().unwrap().jobs.is_empty());
     let _ = std::fs::remove_file(super::super::paths::prune_file(59999));
+  }
+
+  /// A daemon restart clears `client_connected` on every restored session, but the runner it
+  /// belongs to may still be alive and working. The next heartbeat must re-attach it, or the
+  /// job spends the rest of its life with per-route restart refused and greyed out. A session
+  /// that already ended stays detached, so a straggler post cannot resurrect it.
+  #[test]
+  fn a_heartbeat_reattaches_a_live_client_the_daemon_restart_detached() {
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    {
+      // `client_connected: false` on both is exactly what `with_db` leaves behind on restart.
+      let restored = |id: &str, ended_at: Option<u64>| Session {
+        id: id.into(),
+        started_at: 50,
+        ended_at,
+        profile: None,
+        kind: None,
+        repo: "/r".into(),
+        branch: "main".into(),
+        skills: Vec::new(),
+        procs: Vec::new(),
+        last_seen_at: 50,
+        client_connected: false,
+        run_pid: Some(std::process::id()),
+        workflow: None,
+        parent_session: None,
+        supervisor: Default::default(),
+      };
+      let mut s = store.lock().unwrap();
+      s.insert_session("live01".into(), restored("live01", None));
+      s.insert_session("done01".into(), restored("done01", Some(60)));
+    }
+    assert!(handle_api_post("/api/v1/ping", r#"{"session":"live01"}"#, &store, &prune));
+    assert!(handle_api_post("/api/v1/ping", r#"{"session":"done01"}"#, &store, &prune));
+    let guard = store.lock().unwrap();
+    assert!(guard.sessions.get("live01").unwrap().client_connected, "a live runner's ping re-attaches it");
+    assert!(!guard.sessions.get("done01").unwrap().client_connected, "an ended session stays detached");
   }
 
   #[test]
