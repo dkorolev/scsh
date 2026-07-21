@@ -390,6 +390,15 @@ pub fn demo_yaml() -> &'static str {
 /// live in their own repositories (dkorolev/beautiful-skills and friends) and install from
 /// source (`scsh installskills --global <url>`), so the bundle can never drift from them.
 /// Keep this set identical to the shipped reviewers in dkorolev/code-review-skills.
+///
+/// WORK IN PROGRESS — this is the one part of the bundle with no mechanical drift guard.
+/// The five reviewer bodies are `include_str!` copies of this repository's `.skills/`, while
+/// the canonical bodies live in dkorolev/code-review-skills; today only this comment and the
+/// route-pinning tests keep the two aligned, and only for the parts those tests name. Until
+/// that is closed — by generating `.skills/` from the source repositories in CI, or by
+/// checking the shipped bodies against pinned upstream content hashes — the rule is: a
+/// reviewer change lands in the SOURCE repository first, then mirrors here in its own change.
+/// Expect this note to disappear along with the hand-syncing.
 #[cfg(test)]
 pub const CODE_REVIEWER_SKILLS: [&str; 5] =
   ["conventions-reviewer", "justification-reviewer", "reviewability-reviewer", "sanity-reviewer", "testing-reviewer"];
