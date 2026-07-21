@@ -182,6 +182,69 @@ pub struct ActivityWatch {
   pub limit: Duration,
 }
 
+/// Stop waiting the moment the task crosses its own declared finish line, instead of waiting
+/// for a harness process that may never exit.
+///
+/// A terminal harness and a completed task are not the same event. Some agent CLIs finish the
+/// requested work, write their declared result, and then wedge with the TUI still open — the
+/// run then burns its entire inactivity budget (an hour, for a step with a widened window) and
+/// dies red, even though the work was done in the first few minutes.
+///
+/// The result file is bind-mounted, so the host can see it being written. Presence alone is not
+/// enough — a half-written file is present too — so completion is inferred from QUIESCENCE: the
+/// file's `(mtime, len)` stamp must stop changing for `quiet_for`, and only then is `confirm`
+/// asked whether the content is a usable result. A writer still working keeps resetting the
+/// clock.
+///
+/// This decides only WHEN TO STOP WAITING, never whether the run succeeded. The caller's normal
+/// collection path — copy out, validate against the workflow schema, bounded correction retry —
+/// stays authoritative, so an early stop can never launder a bad result into a pass.
+pub struct DoneWatch {
+  /// The declared result file, watched for the writer going quiet.
+  pub file: std::path::PathBuf,
+  /// How long `file`'s stamp must hold still before it counts as finished.
+  pub quiet_for: Duration,
+  /// Asked only once the file has gone quiet: is this actually a usable result? Keeps this
+  /// module free of any knowledge about JSON, schemas, or git.
+  pub confirm: Box<dyn Fn() -> bool + Send + Sync>,
+}
+
+/// The last `(mtime, len)` stamp seen for a [`DoneWatch`] file and how long it has held.
+struct QuiescenceWatch {
+  file: std::path::PathBuf,
+  /// `None` until the file first appears; reset whenever it vanishes.
+  stamp: Option<(std::time::SystemTime, u64)>,
+  /// HOST-side instant at which `stamp` last changed. Deliberately not derived from the file's
+  /// own mtime: that timestamp comes from the container's clock, and any skew against the host
+  /// would make a "written more than N seconds ago" test fire early or never fire at all.
+  /// Comparing stamps only for EQUALITY and timing the gap locally is immune to that.
+  since: std::time::Instant,
+}
+
+impl QuiescenceWatch {
+  fn new(file: &std::path::Path) -> Self {
+    QuiescenceWatch { file: file.to_path_buf(), stamp: None, since: std::time::Instant::now() }
+  }
+
+  /// `true` once the file exists and its stamp has been unchanged for `quiet_for`. Length is
+  /// tracked alongside mtime because bind-mount mtime granularity can be coarse enough to hide
+  /// a rewrite that lands within the same tick.
+  fn poll(&mut self, quiet_for: Duration) -> bool {
+    let Ok(meta) = std::fs::metadata(&self.file) else {
+      // Not written yet (or removed mid-write): nothing has gone quiet.
+      self.stamp = None;
+      return false;
+    };
+    let stamp = (meta.modified().unwrap_or(std::time::UNIX_EPOCH), meta.len());
+    if self.stamp != Some(stamp) {
+      self.stamp = Some(stamp);
+      self.since = std::time::Instant::now();
+      return false;
+    }
+    self.since.elapsed() >= quiet_for
+  }
+}
+
 /// Bounded memory of normalized cast-line hashes already seen, plus the read cursor into the
 /// watched file. Backs one [`ActivityWatch`] evaluation loop.
 struct NoveltyWatch {
@@ -280,6 +343,10 @@ pub enum Killed {
   Timeout,
   /// The watched file showed no activity for the watchdog's limit.
   Inactive,
+  /// Not a failure: the task's declared result file went quiet and passed [`DoneWatch::confirm`],
+  /// so the harness was stopped deliberately rather than waited out. The caller still validates
+  /// the result before calling the run a success.
+  Done,
 }
 
 /// A worker's handle to one proc: mark it started, run a child while pumping its output into the
@@ -348,7 +415,7 @@ impl Proc {
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
-    let (ok, _killed, last) = self.exec(program, args, None, None, None)?;
+    let (ok, _killed, last) = self.exec(program, args, None, None, None, None)?;
     Ok((ok, last))
   }
 
@@ -358,12 +425,13 @@ impl Proc {
   }
 
   /// Like [`Proc::run`] but kills the child past the wall-clock `timeout` and/or when
-  /// `watch` sees no screen activity for its limit (`None`s wait forever). Returns
-  /// `(success, why_killed, last_line)`.
+  /// `watch` sees no screen activity for its limit (`None`s wait forever), and stops it early
+  /// when `done` sees the task's result file finished. Returns `(success, why_killed, last_line)`.
   pub fn run_watched(
     &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
+    done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
-    self.exec(program, args, None, timeout, watch)
+    self.exec(program, args, None, timeout, watch, done)
   }
 
   /// Spawn `program args`, pump both output streams into the model as timestamped lines,
@@ -371,7 +439,7 @@ impl Proc {
   /// public `run*` methods delegate to.
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
-    watch: Option<&ActivityWatch>,
+    watch: Option<&ActivityWatch>, done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
     let started = self.start_instant();
     let mut command = Command::new(program);
@@ -399,12 +467,13 @@ impl Proc {
     }
 
     let mut killed = Killed::No;
-    let status = if timeout.is_none() && watch.is_none() {
+    let status = if timeout.is_none() && watch.is_none() && done.is_none() {
       child.wait()?
     } else {
       // The activity clock starts now: a watched file that never appears (or never shows a
       // novel line) still trips the watchdog once the limit elapses.
       let mut novelty = watch.map(|w| NoveltyWatch::new(&w.file));
+      let mut quiescence = done.map(|d| QuiescenceWatch::new(&d.file));
       let mut last_activity = std::time::Instant::now();
       loop {
         if let Some(s) = child.try_wait()? {
@@ -414,6 +483,17 @@ impl Proc {
           if started.elapsed() >= limit {
             let _ = child.kill();
             killed = Killed::Timeout;
+            break child.wait()?;
+          }
+        }
+        // Checked before the inactivity watchdog: a harness that finished its work and then
+        // wedged is silent on both counts, and "the result is written" is the truthful reading
+        // of that silence. `confirm` runs only after quiescence, so the cost is one stat per
+        // poll until the file actually settles.
+        if let Some(d) = done {
+          if quiescence.as_mut().is_some_and(|q| q.poll(d.quiet_for)) && (d.confirm)() {
+            let _ = child.kill();
+            killed = Killed::Done;
             break child.wait()?;
           }
         }
@@ -875,7 +955,8 @@ mod tests {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("sleep", false);
     p.start();
-    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], Some(Duration::from_millis(150)), None).unwrap();
+    let (ok, killed, _) =
+      p.run_watched("sleep", &["5".to_string()], Some(Duration::from_millis(150)), None, None).unwrap();
     assert_eq!(killed, Killed::Timeout);
     assert!(!ok, "the 5s sleep must be killed by the 150ms timeout");
   }
@@ -890,7 +971,7 @@ mod tests {
       file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
       limit: Duration::from_millis(200),
     };
-    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch)).unwrap();
+    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
     assert_eq!(killed, Killed::Inactive);
     assert!(!ok);
   }
@@ -907,7 +988,7 @@ mod tests {
     // as the same frame — that is the spinner-thrash case the watchdog now kills.)
     let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
     let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600) };
-    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch)).unwrap();
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::No);
     assert!(ok, "an active child must not be killed by the watchdog");
@@ -928,10 +1009,107 @@ mod tests {
       file.display()
     );
     let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(500) };
-    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch)).unwrap();
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::Inactive, "repeating frames are not activity");
     assert!(!ok);
+  }
+
+  /// The case this exists for: the agent writes its result and the CLI then wedges forever.
+  /// The child never exits and never goes near its (deliberately long) inactivity limit, so
+  /// only the completion watch can stop it.
+  #[cfg(unix)]
+  #[test]
+  fn done_watch_stops_a_harness_that_finished_its_work_and_wedged() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("wedged", false);
+    p.start();
+    let result = std::env::temp_dir().join(format!("scsh-done-wedge-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&result);
+    // Write the result once, then hang forever with a silent screen.
+    // `exec` so the wedge IS this child: killing a plain `sh` would leave its `sleep`
+    // grandchild holding the output pipe, and the join below would wait that out instead.
+    let script = format!(r#"echo '{{"message":"done"}}' > {}; exec sleep 30"#, result.display());
+    let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
+    // An inactivity limit far too long to be what stops this run.
+    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20) };
+    let started = Instant::now();
+    let (_ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), Some(&done)).unwrap();
+    let _ = std::fs::remove_file(&result);
+    assert_eq!(killed, Killed::Done, "a written, quiet result ends the wait");
+    assert!(started.elapsed() < Duration::from_secs(10), "stopped on the result, not the 20s watchdog");
+  }
+
+  /// A writer still working must keep resetting the quiescence clock — the whole point of
+  /// waiting for quiet rather than trusting mere presence, since a half-written file is present.
+  #[cfg(unix)]
+  #[test]
+  fn done_watch_waits_while_the_result_is_still_being_written() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("writing", false);
+    p.start();
+    let result = std::env::temp_dir().join(format!("scsh-done-partial-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&result);
+    // Appends for ~800ms — every append restarts the 300ms quiet window — then exits on its own.
+    let script = format!(r#"for w in a b c d e f g h; do echo "$w" >> {}; sleep 0.1; done"#, result.display());
+    let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, None, Some(&done)).unwrap();
+    let body = std::fs::read_to_string(&result).unwrap_or_default();
+    let _ = std::fs::remove_file(&result);
+    assert_eq!(killed, Killed::No, "an active writer is never cut off mid-write");
+    assert!(ok);
+    assert_eq!(body.lines().count(), 8, "every line the writer intended survived");
+  }
+
+  /// Quiescence alone is not completion. A `commits: true` step writes its result and only then
+  /// commits; stopping in that gap would throw the commit away. `confirm` is the veto, and it
+  /// keeps being asked until it agrees.
+  #[cfg(unix)]
+  #[test]
+  fn done_watch_defers_to_confirm_while_the_commit_is_still_pending() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("committing", false);
+    p.start();
+    let result = std::env::temp_dir().join(format!("scsh-done-commit-{}.json", std::process::id()));
+    let committed = std::env::temp_dir().join(format!("scsh-done-ref-{}", std::process::id()));
+    let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_file(&committed);
+    // Result lands immediately and goes quiet; the "commit" only appears ~700ms later.
+    let script = format!(
+      r#"echo '{{"message":"done"}}' > {}; sleep 0.7; touch {}; exec sleep 30"#,
+      result.display(),
+      committed.display()
+    );
+    let done = DoneWatch {
+      file: result.clone(),
+      quiet_for: Duration::from_millis(200),
+      confirm: {
+        let c = committed.clone();
+        Box::new(move || c.exists())
+      },
+    };
+    let (_ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, None, Some(&done)).unwrap();
+    let had_commit = committed.exists();
+    let _ = std::fs::remove_file(&result);
+    let _ = std::fs::remove_file(&committed);
+    assert_eq!(killed, Killed::Done);
+    assert!(had_commit, "the run was not stopped until the commit had landed");
+  }
+
+  #[test]
+  fn quiescence_resets_whenever_the_stamp_changes() {
+    let file = std::env::temp_dir().join(format!("scsh-quiesce-{}.json", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    let mut q = QuiescenceWatch::new(&file);
+    assert!(!q.poll(Duration::ZERO), "a file that does not exist yet has not gone quiet");
+    std::fs::write(&file, b"{}").unwrap();
+    assert!(!q.poll(Duration::ZERO), "the first sighting only starts the clock");
+    assert!(q.poll(Duration::ZERO), "an unchanged stamp is quiet");
+    std::fs::write(&file, b"{\"a\":1}").unwrap();
+    assert!(!q.poll(Duration::ZERO), "a changed stamp restarts the clock");
+    assert!(!q.poll(Duration::from_secs(60)), "and the new window has not elapsed");
+    let _ = std::fs::remove_file(&file);
+    assert!(!q.poll(Duration::ZERO), "a vanished file is not quiet");
   }
 
   #[test]

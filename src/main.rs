@@ -4707,12 +4707,28 @@ fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
   })
 }
 
+/// How long a result file must hold still before the writer counts as finished with it.
+///
+/// Presence alone would be wrong — a half-written file is present too. Thirty seconds is far
+/// longer than any agent takes to flush a small JSON document, and far shorter than the
+/// inactivity windows (1800s by default, 3600s where a step widened it) this replaces as the
+/// usual way a wedged-but-finished harness gets stopped.
+const RESULT_QUIESCENCE_SECS: u64 = 30;
+
 fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
   let exit = run_dir.join(format!("{}.exit", runtime::RUN_LOG_REL));
   let exit_zero = std::fs::read_to_string(exit).is_ok_and(|code| code.trim() == "0");
-  if !exit_zero {
-    return false;
-  }
+  exit_zero && harness_produced_its_deliverables(run_dir, result_rel, commits)
+}
+
+/// Whether the harness has produced everything the skill promised: a result file that parses as
+/// a JSON object, plus at least one commit when the skill declares `commits: true`.
+///
+/// Deliberately says nothing about the harness PROCESS — no exit code, no exit marker. That is
+/// what lets it answer the live question "has the work landed?" for a CLI that finished and then
+/// wedged without ever exiting. The commit half matters for the live use: a step that writes its
+/// result and then spends minutes committing must not be stopped in between.
+fn harness_produced_its_deliverables(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
   let result_good = std::fs::read_to_string(run_dir.join(result_rel))
     .ok()
     .and_then(|body| json::parse(&body).ok())
@@ -4982,6 +4998,20 @@ fn run_one_skill(
     file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
   };
+  // Completion watch: stop as soon as the task crosses its declared finish line, rather than
+  // waiting out `inactivity_secs` for a CLI that finished its work and then failed to exit.
+  // Observed live: a `fix` step wrote its result and wedged, burning its full widened 3600s
+  // window twice over before dying red and costing the job a supervisor retry.
+  let done = ui::screen::DoneWatch {
+    file: run_dir.join(&skill.result),
+    quiet_for: Duration::from_secs(RESULT_QUIESCENCE_SECS),
+    confirm: {
+      let run_dir = run_dir.clone();
+      let result_rel = skill.result.clone();
+      let commits = skill.commits;
+      Box::new(move || harness_produced_its_deliverables(&run_dir, &result_rel, commits))
+    },
+  };
   let _container = ui::signals::ContainerGuard::new(&rt.name, &name);
   if let Some(c) = &daemon_client {
     c.container_event(spinner.index(), "start", &name, &rt.name);
@@ -4989,7 +5019,7 @@ fn run_one_skill(
     // lets the session browser download/replay the recording mid-run.
     c.proc_cast(spinner.index(), &run_dir.join(runtime::RUN_CAST_REL).to_string_lossy());
   }
-  let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch));
+  let result = spinner.run_watched(&run[0], &run[1..], timeout, Some(&watch), Some(&done));
   // A terminal harness process and a completed task are related, but they are not identical.
   // The declared result file is the durable task boundary. Some interactive CLIs finish the
   // requested work, write that result, and then wedge or return a misleading status while their
@@ -5019,6 +5049,7 @@ fn run_one_skill(
       graceful_shutdown_reason = Some(match killed {
         ui::screen::Killed::Inactive => "accepted the valid result after the inactivity watchdog stopped the harness",
         ui::screen::Killed::Timeout => "accepted the valid result after the wall-clock watchdog stopped the harness",
+        ui::screen::Killed::Done => "stopped the harness once its result file had been written and quiet for 30s",
         ui::screen::Killed::No => "accepted the valid result despite the harness exiting non-zero during teardown",
       });
       Ok((true, killed, last))
@@ -5075,6 +5106,18 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
+    }
+    // Unreachable in practice: the completion watch fires only after confirming the result file,
+    // so the recovery arm above has already turned this into a graceful success. Kept explicit
+    // rather than folded into a catch-all so that a future change to `confirm` cannot silently
+    // turn a stopped-because-finished run into an unexplained failure.
+    Ok((false, ui::screen::Killed::Done, _)) => {
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+      let why = "stopped after the result file went quiet, but the result did not survive collection".to_string();
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::HARNESS_NONZERO, Some(&detail));
+      return SkillRun::failed(failure::reason::HARNESS_NONZERO, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why);
     }
     Ok((false, ui::screen::Killed::No, last)) => {
