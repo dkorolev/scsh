@@ -761,6 +761,25 @@ function containerDetailsHtml(p) {
   return '<span class="container-runtime-label">runtime</span> <span class="container-runtime-name">' +
     esc(containerRuntimeName(p.container_runtime)) + '</span> · container: ' + esc(p.container_name);
 }
+// A restart needs the owning run process to respawn the route. When that process is gone the
+// control stays visible but inert, and says why — the alternative is a click that travels to
+// the daemon only to come back refused.
+const RESTART_GONE_TITLE =
+  'The run client is gone, so nothing is left to respawn this route — restart the whole job instead';
+function setRestartBlocked(btn, blocked) {
+  if (!btn) return;
+  btn.disabled = !!blocked;
+  btn.classList.toggle('is-blocked', !!blocked);
+  if (blocked) {
+    btn.title = RESTART_GONE_TITLE;
+    setBtnLabel(btn, 'Restart unavailable');
+  } else if (btn.title === RESTART_GONE_TITLE) {
+    btn.title =
+      'Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues';
+    setBtnLabel(btn, 'Force restart');
+  }
+}
+
 function updateProcFields(det, p, nowUnix) {
   const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
   det.className = 'chamfer proc ' + (terminating ? 'terminating' : p.status);
@@ -806,6 +825,9 @@ function updateProcFields(det, p, nowUnix) {
   const restartEl = det.querySelector('button[data-proc-restart]');
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
   const wantRestart = live && (p.kind || 'skill') === 'skill';
+  // Keep the button, but blocked: vanishing silently would read as a missing feature, while
+  // an enabled one promises a respawn the daemon cannot perform.
+  if (restartEl && wantRestart) setRestartBlocked(restartEl, RUN_CLIENT_GONE);
   if (restartEl && !wantRestart) restartEl.remove();
   else if (!restartEl && wantRestart) {
     const actions = ensureProcActions(det);
@@ -816,6 +838,7 @@ function updateProcFields(det, p, nowUnix) {
     btn.setAttribute('data-session', SESSION_ID);
     btn.title = 'Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues';
     btn.innerHTML = '<span>Force restart</span>';
+    setRestartBlocked(btn, RUN_CLIENT_GONE);
     const kill = det.querySelector('button[data-proc-stop]');
     if (kill && kill.parentElement === actions) actions.insertBefore(btn, kill);
     else actions.appendChild(btn);
@@ -2314,9 +2337,16 @@ function bindSessionProcs(root) {
     if (ev.target && ev.target.matches && ev.target.matches('details.proc')) persistOpenProcs();
   }, true);
 }
+// Only the owning `scsh run` can respawn a route: the daemon records a restart marker and
+// that process consumes it. Once the run client is gone there is nothing to consume it, so
+// the daemon refuses the request — and a button that can only be refused should not be
+// offered as if it worked.
+let RUN_CLIENT_GONE = false;
+
 function renderSession(session, nowUnix) {
   const root = document.getElementById('session-procs');
   if (!root || !session) return;
+  RUN_CLIENT_GONE = session.client_connected === false;
   const open = new Set([...root.querySelectorAll('details.proc')].filter(d => d.open).map(d => d.dataset.index));
   const procs = session.procs || [];
   procs.forEach(p => {
@@ -2842,6 +2872,9 @@ function initProcKills(root) {
     });
   });
   (root || document).querySelectorAll('button[data-proc-restart]').forEach((btn) => {
+    // Rows built by procHtml (first paint, and every newly appended proc) go through here
+    // rather than updateProcFields, so they need the same gate.
+    setRestartBlocked(btn, RUN_CLIENT_GONE);
     btn.addEventListener('click', (ev) => {
       ev.preventDefault();
       ev.stopPropagation();

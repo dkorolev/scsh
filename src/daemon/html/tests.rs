@@ -2050,6 +2050,30 @@ fn client_js_wires_force_stop() {
   assert!(js.contains("p.fail_reason === 'stop_requested'"), "live tasks expose the terminating transition");
 }
 
+/// A Force restart needs the owning `scsh run` to respawn the route, so the browser must not
+/// offer one it knows the daemon will refuse with "the run client is gone".
+#[test]
+fn client_js_blocks_a_restart_with_no_run_client_to_respawn_from() {
+  let js = live_client_js();
+  assert!(js.contains("RUN_CLIENT_GONE"), "the client tracks whether the run process is still attached");
+  assert!(js.contains("session.client_connected === false"), "read from the session payload the daemon already sends");
+  assert!(js.contains("function setRestartBlocked"), "one place decides whether a restart is offerable");
+  assert!(js.contains("Restart unavailable"), "the blocked control says so on its face, not only on hover");
+  assert!(js.contains("nothing is left to respawn this route"), "and explains why, matching the daemon's refusal");
+  assert!(js.contains("restart the whole job instead"), "with the action that does work");
+  // Blocked, not hidden: a control that vanishes reads as a missing feature.
+  assert!(js.contains("btn.disabled = !!blocked"), "the button is disabled rather than removed");
+  // Every path that can put a restart button on the page gates through the helper: the live
+  // update of a row that already has one, the row that grows one mid-run, and the rows
+  // procHtml paints (first load, and each newly appended proc) which never see updateProcFields.
+  assert!(js.contains("setRestartBlocked(restartEl, RUN_CLIENT_GONE)"), "existing row re-gated on each update");
+  assert_eq!(
+    js.matches("setRestartBlocked(btn, RUN_CLIENT_GONE)").count(),
+    2,
+    "the freshly created button and the procHtml-painted ones both gate"
+  );
+}
+
 /// Accessibility hardening: confirm-dialog focus management, the full ARIA tab pattern,
 #[test]
 fn stats_tab_renders_the_flaky_route_dashboard() {
