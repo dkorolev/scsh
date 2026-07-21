@@ -2663,12 +2663,22 @@ fn run_workflow(
             completed < total
           } else if s.do_while.is_some() {
             let holds = outputs.get("SCSH_DO_WHILE_REPEAT").is_some_and(|value| value == "true");
-            if holds && completed >= harness_def::DO_WHILE_MAX_ITERATIONS {
-              failure = Some(format!(
-                "step '{}' hit the do-while backstop ({} iterations) with its condition still true",
-                s.id,
-                harness_def::DO_WHILE_MAX_ITERATIONS
-              ));
+            // A definition's own `max-iterations` is the budget the AUTHOR chose; scsh's
+            // backstop is the ceiling nobody may exceed. Report them differently: the first
+            // is a loop that used up its allowance, the second is a loop that ran away.
+            let ceiling = s.max_iterations.unwrap_or(harness_def::DO_WHILE_MAX_ITERATIONS);
+            if holds && completed >= ceiling {
+              failure = Some(match s.max_iterations {
+                Some(cap) => format!(
+                  "step '{}' reached its max-iterations ({cap}) with its condition still true — the loop did not converge",
+                  s.id
+                ),
+                None => format!(
+                  "step '{}' hit the do-while backstop ({} iterations) with its condition still true",
+                  s.id,
+                  harness_def::DO_WHILE_MAX_ITERATIONS
+                ),
+              });
               break;
             }
             holds
@@ -8853,6 +8863,11 @@ fn print_help_defs() {
                          while the final step's result JSON sets the boolean
                          `SCSH_DO_WHILE_REPEAT` to true. scsh has no comparison language here —
                          an agent decides. A backstop caps runaway loops at 25 iterations.
+  max-iterations: 5      on the same do-while step: THIS loop's own ceiling, below the backstop.
+                         Reaching it fails the job with a message naming the cap, so an
+                         unattended loop cannot burn a fleet per round until the backstop. Use
+                         it whenever a loop's real budget is small; `repeat` needs no cap
+                         because it already declares its exact count.
   break: true            on the loop body's FIRST step, lets that step exit before the rest of
                          the body runs. It must declare the boolean output `SCSH_LOOP_BREAK`;
                          true exits this loop, false continues through the body normally.
@@ -10141,6 +10156,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       inactivity_timeout: Some(3600),
       do_while: None,
       break_loop: false,
+      max_iterations: None,
     };
     let inv = step_invocation(&step, "summarize", "tmp/scsh/abcdef", Vec::new(), None);
     // The artifact lands beside the step's result, inside the caller's session scratch dir.

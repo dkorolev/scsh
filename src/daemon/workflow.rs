@@ -145,9 +145,11 @@ pub fn workflow_loop_plans(session: &Session) -> Vec<WorkflowLoopPlan> {
             plans.push(WorkflowLoopPlan { id: step.id.clone(), max_iterations: Some(total), exact: true });
           }
           if step.do_while.is_some() {
+            // Show the loop's REAL ceiling on the job page: a def that declares
+            // `max-iterations: 5` should read "of 5", not "of 25".
             plans.push(WorkflowLoopPlan {
               id: step.id.clone(),
-              max_iterations: Some(crate::harness_def::DO_WHILE_MAX_ITERATIONS),
+              max_iterations: Some(step.max_iterations.unwrap_or(crate::harness_def::DO_WHILE_MAX_ITERATIONS)),
               exact: false,
             });
           }
@@ -1645,6 +1647,34 @@ mod tests {
     assert_eq!(first.proc_index, Some(10));
     assert_eq!(second.proc_index, Some(11));
     assert!(validate_workflow_meta(&meta).is_ok());
+  }
+
+  #[test]
+  fn a_declared_max_iterations_is_the_ceiling_the_job_page_shows() {
+    // The graph's "iteration N of M" must show the loop's REAL budget: a def that caps itself
+    // at 3 should never advertise the 25-iteration backstop as its ceiling.
+    let dir = std::env::temp_dir().join(format!("scsh-capped-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(dir.join(".harness")).unwrap();
+    let src = concat!(
+      "description: \"capped\"\nsteps:\n",
+      "  seed:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n",
+      "    output:\n      n:\n        type: int\n",
+      "  again:\n    needs: seed\n    do-while: seed\n    max-iterations: 3\n",
+      "    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n",
+      "    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n"
+    );
+    std::fs::write(dir.join(".harness/capped.yml"), src).unwrap();
+    let def = crate::harness_def::validate("capped", src, crate::harness_def::DefSource::Repo).unwrap();
+    let meta = workflow_meta_from_def(&def).unwrap();
+    let mut session = session_with_workflow(meta);
+    session.profile = Some("capped".into());
+    session.repo = dir.to_string_lossy().into_owned();
+    assert_eq!(
+      workflow_loop_plans(&session),
+      [WorkflowLoopPlan { id: "again".into(), max_iterations: Some(3), exact: false }],
+      "the declared cap, not the backstop"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   #[test]

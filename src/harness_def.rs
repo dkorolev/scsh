@@ -379,6 +379,12 @@ pub struct Step {
   /// This step is the first step of a do-while body and may end that loop immediately by
   /// returning the fixed top-level boolean `SCSH_LOOP_BREAK`.
   pub break_loop: bool,
+  /// A `do-while` step's own iteration ceiling (`max-iterations: 5`). `None` = only the
+  /// [`DO_WHILE_MAX_ITERATIONS`] backstop applies. A definition author sets this when the
+  /// loop's real budget is far below the backstop — an unattended fifteen-container round is
+  /// expensive, and "stop after five" is a decision the DEFINITION should make rather than
+  /// leaving it to whether a model ever flips its own condition.
+  pub max_iterations: Option<usize>,
   /// Wall-clock automatic-retry budget for this step (`retry_for: 8h`), seconds.
   /// `None` = the default (30m).
   pub retry_for: Option<u64>,
@@ -849,11 +855,12 @@ fn validate_steps(
       "retry_for",
       "retry_signature_cap",
       "inactivity_timeout",
+      "max-iterations",
     ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, retry_for, retry_signature_cap, inactivity_timeout)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout)"
         ));
       }
     }
@@ -933,6 +940,35 @@ fn validate_steps(
     if repeat.is_some() && do_while.is_some() {
       errors.push(format!("step '{id}' cannot have both 'repeat' and 'do-while'"));
     }
+    let max_iterations = match fm.get("max-iterations") {
+      None => None,
+      Some(Node::Scalar(s)) => match s.trim().parse::<usize>() {
+        // The backstop stays an absolute ceiling: this key lowers a loop's budget, it never
+        // raises it. A definition asking for more is a mistake worth naming, not clamping.
+        Ok(n) if n > 0 && n <= DO_WHILE_MAX_ITERATIONS => Some(n),
+        Ok(n) if n > DO_WHILE_MAX_ITERATIONS => {
+          errors.push(format!(
+            "'steps.{id}.max-iterations' is {n}, above the {DO_WHILE_MAX_ITERATIONS}-iteration backstop scsh enforces for every do-while"
+          ));
+          None
+        }
+        _ => {
+          errors.push(format!("'steps.{id}.max-iterations' must be a positive integer"));
+          None
+        }
+      },
+      Some(_) => {
+        errors.push(format!("'steps.{id}.max-iterations' must be a positive integer"));
+        None
+      }
+    };
+    // `repeat` already IS an exact count, so a ceiling on it would be two answers to one
+    // question; anywhere else there is no loop for it to bound.
+    if max_iterations.is_some() && do_while.is_none() {
+      errors.push(format!(
+        "'steps.{id}.max-iterations' only applies to a 'do-while' step (a 'repeat' step already declares its exact count)"
+      ));
+    }
     let break_loop = match fm.get("break") {
       None => false,
       Some(Node::Scalar(s)) => match s.trim() {
@@ -969,6 +1005,7 @@ fn validate_steps(
         repeat,
         do_while,
         break_loop,
+        max_iterations,
         retry_for,
         retry_signature_cap,
         inactivity_timeout,
@@ -1819,6 +1856,40 @@ mod tests {
     let src = wf("    needs: a\n    repeat: 2\n    do-while: a\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
     let err = validate("t", &src, DefSource::Repo).unwrap_err();
     assert!(err.iter().any(|e| e.contains("cannot have both 'repeat' and 'do-while'")), "{err:?}");
+  }
+
+  #[test]
+  fn a_do_while_may_declare_its_own_ceiling_below_the_backstop() {
+    let dw = |extra: &str| {
+      wf(&format!("    needs: a\n    do-while: a\n{extra}    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool"))
+    };
+
+    // Declared, and it is the step's own budget.
+    let def = validate("t", &dw("    max-iterations: 5\n"), DefSource::Repo).unwrap();
+    assert_eq!(def.steps.iter().find(|s| s.id == "b").unwrap().max_iterations, Some(5));
+    // Absent means only the backstop applies.
+    assert_eq!(validate("t", &dw(""), DefSource::Repo).unwrap().steps[1].max_iterations, None);
+    // The backstop is a ceiling this key lowers, never raises.
+    let err = validate("t", &dw(&format!("    max-iterations: {}\n", DO_WHILE_MAX_ITERATIONS + 1)), DefSource::Repo)
+      .unwrap_err();
+    assert!(err.iter().any(|e| e.contains("above the") && e.contains("backstop")), "{err:?}");
+    assert_eq!(
+      validate("t", &dw(&format!("    max-iterations: {DO_WHILE_MAX_ITERATIONS}\n")), DefSource::Repo).unwrap().steps
+        [1]
+        .max_iterations,
+      Some(DO_WHILE_MAX_ITERATIONS),
+      "the backstop itself is a legal cap"
+    );
+    // Zero and non-integers are refused rather than silently meaning "no loop".
+    for bad in ["    max-iterations: 0\n", "    max-iterations: soon\n", "    max-iterations: -1\n"] {
+      let err = validate("t", &dw(bad), DefSource::Repo).unwrap_err();
+      assert!(err.iter().any(|e| e.contains("must be a positive integer")), "{bad}: {err:?}");
+    }
+
+    // Only a do-while has an open-ended loop to bound: `repeat` already states its count.
+    let on_repeat = wf("    needs: a\n    repeat: 2\n    max-iterations: 5\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: int");
+    let err = validate("t", &on_repeat, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("only applies to a 'do-while' step")), "{err:?}");
   }
 
   #[test]
