@@ -308,6 +308,43 @@ pub fn parse_loop_iteration_id(id: &str) -> Option<(&str, &str, usize)> {
   None
 }
 
+/// Whether `target` is reachable from `from` by following `needs` edges.
+fn need_reaches(nodes: &[WorkflowNodeMeta], from: &str, target: &str) -> bool {
+  let mut seen: std::collections::BTreeSet<&str> = std::collections::BTreeSet::new();
+  let mut stack = vec![from];
+  while let Some(id) = stack.pop() {
+    if !seen.insert(id) {
+      continue;
+    }
+    let Some(node) = nodes.iter().find(|n| n.id == id) else { continue };
+    for need in &node.needs {
+      if need == target {
+        return true;
+      }
+      stack.push(need.as_str());
+    }
+  }
+  false
+}
+
+/// Drop every need that another need already reaches.
+///
+/// A loop iteration inherits its template's `needs`. Those pointing INTO the loop body get
+/// re-pointed at this iteration, but the ones pointing outside it are copied verbatim — so
+/// iteration 5 of a review loop still claims to depend on the round-zero batch that ran before
+/// iteration 1. Scheduling-wise that is harmless (they completed long ago) and the back-edge to
+/// the previous iteration's end already implies every one of them. On the graph it is not
+/// harmless: it draws an edge from each of those far-away nodes across every intervening block
+/// to every later iteration, which is precisely the hairball a reader cannot follow.
+///
+/// Pruning by REACHABILITY rather than by "is it outside the loop body" keeps this safe for a
+/// step that depends on some genuinely independent branch: an edge survives unless another edge
+/// already gets there, so no ordering the graph was expressing is ever lost.
+fn prune_implied_needs(nodes: &[WorkflowNodeMeta], needs: &mut Vec<String>) {
+  let original = needs.clone();
+  needs.retain(|need| !original.iter().any(|other| other != need && need_reaches(nodes, other, need)));
+}
+
 /// Bind a skill proc to its workflow node by step id. Ignores builds and unknown ids.
 pub fn bind_workflow_proc(meta: &mut WorkflowMeta, step_id: &str, proc_index: usize, kind: ProcKind) {
   if kind != ProcKind::Skill || step_id.is_empty() {
@@ -334,6 +371,7 @@ pub fn bind_workflow_proc(meta: &mut WorkflowMeta, step_id: &str, proc_index: us
     } else if suffix == "-repeat" && iteration > 1 {
       needs = vec![format!("{base}{suffix}-{}", iteration - 1)];
     }
+    prune_implied_needs(&meta.nodes, &mut needs);
     meta.nodes.push(WorkflowNodeMeta {
       id: step_id.to_string(),
       proc_index: Some(proc_index),
@@ -1649,6 +1687,83 @@ mod tests {
     assert!(validate_workflow_meta(&meta).is_ok());
   }
 
+  /// A later loop iteration must not re-declare the dependencies its FIRST iteration had on
+  /// nodes outside the loop. Iteration 2's `decide` genuinely follows iteration 1's `collect`;
+  /// claiming it also follows all fifteen round-zero reviewers draws fifteen edges from the far
+  /// left of the graph across every intervening block, once per iteration.
+  #[test]
+  fn a_later_loop_iteration_does_not_re_declare_the_first_iteration_s_outside_needs() {
+    let (_, src) = crate::harness_def::builtin_defs().into_iter().find(|(n, _)| *n == "gorgeous-pipeline").unwrap();
+    let def = crate::harness_def::validate("gorgeous-pipeline", src, crate::harness_def::DefSource::Builtin).unwrap();
+    let mut meta = workflow_meta_from_def(&def).unwrap();
+    // Derived from the def, never from a hard-coded route roster: the reviewer fleet's shape
+    // is a product decision that changes, and this test is about loop unrolling, not headcount.
+    let template = meta.nodes.iter().find(|n| n.id == "decide-while-collect").unwrap();
+    let round_zero: Vec<String> = template.needs.iter().filter(|n| n.starts_with("initial_")).cloned().collect();
+    assert!(!round_zero.is_empty(), "the authored loop head really does depend on the round-zero batch");
+    let body: Vec<String> = meta
+      .nodes
+      .iter()
+      .filter(|n| n.id.ends_with("-while-collect") && n.id != "decide-while-collect")
+      .map(|n| n.id.clone())
+      .collect();
+    // Bind one full cycle in declaration order, then the head of the next.
+    bind_workflow_proc(&mut meta, "decide-while-collect-1", 0, ProcKind::Skill);
+    for (i, step) in body.iter().enumerate() {
+      bind_workflow_proc(&mut meta, &format!("{step}-1"), i + 1, ProcKind::Skill);
+    }
+    bind_workflow_proc(&mut meta, "decide-while-collect-2", body.len() + 1, ProcKind::Skill);
+
+    let first = meta.nodes.iter().find(|n| n.id == "decide-while-collect-1").unwrap();
+    assert_eq!(
+      first.needs.iter().filter(|n| n.starts_with("initial_")).count(),
+      round_zero.len(),
+      "iteration 1 keeps them: that IS what it waited for"
+    );
+    let second = meta.nodes.iter().find(|n| n.id == "decide-while-collect-2").unwrap();
+    assert_eq!(
+      second.needs,
+      ["collect-while-collect-1"],
+      "iteration 2 follows the previous cycle's end, and nothing the previous cycle already covered"
+    );
+    assert!(validate_workflow_meta(&meta).is_ok());
+  }
+
+  /// The prune is by reachability, not by "outside the loop", so an edge to a genuinely
+  /// independent node is never silently dropped.
+  #[test]
+  fn pruning_keeps_a_need_no_other_need_reaches() {
+    let nodes = vec![
+      WorkflowNodeMeta {
+        id: "root".into(),
+        proc_index: None,
+        order: 0,
+        needs: vec![],
+        conditional: false,
+        when_summary: None,
+      },
+      WorkflowNodeMeta {
+        id: "mid".into(),
+        proc_index: None,
+        order: 1,
+        needs: vec!["root".into()],
+        conditional: false,
+        when_summary: None,
+      },
+      WorkflowNodeMeta {
+        id: "loner".into(),
+        proc_index: None,
+        order: 2,
+        needs: vec![],
+        conditional: false,
+        when_summary: None,
+      },
+    ];
+    let mut needs = vec!["root".to_string(), "mid".to_string(), "loner".to_string()];
+    prune_implied_needs(&nodes, &mut needs);
+    assert_eq!(needs, ["mid", "loner"], "`mid` already reaches `root`; nothing reaches `loner`");
+  }
+
   #[test]
   fn a_declared_max_iterations_is_the_ceiling_the_job_page_shows() {
     // The graph's "iteration N of M" must show the loop's REAL budget: a def that caps itself
@@ -1706,7 +1821,9 @@ mod tests {
     let first = meta.nodes.iter().find(|n| n.id == "increment-while-compare-1").unwrap();
     let second = meta.nodes.iter().find(|n| n.id == "increment-while-compare-2").unwrap();
     assert_eq!(first.needs, ["initialize"]);
-    assert_eq!(second.needs, ["initialize", "compare-while-compare-1"]);
+    // Iteration 2 waits on the previous cycle's end and nothing else: `initialize` is already
+    // reachable through it, so re-declaring it would only draw an edge back across the loop.
+    assert_eq!(second.needs, ["compare-while-compare-1"]);
     assert_eq!(first.proc_index, Some(10));
     assert_eq!(second.proc_index, Some(12));
     assert!(validate_workflow_meta(&meta).is_ok());
