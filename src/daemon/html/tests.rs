@@ -2577,6 +2577,77 @@ fn live_client_js_skips_index_render_without_sessions() {
   assert!(js.contains("renderIndex(snapshot, nowUnix)"));
 }
 
+/// Clicking a run inside a job must leave the address bar holding that run's permalink — and
+/// must do it by rewriting the URL, not by navigating, so reading through a job's runs does not
+/// bury the page the reader arrived from under one Back press per run.
+#[test]
+fn live_client_js_addresses_a_clicked_run_without_pushing_history() {
+  let js = live_client_js();
+  assert!(js.contains("function addressProcRow(det)"), "a clicked run row updates the address bar");
+  assert!(
+    js.contains("history.replaceState(history.state, '', location.pathname + location.search + hash)"),
+    "addressing, not navigation: replaceState leaves no Back-button entry"
+  );
+  assert!(
+    !js.contains("history.pushState(history.state, '', location.pathname + location.search + hash)"),
+    "a run click must never push a history entry"
+  );
+  // Bound on click, because `toggle` also fires for restoreOpenProcs and live re-renders —
+  // either would steal the address bar from whatever the reader is actually looking at.
+  assert!(
+    js.contains("root.addEventListener('click', (ev) => {\n    const summary = ev.target.closest && ev.target.closest('details.proc > summary');"),
+    "the permalink follows a real click on a run's summary"
+  );
+  assert!(js.contains("if (ev.target.closest('a')) return;"), "cross-links inside a summary still navigate");
+}
+
+/// One rule for a run's address, shared by the click handler and the scroll-spy, so the hash a
+/// click writes is byte-identical to the one scrolling to that row would write.
+#[test]
+fn live_client_js_has_a_single_run_permalink_rule() {
+  let js = live_client_js();
+  assert!(js.contains("function procPermalinkHash(det)"), "one canonical hash per run row");
+  assert_eq!(
+    js.matches("'#task-' + encodeURIComponent(step)").count(),
+    1,
+    "the workflow-step address is derived in exactly one place"
+  );
+  assert!(
+    js.contains("candidates.push({ el: det, hash: procPermalinkHash(det) });"),
+    "the scroll-spy addresses runs through the same rule as a click"
+  );
+}
+
+/// Scrolling back to the top drops the fragment: the bare job URL is the honest permalink for
+/// the whole job, and a stale `#task-…` would claim the reader is deep in a run they have left.
+#[test]
+fn live_client_js_clears_the_fragment_at_the_top_of_a_job() {
+  let js = live_client_js();
+  assert!(js.contains("if (window.scrollY <= TOP_EPSILON) {"), "the top of the page is a distinct address");
+  assert!(
+    js.contains("if (location.hash) history.replaceState(history.state, '', location.pathname + location.search);"),
+    "at the top the URL loses its fragment entirely"
+  );
+  assert!(js.contains("const TOP_EPSILON = 2;"), "overscroll and subpixel offsets must not flicker the fragment");
+}
+
+/// The offline snapshot has no server and no `client_js`: its in-page navigation is plain
+/// fragment anchors, so a graph node must stay a REAL `#task-…` link that a browser can follow
+/// unaided. The live page only intercepts those clicks — it must never be what creates them.
+#[test]
+fn workflow_graph_nodes_are_real_fragment_links_for_the_offline_export() {
+  let source = include_str!("workflow.rs");
+  assert!(
+    source.contains(r##"let href = format!("#task-{}", esc(&node.id));"##),
+    "every graph node carries a plain in-page fragment href"
+  );
+  let js = live_client_js();
+  assert!(
+    js.contains("const a = ev.target.closest('a.wf-node');"),
+    "the live page enhances those links rather than replacing them"
+  );
+}
+
 #[test]
 fn live_client_js_shows_connecting_on_ws_close() {
   let js = live_client_js();

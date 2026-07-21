@@ -2330,12 +2330,42 @@ function syncProcFromLocation() {
   const det = document.querySelector('details.proc[data-index="' + CSS.escape(match[1]) + '"]');
   activateProcPanel(det, null, false);
 }
+// The canonical permalink for one run row. A workflow run is addressed by its STEP id, which
+// survives across retries and re-renders; a plain run falls back to its index. Single source of
+// truth so a click and the scroll-spy below can never disagree about a row's address.
+function procPermalinkHash(det) {
+  if (!det) return '';
+  const step = det.getAttribute('data-workflow-step');
+  if (step) return '#task-' + encodeURIComponent(step);
+  const index = det.getAttribute('data-index');
+  return index === null ? '' : '#proc-' + encodeURIComponent(index);
+}
+// Point the address bar at whatever run the reader just opened, so the URL is always a
+// copyable permalink to what is on screen. replaceState, not pushState: this is addressing,
+// not navigation — clicking through six runs must not bury the page you arrived from under
+// six Back presses.
+function addressProcRow(det) {
+  const hash = procPermalinkHash(det);
+  if (!hash || location.hash === hash) return;
+  history.replaceState(history.state, '', location.pathname + location.search + hash);
+}
 function bindSessionProcs(root) {
   if (root.dataset.changeBound) return;
   root.dataset.changeBound = '1';
   root.addEventListener('toggle', (ev) => {
     if (ev.target && ev.target.matches && ev.target.matches('details.proc')) persistOpenProcs();
   }, true);
+  // Bound on click rather than `toggle` because only a click is the reader's own doing:
+  // `toggle` also fires for restoreOpenProcs() and for live re-renders, which must not
+  // hijack the address bar out from under whatever the reader is actually looking at.
+  root.addEventListener('click', (ev) => {
+    const summary = ev.target.closest && ev.target.closest('details.proc > summary');
+    if (!summary || !root.contains(summary)) return;
+    // Links inside the summary (retry / original-attempt cross-links) address a DIFFERENT
+    // run; let them navigate instead of stamping this row's hash over their destination.
+    if (ev.target.closest('a')) return;
+    addressProcRow(summary.parentElement);
+  });
 }
 // Only the owning `scsh run` can respawn a route: the daemon records a restart marker and
 // that process consumes it. Once the run client is gone there is nothing to consume it, so
@@ -4041,19 +4071,25 @@ function renderInternalJobs(sessions, nowUnix) {
 // history. The candidate list is rebuilt on each frame because workflow runs add proc rows live.
 (function initJobScrollAddress() {
   if (!SESSION_ID) return;
+  // Rubber-band overscroll and subpixel scroll positions both report a hair off zero; treat
+  // anything within a couple of pixels as "at the top" rather than flickering the fragment.
+  const TOP_EPSILON = 2;
   let queued = false;
   function syncHashToScroll() {
     queued = false;
+    // Back at the very top the whole job is what you are looking at, so the bare /job/<id> is
+    // the honest permalink — it already opens here. Without this the last fragment you scrolled
+    // through would stick to the URL forever, claiming you are deep in a run you have left.
+    if (window.scrollY <= TOP_EPSILON) {
+      if (location.hash) history.replaceState(history.state, '', location.pathname + location.search);
+      return;
+    }
     const marker = Math.min(window.innerHeight * 0.3, 260);
     const candidates = [];
     const graph = document.getElementById('workflow-graph');
     if (graph) candidates.push({ el: graph, hash: '#workflow-graph' });
     document.querySelectorAll('details.proc[data-index]').forEach(det => {
-      const step = det.getAttribute('data-workflow-step');
-      const hash = step
-        ? '#task-' + encodeURIComponent(step)
-        : '#proc-' + encodeURIComponent(det.getAttribute('data-index'));
-      candidates.push({ el: det, hash: hash });
+      candidates.push({ el: det, hash: procPermalinkHash(det) });
     });
     let current = null;
     candidates.forEach(candidate => {
