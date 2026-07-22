@@ -409,6 +409,7 @@ function elapsedPhrase(status, elapsed, failReason) {
     if (failReason === 'force_stopped') return clock ? 'stopped after ' + clock : 'stopped';
     if (failReason === 'force_restarted') return clock ? 'restarted after ' + clock : 'restarted';
     if (failReason === 'container_inactive') return clock ? 'stalled after ' + clock : 'stalled';
+    if (failReason === 'harness_startup_stalled') return clock ? 'stalled at startup after ' + clock : 'stalled at startup';
     if (failReason === 'container_timeout') return clock ? 'timed out after ' + clock : 'timed out';
     return clock ? 'failed in ' + clock : 'failed';
   }

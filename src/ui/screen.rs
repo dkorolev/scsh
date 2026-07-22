@@ -180,6 +180,47 @@ pub struct ActivityWatch {
   pub file: std::path::PathBuf,
   /// Silence budget: kill the child when `file` has shown nothing novel for this long.
   pub limit: Duration,
+  /// Tighter silence budgets for the launch phase, when a wedged run has burned nothing yet
+  /// and an immediate relaunch is cheaper than waiting out the full inactivity budget.
+  pub startup: Option<StartupStall>,
+}
+
+/// Launch-phase stall policy for [`ActivityWatch`]. A harness that wedges before doing any
+/// work — a container that never boots, a TUI that hangs on its first paint, a login screen
+/// waiting for nobody — looks exactly like a slow start until the full inactivity budget
+/// (minutes) burns down. But the launch phase has its own, much tighter honesty contract:
+/// a healthy harness shows SOMETHING within seconds, and keeps showing new frames while it
+/// boots. So during startup the silence budgets shrink, and a kill here is reported as
+/// [`Killed::StartupStalled`] so the caller can force an immediate restart instead of a
+/// backed-off retry — nothing of value was lost.
+pub struct StartupStall {
+  /// Kill when the watched file has shown nothing novel AT ALL this long after spawn.
+  pub silence: Duration,
+  /// After first output: kill when novelty stops for this long during the startup window.
+  pub stall: Duration,
+  /// How long after spawn the `stall` rule stays armed. A stall that BEGINS (last novel
+  /// frame) inside this window is a startup stall; silence that begins later is the normal
+  /// inactivity watchdog's business.
+  pub window: Duration,
+}
+
+/// No terminal output at all for this long after spawn = startup stall.
+pub const STARTUP_SILENCE_SECS: u64 = 15;
+/// Output stopped for this long straight while the startup window was still open = startup stall.
+pub const STARTUP_STALL_SECS: u64 = 30;
+/// The startup window: how long after spawn the stall rule stays armed.
+pub const STARTUP_WINDOW_SECS: u64 = 90;
+
+impl StartupStall {
+  /// The production policy: 15s of initial silence, or a 30s straight stall beginning within
+  /// the first 90s, forces a restart.
+  pub fn defaults() -> StartupStall {
+    StartupStall {
+      silence: Duration::from_secs(STARTUP_SILENCE_SECS),
+      stall: Duration::from_secs(STARTUP_STALL_SECS),
+      window: Duration::from_secs(STARTUP_WINDOW_SECS),
+    }
+  }
 }
 
 /// Stop waiting the moment the task crosses its own declared finish line, instead of waiting
@@ -343,6 +384,10 @@ pub enum Killed {
   Timeout,
   /// The watched file showed no activity for the watchdog's limit.
   Inactive,
+  /// The run stalled during its launch phase (see [`StartupStall`]): `silent` runs never
+  /// produced a single novel frame, the rest went quiet mid-boot. Either way nothing of
+  /// value was in flight, so the caller force-restarts immediately instead of backing off.
+  StartupStalled { silent: bool },
   /// Not a failure: the task's declared result file went quiet and passed [`DoneWatch::confirm`],
   /// so the harness was stopped deliberately rather than waited out. The caller still validates
   /// the result before calling the run a success.
@@ -474,7 +519,9 @@ impl Proc {
       // novel line) still trips the watchdog once the limit elapses.
       let mut novelty = watch.map(|w| NoveltyWatch::new(&w.file));
       let mut quiescence = done.map(|d| QuiescenceWatch::new(&d.file));
-      let mut last_activity = std::time::Instant::now();
+      let watch_started = std::time::Instant::now();
+      let mut last_activity = watch_started;
+      let mut saw_novelty = false;
       loop {
         if let Some(s) = child.try_wait()? {
           break s;
@@ -499,7 +546,20 @@ impl Proc {
         }
         if let Some(w) = watch {
           if novelty.as_mut().is_some_and(NoveltyWatch::poll) {
+            saw_novelty = true;
             last_activity = std::time::Instant::now();
+          }
+          // Startup rules first (they are strictly tighter): the initial-silence budget
+          // until the first novel frame, then the stall budget for any silence that BEGINS
+          // while the startup window is still open.
+          if let Some(su) = &w.startup {
+            let limit = if saw_novelty { su.stall } else { su.silence };
+            let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
+            if stall_began_in_window && last_activity.elapsed() >= limit {
+              let _ = child.kill();
+              killed = Killed::StartupStalled { silent: !saw_novelty };
+              break child.wait()?;
+            }
           }
           if last_activity.elapsed() >= w.limit {
             let _ = child.kill();
@@ -970,6 +1030,7 @@ mod tests {
     let watch = ActivityWatch {
       file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
       limit: Duration::from_millis(200),
+      startup: None,
     };
     let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
     assert_eq!(killed, Killed::Inactive);
@@ -987,7 +1048,7 @@ mod tests {
     // (Letters, not a counter: digits are normalized away, so `line 1`/`line 2` would count
     // as the same frame — that is the spinner-thrash case the watchdog now kills.)
     let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
-    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600) };
+    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600), startup: None };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::No);
@@ -1008,10 +1069,90 @@ mod tests {
       r#"i=0; while true; do echo "[$i.5, \"o\", \"thinking ${{i}}s\"]" >> {}; i=$((i+1)); sleep 0.05; done"#,
       file.display()
     );
-    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(500) };
+    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(500), startup: None };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::Inactive, "repeating frames are not activity");
+    assert!(!ok);
+  }
+
+  #[test]
+  fn startup_watch_kills_a_child_that_never_says_anything() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("mute", false);
+    p.start();
+    // The cast never appears: the tight initial-silence budget fires, not the (much longer)
+    // inactivity limit, and the kill is reported as a SILENT startup stall.
+    let watch = ActivityWatch {
+      file: std::env::temp_dir().join(format!("scsh-startup-mute-{}", std::process::id())),
+      limit: Duration::from_secs(20),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(200),
+        stall: Duration::from_millis(400),
+        window: Duration::from_millis(900),
+      }),
+    };
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
+    assert_eq!(killed, Killed::StartupStalled { silent: true });
+    assert!(!ok);
+    assert!(started.elapsed() < Duration::from_secs(3), "killed on the startup budget, not the 20s watchdog");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn startup_watch_kills_a_child_that_goes_quiet_mid_boot() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("wedges-early", false);
+    p.start();
+    let file = std::env::temp_dir().join(format!("scsh-startup-wedge-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    // A couple of novel frames right away (so the initial-silence rule is satisfied), then
+    // silence while the startup window is still open: the stall budget fires long before the
+    // 20s inactivity limit. `exec` so the wedge IS this child (see the DoneWatch test).
+    let script = format!("echo boot-a >> {f}; echo boot-b >> {f}; exec sleep 30", f = file.display());
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_secs(20),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(2000),
+        stall: Duration::from_millis(400),
+        window: Duration::from_millis(5000),
+      }),
+    };
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(killed, Killed::StartupStalled { silent: false }, "a stall inside the window is a startup stall");
+    assert!(!ok);
+    assert!(started.elapsed() < Duration::from_secs(5), "killed on the stall budget, not the 20s watchdog");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn startup_watch_disarms_once_the_run_outlives_its_window() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("settles", false);
+    p.start();
+    let file = std::env::temp_dir().join(format!("scsh-startup-settled-{}", std::process::id()));
+    let _ = std::fs::remove_file(&file);
+    // Novel frames past the end of the startup window, then silence: the silence BEGAN after
+    // the window closed, so the ordinary inactivity watchdog owns it — Inactive, not a
+    // startup stall.
+    let script =
+      format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done; exec sleep 30", file.display());
+    let watch = ActivityWatch {
+      file: file.clone(),
+      limit: Duration::from_millis(700),
+      startup: Some(StartupStall {
+        silence: Duration::from_millis(400),
+        stall: Duration::from_millis(500),
+        window: Duration::from_millis(300),
+      }),
+    };
+    let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    assert_eq!(killed, Killed::Inactive, "a stall that begins after the window is plain inactivity");
     assert!(!ok);
   }
 
@@ -1032,7 +1173,7 @@ mod tests {
     let script = format!(r#"echo '{{"message":"done"}}' > {}; exec sleep 30"#, result.display());
     let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
     // An inactivity limit far too long to be what stops this run.
-    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20) };
+    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20), startup: None };
     let started = Instant::now();
     let (_ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), Some(&done)).unwrap();
     let _ = std::fs::remove_file(&result);

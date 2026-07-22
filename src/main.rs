@@ -1970,13 +1970,17 @@ enum RetryDecision {
   StopBreaker,
   Browser,
   Schema,
+  /// The attempt stalled during its launch phase: force-restart immediately (no backoff —
+  /// nothing of value was in flight), still spending one retry from the route's budget.
+  Startup,
   Automatic,
 }
 
 /// One route's retry verdict for one failed attempt: browser restarts always win, the
 /// one schema-correction retry comes next, and everything else is the task retry
 /// contract — retryable per [`failure::verdict`], within both its count and wall-clock
-/// budgets, and under its consecutive-identical-failure cap.
+/// budgets, and under its consecutive-identical-failure cap. A startup stall passes the
+/// same gates but skips the backoff: its restart fires immediately.
 #[allow(clippy::too_many_arguments)]
 fn retry_decision(
   fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
@@ -2006,6 +2010,9 @@ fn retry_decision(
   }
   if budget_spent_secs >= policy.budget_secs {
     return RetryDecision::Stop;
+  }
+  if reason == failure::reason::STARTUP_STALLED {
+    return RetryDecision::Startup;
   }
   RetryDecision::Automatic
 }
@@ -2207,6 +2214,7 @@ fn run_workflow_step_with_retries(
     let reason = match decision {
       RetryDecision::Browser => failure::reason::RESTART_REQUESTED,
       RetryDecision::Schema => failure::reason::RESULT_INVALID,
+      RetryDecision::Startup => failure::reason::STARTUP_STALLED,
       RetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
       RetryDecision::Stop | RetryDecision::StopBreaker => unreachable!("terminal decisions returned above"),
     };
@@ -2216,6 +2224,9 @@ fn run_workflow_step_with_retries(
       schema_retry_used = true;
       let error = run.fail_detail.as_deref().unwrap_or("result did not match the declared schema");
       repaired_invocation = Some(schema_repair_invocation(invocation, error));
+    }
+    if decision == RetryDecision::Startup {
+      retry.record_immediate_retry();
     }
     if invalid_result {
       let why = format!(
@@ -2249,9 +2260,9 @@ fn run_workflow_step_with_retries(
     }
     proc_index = next.index();
     proc = next;
-    // Schema and browser retries fire immediately; automatic retries back off so a fleet
-    // does not hammer a provider mid-incident. The wait is visible on the pending row and
-    // a browser Force restart on it cuts the wait short.
+    // Schema, browser, and startup-stall retries fire immediately; automatic retries back
+    // off so a fleet does not hammer a provider mid-incident. The wait is visible on the
+    // pending row and a browser Force restart on it cuts the wait short.
     if decision == RetryDecision::Automatic {
       let delay = retry.next_backoff_secs();
       proc.note(&format!(
@@ -2274,6 +2285,11 @@ fn run_workflow_step_with_retries(
       }
     } else if decision == RetryDecision::Schema {
       proc.note(&format!("retrying after {reason} (retry {} of {})", retry.retries_used, retry.policy.max_retries));
+    } else if decision == RetryDecision::Startup {
+      proc.note(&format!(
+        "force-restarting after a startup stall (retry {} of {})",
+        retry.retries_used, retry.policy.max_retries
+      ));
     } else {
       proc.note(&format!("retrying after {reason}"));
     }
@@ -4231,7 +4247,7 @@ fn build_and_run(
                 retry.mark_breaker_tripped(&mut run);
                 return run;
               }
-              RetryDecision::Browser | RetryDecision::Schema | RetryDecision::Automatic => {}
+              RetryDecision::Browser | RetryDecision::Schema | RetryDecision::Startup | RetryDecision::Automatic => {}
             }
             let reason = if restart_requested {
               failure::reason::RESTART_REQUESTED
@@ -4277,6 +4293,13 @@ fn build_and_run(
                 }
                 BackoffWake::Elapsed => {}
               }
+            } else if decision == RetryDecision::Startup {
+              // Nothing of value was in flight — relaunch immediately, no backoff.
+              retry.record_immediate_retry();
+              proc.note(&format!(
+                "force-restarting after a startup stall (retry {} of {})",
+                retry.retries_used, retry.policy.max_retries
+              ));
             }
           }
         })
@@ -4994,9 +5017,14 @@ fn run_one_skill(
   // hiding behind a looping spinner (hung login, exhausted quota, gateway retry loop) are
   // killed rather than waiting out the full wall-clock timeout.
   let inactivity_secs = config::effective_inactivity_timeout(skill.harness, skill.inactivity_timeout);
+  // The launch phase gets its own, much tighter budgets: a run whose cast shows nothing at
+  // all in the first seconds, or that stops dead while the startup window is still open, has
+  // burned nothing yet — it is killed and force-restarted immediately (no backoff) instead
+  // of waiting out `inactivity_secs`.
   let watch = ui::screen::ActivityWatch {
     file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
+    startup: Some(ui::screen::StartupStall::defaults()),
   };
   // Completion watch: stop as soon as the task crosses its declared finish line, rather than
   // waiting out `inactivity_secs` for a CLI that finished its work and then failed to exit.
@@ -5048,6 +5076,9 @@ fn run_one_skill(
       // remain authoritative, and only a result that survives them becomes graceful success.
       graceful_shutdown_reason = Some(match killed {
         ui::screen::Killed::Inactive => "accepted the valid result after the inactivity watchdog stopped the harness",
+        ui::screen::Killed::StartupStalled { .. } => {
+          "accepted the valid result after the startup watchdog stopped the harness"
+        }
         ui::screen::Killed::Timeout => "accepted the valid result after the wall-clock watchdog stopped the harness",
         ui::screen::Killed::Done => "stopped the harness once its result file had been written and quiet for 30s",
         ui::screen::Killed::No => "accepted the valid result despite the harness exiting non-zero during teardown",
@@ -5106,6 +5137,25 @@ fn run_one_skill(
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why);
+    }
+    Ok((false, ui::screen::Killed::StartupStalled { silent }, _)) => {
+      // The launch phase stalled: nothing of value was in flight, so the retry loop above
+      // force-restarts this route immediately (no backoff) — the reason string keeps the
+      // stalled attempt distinguishable from a mid-run stall in the UI and in stats.
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+      let why = if silent {
+        format!("no terminal output in the first {}s (startup watchdog)", ui::screen::STARTUP_SILENCE_SECS)
+      } else {
+        format!(
+          "terminal output stalled for {}s straight inside the first {}s (startup watchdog)",
+          ui::screen::STARTUP_STALL_SECS,
+          ui::screen::STARTUP_WINDOW_SECS
+        )
+      };
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      spinner.finish_fail(failure::reason::STARTUP_STALLED, Some(&detail));
+      return SkillRun::failed(failure::reason::STARTUP_STALLED, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why);
     }
     // Unreachable in practice: the completion watch fires only after confirming the result file,
@@ -9172,7 +9222,7 @@ mod tests {
 
   #[test]
   fn retry_decision_is_budgeted_breaker_capped_and_browser_restarts_always_win() {
-    use RetryDecision::{Automatic, Browser, Schema, Stop, StopBreaker};
+    use RetryDecision::{Automatic, Browser, Schema, Startup, Stop, StopBreaker};
     let policy = failure::RetryPolicy {
       max_retries: 5,
       budget_secs: 30 * 60,
@@ -9224,6 +9274,13 @@ mod tests {
       Browser,
       "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
     );
+    // A startup stall force-restarts immediately (no backoff) — but through the same
+    // gates: the retry count, the identical-failure breaker, and the wall-clock budget
+    // all still bound it, so a route that stalls at launch every time cannot loop forever.
+    assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 0, 1), Startup);
+    assert_eq!(decide(failure::reason::STARTUP_STALLED, 5, 0, 1), Stop);
+    assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 0, 6), StopBreaker);
+    assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 30 * 60, 1), Stop);
     // First-attempt auth rejection is permanent; on a later attempt it is flakiness.
     assert_eq!(
       retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 0, 1, true, true, true),

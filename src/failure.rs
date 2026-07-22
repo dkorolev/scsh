@@ -18,6 +18,11 @@ pub mod reason {
   pub const CLONE: &str = "clone_failed";
   pub const CONTAINER_TIMEOUT: &str = "container_timeout";
   pub const CONTAINER_INACTIVE: &str = "container_inactive";
+  /// The run stalled during its launch phase — no terminal output at all in the first
+  /// seconds, or output that stopped dead while the startup window was still open. Nothing
+  /// of value was in flight, so the route is force-restarted immediately (no backoff),
+  /// still under the retry count and identical-failure breaker.
+  pub const STARTUP_STALLED: &str = "harness_startup_stalled";
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
   pub const HARNESS_OVERLOADED: &str = "harness_overloaded";
   /// The harness lost its backend connection (its output says so) and exited non-zero —
@@ -65,6 +70,7 @@ pub fn is_transient(reason: &str) -> bool {
     reason,
     reason::CONTAINER_TIMEOUT
       | reason::CONTAINER_INACTIVE
+      | reason::STARTUP_STALLED
       | reason::CONTAINER_RUN
       | reason::HARNESS_OVERLOADED
       | reason::HARNESS_DISCONNECTED
@@ -634,6 +640,7 @@ mod tests {
   fn transient_reasons_are_retryable_and_deterministic_ones_are_not() {
     assert!(is_transient(reason::CONTAINER_TIMEOUT));
     assert!(is_transient(reason::CONTAINER_INACTIVE));
+    assert!(is_transient(reason::STARTUP_STALLED));
     assert!(is_transient(reason::CONTAINER_RUN));
     assert!(is_transient(reason::HARNESS_OVERLOADED));
     assert!(is_transient(reason::HARNESS_DISCONNECTED));
