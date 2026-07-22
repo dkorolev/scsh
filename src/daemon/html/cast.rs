@@ -25,7 +25,11 @@ pub const PLAYER_JS: &str = beecast_player::PLAYER_JS;
 pub const PLAYER_CSS: &str = beecast_player::PLAYER_CSS;
 
 pub fn cast_player_page(store: &Store, session_id: &str, proc_index: usize) -> Option<String> {
-  let session = store.sessions.get(session_id)?;
+  cast_player_page_for(store.sessions.get(session_id)?, proc_index)
+}
+
+/// The player page from a session record alone — shared by live and archived sessions.
+pub fn cast_player_page_for(session: &crate::daemon::model::Session, proc_index: usize) -> Option<String> {
   let proc = session.procs.iter().find(|p| p.index == proc_index)?;
   proc.cast_path.as_ref()?;
   let live = proc.status == ProcStatus::Running;
@@ -260,11 +264,11 @@ document.getElementById('copy-t').addEventListener('click', () => {{
 "#,
     favicon = FAVICON_LINK,
     label = esc(&proc.label),
-    sid = esc(session_id),
+    sid = esc(&session.id),
     live_note = live_note,
-    cast_url = format!("/cast/{}/{}", esc(session_id), proc_index),
-    cast_url_js = quote_js(&format!("/cast/{session_id}/{proc_index}")),
-    sid_js = quote_js(session_id),
+    cast_url = format!("/cast/{}/{}", esc(&session.id), proc_index),
+    cast_url_js = quote_js(&format!("/cast/{}/{proc_index}", session.id)),
+    sid_js = quote_js(&session.id),
     proc_index = proc_index,
     live_js = if live { "true" } else { "false" },
   ))

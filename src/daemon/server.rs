@@ -47,8 +47,9 @@ pub struct Server {
   /// Session ids mutated since the last persist — the persist step writes only these.
   dirty_sessions: Arc<Mutex<HashSet<String>>>,
   /// The redb-backed session store. `None` when it could not be opened (persistence disabled,
-  /// daemon still serves from memory) — best-effort, never fatal.
-  db: Option<StoreDb>,
+  /// daemon still serves from memory) — best-effort, never fatal. Shared with connection
+  /// threads, which fall back to archived rows for sessions evicted from the in-memory cap.
+  db: Option<Arc<StoreDb>>,
   last_persist: Mutex<Option<Instant>>,
   last_prune_tick: Mutex<Instant>,
   ws_hub: Arc<Hub>,
@@ -70,10 +71,18 @@ impl Server {
   /// `~/.scsh` path; tests pass an explicit temp-file DB so they touch neither the real home
   /// nor the process-global `SCSH_HOME`.
   fn with_db(mode: DaemonMode, port: u16, db: Option<StoreDb>) -> Server {
+    let db = db.map(Arc::new);
     let now = now_unix_secs();
     let mut store = Store::new(mode, port, now);
     if let Some(db) = &db {
-      store.sessions = db.load_sessions();
+      // Working set only: running sessions plus the newest finished ones. Older finished
+      // sessions stay behind as archived rows (served read-only on demand), and the archive
+      // itself is pruned to its own cap in the same pass.
+      store.sessions = db.load_working_set(
+        crate::daemon::model::MAX_STORED_SESSIONS,
+        crate::daemon::model::MAX_ARCHIVED_SESSIONS,
+        now,
+      );
     }
     // Reload keeps session history but starts the daemon's own runtime state fresh: no clients
     // are connected yet, and uptime restarts from now.
@@ -177,11 +186,13 @@ impl Server {
             let ws_dirty = Arc::clone(&self.ws_dirty);
             let dirty_sessions = Arc::clone(&self.dirty_sessions);
             let ws_hub = Arc::clone(&self.ws_hub);
+            let db = self.db.clone();
             std::thread::spawn(move || {
               // Dirty flags are set inside the per-request loop: a keep-alive connection
               // outlives its mutations, which must be visible immediately, not at close.
               let _ = catch_unwind(AssertUnwindSafe(|| {
-                let _ = handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty, &dirty, &dirty_sessions);
+                let _ =
+                  handle_connection(stream, &store, &prune, &ws_hub, &ws_dirty, &dirty, &dirty_sessions, db.as_deref());
               }));
             });
           }
@@ -326,18 +337,17 @@ impl Server {
       let mut set = self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner());
       set.drain().collect()
     };
-    // Snapshot (serialize) the dirty sessions and the full live-id set under the lock, then
-    // release it before touching disk.
-    let (dirty, keep) = {
+    // Snapshot (serialize) the dirty sessions under the lock, then release it before
+    // touching disk. A dirty id no longer in the store was evicted mid-tick; its
+    // last-written row simply remains as its archive.
+    let dirty: Vec<(String, String)> = {
       let store = lock_store(&self.store);
-      let dirty: Vec<(String, String)> = dirty_ids
+      dirty_ids
         .into_iter()
         .filter_map(|id| store.sessions.get(&id).map(|s| (id, crate::daemon::jsonio::session_json_store(s))))
-        .collect();
-      let keep: HashSet<String> = store.sessions.keys().cloned().collect();
-      (dirty, keep)
+        .collect()
     };
-    if let Err(e) = db.sync(&dirty, &keep) {
+    if let Err(e) = db.sync(&dirty) {
       eprintln!("scsh daemon: store DB write failed: {e}");
     }
   }
@@ -497,9 +507,11 @@ fn connection_close(headers: &[(String, String)]) -> bool {
   })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn handle_connection(
   mut stream: TcpStream, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_hub: &Arc<Hub>,
   ws_dirty: &AtomicBool, dirty: &AtomicBool, dirty_sessions: &Mutex<std::collections::HashSet<String>>,
+  db: Option<&StoreDb>,
 ) -> std::io::Result<()> {
   // Accepted sockets inherit the listener's non-blocking mode on macOS; block for reads.
   stream.set_nonblocking(false)?;
@@ -538,19 +550,19 @@ fn handle_connection(
     let close = req.http1_0 || connection_close(&req.headers);
     let bare_path = req.path.split('?').next().unwrap_or("");
     if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/chapters") {
-      let (status, body) = chapters_response(bare_path, store);
+      let (status, body) = chapters_response(bare_path, store, db);
       write_response(&mut stream, status, &body, "application/json", close)?;
     } else if req.method == "GET" && req.path.starts_with("/cast/") && bare_path.ends_with("/export.html") {
-      let (status, body, disposition) = export_response(bare_path, store);
+      let (status, body, disposition) = export_response(bare_path, store, db);
       write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
     } else if req.method == "GET"
       && (req.path.starts_with("/job/") || req.path.starts_with("/session/"))
       && bare_path.ends_with("/export.html")
     {
-      let (status, body, disposition) = session_export_response(bare_path, store);
+      let (status, body, disposition) = session_export_response(bare_path, store, db);
       write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
     } else if req.method == "GET" && req.path.starts_with("/cast/") && !bare_path.ends_with("/play") {
-      let (status, body, disposition) = cast_response(&req.path, store);
+      let (status, body, disposition) = cast_response(&req.path, store, db);
       write_download_response(
         &mut stream,
         status,
@@ -560,10 +572,10 @@ fn handle_connection(
         close,
       )?;
     } else if req.method == "GET" && req.path.starts_with("/diff/") {
-      let (status, body, disposition) = diff_response(&req.path, store);
+      let (status, body, disposition) = diff_response(&req.path, store, db);
       write_download_response(&mut stream, status, &body, "text/html; charset=utf-8", disposition.as_deref(), close)?;
     } else {
-      let (status, body, content_type, mutated) = route(&req, store, prune, ws_dirty);
+      let (status, body, content_type, mutated) = route(&req, store, prune, ws_dirty, db);
       write_response(&mut stream, status, &body, content_type, close)?;
       if mutated {
         dirty.store(true, Ordering::Relaxed);
@@ -598,11 +610,27 @@ fn parse_cast_route(rest: &str) -> Option<(&str, usize)> {
   Some((session_id, proc_str.parse::<usize>().ok()?))
 }
 
+/// A session evicted from the in-memory cap, read back from its archived store-DB row.
+/// The read path for every handler whose in-memory lookup missed: archived sessions stay
+/// browsable (their casts, diffs, and logs are durable files under `~/.scsh`), they are
+/// just no longer part of the mutable working set.
+fn archived_session(db: Option<&StoreDb>, id: &str) -> Option<Session> {
+  db.and_then(|d| d.get(id))
+}
+
 /// The registered cast path of a session's proc, shared by the cast, chapters, and export
 /// endpoints. `None` covers unknown session/proc and a proc without a recording alike.
-fn proc_cast_path(store: &Arc<Mutex<Store>>, session_id: &str, proc_index: usize) -> Option<String> {
-  let store = lock_store(store);
-  store.sessions.get(session_id)?.procs.iter().find(|p| p.index == proc_index).and_then(|p| p.cast_path.clone())
+/// Falls back to the archived row once the session has left the in-memory working set.
+fn proc_cast_path(
+  store: &Arc<Mutex<Store>>, db: Option<&StoreDb>, session_id: &str, proc_index: usize,
+) -> Option<String> {
+  {
+    let store = lock_store(store);
+    if let Some(s) = store.sessions.get(session_id) {
+      return s.procs.iter().find(|p| p.index == proc_index).and_then(|p| p.cast_path.clone());
+    }
+  }
+  archived_session(db, session_id)?.procs.iter().find(|p| p.index == proc_index).and_then(|p| p.cast_path.clone())
 }
 
 /// Read a cast file truncated to its last complete line (a cast still being written by a
@@ -622,12 +650,14 @@ fn read_complete_cast_lines(cast_path: &str) -> Result<String, (u16, String)> {
 /// at request time and truncated to its last complete line, so a cast still being written
 /// by a live container downloads and replays as a valid (partial) asciicast. `dl=1` adds a
 /// Content-Disposition attachment header for a browser "download" link.
-fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+fn cast_response(
+  path_and_query: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>,
+) -> (u16, String, Option<String>) {
   let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
   let Some((session_id, proc_index)) = parse_cast_route(path.strip_prefix("/cast/").unwrap_or("")) else {
     return (404, "not found".into(), None);
   };
-  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
+  let Some(cast_path) = proc_cast_path(store, db, session_id, proc_index) else {
     return (404, "no cast recorded for this proc".into(), None);
   };
   let body = match read_complete_cast_lines(&cast_path) {
@@ -645,13 +675,15 @@ fn cast_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
 /// this step brought into the caller's branch. The page is self-contained (CSS, the diff,
 /// and the comment engine are all inside the one file), so without `dl=1` it renders
 /// inline in a new tab; `dl=1` turns it into a download attachment.
-fn diff_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+fn diff_response(
+  path_and_query: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>,
+) -> (u16, String, Option<String>) {
   let (path, query) = path_and_query.split_once('?').unwrap_or((path_and_query, ""));
   if let Some(session_id) = path.strip_prefix("/diff/").and_then(|rest| rest.strip_suffix("/all")) {
     if session_id.is_empty() || session_id.contains('/') {
       return (404, "not found".into(), None);
     }
-    let known = lock_store(store).sessions.contains_key(session_id);
+    let known = lock_store(store).sessions.contains_key(session_id) || archived_session(db, session_id).is_some();
     if !known {
       return (404, "not found".into(), None);
     }
@@ -675,7 +707,10 @@ fn diff_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
       .get(session_id)
       .and_then(|s| s.procs.iter().find(|p| p.index == proc_index))
       .and_then(|p| p.diff_path.clone())
-  };
+  }
+  .or_else(|| {
+    archived_session(db, session_id)?.procs.iter().find(|p| p.index == proc_index).and_then(|p| p.diff_path.clone())
+  });
   let Some(diff_path) = diff_path else {
     return (404, "no commits diff packed for this step".into(), None);
   };
@@ -696,12 +731,12 @@ fn diff_response(path_and_query: &str, store: &Arc<Mutex<Store>>) -> (u16, Strin
 /// malformed sidecar exports without summary/chapters, never an error. A recording with no
 /// complete frames yet is a 404 with an actionable body — the UI hides the button until
 /// frames exist, so only a hand-typed URL sees it.
-fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>) -> (u16, String, Option<String>) {
   let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/export.html").unwrap_or("");
   let Some((session_id, proc_index)) = parse_cast_route(rest) else {
     return (404, "not found".into(), None);
   };
-  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
+  let Some(cast_path) = proc_cast_path(store, db, session_id, proc_index) else {
     return (404, "no cast recorded for this proc".into(), None);
   };
   let ndjson = match read_complete_cast_lines(&cast_path) {
@@ -727,7 +762,9 @@ fn export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
 /// — see [`html::session_export_page`] for the composition rationale. Procs with no cast
 /// or no frames become note rows, never errors. `/session/…/export.html` remains accepted
 /// as a compatibility alias.
-fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String, Option<String>) {
+fn session_export_response(
+  bare_path: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>,
+) -> (u16, String, Option<String>) {
   let id = bare_path
     .strip_prefix("/job/")
     .or_else(|| bare_path.strip_prefix("/session/"))
@@ -735,7 +772,8 @@ fn session_export_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, 
     .strip_suffix("/export.html")
     .unwrap_or("");
   // Clone the session under the lock, then do all file I/O (casts + sidecars) unlocked.
-  let Some(session) = lock_store(store).sessions.get(id).cloned() else {
+  // An evicted session exports from its archived row — the casts on disk outlive the cap.
+  let Some(session) = { lock_store(store).sessions.get(id).cloned() }.or_else(|| archived_session(db, id)) else {
     return (404, "job not found".into(), None);
   };
   let exports: Vec<html::CastExport> = session.procs.iter().map(gather_proc_export).collect();
@@ -780,12 +818,12 @@ fn gather_proc_export(proc: &ProcRecord) -> html::CastExport {
 /// exists yet the body is `{}` — or `{ "summarizing_job": "<id>" }` when a live annotate
 /// proc covering this cast is registered, so the page's "chapters: summarizing…" note can
 /// deep-link to the job doing the work.
-fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
+fn chapters_response(bare_path: &str, store: &Arc<Mutex<Store>>, db: Option<&StoreDb>) -> (u16, String) {
   let rest = bare_path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/chapters").unwrap_or("");
   let Some((session_id, proc_index)) = parse_cast_route(rest) else {
     return (404, "{}".into());
   };
-  let Some(cast_path) = proc_cast_path(store, session_id, proc_index) else {
+  let Some(cast_path) = proc_cast_path(store, db, session_id, proc_index) else {
     return (200, "{}".into());
   };
   let annotation = annotation_for_cast(store, &cast_path);
@@ -957,6 +995,7 @@ fn parse_content_length(header_bytes: &[u8]) -> usize {
 
 fn route(
   req: &HttpRequest, store: &Arc<Mutex<Store>>, prune: &Arc<Mutex<PruneQueue>>, ws_dirty: &AtomicBool,
+  db: Option<&StoreDb>,
 ) -> (u16, String, &'static str, bool) {
   // The images-build endpoint returns a custom body (the spawned session id), so it does not
   // go through the generic `{"ok":…}` POST handler.
@@ -1044,8 +1083,14 @@ fn route(
     path if path.starts_with("/job/") || path.starts_with("/session/") => {
       // Canonical page URL is `/job/<id>`; `/session/<id>` is kept as a compatibility alias.
       let id = path.strip_prefix("/job/").or_else(|| path.strip_prefix("/session/")).unwrap_or("");
-      let store = lock_store(store);
-      if let Some(page) = html::session_page(&store, id) {
+      let (page, port) = {
+        let store = lock_store(store);
+        (html::session_page(&store, id), store.port)
+      };
+      // An evicted session renders from its archived row: same page, read-only by nature
+      // (its run ended long ago, so there is nothing live to mutate anyway).
+      let page = page.or_else(|| archived_session(db, id).map(|s| html::session_page_for(&s, port)));
+      if let Some(page) = page {
         (200, page, "text/html; charset=utf-8", false)
       } else {
         (404, "job not found".into(), "text/plain", false)
@@ -1057,7 +1102,13 @@ fn route(
       let rest = path.strip_prefix("/cast/").unwrap_or("").strip_suffix("/play").unwrap_or("");
       let page = rest.split_once('/').and_then(|(sid, proc)| {
         let proc_index = proc.parse::<usize>().ok()?;
-        html::cast_player_page(&lock_store(store), sid, proc_index)
+        {
+          let store = lock_store(store);
+          if store.sessions.contains_key(sid) {
+            return html::cast_player_page(&store, sid, proc_index);
+          }
+        }
+        html::cast_player_page_for(&archived_session(db, sid)?, proc_index)
       });
       match page {
         Some(page) => (200, page, "text/html; charset=utf-8", false),
@@ -1104,20 +1155,26 @@ fn route(
     // live so it also serves mid-run.
     path if path.starts_with("/api/v1/session/") && path.ends_with("/fleet") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("").strip_suffix("/fleet").unwrap_or("");
-      let store = lock_store(store);
-      if let Some(s) = store.sessions.get(id) {
-        (200, crate::fleet::fleet_json(&s.id, &s.procs), "application/json", false)
-      } else {
-        (404, "{\"error\":\"not found\"}".into(), "application/json", false)
+      let json = {
+        let store = lock_store(store);
+        store.sessions.get(id).map(|s| crate::fleet::fleet_json(&s.id, &s.procs))
+      }
+      .or_else(|| archived_session(db, id).map(|s| crate::fleet::fleet_json(&s.id, &s.procs)));
+      match json {
+        Some(json) => (200, json, "application/json", false),
+        None => (404, "{\"error\":\"not found\"}".into(), "application/json", false),
       }
     }
     path if path.starts_with("/api/v1/session/") => {
       let id = path.strip_prefix("/api/v1/session/").unwrap_or("");
-      let store = lock_store(store);
-      if let Some(s) = store.sessions.get(id) {
-        (200, crate::daemon::jsonio::session_json_api(s), "application/json", false)
-      } else {
-        (404, "{\"error\":\"not found\"}".into(), "application/json", false)
+      let json = {
+        let store = lock_store(store);
+        store.sessions.get(id).map(crate::daemon::jsonio::session_json_api)
+      }
+      .or_else(|| archived_session(db, id).map(|s| crate::daemon::jsonio::session_json_api(&s)));
+      match json {
+        Some(json) => (200, json, "application/json", false),
+        None => (404, "{\"error\":\"not found\"}".into(), "application/json", false),
       }
     }
     _ => (404, "not found".into(), "text/plain", false),
@@ -3259,7 +3316,7 @@ mod tests {
       headers: Vec::new(),
       http1_0: false,
     };
-    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty, None);
     assert_eq!(status, 200);
     assert_eq!(content_type, "application/json");
     assert!(!mutated);
@@ -3338,7 +3395,7 @@ mod tests {
       headers: Vec::new(),
       http1_0: false,
     };
-    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty, None);
     assert_eq!(status, 200);
     assert_eq!(content_type, "application/json");
     assert!(!mutated);
@@ -3358,8 +3415,93 @@ mod tests {
       headers: Vec::new(),
       http1_0: false,
     };
-    let (status, _, _, _) = route(&missing, &store, &prune, &ws_dirty);
+    let (status, _, _, _) = route(&missing, &store, &prune, &ws_dirty, None);
     assert_eq!(status, 404);
+  }
+
+  /// A session evicted from the in-memory cap is archival, not gone: its fleet endpoint,
+  /// session JSON, and job page are all served from the store-DB row, and an id nobody ever
+  /// had still 404s.
+  #[test]
+  fn evicted_session_is_served_from_the_archived_store_row() {
+    let db_path = std::env::temp_dir().join(format!("scsh-archive-api-{}.redb", crate::runtime::random_nonce_6()));
+    let db = crate::daemon::db::StoreDb::open_path(&db_path).unwrap();
+    let mut archived = Session {
+      id: "oldjob".into(),
+      started_at: 1,
+      ended_at: Some(10),
+      profile: Some("default".into()),
+      kind: Some("profile".into()),
+      repo: "/tmp/repo".into(),
+      branch: "main".into(),
+      last_seen_at: 10,
+      client_connected: false,
+      run_pid: None,
+      skills: vec![],
+      procs: vec![],
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+    };
+    archived.procs.push(ProcRecord {
+      index: 0,
+      previous_attempt: None,
+      kind: ProcKind::Skill,
+      label: "old-skill".into(),
+      status: ProcStatus::Ok,
+      note: None,
+      detail: Some("done".into()),
+      fail_reason: None,
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: Some("old-skill".into()),
+      route: Some("opus".into()),
+      result_path: None,
+      annotate_target: None,
+      harness: Some("claude".into()),
+      skill_name: Some("old-skill".into()),
+      model: None,
+      started_at: Some(1),
+      elapsed: Some(1.0),
+      lines: vec![],
+    });
+    db.sync(&[("oldjob".into(), crate::daemon::jsonio::session_json_store(&archived))]).unwrap();
+
+    // The store does NOT hold the session — only the archive does.
+    let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
+    let prune = Arc::new(Mutex::new(PruneQueue::default()));
+    let ws_dirty = AtomicBool::new(false);
+    let get = |path: &str| HttpRequest {
+      method: "GET".into(),
+      path: path.into(),
+      body: String::new(),
+      headers: Vec::new(),
+      http1_0: false,
+    };
+
+    let (status, body, _, _) = route(&get("/api/v1/session/oldjob/fleet"), &store, &prune, &ws_dirty, Some(&db));
+    assert_eq!(status, 200, "archived fleet endpoint serves: {body}");
+    assert!(body.contains("\"session\": \"oldjob\""), "{body}");
+
+    let (status, body, _, _) = route(&get("/api/v1/session/oldjob"), &store, &prune, &ws_dirty, Some(&db));
+    assert_eq!(status, 200, "archived session JSON serves: {body}");
+    assert!(body.contains("\"id\": \"oldjob\""), "{body}");
+
+    let (status, page, content_type, _) = route(&get("/job/oldjob"), &store, &prune, &ws_dirty, Some(&db));
+    assert_eq!(status, 200, "archived job page renders");
+    assert_eq!(content_type, "text/html; charset=utf-8");
+    assert!(page.contains("old-skill"), "page shows the archived proc");
+
+    // Without the fallback db the same session is a 404 — and a genuinely unknown id
+    // stays a 404 even with the archive available.
+    assert_eq!(route(&get("/api/v1/session/oldjob/fleet"), &store, &prune, &ws_dirty, None).0, 404);
+    assert_eq!(route(&get("/api/v1/session/nnnnnn/fleet"), &store, &prune, &ws_dirty, Some(&db)).0, 404);
+    assert_eq!(route(&get("/job/nnnnnn"), &store, &prune, &ws_dirty, Some(&db)).0, 404);
+
+    drop(db);
+    let _ = std::fs::remove_file(&db_path);
   }
 
   #[test]
@@ -3401,7 +3543,7 @@ mod tests {
       headers: Vec::new(),
       http1_0: false,
     };
-    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty);
+    let (status, body, content_type, mutated) = route(&req, &store, &prune, &ws_dirty, None);
     assert_eq!((status, content_type, mutated), (200, "application/json", false));
     assert!(parse(&body).is_ok(), "stats payload parses as JSON: {body}");
     assert!(body.contains("\"routes\"") && body.contains("\"skills\""), "{body}");
@@ -3428,7 +3570,7 @@ mod tests {
         headers: Vec::new(),
         http1_0: false,
       };
-      let (status, body, _, _) = route(&req, &store, &prune, &ws_dirty);
+      let (status, body, _, _) = route(&req, &store, &prune, &ws_dirty, None);
       assert_eq!(status, 200, "{api}");
       assert!(body.contains("\"error\""), "{api} ignored its runtime query param: {body}");
       assert!(body.contains("not-a-runtime-xyz"), "{api}: {body}");
@@ -4546,7 +4688,7 @@ mod tests {
       );
     }
     // Before registration: 404.
-    let (status, _, _) = cast_response("/cast/castab/0", &store);
+    let (status, _, _) = cast_response("/cast/castab/0", &store, None);
     assert_eq!(status, 404);
 
     // Register a cast path; write a partially-flushed asciicast (last line incomplete).
@@ -4561,25 +4703,25 @@ mod tests {
     );
 
     // Inline fetch: 200, truncated to the last complete line, no disposition.
-    let (status, served, disposition) = cast_response("/cast/castab/0", &store);
+    let (status, served, disposition) = cast_response("/cast/castab/0", &store, None);
     assert_eq!(status, 200);
     assert_eq!(served, format!("{header}\n[0.1, \"o\", \"hello\"]\n"));
     assert!(disposition.is_none());
 
     // Download variant carries an attachment disposition with a stable filename.
-    let (status, _, disposition) = cast_response("/cast/castab/0?dl=1", &store);
+    let (status, _, disposition) = cast_response("/cast/castab/0?dl=1", &store, None);
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-castab-p0.cast\""));
 
     // Unknown session/proc and vanished files are 404s, not errors.
-    assert_eq!(cast_response("/cast/nosuch/0", &store).0, 404);
-    assert_eq!(cast_response("/cast/castab/9", &store).0, 404);
+    assert_eq!(cast_response("/cast/nosuch/0", &store, None).0, 404);
+    assert_eq!(cast_response("/cast/castab/9", &store, None).0, 404);
     std::fs::remove_file(&path).unwrap();
-    assert_eq!(cast_response("/cast/castab/0", &store).0, 404);
+    assert_eq!(cast_response("/cast/castab/0", &store, None).0, 404);
 
     // The commits-diff endpoint mirrors the cast one: 404 until the run posts a packed
     // page, then the self-contained HTML inline (renders in a tab) or as a download.
-    assert_eq!(diff_response("/diff/castab/0", &store).0, 404);
+    assert_eq!(diff_response("/diff/castab/0", &store, None).0, 404);
     let diff = std::env::temp_dir().join(format!("scsh-test-diff-{}.html", std::process::id()));
     std::fs::write(&diff, "<html>packed diff</html>").unwrap();
     let body = format!(r#"{{"session":"castab","proc":0,"path":{}}}"#, crate::json::quote(&diff.to_string_lossy()));
@@ -4588,17 +4730,17 @@ mod tests {
       store.lock().unwrap().sessions.get("castab").unwrap().procs[0].diff_path.as_deref(),
       Some(diff.to_string_lossy().as_ref())
     );
-    let (status, served, disposition) = diff_response("/diff/castab/0", &store);
+    let (status, served, disposition) = diff_response("/diff/castab/0", &store, None);
     assert_eq!(status, 200);
     assert_eq!(served, "<html>packed diff</html>");
     assert!(disposition.is_none(), "inline by default — the page renders in a new tab");
-    let (status, _, disposition) = diff_response("/diff/castab/0?dl=1", &store);
+    let (status, _, disposition) = diff_response("/diff/castab/0?dl=1", &store, None);
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-castab-p0-diff.html\""));
-    assert_eq!(diff_response("/diff/nosuch/0", &store).0, 404);
-    assert_eq!(diff_response("/diff/castab/9", &store).0, 404);
+    assert_eq!(diff_response("/diff/nosuch/0", &store, None).0, 404);
+    assert_eq!(diff_response("/diff/castab/9", &store, None).0, 404);
     std::fs::remove_file(&diff).unwrap();
-    assert_eq!(diff_response("/diff/castab/0", &store).0, 404);
+    assert_eq!(diff_response("/diff/castab/0", &store, None).0, 404);
   }
 
   #[test]
@@ -4654,13 +4796,13 @@ mod tests {
       );
     }
     // Unknown session/proc → the existing 404 style.
-    assert_eq!(export_response("/cast/nosuch/0/export.html", &store).0, 404);
-    assert_eq!(export_response("/cast/expabc/9/export.html", &store).0, 404);
+    assert_eq!(export_response("/cast/nosuch/0/export.html", &store, None).0, 404);
+    assert_eq!(export_response("/cast/expabc/9/export.html", &store, None).0, 404);
     // A registered cast whose file is not on disk yet → 404.
-    assert_eq!(export_response("/cast/expabc/0/export.html", &store).0, 404);
+    assert_eq!(export_response("/cast/expabc/0/export.html", &store, None).0, 404);
     // A header with no complete frames yet → 404 with an actionable body.
     std::fs::write(&cast_path, "{\"version\":3,\"term\":{\"cols\":80,\"rows\":24}}\n").unwrap();
-    let (status, body, disposition) = export_response("/cast/expabc/0/export.html", &store);
+    let (status, body, disposition) = export_response("/cast/expabc/0/export.html", &store, None);
     assert_eq!(status, 404);
     assert!(body.contains("no recorded frames yet"), "body: {body}");
     assert!(disposition.is_none());
@@ -4672,7 +4814,7 @@ mod tests {
       r#"{"summary":"Ran the demo.","chapters":[{"t":0,"title":"Start"}]}"#,
     )
     .unwrap();
-    let (status, page, disposition) = export_response("/cast/expabc/0/export.html", &store);
+    let (status, page, disposition) = export_response("/cast/expabc/0/export.html", &store, None);
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"rec.html\""));
     assert!(page.contains("<title>rec</title>"), "cast stem is the title");
@@ -4683,7 +4825,7 @@ mod tests {
     assert!(page.contains("\"title\":\"Start\""), "sidecar chapter folded in");
     // A malformed sidecar exports without chapters — a warning path, never an error.
     std::fs::write(dir.join("rec.chapters.json"), "{ not json").unwrap();
-    let (status, page, _) = export_response("/cast/expabc/0/export.html", &store);
+    let (status, page, _) = export_response("/cast/expabc/0/export.html", &store, None);
     assert_eq!(status, 200);
     assert!(!page.contains("\"chapters\":["), "malformed sidecar → chapterless export");
     let _ = std::fs::remove_dir_all(&dir);
@@ -4824,7 +4966,7 @@ mod tests {
     let cast_path = cast.to_string_lossy().into_owned();
     let store = store_with_export_session("srcjob", vec![export_test_proc(0, "claude: add", Some(cast_path.clone()))]);
     // No annotator proc means no invented annotation state.
-    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(status, 200);
     assert_eq!(body, "{}");
     // A LIVE annotate proc covering this cast names its job — the id the pending
@@ -4853,31 +4995,31 @@ mod tests {
         supervisor: Default::default(),
       },
     );
-    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(status, 200);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // Regression: the old model treated 30 seconds without a session event as a terminal
     // failure even after the annotation proc had started. Running work gets the 30-minute
     // idle allowance, so a quiet annotator remains running here.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().last_seen_at = now - 31;
-    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // The match also holds across path spellings: a standalone `scsh annotate-cast` may
     // register a relative argument while the run registered the absolute path — the
     // nonce-stamped file name is the shared key.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].annotate_target =
       Some("casts/add-20260711-114749-utc-ufakca.cast".into());
-    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "running" }"#);
     // A job that ended with a non-terminal proc is cancelled. The stale proc must not keep
     // animated "annotating..." UI alive forever in the source player or workflow graph.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().ended_at = Some(now + 1);
-    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "fail" }"#);
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().ended_at = None;
     // Finished state remains linked instead of disappearing.
     store.lock().unwrap().sessions.get_mut("annjob").unwrap().procs[0].status = ProcStatus::Ok;
-    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert_eq!(body, r#"{ "annotation_job": "annjob", "annotation_proc": 0, "annotation_status": "ok" }"#);
     // Once the sidecar lands, chapters and the durable relationship coexist.
     std::fs::write(
@@ -4885,7 +5027,7 @@ mod tests {
       r#"{"summary":"ok","chapters":[{"t":0,"title":"Start"}]}"#,
     )
     .unwrap();
-    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store);
+    let (_, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
     assert!(body.contains("\"chapters\""), "sidecar content served: {body}");
     assert!(body.contains("\"annotation_status\": \"ok\""), "completed annotation stays linked: {body}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -4917,7 +5059,7 @@ mod tests {
         export_test_proc(2, "cursor: skipped", None),
       ],
     );
-    let (status, page, disposition) = session_export_response("/job/sexabc/export.html", &store);
+    let (status, page, disposition) = session_export_response("/job/sexabc/export.html", &store, None);
     assert_eq!(status, 200);
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-sexabc.html\""));
     // The header: the page says JOB, wears the live page's purple island, and carries the
@@ -4967,7 +5109,7 @@ mod tests {
       "hostil",
       vec![export_test_proc(0, "claude: evil", Some(cast.to_string_lossy().into_owned()))],
     );
-    let (status, page, _) = session_export_response("/job/hostil/export.html", &store);
+    let (status, page, _) = session_export_response("/job/hostil/export.html", &store, None);
     assert_eq!(status, 200);
     // The recording rides inside a JSON string in the boot script, with every `</`
     // escaped as `<\/` — a literal `</script>` in the cast can neither terminate the
@@ -4993,13 +5135,13 @@ mod tests {
         export_test_proc(1, "codex: multiply", None),
       ],
     );
-    let (status, body, disposition) = session_export_response("/job/nocast/export.html", &store);
+    let (status, body, disposition) = session_export_response("/job/nocast/export.html", &store, None);
     assert_eq!(status, 200);
     assert!(body.contains("no recording"), "body: {body}");
     assert_eq!(disposition.as_deref(), Some("attachment; filename=\"scsh-job-nocast.html\""));
     // Unknown job: the existing 404 style. Legacy /session/… alias still works.
-    assert_eq!(session_export_response("/job/nosuch/export.html", &store).0, 404);
-    assert_eq!(session_export_response("/session/nosuch/export.html", &store).0, 404);
+    assert_eq!(session_export_response("/job/nosuch/export.html", &store, None).0, 404);
+    assert_eq!(session_export_response("/session/nosuch/export.html", &store, None).0, 404);
     let _ = std::fs::remove_dir_all(&dir);
   }
 
