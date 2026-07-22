@@ -391,17 +391,31 @@ pub fn demo_yaml() -> &'static str {
 /// source (`scsh installskills --global <url>`), so the bundle can never drift from them.
 /// Keep this set identical to the shipped reviewers in dkorolev/code-review-skills.
 ///
-/// WORK IN PROGRESS — this is the one part of the bundle with no mechanical drift guard.
-/// The five reviewer bodies are `include_str!` copies of this repository's `.skills/`, while
-/// the canonical bodies live in dkorolev/code-review-skills; today only this comment and the
-/// route-pinning tests keep the two aligned, and only for the parts those tests name. Until
-/// that is closed — by generating `.skills/` from the source repositories in CI, or by
-/// checking the shipped bodies against pinned upstream content hashes — the rule is: a
-/// reviewer change lands in the SOURCE repository first, then mirrors here in its own change.
-/// Expect this note to disappear along with the hand-syncing.
+/// The five reviewer bodies are `include_str!` copies of this repository's `.skills/`,
+/// mirrored from the canonical bodies in dkorolev/code-review-skills. The rule is: a
+/// reviewer change lands in the SOURCE repository first, then mirrors here in its own
+/// change — and the mirror is now mechanically guarded:
+/// [`REVIEWER_BODY_SHA256`] pins each shipped body to the canonical revision's content
+/// hash, so an edit that skips the source repository fails the drift-guard test instead
+/// of shipping silently. Mirroring a canonical change = copy the bodies, re-pin the
+/// hashes, and name the canonical commit in the pin's comment.
 #[cfg(test)]
 pub const CODE_REVIEWER_SKILLS: [&str; 5] =
   ["conventions-reviewer", "justification-reviewer", "reviewability-reviewer", "sanity-reviewer", "testing-reviewer"];
+
+/// The drift guard's pins: sha256 of each shipped reviewer body, in
+/// [`CODE_REVIEWER_SKILLS`] order, matching dkorolev/code-review-skills @ 5dde611
+/// ("Fold the scsh-side reviewer evolution back into the canonical bodies."). A reviewer
+/// edit that lands here without first landing canonically fails the drift-guard test;
+/// a legitimate mirror updates these hashes and this comment's canonical commit.
+#[cfg(test)]
+pub const REVIEWER_BODY_SHA256: [&str; 5] = [
+  "01aff90cc2ffa4595fcee388a167e5e19d7ada71f4caf84e6db1058f29760330",
+  "0fbaf3b2afb19b22c08f5d9e4822aa59d07334e3433d85962f01a65af18bf932",
+  "4761dd0f3d5eecffa582531b57f388d674ceedfcf619452e42c5c54bf36fd41b",
+  "6c074e90f3812d8c70fe808621401322b1b578e9075c6d433a25f5b7516f209b",
+  "0c6cf79e014cebae13d0db3974ec9f5c16396a8f0ed0c842d2fa631b987565c7",
+];
 
 pub fn bundled_skills() -> [(&'static str, &'static str); 6] {
   [
@@ -1730,6 +1744,25 @@ mod tests {
       !manifest.skills.iter().any(|s| s.name.contains("beautiful") || s.name.contains("gorgeous")),
       "the bundled manifest must not declare delivery-family profiles"
     );
+  }
+
+  /// The mirror's mechanical drift guard: every shipped reviewer body must hash to its pin
+  /// in [`REVIEWER_BODY_SHA256`] — the content of the canonical revision named there. An
+  /// edit that lands here without first landing in dkorolev/code-review-skills fails this
+  /// test; the failure message spells out the source-first protocol.
+  #[test]
+  fn bundled_reviewer_bodies_match_the_pinned_canonical_revision() {
+    for (name, pinned) in CODE_REVIEWER_SKILLS.into_iter().zip(REVIEWER_BODY_SHA256) {
+      let body = bundled_skill_body(name).unwrap_or_else(|| panic!("{name} is bundled"));
+      let actual = crate::sha256::sha256_hex(body.as_bytes());
+      assert_eq!(
+        actual, pinned,
+        "{name}'s shipped body drifted from its canonical pin.\n\
+         Reviewer changes land in dkorolev/code-review-skills FIRST, then mirror here:\n\
+         copy the canonical body into .skills/{name}/SKILL.md, update REVIEWER_BODY_SHA256\n\
+         with this hash, and name the canonical commit in the pin's comment."
+      );
+    }
   }
 
   #[test]
