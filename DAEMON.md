@@ -52,6 +52,7 @@ harness output and container names.
 | Container start / stop | Named container around each skill |
 | Every stdout/stderr line | Build tail + harness tee (`scsh-run.log` stream) |
 | Terminal recording (`.cast`) | asciinema PTY recording of each harness (see below) |
+| Image-build recording (`.cast`) | scsh's own PTY recorder around each image build |
 
 ## Terminal recordings (asciinema)
 
@@ -596,11 +597,16 @@ refresh"* rather than guessing a command.
 
 ## Resetting the store
 
-The daemon retains up to 200 sessions (each proc keeping up to 5000 output lines) in the
-redb store. Because it writes only the sessions that changed — not the whole store each tick
-— the store stays small and event POSTs don't stall (this replaced the earlier scheme that
-re-serialized one growing JSON file and could reach tens of megabytes). To wipe session
-history, stop the daemon and delete its DB:
+The daemon keeps up to 200 sessions in memory (each proc keeping up to 5000 output lines).
+Older finished sessions are evicted from that working set but their rows stay in the redb
+store as an archive — the job page, fleet endpoint, session JSON, exports, and recordings
+of an evicted session are served straight from the archived row, so old links keep working.
+The archive itself is capped at 2000 rows (oldest finished sessions beyond it are dropped
+at daemon startup; a running session is never evicted from either tier). Because the daemon
+writes only the sessions that changed — not the whole store each tick — the store stays
+small and event POSTs don't stall (this replaced the earlier scheme that re-serialized one
+growing JSON file and could reach tens of megabytes). To wipe session history, stop the
+daemon and delete its DB:
 
 ```console
 scsh daemon stop

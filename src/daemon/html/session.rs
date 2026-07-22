@@ -9,8 +9,12 @@ use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
-  let session = store.sessions.get(session_id)?;
-  let port = store.port;
+  Some(session_page_for(store.sessions.get(session_id)?, store.port))
+}
+
+/// The session page from a session record alone — the render path shared by live sessions
+/// (looked up in the store) and archived ones (read back from the store DB after eviction).
+pub fn session_page_for(session: &Session, port: u16) -> String {
   let now = now_unix_secs();
   let mut procs_html = String::new();
   let mut fleet_sections = fleet_sections_by_anchor(session);
@@ -162,7 +166,7 @@ pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
     workflow = workflow,
     procs = procs_html,
   );
-  Some(wrap_page(&format!("job {session_id}"), port, Some(session_id), None, &lede, &body))
+  wrap_page(&format!("job {}", session.id), port, Some(&session.id), None, &lede, &body)
 }
 
 fn container_runtime_name(runtime: Option<&str>) -> &'static str {

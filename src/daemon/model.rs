@@ -38,6 +38,13 @@ pub const SESSION_NO_WORK_TIMEOUT_SECS: u64 = SESSION_IDLE_TIMEOUT_SECS * 2;
 /// Maximum sessions retained in daemon state.
 pub const MAX_STORED_SESSIONS: usize = 200;
 
+/// Maximum session rows retained in the store DB. Eviction from the in-memory map (the
+/// [`MAX_STORED_SESSIONS`] cap) no longer deletes the persisted row: the API and the
+/// session pages fall back to the archived row, so an old job's fleet endpoint, page, and
+/// recordings stay reachable long after it left the working set. This larger cap bounds
+/// the archive itself; the oldest finished rows beyond it are dropped at daemon startup.
+pub const MAX_ARCHIVED_SESSIONS: usize = 2000;
+
 /// How a daemon was started.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DaemonMode {
