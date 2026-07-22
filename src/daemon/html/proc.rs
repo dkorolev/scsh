@@ -110,6 +110,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
         Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped after",
         Some(r) if r == crate::failure::reason::FORCE_RESTARTED => "restarted after",
         Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled after",
+        Some(r) if r == crate::failure::reason::STARTUP_STALLED => "stalled at startup after",
         Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out after",
         _ => "failed in",
       };
@@ -119,6 +120,7 @@ pub(crate) fn elapsed_phrase(status: ProcStatus, elapsed: Option<f64>, fail_reas
           Some(r) if r == crate::failure::reason::FORCE_STOPPED => "stopped".into(),
           Some(r) if r == crate::failure::reason::FORCE_RESTARTED => "restarted".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_INACTIVE => "stalled".into(),
+          Some(r) if r == crate::failure::reason::STARTUP_STALLED => "stalled at startup".into(),
           Some(r) if r == crate::failure::reason::CONTAINER_TIMEOUT => "timed out".into(),
           _ => "failed".into(),
         },
@@ -250,6 +252,11 @@ mod elapsed_phrase_tests {
     assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(45.0), Some(reason::FORCE_STOPPED)), "stopped after 45s");
     assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::FORCE_STOPPED)), "stopped");
     assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(120.0), Some(reason::CONTAINER_INACTIVE)), "stalled after 2m");
+    assert_eq!(
+      elapsed_phrase(ProcStatus::Fail, Some(16.0), Some(reason::STARTUP_STALLED)),
+      "stalled at startup after 16s"
+    );
+    assert_eq!(elapsed_phrase(ProcStatus::Fail, None, Some(reason::STARTUP_STALLED)), "stalled at startup");
     assert_eq!(elapsed_phrase(ProcStatus::Fail, Some(60.0), Some(reason::CONTAINER_TIMEOUT)), "timed out after 1m");
     assert_eq!(elapsed_phrase(ProcStatus::Waiting, None, None), "waiting");
     assert_eq!(elapsed_phrase(ProcStatus::Skipped, None, None), "skipped");
