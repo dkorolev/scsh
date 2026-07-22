@@ -1783,6 +1783,18 @@ mod tests {
       decide.outputs.iter().any(|o| o.name == "change_request" && o.ty == OutputType::StringList),
       "the change request is a typed list, one entry per requested change"
     );
+    // The honest-termination contract: a plateaued loop may exit with reservations —
+    // only over journaled human-adjudication items, never over code-level defects.
+    let resolution = decide.outputs.iter().find(|o| o.name == "resolution").expect("decide declares a resolution");
+    assert_eq!(resolution.ty, OutputType::Enum);
+    assert_eq!(resolution.choices, ["approved", "approved_with_reservations", "changes_requested"]);
+    assert!(decide.outputs.iter().any(|o| o.name == "reservations" && o.ty == OutputType::StringList));
+    assert!(decide.task.body().contains("approved_with_reservations"), "the prompt spells out the reservations exit");
+    assert!(
+      decide.task.body().contains("no grade is poor and no comment is\n      [blocking]")
+        || decide.task.body().contains("no grade is poor"),
+      "the reservations exit is fenced off from real defects"
+    );
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
     assert_eq!(collect.do_while.as_deref(), Some("decide"));
     assert!(collect.outputs.iter().any(|o| o.name == "SCSH_DO_WHILE_REPEAT" && o.ty == OutputType::Bool));

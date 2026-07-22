@@ -2750,9 +2750,17 @@ fn run_workflow(
         }
       }
       if s.commits {
-        if let (Some(b), Some(clone)) = (caller_tip.as_deref(), run.clone_dir.as_ref()) {
+        // A live clone integrates its commits directly; a commit-enabled cache HIT replays
+        // the commits journaled in the cache — same contract as the flat path, so a hit
+        // reproduces the commit, not just the result.
+        let integration = if let (Some(b), Some(clone)) = (caller_tip.as_deref(), run.clone_dir.as_ref()) {
+          Some(integrate_commits(root, clone, b, &s.id, &stamp))
+        } else {
+          run.cached_commits.as_ref().map(|patch| apply_cached_commits(root, patch, &s.id, &stamp))
+        };
+        if let Some(integration) = integration {
           let inv = invs.iter().find(|i| i.name == *run_id).expect("invocation for step in this wave");
-          match integrate_commits(root, clone, b, &s.id, &stamp) {
+          match integration {
             Ok(None) => {}
             Ok(Some(Integration::Applied { count, range })) => {
               ok(&format!(
@@ -6369,6 +6377,15 @@ fn cache_key(root: &Path, skill: &ResolvedInvocation, env: &[(String, String)]) 
   cache_key_at(root, skill, env, None, None)
 }
 
+/// The local mainline tip (`main`, else `master`), when the repository has one — the far
+/// side of the `mainline..HEAD` range a workflow judgment step reads.
+fn local_mainline_sha(root: &Path) -> Option<String> {
+  runtime::MAINLINE_BRANCHES
+    .into_iter()
+    .find_map(|b| git_capture(root, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{b}")]))
+    .map(|s| s.trim().to_string())
+}
+
 /// Workflow variant of [`cache_key`]: hash the authoritative carried revision rather than
 /// the caller branch, which may intentionally remain untouched after a history rewrite.
 fn cache_key_at(
@@ -6385,6 +6402,23 @@ fn cache_key_at(
   let mut blob = String::new();
   blob.push_str("scsh-cache v2\n");
   blob.push_str(&format!("repo-tree={tree}\n"));
+  // A commits-enabled skill may judge the branch's HISTORY, not only its tree: the
+  // gorgeous pipeline's `prepare` writes the PR description FROM the commits, so messages,
+  // slicing, and ancestry are inputs even though none of them move the tree hash
+  // (observed live: a tree-keyed hit replaying an earlier run's stale PR description).
+  // The commit hash seals all of them. In a workflow the judged range is
+  // `mainline..HEAD`, so where the mainline points is an input too — keyed whenever the
+  // branch resolves. Keying (not bypassing) keeps commit-based gates cached AND honest:
+  // a hit still replays the journaled commits.
+  if skill.commits {
+    let commit = git_capture(root, &["rev-parse", source_revision.unwrap_or("HEAD")])?.trim().to_string();
+    blob.push_str(&format!("history={commit}\n"));
+    if source_revision.is_some() {
+      if let Some(mainline) = local_mainline_sha(root) {
+        blob.push_str(&format!("mainline={mainline}\n"));
+      }
+    }
+  }
   blob.push_str(&format!("invocation={}\n", skill.name));
   blob.push_str(&format!("skill={}\n", skill.skill_source));
   blob.push_str(&format!("harness={}\n", skill.harness.as_str()));
@@ -9050,6 +9084,11 @@ fn print_help_cache() {
   scsh restores the result AND replays the journaled commits, so the commit reappears on top.
   A hit reproduces the full side effect, not just the result. (If a replay can't apply
   cleanly, scsh saves the patch under tmp/.sccache/ and leaves your branch alone.)
+  A commit-enabled skill's key also includes the COMMIT hash — and, inside a workflow,
+  where the mainline points — because such a skill may judge the branch's HISTORY:
+  messages, slicing, ancestry, the mainline. A reword, re-slice, or a moved main is a
+  MISS even when the tree is unchanged; an identical history is a HIT that replays the
+  journaled commits, in workflows and flat runs alike.
 "#
   );
   println!();
@@ -10267,6 +10306,60 @@ Subject: [PATCH] add: 2 + 3 = 5
     // Side files are not journaled in the cache, so artifact steps must always run live.
     let caller = repo("artifacts-nocache");
     assert!(cache_key(&caller, &inv, &[]).is_none(), "artifact steps must bypass the cache");
+  }
+
+  #[test]
+  fn commits_enabled_skills_key_on_history_not_only_the_tree() {
+    let step = harness_def::Step {
+      id: "prepare".into(),
+      agent: harness_def::StepAgent {
+        harness: config::Harness::Claude,
+        model: Some("claude-opus-4-8".into()),
+        effort: None,
+      },
+      task: harness_def::StepTask::Prompt("write or update PR-DESCRIPTION.md".into()),
+      inputs: Vec::new(),
+      outputs: Vec::new(),
+      commit_identity: harness_def::CommitIdentity::Notes,
+      when: None,
+      needs: Vec::new(),
+      artifacts: Vec::new(),
+      commits: true,
+      repeat: None,
+      retry_for: None,
+      retry_signature_cap: None,
+      inactivity_timeout: None,
+      do_while: None,
+      break_loop: false,
+      max_iterations: None,
+    };
+    let inv = step_invocation(&step, "prepare", "tmp/scsh/abcdef", Vec::new(), None);
+    let caller = repo("commits-history-key");
+    // Same commit, same key: caching commit-based gates is good — when their input is.
+    let k1 = cache_key(&caller, &inv, &[]);
+    assert!(k1.is_some(), "commits skills cache");
+    assert_eq!(k1, cache_key(&caller, &inv, &[]));
+    // Reword the commit: the TREE is unchanged, but the history — this skill's actual
+    // input — is not. The key must move (a tree-only key replayed a stale PR description
+    // from exactly this situation, observed live).
+    g(&caller, &["commit", "--amend", "-qm", "base, reworded"]);
+    let k2 = cache_key(&caller, &inv, &[]);
+    assert_ne!(k1, k2, "a reworded history is a different input to a commits skill");
+    // Workflow context: the judged range is mainline..HEAD, so with the carried revision
+    // held FIXED, a mainline that moved is a different input too.
+    let pinned = git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim().to_string();
+    std::fs::write(caller.join("one"), "1\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "one"]);
+    // The default branch may be `main` or `master` depending on host git config; both are
+    // mainline branches, and HEAD sits on it, so each commit moves the mainline tip.
+    let k3 = cache_key_at(&caller, &inv, &[], Some(&pinned), None);
+    std::fs::write(caller.join("two"), "2\n").unwrap();
+    g(&caller, &["add", "-A"]);
+    g(&caller, &["commit", "-qm", "two"]);
+    let k4 = cache_key_at(&caller, &inv, &[], Some(&pinned), None);
+    assert!(k3.is_some() && k4.is_some());
+    assert_ne!(k3, k4, "a moved mainline is a different input to a workflow judgment step");
   }
 
   #[test]

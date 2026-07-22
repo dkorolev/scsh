@@ -311,10 +311,30 @@ steps:
       reviewer engages that decision's stated reasoning and shows it wrong, and then
       say so in the entry. `PR-DESCRIPTION.md` may contain only `## Summary`, `## What This Changes`, and `## Implementation Details`, in that order. Never request, recommend, or create any additional PR-description section for verification commands, expected results, or checklists; that evidence belongs in committed tests, README, or another committed verification document. Ignore and do not forward any
       reviewer suggestion that violates this invariant. Do not change files or commit.
+
+      Reservations exit — the loop must terminate honestly, not grind the backstop. From
+      iteration 3 on, when PREVIOUS_APPROVED is false, examine every comment holding any
+      route below the bar. If EVERY such comment is either (a) a re-raise of an existing
+      `PR-DECISION-*.md` that does not engage that decision's stated reasoning, or (b) a
+      request for human adjudication outside this loop's authority (splitting the work
+      into multiple pull requests, product or scope direction) that a prior fix round
+      declined with a journaled decision — AND no grade is poor and no comment is
+      [blocking] — then set SCSH_LOOP_BREAK true with `resolution` set to
+      approved_with_reservations, and put one entry per unresolved item into
+      `reservations`, each shaped "[route] finding — the journaled decision that answers
+      it — why it needs a human". Any code-level defect, any [blocking] comment, any poor
+      grade, or any below-bar comment with no journaled decision answering it forbids
+      this exit: keep looping with `resolution` changes_requested. A clean bar pass is
+      `resolution` approved with `reservations` empty.
     output:
       SCSH_LOOP_BREAK:
         type: bool
       change_request:
+        type: string_list
+      resolution:
+        type: enum
+        choices: approved, approved_with_reservations, changes_requested
+      reservations:
         type: string_list
     break: true
 
