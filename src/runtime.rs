@@ -168,6 +168,12 @@ pub fn image_target(harness: Harness) -> &'static str {
 /// Claude Code's interactive TUI re-runs onboarding when it cannot write its state json.)
 pub const CLAUDE_AUTH_REL: &str = "tmp/.claude-auth";
 
+/// The image's `CLAUDE_CONFIG_DIR` (see `src/Dockerfile`) — the in-container path of the
+/// forwarded config dir, needed when a config value must name a path the CONTAINER sees.
+pub fn claude_config_dir_in_container() -> String {
+  format!("{AGENT_REPO}/{CLAUDE_AUTH_REL}/.claude")
+}
+
 /// Run-dir-relative opencode auth dir (`$XDG_DATA_HOME/opencode` in the image). scsh copies the
 /// host's `~/.local/share/opencode/auth.json` into the run clone here (riding the repo mount),
 /// required for third-party opencode providers (e.g. Nebius GLM) that authenticate via the host
@@ -1080,6 +1086,12 @@ pub fn asciinema_available() -> bool {
 /// forgets exactly one run. Ordinary runs never delete these; reclaim with `scsh gc`.
 pub fn host_sessions_dir() -> std::path::PathBuf {
   scsh_home().join("sessions")
+}
+
+/// Quota observed during real runs, newest per harness (`$SCSH_HOME/quota/`). Session
+/// artifacts are per-session; this is account state, so it lives beside them, not inside one.
+pub fn host_quota_dir() -> std::path::PathBuf {
+  scsh_home().join("quota")
 }
 
 /// A session's recordings — skill casts and image-build casts alike

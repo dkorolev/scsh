@@ -45,6 +45,92 @@ pub fn result_file_name(harness: Harness) -> String {
   format!("{}.json", run_name(harness))
 }
 
+// ---- byproduct capture from real container runs (claude) ----
+//
+// Claude Code hands its status line a JSON blob that carries `rate_limits` once the
+// session's first API response lands. scsh already runs claude in a TUI container doing
+// real work, so pointing that container's status line at a writer captures quota for
+// FREE — no probe, no extra model call — and the numbers keep their exact epoch reset
+// times. `scsh quota` falls back to the newest capture when the live endpoints refuse.
+
+/// File the in-container status line writes, inside the forwarded claude config dir.
+pub const CAPTURE_FILE: &str = "scsh-quota.json";
+
+/// The status line scsh installs into claude containers. POSIX sh with no `jq`: it just
+/// parks the JSON next to itself (atomically, so the host never reads a torn file) and
+/// prints a short line. Parsing happens on the host, where the real parser lives.
+pub const CAPTURE_STATUSLINE_SH: &str = concat!(
+  "#!/bin/sh\n",
+  "# Installed by scsh. Claude Code pipes its status-line JSON (which carries rate_limits\n",
+  "# once the first API response lands) to stdin; stdout becomes the status line. scsh\n",
+  "# keeps the newest copy so `scsh quota` can report usage observed during real runs.\n",
+  "d=$(dirname \"$0\")\n",
+  "cat > \"$d/scsh-quota.json.part\" 2>/dev/null && mv \"$d/scsh-quota.json.part\" \"$d/scsh-quota.json\" 2>/dev/null\n",
+  "printf 'scsh'\n",
+);
+
+/// `settings.json` pointing claude's status line at the writer above (container path).
+pub fn capture_settings_json(statusline_path_in_container: &str) -> String {
+  format!(
+    "{{ \"statusLine\": {{ \"type\": \"command\", \"command\": {}, \"refreshInterval\": 5 }} }}",
+    json::quote(statusline_path_in_container)
+  )
+}
+
+/// Where the newest capture is kept: `$SCSH_HOME/quota/<harness>.json`.
+fn capture_store_path(harness: Harness) -> std::path::PathBuf {
+  crate::runtime::host_quota_dir().join(format!("{}.json", harness.as_str()))
+}
+
+/// Harvest a finished run's status-line capture into the durable store. Called with the
+/// forwarded claude config dir just before it is scrubbed. Best-effort and silent: a run
+/// whose session never made an API call simply has no `rate_limits` to keep.
+pub fn harvest_claude_capture(claude_config_dir: &std::path::Path) -> bool {
+  let Ok(text) = std::fs::read_to_string(claude_config_dir.join(CAPTURE_FILE)) else { return false };
+  if parse_statusline_rate_limits(&text).is_empty() {
+    return false;
+  }
+  let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+  let path = capture_store_path(Harness::Claude);
+  let Some(parent) = path.parent() else { return false };
+  if std::fs::create_dir_all(parent).is_err() {
+    return false;
+  }
+  // Keep the provider's own blob verbatim plus when it was seen — the parser above is the
+  // only thing that interprets it, so a future field lands without a migration.
+  let doc = format!("{{ \"observed_at\": {now}, \"statusline\": {} }}", text.trim());
+  std::fs::write(&path, doc).is_ok()
+}
+
+/// The newest captured claude quota, if any: `(windows, observed_at)`.
+fn stored_claude_capture() -> Option<(Vec<QuotaWindow>, u64)> {
+  let text = std::fs::read_to_string(capture_store_path(Harness::Claude)).ok()?;
+  let Ok(Value::Object(root)) = json::parse(&text) else { return None };
+  let observed_at = get_num(&root, "observed_at")? as u64;
+  let statusline = get_obj(&root, "statusline")?;
+  let windows = statusline_windows(statusline);
+  (!windows.is_empty()).then_some((windows, observed_at))
+}
+
+/// Normalize the `rate_limits` block of Claude Code's status-line JSON. Reset times are
+/// unix epochs here (unlike `/usage`'s local-timezone prose), so they survive as exact UTC.
+fn parse_statusline_rate_limits(text: &str) -> Vec<QuotaWindow> {
+  let Ok(Value::Object(root)) = json::parse(text) else { return Vec::new() };
+  statusline_windows(&root)
+}
+
+fn statusline_windows(root: &[(String, Value)]) -> Vec<QuotaWindow> {
+  let Some(limits) = get_obj(root, "rate_limits") else { return Vec::new() };
+  let mut out = Vec::new();
+  for (key, id, label) in [("five_hour", "session_5h", "5h session"), ("seven_day", "weekly", "weekly")] {
+    let Some(w) = get_obj(limits, key) else { continue };
+    let Some(pct) = get_num(w, "used_percentage") else { continue };
+    let resets_at = get_num(w, "resets_at").filter(|s| *s > 0.0).map(|s| epoch_to_iso(s as u64));
+    out.push(QuotaWindow { id: id.to_string(), label: label.to_string(), used_percent: pct, resets_at });
+  }
+  out
+}
+
 /// One rate-limit window: a stable machine id, a human label, how much is used, and
 /// when the window resets (ISO-8601 UTC, `None` when the provider doesn't say).
 #[derive(Debug, Clone, PartialEq)]
@@ -70,12 +156,26 @@ pub struct HarnessQuota {
   pub summary: String,
   /// Actionable next step when not `ok`; empty otherwise.
   pub hint: String,
+  /// Which tier answered: `endpoint` (the provider's usage API), `cli` (the harness's own
+  /// command), or `run` (captured during an earlier container run — not a live reading).
+  pub source: &'static str,
+  /// When a non-live answer was observed (unix seconds); `None` for live readings.
+  pub observed_at: Option<u64>,
 }
 
 impl HarnessQuota {
   fn ok(harness: Harness, plan: Option<String>, windows: Vec<QuotaWindow>) -> Self {
     let summary = summarize(harness, plan.as_deref(), &windows);
-    HarnessQuota { harness, status: "ok", plan, windows, summary, hint: String::new() }
+    HarnessQuota {
+      harness,
+      status: "ok",
+      plan,
+      windows,
+      summary,
+      hint: String::new(),
+      source: "endpoint",
+      observed_at: None,
+    }
   }
 
   fn down(harness: Harness, status: &'static str, reason: &str, hint: &str) -> Self {
@@ -86,7 +186,21 @@ impl HarnessQuota {
       windows: Vec::new(),
       summary: format!("{}: {reason}", harness.as_str()),
       hint: hint.to_string(),
+      source: "endpoint",
+      observed_at: None,
     }
+  }
+
+  /// Mark which tier produced this answer; a non-live one says so in its own summary,
+  /// so a stale number can never be mistaken for a fresh one.
+  fn with_source(mut self, source: &'static str, observed_at: Option<u64>) -> Self {
+    self.source = source;
+    self.observed_at = observed_at;
+    if source == "run" {
+      let when = observed_at.map(|t| human_time(&epoch_to_iso(t))).unwrap_or_else(|| "an earlier run".into());
+      self.summary = format!("{} — as of {when} UTC, captured during a run", self.summary);
+    }
+    self
   }
 }
 
@@ -289,7 +403,7 @@ fn claude_quota() -> HarnessQuota {
   // The file/keychain blob also carries the plan (`subscriptionType`) and expiry.
   let (token, plan) = match claude_token_and_plan() {
     Ok(pair) => pair,
-    Err(quota) => return quota,
+    Err(quota) => return *quota,
   };
   let resp = match curl("https://api.anthropic.com/api/oauth/usage", &[format!("Authorization: Bearer {token}")], None)
   {
@@ -305,21 +419,25 @@ fn claude_quota() -> HarnessQuota {
     // through its own client — refreshing a stale token itself, and riding out endpoint
     // throttling the raw call cannot (observed live: direct 429 while the CLI answers).
     // A failed fallback names its reason in the report — a silent one is undebuggable.
-    401 | 403 => claude_cli_usage(plan.clone()).unwrap_or_else(|why| {
-      HarnessQuota::down(
-        h,
-        "expired",
-        &format!("the stored OAuth token was rejected, and the CLI fallback failed ({why})"),
-        &expired_hint("claude"),
-      )
+    401 | 403 => claude_cli_usage(plan.clone()).map(|q| q.with_source("cli", None)).unwrap_or_else(|why| {
+      claude_captured(plan.clone()).unwrap_or_else(|| {
+        HarnessQuota::down(
+          h,
+          "expired",
+          &format!("the stored OAuth token was rejected, and the CLI fallback failed ({why})"),
+          &expired_hint("claude"),
+        )
+      })
     }),
-    429 => claude_cli_usage(plan.clone()).unwrap_or_else(|why| {
-      HarnessQuota::down(
-        h,
-        "error",
-        &format!("usage endpoint rate-limited the check (HTTP 429), and the CLI fallback failed ({why})"),
-        "wait a minute and re-run — the endpoint throttles bursts",
-      )
+    429 => claude_cli_usage(plan.clone()).map(|q| q.with_source("cli", None)).unwrap_or_else(|why| {
+      claude_captured(plan.clone()).unwrap_or_else(|| {
+        HarnessQuota::down(
+          h,
+          "error",
+          &format!("usage endpoint rate-limited the check (HTTP 429), and the CLI fallback failed ({why})"),
+          "wait a minute and re-run — the endpoint throttles bursts",
+        )
+      })
     }),
     code => HarnessQuota::down(h, "error", &format!("usage endpoint answered HTTP {code}"), ""),
   }
@@ -368,6 +486,14 @@ fn claude_cli_usage(plan: Option<String>) -> Result<HarnessQuota, String> {
   Ok(HarnessQuota::ok(Harness::Claude, plan, windows))
 }
 
+/// Last resort: quota captured by the status line during an earlier container run. Not a
+/// live reading, so it is labelled as such — but real numbers with exact reset times beat
+/// "throttled, try later" when the caller just wants to know where the account stands.
+fn claude_captured(plan: Option<String>) -> Option<HarnessQuota> {
+  let (windows, observed_at) = stored_claude_capture()?;
+  Some(HarnessQuota::ok(Harness::Claude, plan, windows).with_source("run", Some(observed_at)))
+}
+
 /// First non-empty line of a child's output, capped for a one-line diagnostic.
 fn glimpse(bytes: &[u8]) -> Option<String> {
   let text = String::from_utf8_lossy(bytes);
@@ -397,22 +523,24 @@ fn parse_claude_usage_text(text: &str) -> Vec<QuotaWindow> {
   out
 }
 
-fn claude_token_and_plan() -> Result<(String, Option<String>), HarnessQuota> {
+// The error is a fully-formed HarnessQuota (a large struct); box it so the common Ok path
+// stays a cheap two-word tuple (clippy::result_large_err).
+fn claude_token_and_plan() -> Result<(String, Option<String>), Box<HarnessQuota>> {
   let h = Harness::Claude;
   if let Some(token) = crate::runtime::claude_oauth_token() {
     return Ok((token, None));
   }
   let blob = claude_credentials_blob().ok_or_else(|| {
-    HarnessQuota::down(
+    Box::new(HarnessQuota::down(
       h,
       "missing",
       "no claude.ai login found",
       "log in with `claude` on the host (subscription quota needs claude.ai OAuth, not an API key)",
-    )
+    ))
   })?;
   match parse_claude_credentials(&blob) {
     Ok(pair) => Ok(pair),
-    Err(e) => Err(HarnessQuota::down(h, "error", &e, "")),
+    Err(e) => Err(Box::new(HarnessQuota::down(h, "error", &e, ""))),
   }
 }
 
@@ -807,13 +935,15 @@ fn harness_json_fields(q: &HarnessQuota) -> String {
     })
     .collect();
   format!(
-    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": [{}], \"summary\": {}, \"hint\": {}",
+    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": [{}], \"summary\": {}, \"hint\": {}, \"source\": {}, \"observed_at\": {}",
     json::quote(q.harness.as_str()),
     json::quote(q.status),
     q.plan.as_deref().map(json::quote).unwrap_or_else(|| "null".into()),
     windows.join(", "),
     json::quote(&q.summary),
     json::quote(&q.hint),
+    json::quote(q.source),
+    q.observed_at.map(|t| t.to_string()).unwrap_or_else(|| "null".into()),
   )
 }
 
@@ -1126,6 +1256,76 @@ mod tests {
     assert_eq!(get_str(grok, "status"), Some("expired"));
     assert_eq!(get_str(grok, "plan"), None);
     assert!(get_str(grok, "summary").unwrap().contains("lapsed"));
+  }
+
+  /// Live-captured statusline payload from a real claude TUI session (values anonymized):
+  /// `rate_limits` appears only after the session's first API response, and its reset
+  /// times are unix epochs — so a capture keeps EXACT UTC, unlike `/usage`'s local prose.
+  const STATUSLINE_JSON: &str = r#"{
+    "model": {"display_name": "Fable 5"}, "version": "2.1.218",
+    "context_window": {"used_percentage": 34},
+    "rate_limits": {
+      "five_hour": {"used_percentage": 17, "resets_at": 1784855400},
+      "seven_day": {"used_percentage": 64, "resets_at": 1785081600}
+    }
+  }"#;
+
+  #[test]
+  fn statusline_capture_normalizes_into_windows_with_utc_resets() {
+    let windows = parse_statusline_rate_limits(STATUSLINE_JSON);
+    assert_eq!(windows.len(), 2);
+    assert_eq!(
+      windows[0],
+      QuotaWindow {
+        id: "session_5h".into(),
+        label: "5h session".into(),
+        used_percent: 17.0,
+        resets_at: Some("2026-07-24T01:10:00Z".into()),
+      }
+    );
+    assert_eq!(windows[1].id, "weekly");
+    assert_eq!(windows[1].used_percent, 64.0);
+    assert_eq!(windows[1].resets_at.as_deref(), Some("2026-07-26T16:00:00Z"));
+    // A session that never made an API call carries no rate_limits — nothing to capture.
+    assert!(parse_statusline_rate_limits(r#"{"model": {"display_name": "Fable 5"}}"#).is_empty());
+    assert!(parse_statusline_rate_limits("not json").is_empty());
+  }
+
+  /// A captured answer must never read as a live one: it says when it was seen, and its
+  /// `source` marks it for machines.
+  #[test]
+  fn captured_answers_declare_their_provenance() {
+    let windows = parse_statusline_rate_limits(STATUSLINE_JSON);
+    let q = HarnessQuota::ok(Harness::Claude, Some("max".into()), windows).with_source("run", Some(1_784_855_000));
+    assert_eq!(q.source, "run");
+    assert_eq!(q.observed_at, Some(1_784_855_000));
+    assert!(q.summary.contains("as of 2026-07-24 01:03 UTC, captured during a run"), "{}", q.summary);
+    let live = HarnessQuota::ok(Harness::Codex, None, vec![]);
+    assert_eq!(live.source, "endpoint");
+    assert_eq!(live.observed_at, None);
+    assert!(!live.summary.contains("as of"));
+    // Provenance rides along in the machine-readable shape.
+    let out = render_json(&[q], 1);
+    assert!(out.contains("\"source\": \"run\""), "{out}");
+    assert!(out.contains("\"observed_at\": 1784855000"), "{out}");
+    assert!(render_json(&[live], 1).contains("\"observed_at\": null"));
+  }
+
+  /// The in-container writer must be self-locating POSIX sh with no `jq` — container
+  /// images carry no guarantee of it, and the real parsing happens host-side anyway.
+  #[test]
+  fn the_container_statusline_writer_is_dependency_free() {
+    assert!(CAPTURE_STATUSLINE_SH.starts_with("#!/bin/sh\n"));
+    assert!(!CAPTURE_STATUSLINE_SH.contains("jq"));
+    assert!(!CAPTURE_STATUSLINE_SH.contains("bash"));
+    // Atomic publish: the host must never read a half-written capture.
+    assert!(CAPTURE_STATUSLINE_SH.contains(".part"));
+    assert!(CAPTURE_STATUSLINE_SH.contains(&format!("mv \"$d/{CAPTURE_FILE}.part\" \"$d/{CAPTURE_FILE}\"")));
+    let settings = capture_settings_json("/home/agent/repo/tmp/.claude-auth/.claude/scsh-quota-statusline.sh");
+    let Ok(Value::Object(root)) = json::parse(&settings) else { panic!("settings must be valid JSON: {settings}") };
+    let line = get_obj(&root, "statusLine").expect("statusLine");
+    assert_eq!(get_str(line, "type"), Some("command"));
+    assert!(get_str(line, "command").unwrap().ends_with("/scsh-quota-statusline.sh"));
   }
 
   #[test]
