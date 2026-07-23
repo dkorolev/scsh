@@ -17,6 +17,7 @@ mod json;
 #[cfg(test)]
 mod licenses;
 mod ptyrec;
+mod quota;
 mod runtime;
 mod sha1;
 mod sha256;
@@ -100,6 +101,7 @@ fn run(args: &[String]) -> i32 {
     Mode::RecordPty { cast, cols, rows, argv } => ptyrec::record(&cast, cols, rows, &argv),
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
+    Mode::Quota { harness } => quota_cmd(harness, cli.json, cli.failures.session.clone()),
     Mode::Prune => prune_cmd(cli.prune_now),
     Mode::Gc => gc_cmd(&cli.gc),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
@@ -664,6 +666,11 @@ enum Mode {
   Failures,
   /// Browse durable run statistics (`scsh stats`): durations and workload per route.
   Stats,
+  /// Subscription quota per harness (`scsh quota [harness]`): live percent-used windows
+  /// from each agent CLI's own provider, as a table or `--json`.
+  Quota {
+    harness: Option<config::Harness>,
+  },
   /// Show the run-dir prune queue; `--now` forces a janitor pass.
   Prune,
   /// Reclaim old `$SCSH_HOME/sessions/` dirs (dry-run by default; `--apply` to delete).
@@ -727,6 +734,7 @@ const COMMAND_NAMES: &[&str] = &[
   "daemon",
   "failures",
   "stats",
+  "quota",
   "prune",
   "gc",
   "annotate-cast",
@@ -750,6 +758,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "daemon" => "daemon",
     "failures" => "failures",
     "stats" => "stats",
+    "quota" | "usage" => "quota",
     "prune" => "prune",
     "gc" => "gc",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
@@ -965,6 +974,20 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `stats [--skill NAME] [--profile P] [--harness H] [--model M] [--raw] [--last N]`:
       // durations and workload sizes per skill and harness·model route (~/.scsh/stats.jsonl).
       "stats" => Some(Mode::Stats),
+      // `quota [harness]`: live subscription usage from each agent CLI's own provider —
+      // read-only, no model calls. An optional harness name narrows to one provider.
+      "quota" | "usage" => {
+        let harness = match args.get(i + 1).map(|s| s.as_str()) {
+          Some(name) if !name.starts_with('-') => {
+            i += 1;
+            Some(config::Harness::parse(name).ok_or_else(|| {
+              format!("unknown harness '{name}' (expected one of: claude, codex, grok, cursor, opencode)")
+            })?)
+          }
+          _ => None,
+        };
+        Some(Mode::Quota { harness })
+      }
       "--session" | "--skill" | "--reason" | "--harness" | "--model" => {
         let flag = args[i].clone();
         i += 1;
@@ -1271,8 +1294,8 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  if json && !matches!(mode, Mode::List | Mode::Probe | Mode::AnnotateCasts | Mode::ExportCasts) {
-    return Err("--json only applies to 'list', 'probe', 'annotate-cast', and 'export-cast'".into());
+  if json && !matches!(mode, Mode::List | Mode::Probe | Mode::Quota { .. } | Mode::AnnotateCasts | Mode::ExportCasts) {
+    return Err("--json only applies to 'list', 'probe', 'quota', 'annotate-cast', and 'export-cast'".into());
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -1283,8 +1306,10 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   // `--session` (the session id to report into) is shared by failures/stats and by
   // `build-images`/`run`, which the daemon spawns with a pre-created session id; `--skill`
   // and `--last` are query flags that stay on failures/stats only.
-  if failures.session.is_some() && !matches!(mode, Mode::Failures | Mode::Stats | Mode::BuildImages | Mode::Run) {
-    return Err("--session only applies to 'failures', 'stats', 'build-images', or 'run'".into());
+  if failures.session.is_some()
+    && !matches!(mode, Mode::Failures | Mode::Stats | Mode::BuildImages | Mode::Run | Mode::Quota { .. })
+  {
+    return Err("--session only applies to 'failures', 'stats', 'build-images', 'run', or 'quota'".into());
   }
   if (failures.skill.is_some() || failures.last.is_some()) && !matches!(mode, Mode::Failures | Mode::Stats) {
     return Err("--skill/--last only apply to 'failures' or 'stats'".into());
@@ -3491,6 +3516,156 @@ fn probe_cmd(profile: Option<&str>, override_yml: Option<&Path>, json_flag: bool
     }
   }
   if available > 0 {
+    0
+  } else {
+    1
+  }
+}
+
+/// `scsh quota [harness] [--json]` — live subscription usage per harness, straight from
+/// each provider's own endpoint (read-only; no model calls, so no cost and no container).
+///
+/// Structurally a JOB, not a query: one session with one RUN per harness, concurrent.
+/// Each run writes its own result file (`sessions/<id>/results/quota-<harness>.json`,
+/// headlined by its summary line) and finishes its own proc row, so the session browser
+/// shows per-harness status lines exactly like any other fleet. `--session` reuses the
+/// id the daemon pre-created (the Setup tab's Check quota button), like `build-images`.
+/// Exit 0 only when every requested harness answered `ok` — a partial dashboard is a
+/// failure a script should notice.
+fn quota_cmd(harness: Option<config::Harness>, json_flag: bool, session: Option<String>) -> i32 {
+  ui::signals::install();
+  let targets: Vec<config::Harness> = match harness {
+    Some(h) => vec![h],
+    None => quota::SUPPORTED.to_vec(),
+  };
+  let session_id = session.filter(|s| !s.is_empty()).unwrap_or_else(daemon::new_session_id);
+  let results_dir = runtime::session_results_dir(&session_id);
+  if let Err(e) = std::fs::create_dir_all(&results_dir) {
+    fail(&format!("could not create {}: {e}", results_dir.display()));
+    return 1;
+  }
+
+  // Session browser wiring — same shape as `build_images_cmd`: register under the
+  // synthetic `(quota)` repo (never a real path; exempt from job supervision) and keep
+  // going without the browser when no daemon is reachable.
+  let mut daemon_client: Option<std::sync::Arc<daemon::Client>> = None;
+  let mut ping_active: Option<std::sync::Arc<std::sync::atomic::AtomicBool>> = None;
+  match daemon::ensure_for_run() {
+    Ok(()) => {
+      let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
+      let names: Vec<String> = targets.iter().map(|&h| quota::run_name(h)).collect();
+      let skills: Vec<(&str, &str)> = names.iter().zip(&targets).map(|(name, h)| (name.as_str(), h.as_str())).collect();
+      if client.register_session(quota::QUOTA_REPO, "", Some(quota::QUOTA_SKILL), "run", &skills) {
+        if !json_flag {
+          ok(&format!("track progress at {}", client.session_url()));
+        }
+        let flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let ping_flag = std::sync::Arc::clone(&flag);
+        let ping_client = std::sync::Arc::clone(&client);
+        std::thread::spawn(move || {
+          while ping_flag.load(std::sync::atomic::Ordering::Relaxed) {
+            ping_client.ping();
+            std::thread::sleep(Duration::from_secs(2));
+          }
+        });
+        daemon_client = Some(client);
+        ping_active = Some(flag);
+      }
+    }
+    Err(e) => hint(&format!("session browser daemon unavailable ({e}); continuing without live browser UI")),
+  }
+  let ui = ui::screen::LiveUi::new(console::user_attended_stderr() && !json_flag, daemon_client.clone());
+
+  // One proc row per harness; `Proc::start/finish_*` post the lifecycle to the daemon.
+  // Each run carries its UNIQUE name (`quota-<harness>`) as the skill name — sibling
+  // harness checks are parallel tasks, and same-name procs would chain as retry attempts.
+  let procs: Vec<ui::screen::Proc> = targets
+    .iter()
+    .map(|&h| {
+      let label = format!("{} · {}", quota::QUOTA_SKILL, h.as_str());
+      let p = ui.proc(label.clone(), false);
+      if let Some(c) = &daemon_client {
+        c.proc_add(
+          p.index(),
+          &label,
+          daemon::ProcKind::Skill,
+          Some(&quota::run_name(h)),
+          Some(h.as_str()),
+          None,
+          None,
+          None,
+          None,
+          None,
+        );
+      }
+      p
+    })
+    .collect();
+  ui.pin_board_to_top();
+
+  // All checks run concurrently — each is at most a few 10s-capped curls.
+  let rows: Vec<quota::HarnessQuota> = std::thread::scope(|scope| {
+    let handles: Vec<_> = targets
+      .iter()
+      .zip(&procs)
+      .map(|(&h, p)| {
+        let client = daemon_client.clone();
+        let path = results_dir.join(quota::result_file_name(h));
+        scope.spawn(move || {
+          p.start();
+          let q = quota::fetch(h);
+          // The run's own output file — written for failures too, so the job page's
+          // headline explains what went wrong instead of pointing at nothing.
+          match std::fs::write(&path, quota::result_json(&q)) {
+            Ok(()) => {
+              if let Some(c) = &client {
+                c.proc_result(p.index(), &path.display().to_string());
+              }
+            }
+            Err(e) => warn(&format!("could not write {}: {e}", path.display())),
+          }
+          match q.status {
+            "ok" => p.finish_ok(Some(&q.summary)),
+            _ => {
+              let detail = if q.hint.is_empty() { q.summary.clone() } else { format!("{}\n→ {}", q.summary, q.hint) };
+              p.finish_fail(failure::reason::QUOTA_UNAVAILABLE, Some(&detail));
+            }
+          }
+          q
+        })
+      })
+      .collect();
+    handles.into_iter().map(|t| t.join().expect("quota check thread panicked")).collect()
+  });
+  ui.finish();
+
+  let all_ok = rows.iter().all(|q| q.status == "ok");
+  if json_flag {
+    let checked_at =
+      std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    println!("{}", quota::render_json(&rows, checked_at));
+  } else {
+    println!("{}", quota::render_table(&rows));
+    for q in &rows {
+      match q.status {
+        "ok" => ok(&q.summary),
+        _ => {
+          fail(&q.summary);
+          if !q.hint.is_empty() {
+            hint(&q.hint);
+          }
+        }
+      }
+    }
+    hint(&format!("per-harness result files: {}", results_dir.join("quota-<harness>.json").display()));
+  }
+  if let Some(flag) = ping_active {
+    flag.store(false, std::sync::atomic::Ordering::Relaxed);
+  }
+  if let Some(c) = &daemon_client {
+    c.finish_session();
+  }
+  if all_ok {
     0
   } else {
     1
@@ -8458,6 +8633,17 @@ fn print_help_command(name: &str) {
         ("--last N", "Limit to the last N runs."),
       ],
     ),
+    "quota" => (
+      "live subscription usage per harness",
+      "scsh quota [harness] [--json] [--session <id>]",
+      &[
+        ("[harness]", "One of claude, codex, grok, cursor — none queries all four (opencode has no quota endpoint)."),
+        ("--json", "Machine-readable: per-harness status, plan, percent-used windows with reset times, and a summary line."),
+        ("--session <id>", "Report into this session id (used by the Setup tab's Check quota button)."),
+        ("(a job)", "One run per harness: each writes sessions/<id>/results/quota-<harness>.json and its own status line."),
+        ("(read-only)", "Uses each CLI's own stored login; no model calls, no cost. Exit 0 iff every queried harness answered."),
+      ],
+    ),
     "prune" => (
       "the run-dir cleanup queue",
       "scsh prune [--now]",
@@ -8563,6 +8749,7 @@ fn print_help_overview() {
   help_cont("Browse run output at http://127.0.0.1:7274 (override: SCSH_DAEMON_PORT).");
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
+  help_row("quota", "Live subscription usage per harness ([harness], --json; read-only, no model calls).");
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
   help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / Luna (--json).");
@@ -9716,6 +9903,24 @@ steps:
     // But probe-only flags stay probe-only.
     assert!(cli(&["probe", "--global"]).is_err());
     assert!(cli(&["check-profile", "x", "--json"]).is_err(), "--json doesn't apply to check-profile");
+  }
+
+  #[test]
+  fn quota_parses_harness_and_json() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert!(matches!(cli(&["quota"]).unwrap().mode, Mode::Quota { harness: None }));
+    // `usage` is the natural synonym (the interactive CLIs call this /usage or /status).
+    assert!(matches!(cli(&["usage"]).unwrap().mode, Mode::Quota { harness: None }));
+    let c = cli(&["quota", "grok", "--json"]).unwrap();
+    assert!(matches!(c.mode, Mode::Quota { harness: Some(config::Harness::Grok) }));
+    assert!(c.json);
+    // Every harness name parses — opencode included; it answers `unsupported` at run time.
+    assert!(matches!(cli(&["quota", "opencode"]).unwrap().mode, Mode::Quota { harness: Some(_) }));
+    let Err(err) = cli(&["quota", "nonsense"]) else { panic!("an unknown harness must be a usage error") };
+    assert!(err.contains("unknown harness 'nonsense'"), "{err}");
+    // Quota takes no profiles and no probe/list flags.
+    assert!(cli(&["quota", "--profile", "x"]).is_err());
+    assert!(cli(&["quota", "--verbose"]).is_err());
   }
 
   #[test]
