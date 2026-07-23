@@ -11,6 +11,10 @@ use crate::json::{parse, quote, Value};
 /// Machine-readable reason codes (stable strings for scripts and the session browser).
 pub mod reason {
   pub const BUILD_FAILED: &str = "build_failed";
+  /// A `scsh quota` run could not produce a quota answer for its harness (no login,
+  /// lapsed token, throttled or failing provider endpoint). Deterministic from the
+  /// run's point of view — never auto-retried; the fix is a human signing in or waiting.
+  pub const QUOTA_UNAVAILABLE: &str = "quota_unavailable";
   pub const ENV_UNRESOLVED: &str = "env_unresolved";
   pub const RUN_DIR: &str = "run_dir_prepare_failed";
   pub const GIT_TRANSPORT: &str = "git_transport_prepare_failed";
