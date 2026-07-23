@@ -271,6 +271,21 @@ separately. Model probes run only when you click <strong>Test</strong> (real pro
 <p id="setup-summary" class="setup-summary dim">checking agents…</p>
 <div id="setup-cards" class="setup-cards">{cards}</div>
 </div>
+<div class="chamfer card card--accent-left-cyan">
+<p class="section-label">Subscription quota</p>
+<p class="dim">Live usage from each provider's own endpoint, using the host logins above.
+Read-only — no model calls, no cost. Checking runs a real job (one run per harness, each
+with its own result file), started only when you click. Also available as
+<code>scsh quota [--json]</code>.</p>
+<div class="setup-toolbar">
+<button type="button" class="chamfer btn btn--cyan btn--sm" id="setup-quota-btn" title="Query each provider's usage endpoint with the host logins (read-only)"><span>Check quota</span></button>
+<span id="setup-quota-note" class="dim"></span>
+</div>
+<div class="table-scroll"><table id="setup-quota-table" hidden>
+<thead><tr><th>Harness</th><th>Plan</th><th>Window</th><th>Used</th><th>Resets (UTC)</th></tr></thead>
+<tbody id="setup-quota-body"></tbody>
+</table></div>
+</div>
 <div class="chamfer card card--accent-left-purple">
 <p class="section-label">Images setup</p>
 <p class="dim">Image tags, sizes, timestamps, base rebuilds, and force rebuilds for the
