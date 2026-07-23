@@ -5284,6 +5284,9 @@ fn run_one_skill(
     c.proc_cast(spinner.index(), durable);
   }
   if let Some(p) = &claude_auth {
+    // Keep what this run's status line observed about the account's limits before the
+    // forwarded credentials (and the capture beside them) are scrubbed.
+    quota::harvest_claude_capture(&p.join(".claude"));
     let _ = std::fs::remove_dir_all(p);
   }
   if let Some(p) = &opencode_forward {
@@ -6031,6 +6034,7 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     write_claude_identity(src, &json_dest);
   }
   seed_claude_tui_config(&json_dest);
+  install_claude_quota_statusline(&claude_dir);
 
   #[cfg(unix)]
   {
@@ -6042,6 +6046,26 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     }
   }
   Some(root)
+}
+
+/// Point the container's Claude Code status line at a writer that parks its JSON payload in
+/// the forwarded config dir. That payload carries `rate_limits` once the session's first API
+/// response lands, so every real run leaves behind the account's usage — captured for free,
+/// from work already happening, and harvested by [`quota::harvest_claude_capture`] when the
+/// run ends. Best-effort: a failure here only costs the capture, never the run.
+fn install_claude_quota_statusline(claude_dir: &Path) {
+  let script = claude_dir.join("scsh-quota-statusline.sh");
+  if std::fs::write(&script, quota::CAPTURE_STATUSLINE_SH).is_err() {
+    return;
+  }
+  #[cfg(unix)]
+  {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755));
+  }
+  // The command must name the path the CONTAINER sees, not this host path.
+  let in_container = format!("{}/scsh-quota-statusline.sh", runtime::claude_config_dir_in_container());
+  let _ = std::fs::write(claude_dir.join("settings.json"), quota::capture_settings_json(&in_container));
 }
 
 /// Write a minimal `.claude.json` at `dest` carrying only the host's Claude **login identity**
