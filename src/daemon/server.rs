@@ -1007,6 +1007,11 @@ fn route(
     let (status, body, mutated) = setup_tests_response(&req.body, store);
     return (status, body, "application/json", mutated);
   }
+  // Check quota spawns a real job (one run per harness) and returns its session id.
+  if req.method == "POST" && req.path == "/api/v1/setup/quota" {
+    let (status, body, mutated) = setup_quota_response(store);
+    return (status, body, "application/json", mutated);
+  }
   // The "open a repository" + "start a job" endpoints return custom bodies (validation result,
   // discovered definitions, the spawned session id), so they bypass the generic POST handler.
   if req.method == "POST" && req.path == "/api/v1/repos/open" {
@@ -1145,6 +1150,12 @@ fn route(
     "/api/v1/setup" => {
       let runtime = req.path.split_once("runtime=").map(|(_, v)| v.split('&').next().unwrap_or(v));
       (200, super::setup::setup_json(runtime), "application/json", false)
+    }
+    // A quota job's per-run result files, aggregated: `{harnesses: [...], ok, total}`.
+    // The browser polls the session for run status and reads this once the job ends.
+    path if path.starts_with("/api/v1/session/") && path.ends_with("/quota") => {
+      let id = path.strip_prefix("/api/v1/session/").unwrap_or("").strip_suffix("/quota").unwrap_or("");
+      (200, quota_results_json(id), "application/json", false)
     }
     "/api/v1/repos" => (200, repos_json(&lock_store(store), now_unix_secs()), "application/json", false),
     // Flaky-route dashboard data: reliability + latency percentiles per route and per
@@ -1768,6 +1779,108 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
       (500, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false)
     }
   }
+}
+
+/// `POST /api/v1/setup/quota` — spawn a detached `scsh quota --session <id>` job (one run
+/// per harness, each with its own result file and proc row) and pre-create its session so
+/// the response deep-links to a live page. Same fate-binding as `images/build`: stderr is
+/// captured and the session reconciled on exit. One quota job at a time; concurrent → 409.
+fn setup_quota_response(store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
+  let now = now_unix_secs();
+  let port = {
+    let store = lock_store(store);
+    let quota_running = store
+      .sessions
+      .values()
+      .any(|s| s.repo == crate::quota::QUOTA_REPO && s.lifecycle_status(now) == SessionLifecycle::Running);
+    if quota_running {
+      return (409, "{\"ok\":false,\"error\":\"a quota check is already running\"}".to_string(), false);
+    }
+    store.port
+  };
+  let exe = match super::client::scsh_executable() {
+    Ok(exe) => exe,
+    Err(e) => {
+      let msg = format!("cannot locate the scsh binary to spawn: {e}");
+      return (500, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false);
+    }
+  };
+  let session_id = crate::runtime::random_nonce_6();
+  let mut cmd = std::process::Command::new(exe);
+  cmd.args(["quota", "--session", &session_id]);
+  cmd.env(super::paths::PORT_ENV, port.to_string());
+  cmd.env("NO_COLOR", "1");
+  cmd.stdin(std::process::Stdio::null());
+  cmd.stdout(std::process::Stdio::null());
+  cmd.stderr(std::process::Stdio::piped());
+  match cmd.spawn() {
+    Ok(mut child) => {
+      let run_pid = Some(child.id());
+      let store_reap = Arc::clone(store);
+      let sid = session_id.clone();
+      let stderr = child.stderr.take();
+      std::thread::spawn(move || {
+        let mut tail = String::new();
+        if let Some(mut e) = stderr {
+          let _ = e.read_to_string(&mut tail);
+        }
+        let code = child.wait().ok().and_then(|s| s.code());
+        reconcile_finished_job(&store_reap, &sid, code, &tail);
+      });
+      let mut store = lock_store(store);
+      store.touch(now);
+      store.insert_session(
+        session_id.clone(),
+        Session {
+          id: session_id.clone(),
+          started_at: now,
+          ended_at: None,
+          profile: Some(crate::quota::QUOTA_SKILL.to_string()),
+          kind: None,
+          repo: crate::quota::QUOTA_REPO.to_string(),
+          branch: String::new(),
+          skills: Vec::new(),
+          procs: Vec::new(),
+          last_seen_at: now,
+          client_connected: false,
+          run_pid,
+          workflow: None,
+          parent_session: None,
+          supervisor: Default::default(),
+        },
+      );
+      (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
+    }
+    Err(e) => {
+      let msg = format!("failed to spawn scsh quota: {e}");
+      (500, format!("{{\"ok\":false,\"error\":{}}}", quote(&msg)), false)
+    }
+  }
+}
+
+/// Aggregate a quota job's per-run result files into `{harnesses: […], ok, total}` — the
+/// same per-harness objects the runs wrote (their `result` headline field included). The
+/// session id is a six-letter nonce; anything else is refused before touching the disk.
+fn quota_results_json(session_id: &str) -> String {
+  if session_id.is_empty() || !session_id.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+    return "{ \"error\": \"bad session id\" }".to_string();
+  }
+  let dir = crate::runtime::session_results_dir(session_id);
+  let mut rows = Vec::new();
+  let mut ok = 0usize;
+  for h in crate::quota::SUPPORTED {
+    let path = dir.join(crate::quota::result_file_name(h));
+    let Ok(text) = std::fs::read_to_string(&path) else { continue };
+    // Runs write these files themselves; only well-formed objects are passed through.
+    if let Ok(crate::json::Value::Object(obj)) = crate::json::parse(&text) {
+      let is_ok = obj.iter().any(|(k, v)| k == "status" && matches!(v, crate::json::Value::String(s) if s == "ok"));
+      if is_ok {
+        ok += 1;
+      }
+      rows.push(text);
+    }
+  }
+  format!("{{ \"harnesses\": [{}], \"ok\": {ok}, \"total\": {} }}", rows.join(", "), rows.len())
 }
 
 /// The `profile` label `scsh build-images` registers its sessions under; the build guard and

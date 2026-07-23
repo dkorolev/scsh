@@ -759,6 +759,31 @@ mod tests {
     }
   }
 
+  /// The regression behind `scsh quota`'s per-harness run names: the legacy attempt
+  /// fallback chains same-kind SAME-NAME procs, so sibling runs must carry unique skill
+  /// names (`quota-claude`, `quota-codex`, …) to render as parallel tasks — while runs
+  /// that really do share a name still chain as attempts.
+  #[test]
+  fn distinct_skill_names_are_parallel_tasks_not_attempts() {
+    let named = |index: usize, name: &str| {
+      let mut p = test_proc(ProcStatus::Ok);
+      p.index = index;
+      p.skill_name = Some(name.to_string());
+      p
+    };
+    let mut quota = stored_session("quota", 1, Some(2), 2);
+    quota.procs = vec![named(0, "quota-claude"), named(1, "quota-codex"), named(2, "quota-grok")];
+    for p in &quota.procs {
+      assert_eq!(quota.proc_attempt(p), (1, 1), "{:?} must not read as a retry", p.skill_name);
+      assert!(quota.proc_next_attempt(p).is_none());
+    }
+    // Same name, no explicit lineage: the legacy fallback still chains those as attempts.
+    let mut retried = stored_session("retried", 1, Some(2), 2);
+    retried.procs = vec![named(0, "quota-claude"), named(1, "quota-claude")];
+    assert_eq!(retried.proc_attempt(&retried.procs[0]), (1, 2));
+    assert_eq!(retried.proc_attempt(&retried.procs[1]), (2, 2));
+  }
+
   #[test]
   fn store_trim_never_evicts_a_running_session() {
     let now = 10_000;
