@@ -3402,9 +3402,96 @@ function startImageBuildOne(name, upToDate) {
   // `base` rides the same path: harnesses:["base"] builds ONLY the shared base.
   postImagesBuild({ harnesses: [name], rebuild_base: false, force: upToDate });
 }
+// ---- subscription quota (fetched only on click — it hits every provider's endpoint) ----
+function quotaTimeHtml(iso) {
+  if (!iso) return '<span class="dim">—</span>';
+  return esc(iso.replace('T', ' ').replace('Z', '').slice(0, 16));
+}
+function quotaPercentHtml(pct) {
+  const cls = pct >= 80 ? 'setup-warn' : 'setup-ok';
+  const shown = (pct % 1 === 0) ? String(pct) : pct.toFixed(1);
+  return '<span class="' + cls + '">' + esc(shown) + '%</span>';
+}
+function quotaRowsHtml(q) {
+  if (!q.windows || !q.windows.length) {
+    // A harness that answered nothing still gets a row: status + the actionable hint.
+    return '<tr><td>' + esc(q.harness) + '</td><td class="dim">—</td>' +
+      '<td class="setup-warn">' + esc(q.status) + '</td>' +
+      '<td class="dim">—</td><td class="dim">' + esc(q.hint || q.summary || '') + '</td></tr>';
+  }
+  return q.windows.map((w, i) =>
+    '<tr><td>' + (i === 0 ? esc(q.harness) : '') + '</td>' +
+    '<td>' + (i === 0 ? esc(q.plan || '—') : '') + '</td>' +
+    '<td>' + esc(w.label) + '</td>' +
+    '<td>' + quotaPercentHtml(w.used_percent) + '</td>' +
+    '<td>' + quotaTimeHtml(w.resets_at) + '</td></tr>').join('');
+}
+function renderQuota(data, sessionId) {
+  const body = document.getElementById('setup-quota-body');
+  const table = document.getElementById('setup-quota-table');
+  if (!body || !table) return;
+  if (data.error) {
+    quotaNote(esc(data.error), sessionId);
+    return;
+  }
+  body.innerHTML = (data.harnesses || []).map(quotaRowsHtml).join('');
+  table.hidden = false;
+  quotaNote(data.ok + ' of ' + data.total + ' answered — checked just now', sessionId);
+}
+function quotaNote(html, sessionId) {
+  const note = document.getElementById('setup-quota-note');
+  if (!note) return;
+  const link = sessionId
+    ? ' <a href="/job/' + encodeURIComponent(sessionId) + '">view job</a>'
+    : '';
+  note.innerHTML = html + link;
+}
+// The check is a real job: one run per harness, each with its own result file and status
+// line. POST starts it; this poll mirrors the runs' progress, then reads the aggregated
+// per-run result files once the session ends.
+function pollQuotaJob(sessionId, btn, tries) {
+  if (tries > 120) { // ~3 minutes — each run caps its requests at 10s, so this is generous
+    quotaNote('quota job did not finish in time —', sessionId);
+    if (btn) btn.disabled = false;
+    return;
+  }
+  fetch('/api/v1/session/' + encodeURIComponent(sessionId)).then(r => r.json()).then(s => {
+    const procs = s.procs || [];
+    const done = procs.filter(p => p.status !== 'waiting' && p.status !== 'running').length;
+    const total = procs.length || '?';
+    const ended = !!s.ended_at && procs.length && done === procs.length;
+    if (!ended) {
+      quotaNote('checking… ' + done + ' of ' + total + ' runs done —', sessionId);
+      setTimeout(() => pollQuotaJob(sessionId, btn, tries + 1), 1500);
+      return;
+    }
+    fetch('/api/v1/session/' + encodeURIComponent(sessionId) + '/quota').then(r => r.json())
+      .then(data => renderQuota(data, sessionId))
+      .catch(() => renderQuota({ error: 'quota results unavailable' }, sessionId))
+      .finally(() => { if (btn) btn.disabled = false; });
+  }).catch(() => {
+    setTimeout(() => pollQuotaJob(sessionId, btn, tries + 1), 1500);
+  });
+}
+function fetchQuota(btn) {
+  if (btn) btn.disabled = true;
+  quotaNote('starting quota job…', null);
+  fetch('/api/v1/setup/quota', { method: 'POST' }).then(r => r.json()).then(res => {
+    if (!res.ok || !res.session) {
+      quotaNote(esc(res.error || 'could not start the quota job'), null);
+      if (btn) btn.disabled = false;
+      return;
+    }
+    pollQuotaJob(res.session, btn, 0);
+  }).catch(() => {
+    quotaNote('quota unavailable (daemon error)', null);
+    if (btn) btn.disabled = false;
+  });
+}
 (function initSetupPanel() {
   if (!document.getElementById('setup-cards') && !document.getElementById('images-body')) return;
   refreshSetup();
+  document.getElementById('setup-quota-btn')?.addEventListener('click', (e) => fetchQuota(e.currentTarget));
   document.getElementById('images-build-selected')?.addEventListener('click', () => startImagesBuild('selected'));
   document.getElementById('images-build-stale')?.addEventListener('click', () => startImagesBuild('stale'));
   document.getElementById('images-build-all')?.addEventListener('click', () => startImagesBuild('all'));

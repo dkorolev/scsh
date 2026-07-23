@@ -966,6 +966,16 @@ fn index_page_carries_the_setup_panel_and_its_client_wiring() {
   assert!(js.contains("data-image-build"), "per-row build buttons are rendered");
   assert!(js.contains("data-setup-build"), "card Build/Update actions");
   assert!(html.contains("id=\"setup-test-all\""), "Test all defaults on the toolbar");
+  // Subscription quota is click-to-start only: the card ships with the page, but the
+  // quota JOB (one run per harness) is spawned exclusively from the button's POST.
+  assert!(html.contains("id=\"setup-quota-btn\""), "Check quota button on the Setup tab");
+  assert!(html.contains("id=\"setup-quota-body\""), "quota table body placeholder");
+  assert!(js.contains("/api/v1/setup/quota"), "client js starts the quota job on click");
+  assert!(js.contains("method: 'POST'"), "quota check starts a job, not a passive GET");
+  assert!(js.contains("function pollQuotaJob"), "quota job progress poller");
+  assert!(js.contains("/quota"), "aggregated per-run results are read after the job ends");
+  assert!(js.contains("function renderQuota"), "quota renderer");
+  assert!(!js.contains("fetchQuota()"), "quota is never fetched automatically — only from the button");
   assert!(js.contains("setup-models-hint"), "models section explains how to test");
   assert!(js.contains("ready to test"), "summary uses ready-to-test wording");
   assert!(js.contains("setupModelStatusHtml"), "model rows hide raw not_tested");

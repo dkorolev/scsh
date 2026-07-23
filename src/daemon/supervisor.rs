@@ -86,6 +86,7 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
       || s.profile.is_none()
       || s.repo == super::server::IMAGE_BUILDS_REPO
       || s.repo == crate::daemon::INTERNAL_REPO
+      || s.repo == crate::quota::QUOTA_REPO
     {
       continue;
     }
