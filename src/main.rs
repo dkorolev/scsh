@@ -96,7 +96,7 @@ fn run(args: &[String]) -> i32 {
     // feature's demo + PTY test. `--frames` dumps deterministic plain frames; otherwise it runs
     // the real interactive board over a few scripted subprocesses.
     Mode::UiDemo { frames } => ui::demo::run(frames),
-    Mode::Daemon { action } => daemon_cmd(action),
+    Mode::Daemon { action } => daemon_cmd(action, cli.json),
     Mode::DaemonServe { mode, port } => daemon_serve(mode, port),
     Mode::RecordPty { cast, cols, rows, argv } => ptyrec::record(&cast, cols, rows, &argv),
     Mode::Failures => failures_cmd(&cli.failures),
@@ -1319,8 +1319,13 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if verbose && !matches!(mode, Mode::List) {
     return Err("--verbose only applies to 'list'".into());
   }
-  if json && !matches!(mode, Mode::List | Mode::Probe | Mode::Quota { .. } | Mode::AnnotateCasts | Mode::ExportCasts) {
-    return Err("--json only applies to 'list', 'probe', 'quota', 'annotate-cast', and 'export-cast'".into());
+  if json
+    && !matches!(
+      mode,
+      Mode::List | Mode::Probe | Mode::Quota { .. } | Mode::Daemon { .. } | Mode::AnnotateCasts | Mode::ExportCasts
+    )
+  {
+    return Err("--json only applies to 'list', 'probe', 'quota', 'daemon', 'annotate-cast', and 'export-cast'".into());
   }
   if (failures.reason.is_some() || failures.stats) && !matches!(mode, Mode::Failures) {
     return Err("--reason/--stats only apply to 'failures'".into());
@@ -3697,112 +3702,241 @@ fn quota_cmd(harness: Option<config::Harness>, json_flag: bool, session: Option<
   }
 }
 
-fn daemon_cmd(action: DaemonAction) -> i32 {
+fn daemon_cmd(action: DaemonAction, json: bool) -> i32 {
   match action {
-    DaemonAction::Start => match daemon::start_persistent() {
-      Ok(()) => {
-        ok(&format!("session browser daemon listening on {}", daemon::base_url(daemon::daemon_port())));
-        0
+    DaemonAction::Start => daemon_start_cmd(json),
+    DaemonAction::Stop => daemon_stop_cmd(json),
+    DaemonAction::Restart { despite_jobs } => daemon_restart_cmd(despite_jobs, json),
+    DaemonAction::Status => daemon_status_cmd(json),
+    DaemonAction::Version => daemon_version_cmd(json),
+  }
+}
+
+/// A `{ "ok", "action", ... }` line for a daemon lifecycle command in `--json` mode, so an
+/// agent reads one object whether the action succeeded or not.
+fn daemon_action_json(action: &str, ok: bool, extra: &str) -> String {
+  let sep = if extra.is_empty() { "" } else { ", " };
+  format!("{{ \"action\": {}, \"ok\": {ok}{sep}{extra} }}", json::quote(action))
+}
+
+fn daemon_start_cmd(json: bool) -> i32 {
+  let url = daemon::base_url(daemon::daemon_port());
+  match daemon::start_persistent() {
+    Ok(()) => {
+      if json {
+        println!("{}", daemon_action_json("start", true, &format!("\"url\": {}", json::quote(&url))));
+      } else {
+        ok(&format!("session browser daemon listening on {url}"));
       }
-      Err(e) => {
+      0
+    }
+    Err(e) => {
+      if json {
+        println!("{}", daemon_action_json("start", false, &format!("\"error\": {}", json::quote(&e.to_string()))));
+      } else {
         fail(&format!("could not start daemon: {e}"));
         hint("→ check SCSH_DAEMON_PORT and whether another process is already listening on that port");
-        1
       }
-    },
-    DaemonAction::Stop => match daemon::stop() {
-      Ok(true) => {
+      1
+    }
+  }
+}
+
+fn daemon_stop_cmd(json: bool) -> i32 {
+  match daemon::stop() {
+    Ok(stopped) => {
+      if json {
+        println!("{}", daemon_action_json("stop", true, &format!("\"stopped\": {stopped}")));
+      } else if stopped {
         ok("session browser daemon stopped");
-        0
-      }
-      Ok(false) => {
+      } else {
         fail("session browser daemon is not running");
         hint("→ start it with: scsh daemon start");
+      }
+      // Not-running is a no-op the caller asked for; exit 0 only when something was stopped.
+      if stopped {
+        0
+      } else {
         1
       }
-      Err(e) => {
+    }
+    Err(e) => {
+      if json {
+        println!("{}", daemon_action_json("stop", false, &format!("\"error\": {}", json::quote(&e.to_string()))));
+      } else {
         fail(&format!("could not stop daemon: {e}"));
         hint("→ check SCSH_DAEMON_PORT and stale files under $TMPDIR/scsh-daemon/");
-        1
       }
-    },
-    DaemonAction::Restart { despite_jobs } => {
-      // A restart tears down the daemon and orphans whatever it is supervising. If jobs are
-      // running, confirm before doing that — see `confirm_restart_despite_jobs`.
-      if daemon::Client::daemon_alive() {
-        let running = daemon_running_jobs(daemon::daemon_port());
-        if !running.is_empty() {
-          match confirm_restart_despite_jobs(&running, despite_jobs.as_deref()) {
-            RestartConfirm::Proceed => {}
-            RestartConfirm::Abort(code) => return code,
-          }
-        }
-      }
-      let _ = daemon::stop();
-      match daemon::start_persistent() {
-        Ok(()) => {
-          ok(&format!("session browser daemon restarted on {}", daemon::base_url(daemon::daemon_port())));
-          0
-        }
-        Err(e) => {
-          fail(&format!("could not restart daemon: {e}"));
-          hint("→ check SCSH_DAEMON_PORT and whether another process is listening on that port");
-          1
-        }
-      }
+      1
     }
-    DaemonAction::Status => {
-      let port = daemon::daemon_port();
-      if daemon::Client::daemon_alive() {
-        // The RUNNING daemon's version, which can lag the installed binary until a
-        // restart. An older daemon serving "unknown" (pre-endpoint) is reported honestly.
-        let running =
-          daemon::daemon_reported_version(port).unwrap_or_else(|| "unknown (older than this feature)".into());
-        let installed = crate::version::display();
-        let where_at = daemon::base_url(port);
-        match daemon::read_live_pid(port) {
-          Some(pid) => ok(&format!("session browser daemon running (pid {pid}) on {where_at}")),
-          None => ok(&format!("session browser daemon responding on {where_at}")),
-        }
-        print_daemon_version_lines(port, &running, &installed);
-        0
-      } else if let Some(pid) = daemon::read_live_pid(port) {
-        fail(&format!("session browser daemon pid {pid} exists but is not responding on {}", daemon::base_url(port)));
-        hint("→ recover with: scsh daemon restart");
-        1
-      } else {
-        fail("session browser daemon is not running");
-        hint("→ start it with: scsh daemon start");
-        1
-      }
-    }
-    DaemonAction::Version => {
-      let port = daemon::daemon_port();
-      if daemon::Client::daemon_alive() {
-        let running =
-          daemon::daemon_reported_version(port).unwrap_or_else(|| "unknown (older than this feature)".into());
-        let installed = crate::version::display();
-        // Lead with the reconciliation headline the user asked this command for; the detail
-        // lines below spell out each version and the uptime.
-        if running == installed {
-          ok(&format!("scsh {installed} — CLI and daemon match"));
-        } else {
-          fail(&format!("scsh {installed} CLI vs scsh {running} daemon — versions differ"));
-        }
-        print_daemon_version_lines(port, &running, &installed);
-        // Same actionable exit contract as the rest: 0 only when they agree.
-        if running == installed {
-          0
-        } else {
-          1
+  }
+}
+
+fn daemon_restart_cmd(despite_jobs: Option<Vec<String>>, json: bool) -> i32 {
+  // A restart tears down the daemon and orphans whatever it is supervising. If jobs are
+  // running, confirm before doing that.
+  if daemon::Client::daemon_alive() {
+    let running = daemon_running_jobs(daemon::daemon_port());
+    if !running.is_empty() {
+      // `--json` is machine-driven: never prompt (even on a TTY). An unapproved set is
+      // reported as a refusal object with the jobs and the exact confirm command.
+      if json {
+        let unapproved =
+          despite_jobs.as_deref().map(|a| unapproved_running(&running, a)).unwrap_or_else(|| running.iter().collect());
+        if !unapproved.is_empty() {
+          let reason = if despite_jobs.is_some() { "jobs_started_since_confirmation" } else { "jobs_running" };
+          let extra = format!(
+            "\"refused\": true, \"reason\": {}, \"running_jobs\": {}, \"confirm_command\": {}",
+            json::quote(reason),
+            running_jobs_json(&running),
+            json::quote(&restart_despite_command(&running)),
+          );
+          println!("{}", daemon_action_json("restart", false, &extra));
+          return 1;
         }
       } else {
-        fail("session browser daemon is not running");
-        hint("→ start it with: scsh daemon start");
-        1
+        match confirm_restart_despite_jobs(&running, despite_jobs.as_deref()) {
+          RestartConfirm::Proceed => {}
+          RestartConfirm::Abort(code) => return code,
+        }
       }
     }
   }
+  let url = daemon::base_url(daemon::daemon_port());
+  let _ = daemon::stop();
+  match daemon::start_persistent() {
+    Ok(()) => {
+      if json {
+        println!("{}", daemon_action_json("restart", true, &format!("\"url\": {}", json::quote(&url))));
+      } else {
+        ok(&format!("session browser daemon restarted on {url}"));
+      }
+      0
+    }
+    Err(e) => {
+      if json {
+        println!("{}", daemon_action_json("restart", false, &format!("\"error\": {}", json::quote(&e.to_string()))));
+      } else {
+        fail(&format!("could not restart daemon: {e}"));
+        hint("→ check SCSH_DAEMON_PORT and whether another process is listening on that port");
+      }
+      1
+    }
+  }
+}
+
+fn daemon_status_cmd(json: bool) -> i32 {
+  let info = gather_daemon_status();
+  if json {
+    println!("{}", daemon_status_json(&info));
+    return if info.running { 0 } else { 1 };
+  }
+  let port = info.port;
+  if info.running {
+    let running = info.daemon_version.clone().unwrap_or_else(|| "unknown (older than this feature)".into());
+    match info.pid {
+      Some(pid) => ok(&format!("session browser daemon running (pid {pid}) on {}", info.url)),
+      None => ok(&format!("session browser daemon responding on {}", info.url)),
+    }
+    print_daemon_version_lines(port, &running, &info.installed_version);
+    0
+  } else if let Some(pid) = info.pid {
+    fail(&format!("session browser daemon pid {pid} exists but is not responding on {}", info.url));
+    hint("→ recover with: scsh daemon restart");
+    1
+  } else {
+    fail("session browser daemon is not running");
+    hint("→ start it with: scsh daemon start");
+    1
+  }
+}
+
+fn daemon_version_cmd(json: bool) -> i32 {
+  let info = gather_daemon_status();
+  if json {
+    println!("{}", daemon_status_json(&info));
+    // Exit 0 only when the versions agree (and the daemon is up to have a version).
+    return if info.running && info.versions_match { 0 } else { 1 };
+  }
+  if !info.running {
+    fail("session browser daemon is not running");
+    hint("→ start it with: scsh daemon start");
+    return 1;
+  }
+  let running = info.daemon_version.clone().unwrap_or_else(|| "unknown (older than this feature)".into());
+  // Lead with the reconciliation headline; the detail lines spell out each version + uptime.
+  if info.versions_match {
+    ok(&format!("scsh {} — CLI and daemon match", info.installed_version));
+  } else {
+    fail(&format!("scsh {} CLI vs scsh {running} daemon — versions differ", info.installed_version));
+  }
+  print_daemon_version_lines(info.port, &running, &info.installed_version);
+  if info.versions_match {
+    0
+  } else {
+    1
+  }
+}
+
+/// The reconciled daemon state that `status` and `version` both report (as text or JSON).
+struct DaemonStatusInfo {
+  /// The daemon answers HTTP right now.
+  running: bool,
+  /// The recorded run-pid, if any — present-but-not-`running` means a wedged daemon.
+  pid: Option<u32>,
+  port: u16,
+  url: String,
+  installed_version: String,
+  /// The running daemon's reported version, or `None` if it's down or too old to report.
+  daemon_version: Option<String>,
+  versions_match: bool,
+  /// Seconds the daemon has been up, or `None` if down / too old to report a boot time.
+  uptime_secs: Option<u64>,
+}
+
+fn gather_daemon_status() -> DaemonStatusInfo {
+  let port = daemon::daemon_port();
+  let running = daemon::Client::daemon_alive();
+  let installed_version = crate::version::display();
+  let daemon_version = if running { daemon::daemon_reported_version(port) } else { None };
+  let uptime_secs = if running {
+    daemon::daemon_reported_started_at(port).map(|s| daemon::now_unix_secs().saturating_sub(s))
+  } else {
+    None
+  };
+  DaemonStatusInfo {
+    running,
+    pid: daemon::read_live_pid(port),
+    port,
+    url: daemon::base_url(port),
+    versions_match: daemon_version.as_deref() == Some(installed_version.as_str()),
+    installed_version,
+    daemon_version,
+    uptime_secs,
+  }
+}
+
+fn daemon_status_json(i: &DaemonStatusInfo) -> String {
+  format!(
+    "{{ \"running\": {}, \"pid\": {}, \"port\": {}, \"url\": {}, \"installed_version\": {}, \"daemon_version\": {}, \"versions_match\": {}, \"uptime_secs\": {} }}",
+    i.running,
+    i.pid.map(|p| p.to_string()).unwrap_or_else(|| "null".into()),
+    i.port,
+    json::quote(&i.url),
+    json::quote(&i.installed_version),
+    i.daemon_version.as_deref().map(json::quote).unwrap_or_else(|| "null".into()),
+    i.versions_match,
+    i.uptime_secs.map(|s| s.to_string()).unwrap_or_else(|| "null".into()),
+  )
+}
+
+/// The running jobs as a JSON array (for `scsh daemon restart --json` refusals).
+fn running_jobs_json(running: &[RunningJob]) -> String {
+  let parts: Vec<String> = running
+    .iter()
+    .map(|j| format!("{{ \"id\": {}, \"label\": {} }}", json::quote(&j.id), json::quote(&j.label)))
+    .collect();
+  format!("[{}]", parts.join(", "))
 }
 
 /// The shared version-reconciliation + uptime block for `scsh daemon status` and
@@ -8854,7 +8988,7 @@ fn print_help_command(name: &str) {
     ),
     "daemon" => (
       "the session-browser daemon",
-      "scsh daemon <start|stop|restart|status|version>",
+      "scsh daemon <start|stop|restart|status|version> [--json]",
       &[
         ("start", "Run a persistent daemon until `daemon stop`."),
         ("stop", "Stop the running daemon."),
@@ -8862,6 +8996,7 @@ fn print_help_command(name: &str) {
         ("restart --despite-jobs <ids>", "Restart despite the named running jobs (the comma-separated ids it printed)."),
         ("status", "Whether it's listening, where, plus versions and uptime."),
         ("version", "Installed CLI vs running daemon version, match, and uptime; exit 0 iff they match."),
+        ("--json", "Machine-readable output for any daemon subcommand (status/version fields, action results)."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
         (
           "SCSH_HOME",
@@ -10202,6 +10337,58 @@ steps:
     assert!(bare.contains("version"), "{bare}");
     let Err(err) = cli(&["daemon", "nope"]) else { panic!("unknown daemon subcommand must be a usage error") };
     assert!(err.contains("unknown daemon subcommand 'nope'") && err.contains("version"), "{err}");
+  }
+
+  #[test]
+  fn json_flag_is_accepted_for_daemon_subcommands() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    // The whole point of this change: `--json` now applies to daemon subcommands.
+    assert!(cli(&["daemon", "status", "--json"]).unwrap().json);
+    assert!(cli(&["daemon", "version", "--json"]).unwrap().json);
+    assert!(cli(&["daemon", "restart", "--json"]).unwrap().json);
+    assert!(cli(&["daemon", "restart", "--despite-jobs", "abcdef", "--json"]).unwrap().json);
+    // It still does NOT apply to commands with no machine-readable form.
+    assert!(cli(&["failures", "--json"]).is_err());
+  }
+
+  #[test]
+  fn daemon_status_json_shape_reflects_running_and_versions() {
+    let up = DaemonStatusInfo {
+      running: true,
+      pid: Some(4242),
+      port: 7274,
+      url: "http://127.0.0.1:7274".into(),
+      installed_version: "1.41.16 (aaaaaaa)".into(),
+      daemon_version: Some("1.41.15 (bbbbbbb)".into()),
+      versions_match: false,
+      uptime_secs: Some(9960),
+    };
+    let out = daemon_status_json(&up);
+    let Ok(json::Value::Object(o)) = json::parse(&out) else { panic!("daemon status must be valid JSON: {out}") };
+    let s = |k: &str| o.iter().find(|(key, _)| key == k).map(|(_, v)| v);
+    assert!(matches!(s("running"), Some(json::Value::Bool(true))));
+    assert!(matches!(s("pid"), Some(json::Value::Number(n)) if *n == 4242.0));
+    assert!(matches!(s("versions_match"), Some(json::Value::Bool(false))));
+    assert!(matches!(s("uptime_secs"), Some(json::Value::Number(n)) if *n == 9960.0));
+    // A down daemon nulls the fields it can't know, and still parses.
+    let down = DaemonStatusInfo {
+      running: false,
+      pid: None,
+      port: 7274,
+      url: "http://127.0.0.1:7274".into(),
+      installed_version: "1.41.16 (aaaaaaa)".into(),
+      daemon_version: None,
+      versions_match: false,
+      uptime_secs: None,
+    };
+    let out = daemon_status_json(&down);
+    assert!(
+      out.contains("\"pid\": null")
+        && out.contains("\"daemon_version\": null")
+        && out.contains("\"uptime_secs\": null"),
+      "{out}"
+    );
+    assert!(json::parse(&out).is_ok(), "{out}");
   }
 
   #[test]
