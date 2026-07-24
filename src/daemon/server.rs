@@ -1131,12 +1131,17 @@ fn route(
     // caller's version.
     "/api/v1/version" => {
       // `commit` is the bare stamp (null when unknown); `version` keeps the human line
-      // (`1.30.3 (d5e2270)`) existing callers parse.
+      // (`1.30.3 (d5e2270)`) existing callers parse. `started_at` is this daemon process's
+      // boot time (unix seconds), so `scsh daemon status` can report uptime.
       let commit = crate::version::git_stamp();
       let commit_json = if commit.is_empty() { "null".to_string() } else { quote(&commit) };
+      let started_at = lock_store(store).started_at;
       (
         200,
-        format!("{{ \"version\": {}, \"commit\": {commit_json} }}", quote(&crate::version::display())),
+        format!(
+          "{{ \"version\": {}, \"commit\": {commit_json}, \"started_at\": {started_at} }}",
+          quote(&crate::version::display())
+        ),
         "application/json",
         false,
       )
@@ -3443,6 +3448,9 @@ mod tests {
     } else {
       assert!(body.contains(&format!("\"commit\": \"{stamp}\"")), "{body}");
     }
+    // The daemon's boot time rides along so `scsh daemon status` can report uptime; it is
+    // the store's `started_at` (the `now` passed to Store::new).
+    assert!(body.contains("\"started_at\": 50"), "endpoint omits the daemon start time: {body}");
     assert!(parse(&body).is_ok(), "version payload parses as JSON: {body}");
   }
 

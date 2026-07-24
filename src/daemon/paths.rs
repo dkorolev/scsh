@@ -147,6 +147,26 @@ pub fn daemon_api_responds(port: u16) -> bool {
 /// The version string the running daemon reports over `GET /api/v1/version` (its own
 /// `version::display()`), or `None` if the daemon is unreachable or too old to serve it.
 pub fn daemon_reported_version(port: u16) -> Option<String> {
+  let body = fetch_version_body(port)?;
+  // Minimal extraction of the sole string field — avoids pulling the JSON parser in here.
+  let after = body.split("\"version\":").nth(1)?;
+  let start = after.find('"')? + 1;
+  let end = after[start..].find('"')? + start;
+  Some(after[start..end].to_string())
+}
+
+/// The running daemon's `started_at` (unix seconds) from `GET /api/v1/version`, or `None`
+/// if unreachable or too old to serve the field. Its own line-oriented extraction, matching
+/// [`daemon_reported_version`], so neither pulls the JSON parser into this module.
+pub fn daemon_reported_started_at(port: u16) -> Option<u64> {
+  let body = fetch_version_body(port)?;
+  let after = body.split("\"started_at\":").nth(1)?;
+  let digits: String = after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+  digits.parse().ok()
+}
+
+/// The raw JSON body of `GET /api/v1/version`, shared by the field extractors above.
+fn fetch_version_body(port: u16) -> Option<String> {
   let addr: SocketAddr = format!("127.0.0.1:{port}").parse().ok()?;
   let mut stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500)).ok()?;
   stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
@@ -158,12 +178,7 @@ pub fn daemon_reported_version(port: u16) -> Option<String> {
   if !resp.starts_with("HTTP/1.1 200") {
     return None;
   }
-  let body = resp.split("\r\n\r\n").nth(1)?;
-  // Minimal extraction of the sole string field — avoids pulling the JSON parser in here.
-  let after = body.split("\"version\":").nth(1)?;
-  let start = after.find('"')? + 1;
-  let end = after[start..].find('"')? + start;
-  Some(after[start..end].to_string())
+  resp.split("\r\n\r\n").nth(1).map(str::to_string)
 }
 
 /// Daemon mode from the cross-process mode marker, when present and valid.

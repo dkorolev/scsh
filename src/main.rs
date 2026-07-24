@@ -3722,16 +3722,35 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
         // restart. An older daemon serving "unknown" (pre-endpoint) is reported honestly.
         let running =
           daemon::daemon_reported_version(port).unwrap_or_else(|| "unknown (older than this feature)".into());
+        let installed = crate::version::display();
         let where_at = daemon::base_url(port);
         match daemon::read_live_pid(port) {
-          Some(pid) => ok(&format!("session browser daemon running (pid {pid}, scsh {running}) on {where_at}")),
-          None => ok(&format!("session browser daemon responding (scsh {running}) on {where_at}")),
+          Some(pid) => ok(&format!("session browser daemon running (pid {pid}) on {where_at}")),
+          None => ok(&format!("session browser daemon responding on {where_at}")),
+        }
+        // The two versions side by side, and whether they agree — the daemon runs the code it
+        // was started with, which can lag the installed binary until a restart.
+        info(&format!("installed CLI: scsh {installed}"));
+        info(&format!("running daemon: scsh {running}"));
+        if running == installed {
+          info("versions match");
+        } else if running.starts_with("unknown") {
+          info("versions: daemon too old to report — a restart runs the installed build");
+        } else {
+          info("versions DIFFER — the daemon is running an older build");
+        }
+        // Uptime, when the daemon is new enough to report its boot time.
+        match daemon::daemon_reported_started_at(port) {
+          Some(started_at) => {
+            let now = daemon::now_unix_secs();
+            info(&format!("uptime: {}", format_uptime(now.saturating_sub(started_at))));
+          }
+          None => info("uptime: unavailable (daemon older than this feature)"),
         }
         // Nudge only on a real mismatch: the binary was upgraded but the daemon still runs
         // the old code, so a restart is needed to pick up the new build.
-        let installed = crate::version::display();
         if daemon_version_is_stale(&running, &installed) {
-          hint(&format!("→ the installed scsh is {installed}; restart to run it in the daemon: scsh daemon restart"));
+          hint(&format!("the installed scsh is {installed}; restart to run it in the daemon: scsh daemon restart"));
         }
         0
       } else if let Some(pid) = daemon::read_live_pid(port) {
@@ -8381,6 +8400,31 @@ fn hint(msg: &str) {
   eprintln!("  {} {msg}", console::style("\u{2192}").cyan().for_stderr());
 }
 
+/// A dimmed, indented detail line under an ✓/✗ headline (e.g. the daemon-status version and
+/// uptime rows) — informational, so it goes to stdout and carries no glyph.
+fn info(msg: &str) {
+  println!("  {}", console::style(msg).dim());
+}
+
+/// A coarse human uptime: the two largest non-zero units, e.g. `3d 4h`, `4h 12m`, `12m 3s`,
+/// `8s`. Deliberately approximate — daemon status wants "roughly how long", not a stopwatch.
+fn format_uptime(secs: u64) -> String {
+  let units = [("d", 86_400u64), ("h", 3_600), ("m", 60), ("s", 1)];
+  let mut parts = Vec::new();
+  let mut rem = secs;
+  for (label, size) in units {
+    let n = rem / size;
+    if n > 0 || (label == "s" && parts.is_empty()) {
+      parts.push(format!("{n}{label}"));
+      rem %= size;
+    }
+    if parts.len() == 2 {
+      break;
+    }
+  }
+  parts.join(" ")
+}
+
 /// A warning that isn't a hard failure — e.g. a skill's commits were saved to a branch
 /// because they couldn't be rebased cleanly. Yellow `⚠`, so it stands apart from ✓/✗.
 fn warn(msg: &str) {
@@ -9554,6 +9598,18 @@ mod tests {
     // A daemon too old to serve the version endpoint reports "unknown …" — the status
     // line already explains that; a restart-nudge would be misleading, so suppress it.
     assert!(!daemon_version_is_stale("unknown (older than this feature)", "1.29.5"));
+  }
+
+  #[test]
+  fn uptime_shows_the_two_largest_units() {
+    assert_eq!(format_uptime(0), "0s");
+    assert_eq!(format_uptime(8), "8s");
+    assert_eq!(format_uptime(59), "59s");
+    assert_eq!(format_uptime(60), "1m"); // exact minute drops the empty seconds
+    assert_eq!(format_uptime(60 + 3), "1m 3s");
+    assert_eq!(format_uptime(4 * 3600 + 12 * 60 + 9), "4h 12m"); // seconds beyond the top two are dropped
+    assert_eq!(format_uptime(3 * 86_400 + 4 * 3600), "3d 4h");
+    assert_eq!(format_uptime(3 * 86_400), "3d"); // no empty trailing unit
   }
 
   #[test]
