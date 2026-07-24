@@ -696,6 +696,9 @@ enum DaemonAction {
   Stop,
   Restart,
   Status,
+  /// Just the version reconciliation and uptime (`scsh daemon version`): installed CLI vs
+  /// running daemon, whether they match, and how long the daemon has been up.
+  Version,
 }
 
 /// Which help page to print. The default (`scsh help` / a bare `scsh`) is a compact
@@ -1080,13 +1083,16 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       }
       "daemon" => {
         i += 1;
-        let sub = args.get(i).ok_or("daemon needs a subcommand: start, stop, restart, or status")?;
+        let sub = args.get(i).ok_or("daemon needs a subcommand: start, stop, restart, status, or version")?;
         let action = match sub.as_str() {
           "start" => DaemonAction::Start,
           "stop" => DaemonAction::Stop,
           "restart" => DaemonAction::Restart,
           "status" => DaemonAction::Status,
-          other => return Err(format!("unknown daemon subcommand '{other}' (try: start, stop, restart, status)")),
+          "version" => DaemonAction::Version,
+          other => {
+            return Err(format!("unknown daemon subcommand '{other}' (try: start, stop, restart, status, version)"))
+          }
         };
         Some(Mode::Daemon { action })
       }
@@ -3728,30 +3734,7 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
           Some(pid) => ok(&format!("session browser daemon running (pid {pid}) on {where_at}")),
           None => ok(&format!("session browser daemon responding on {where_at}")),
         }
-        // The two versions side by side, and whether they agree — the daemon runs the code it
-        // was started with, which can lag the installed binary until a restart.
-        info(&format!("installed CLI: scsh {installed}"));
-        info(&format!("running daemon: scsh {running}"));
-        if running == installed {
-          info("versions match");
-        } else if running.starts_with("unknown") {
-          info("versions: daemon too old to report — a restart runs the installed build");
-        } else {
-          info("versions DIFFER — the daemon is running an older build");
-        }
-        // Uptime, when the daemon is new enough to report its boot time.
-        match daemon::daemon_reported_started_at(port) {
-          Some(started_at) => {
-            let now = daemon::now_unix_secs();
-            info(&format!("uptime: {}", format_uptime(now.saturating_sub(started_at))));
-          }
-          None => info("uptime: unavailable (daemon older than this feature)"),
-        }
-        // Nudge only on a real mismatch: the binary was upgraded but the daemon still runs
-        // the old code, so a restart is needed to pick up the new build.
-        if daemon_version_is_stale(&running, &installed) {
-          hint(&format!("the installed scsh is {installed}; restart to run it in the daemon: scsh daemon restart"));
-        }
+        print_daemon_version_lines(port, &running, &installed);
         0
       } else if let Some(pid) = daemon::read_live_pid(port) {
         fail(&format!("session browser daemon pid {pid} exists but is not responding on {}", daemon::base_url(port)));
@@ -3763,6 +3746,62 @@ fn daemon_cmd(action: DaemonAction) -> i32 {
         1
       }
     }
+    DaemonAction::Version => {
+      let port = daemon::daemon_port();
+      if daemon::Client::daemon_alive() {
+        let running =
+          daemon::daemon_reported_version(port).unwrap_or_else(|| "unknown (older than this feature)".into());
+        let installed = crate::version::display();
+        // Lead with the reconciliation headline the user asked this command for; the detail
+        // lines below spell out each version and the uptime.
+        if running == installed {
+          ok(&format!("scsh {installed} — CLI and daemon match"));
+        } else {
+          fail(&format!("scsh {installed} CLI vs scsh {running} daemon — versions differ"));
+        }
+        print_daemon_version_lines(port, &running, &installed);
+        // Same actionable exit contract as the rest: 0 only when they agree.
+        if running == installed {
+          0
+        } else {
+          1
+        }
+      } else {
+        fail("session browser daemon is not running");
+        hint("→ start it with: scsh daemon start");
+        1
+      }
+    }
+  }
+}
+
+/// The shared version-reconciliation + uptime block for `scsh daemon status` and
+/// `scsh daemon version`: installed CLI and running daemon side by side, whether they
+/// agree, the daemon's uptime, and a restart nudge on a real mismatch.
+fn print_daemon_version_lines(port: u16, running: &str, installed: &str) {
+  // The two versions side by side, and whether they agree — the daemon runs the code it
+  // was started with, which can lag the installed binary until a restart.
+  info(&format!("installed CLI: scsh {installed}"));
+  info(&format!("running daemon: scsh {running}"));
+  if running == installed {
+    info("versions match");
+  } else if running.starts_with("unknown") {
+    info("versions: daemon too old to report — a restart runs the installed build");
+  } else {
+    info("versions DIFFER — the daemon is running an older build");
+  }
+  // Uptime, when the daemon is new enough to report its boot time.
+  match daemon::daemon_reported_started_at(port) {
+    Some(started_at) => {
+      let now = daemon::now_unix_secs();
+      info(&format!("uptime: {}", format_uptime(now.saturating_sub(started_at))));
+    }
+    None => info("uptime: unavailable (daemon older than this feature)"),
+  }
+  // Nudge only on a real mismatch: the binary was upgraded but the daemon still runs
+  // the old code, so a restart is needed to pick up the new build.
+  if daemon_version_is_stale(running, installed) {
+    hint(&format!("the installed scsh is {installed}; restart to run it in the daemon: scsh daemon restart"));
   }
 }
 
@@ -8669,12 +8708,13 @@ fn print_help_command(name: &str) {
     ),
     "daemon" => (
       "the session-browser daemon",
-      "scsh daemon <start|stop|restart|status>",
+      "scsh daemon <start|stop|restart|status|version>",
       &[
         ("start", "Run a persistent daemon until `daemon stop`."),
         ("stop", "Stop the running daemon."),
         ("restart", "Stop then start (persistent)."),
-        ("status", "Exit 0 when the daemon is listening."),
+        ("status", "Whether it's listening, where, plus versions and uptime."),
+        ("version", "Installed CLI vs running daemon version, match, and uptime; exit 0 iff they match."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
         (
           "SCSH_HOME",
@@ -10001,6 +10041,20 @@ steps:
     // Quota takes no profiles and no probe/list flags.
     assert!(cli(&["quota", "--profile", "x"]).is_err());
     assert!(cli(&["quota", "--verbose"]).is_err());
+  }
+
+  #[test]
+  fn daemon_subcommands_parse_including_version() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    assert!(matches!(cli(&["daemon", "start"]).unwrap().mode, Mode::Daemon { action: DaemonAction::Start }));
+    assert!(matches!(cli(&["daemon", "status"]).unwrap().mode, Mode::Daemon { action: DaemonAction::Status }));
+    // The subcommand this test exists for: `scsh daemon version` is a real action.
+    assert!(matches!(cli(&["daemon", "version"]).unwrap().mode, Mode::Daemon { action: DaemonAction::Version }));
+    // A bare `daemon`, or an unknown subcommand, errors — and the message lists version.
+    let Err(bare) = cli(&["daemon"]) else { panic!("a bare daemon must be a usage error") };
+    assert!(bare.contains("version"), "{bare}");
+    let Err(err) = cli(&["daemon", "nope"]) else { panic!("unknown daemon subcommand must be a usage error") };
+    assert!(err.contains("unknown daemon subcommand 'nope'") && err.contains("version"), "{err}");
   }
 
   #[test]
