@@ -623,16 +623,16 @@ fn session_header_carries_breadcrumbs_and_honest_kind() {
   let html = session_page(&old, "castab").expect("session renders");
   assert!(html.contains("profile <strong>default</strong>"), "lede defaults kind to profile: {html}");
   assert!(!html.contains(r#"class="session-kind""#), "no session-kind on default profile: {html}");
-  // The Run tab keeps the retained index crumb hidden; the Jobs URL renders it on
-  // first paint so returning through the job-page breadcrumb never drops "jobs".
+  // The Jobs tab is home and keeps the retained index crumb hidden; the Run URL renders it
+  // on first paint so returning through a breadcrumb never drops the tab name.
   let html = super::index_page(&store);
-  assert!(html.contains(r#"<span id="index-crumb-tail" hidden>"#), "Run hides the retained index crumb: {html}");
-  let html = super::index::index_page_for(&store, None, super::index::IndexTab::Jobs);
+  assert!(html.contains(r#"<span id="index-crumb-tail" hidden>"#), "Jobs (home) hides the retained index crumb: {html}");
+  let html = super::index::index_page_for(&store, None, super::index::IndexTab::Run);
   assert!(
     html.contains(
-      r#"<span class="crumbs"><a href="/">scsh</a><span id="index-crumb-tail"><span class="crumb-sep">›</span><a id="index-crumb" href="/jobs">jobs</a></span></span>"#
+      r#"<span class="crumbs"><a href="/">scsh</a><span id="index-crumb-tail"><span class="crumb-sep">›</span><a id="index-crumb" href="/run">run</a></span></span>"#
     ),
-    "Jobs stays present in the top island on /jobs: {html}"
+    "Run stays present in the top island on /run: {html}"
   );
 }
 
@@ -1020,22 +1020,22 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(html.contains("<span>New Project</span>"), "create button is title-cased");
   assert!(html.contains("#repo-note:empty { display: none; }"), "empty note must not push Open off the shared right edge");
   assert!(html.contains("summary .note { order: 9; flex-basis: 100%;"), "the proc answer always gets its own summary line");
-  // The four tabs, and their panels — Run is leftmost and the default landing tab.
-  for (tab, panel) in [("run", "tab-run"), ("jobs", "tab-jobs"), ("projects", "tab-projects"), ("setup", "tab-setup")] {
+  // The four tabs, and their panels — Jobs is leftmost and the default landing tab.
+  for (tab, panel) in [("jobs", "tab-jobs"), ("run", "tab-run"), ("projects", "tab-projects"), ("setup", "tab-setup")] {
     assert!(html.contains(&format!("data-tab=\"{tab}\"")), "index page should have the {tab} tab");
     assert!(html.contains(&format!("id=\"{panel}\"")), "index page should have panel #{panel}");
   }
   let nav = html.find("<nav class=\"tabs\" role=\"tablist\">").expect("tabs nav");
-  let run_btn = html[nav..].find("data-tab=\"run\">Run</button>").expect("Run tab");
   let jobs_btn = html[nav..].find("data-tab=\"jobs\">Jobs</button>").expect("Jobs tab");
-  assert!(run_btn < jobs_btn, "Run should be leftmost");
+  let run_btn = html[nav..].find("data-tab=\"run\">Run</button>").expect("Run tab");
+  assert!(jobs_btn < run_btn, "Jobs should be leftmost");
   assert!(
-    html.contains("<section class=\"tab-panel active\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">"),
-    "Run panel active by default"
+    html.contains("<section class=\"tab-panel active\" id=\"tab-jobs\" role=\"tabpanel\" aria-labelledby=\"tabbtn-jobs\">"),
+    "Jobs panel active by default"
   );
-  assert!(html.contains("class=\"tab active\" data-tab=\"run\">Run</button>"), "Run tab active by default");
+  assert!(html.contains("class=\"tab active\" data-tab=\"jobs\">Jobs</button>"), "Jobs tab active by default");
   let js = live_client_js();
-  assert!(js.contains("saved || 'run'"), "client default tab is Run");
+  assert!(js.contains("saved || 'jobs'"), "client default tab is Jobs");
   assert!(js.contains("pathForTab"), "tabs use path URLs, not #tab= hashes");
   assert!(!js.contains("'/#tab='"), "no hash-based tab navigation");
   assert!(js.contains("'/projects'"), "Projects tab path is /projects");
@@ -1043,7 +1043,8 @@ fn index_page_carries_the_repositories_panel_and_its_client_wiring() {
   assert!(super::index::IndexTab::from_path("/setup") == Some(super::index::IndexTab::Setup));
   assert!(super::index::IndexTab::from_path("/images") == Some(super::index::IndexTab::Setup));
   assert!(super::index::IndexTab::from_path("/jobs") == Some(super::index::IndexTab::Jobs));
-  assert!(super::index::IndexTab::from_path("/") == Some(super::index::IndexTab::Run));
+  assert!(super::index::IndexTab::from_path("/") == Some(super::index::IndexTab::Jobs));
+  assert!(super::index::IndexTab::from_path("/run") == Some(super::index::IndexTab::Run));
   assert!(js.contains("/api/v1/repos/open"), "client js opens a repo");
   assert!(js.contains("/api/v1/repos/pick"), "client js pops the folder picker");
   assert!(js.contains("/api/v1/jobs/start"), "client js starts a job");

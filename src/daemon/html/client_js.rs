@@ -3608,7 +3608,7 @@ const OPEN_REPOS = {};    // path -> { clean }
 const DEFS_BY_NAME = {};  // name -> definition
 const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh installskills --global)
 // ---- tabs ----
-// Explicit tab clicks push history (/jobs, /projects, /setup, /); Back/Forward restore (WEB-UI §1).
+// Explicit tab clicks push history (/, /run, /projects, /setup); Back/Forward restore (WEB-UI §1).
 // /project/… and /repo/… are filtered Projects views — keep the path, open the Projects tab.
 (function initTabs() {
   const tabs = document.querySelectorAll('.tab');
@@ -3625,20 +3625,20 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
   }
   function pathForTab(id) {
     id = normalizeTab(id);
-    if (id === 'jobs') return '/jobs';
+    if (id === 'run') return '/run';
     if (id === 'projects') return '/projects';
     if (id === 'stats') return '/stats';
     if (id === 'setup') return '/setup';
-    return '/'; // run
+    return '/'; // jobs
   }
   function tabFromLocation() {
     if (pathFilter()) return 'projects';
     const p = (location.pathname || '/').replace(/\/+$/, '') || '/';
-    if (p === '/jobs') return 'jobs';
+    if (p === '/run') return 'run';
     if (p === '/projects') return 'projects';
     if (p === '/stats') return 'stats';
     if (p === '/setup' || p === '/images') return 'setup';
-    if (p === '/run' || p === '/') return 'run';
+    if (p === '/jobs' || p === '/') return 'jobs';
     // Legacy bookmarks: /#tab=dirs → projects, etc.
     const m = (location.hash || '').match(/^#tab=([a-z]+)$/);
     if (m) return normalizeTab(m[1]);
@@ -3648,7 +3648,7 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
     const tail = document.getElementById('index-crumb-tail');
     const crumb = document.getElementById('index-crumb');
     if (!tail || !crumb) return;
-    const visible = id !== 'run';
+    const visible = id !== 'jobs';
     tail.hidden = !visible;
     if (!visible) return;
     crumb.href = pathForTab(id);
@@ -3657,7 +3657,7 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
   function activate(id, mode) {
     id = normalizeTab(id);
     const t = document.querySelector('.tab[data-tab="' + id + '"]');
-    if (!t) id = 'run';
+    if (!t) id = 'jobs';
     const active = document.querySelector('.tab[data-tab="' + id + '"]') || tabs[0];
     id = active.dataset.tab;
     syncIndexCrumb(id);
@@ -3701,12 +3701,12 @@ const GLOBAL_PROFILES = {};  // name -> globally installed skill profile (scsh i
     });
   });
   window.addEventListener('popstate', () => {
-    activate(tabFromLocation() || 'run', 'sync');
+    activate(tabFromLocation() || 'jobs', 'sync');
   });
   const fromLoc = tabFromLocation();
   const savedRaw = loadUiPrefs().tab;
   const saved = savedRaw ? normalizeTab(savedRaw) : null;
-  activate(fromLoc || saved || 'run', 'sync');
+  activate(fromLoc || saved || 'jobs', 'sync');
 })();
 function defSourceBadge(src) {
   // builtin wears purple (the setup color), global cyan; repo/home keep the muted status hues.

@@ -257,7 +257,7 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 
 ## API (for scripts)
 
-- `GET /` — HTML index (Run tab); also `/jobs`, `/projects`, `/setup`
+- `GET /` — HTML index (Jobs tab); also `/run`, `/jobs`, `/projects`, `/setup`
 - `GET /job/{id}` — HTML job detail (`/session/{id}` still accepted)
 - `GET /cast/{session}/{proc}` — asciicast v3 recording (valid partial file mid-run);
   `?dl=1` for a download attachment
@@ -499,7 +499,7 @@ run never dirties the tracked tree.
 
 ## Start a job from the browser
 
-The session index page is organized into tabs: **Jobs** (every run), **Projects** (current jobs grouped by project/repository; opened
+The session index page is organized into tabs: **Jobs** (every run — the tab `/` lands on), **Projects** (current jobs grouped by project/repository; opened
 repos and their jobs), **Start a job**, and **Containers** (the images panel).
 
 Under **Start a job**: type or paste a path (or click **Pick…** for the native folder chooser)

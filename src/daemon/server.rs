@@ -1070,7 +1070,7 @@ fn route(
       (200, html, "text/html; charset=utf-8", false)
     }
     path @ ("/run" | "/jobs" | "/projects" | "/stats" | "/setup" | "/images") => {
-      let tab = html::IndexTab::from_path(path).unwrap_or(html::IndexTab::Run);
+      let tab = html::IndexTab::from_path(path).unwrap_or(html::IndexTab::Jobs);
       let html = html::index_page_for(&lock_store(store), None, tab);
       (200, html, "text/html; charset=utf-8", false)
     }
