@@ -55,11 +55,12 @@ pub fn parse_index_filter(path: &str) -> Option<IndexFilter> {
   None
 }
 
-/// Which index tab is active on first paint (path-based: `/`, `/jobs`, `/projects`, `/setup`).
+/// Which index tab is active on first paint (path-based: `/`, `/run`, `/projects`, `/setup`).
+/// Declared in the order the tabs are painted; `Jobs` is first because it is where `/` lands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IndexTab {
-  Run,
   Jobs,
+  Run,
   Projects,
   Stats,
   Setup,
@@ -71,8 +72,8 @@ impl IndexTab {
     let path = path.split('?').next().unwrap_or(path).trim_end_matches('/');
     let path = if path.is_empty() { "/" } else { path };
     match path {
-      "/" | "/run" => Some(Self::Run),
-      "/jobs" => Some(Self::Jobs),
+      "/" | "/jobs" => Some(Self::Jobs),
+      "/run" => Some(Self::Run),
       "/projects" => Some(Self::Projects),
       "/stats" => Some(Self::Stats),
       "/setup" | "/images" => Some(Self::Setup),
@@ -82,8 +83,8 @@ impl IndexTab {
 
   fn crumb(self) -> Option<(&'static str, &'static str)> {
     match self {
-      Self::Run => None,
-      Self::Jobs => Some(("/jobs", "jobs")),
+      Self::Jobs => None,
+      Self::Run => Some(("/run", "run")),
       Self::Projects => Some(("/projects", "projects")),
       Self::Stats => Some(("/stats", "stats")),
       Self::Setup => Some(("/setup", "setup")),
@@ -92,7 +93,7 @@ impl IndexTab {
 }
 
 pub fn index_page(store: &Store) -> String {
-  index_page_for(store, None, IndexTab::Run)
+  index_page_for(store, None, IndexTab::Jobs)
 }
 
 pub fn index_page_with_filter(store: &Store, filter: Option<IndexFilter>) -> String {
@@ -136,10 +137,10 @@ pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab)
   let tabindex = |want: IndexTab| if tab == want { "0" } else { "-1" };
   let body = format!(
     "<nav class=\"tabs\" role=\"tablist\">\
-<button id=\"tabbtn-run\" role=\"tab\" aria-selected=\"{run_s}\" aria-controls=\"tab-run\" \
-tabindex=\"{run_i}\" class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
 <button id=\"tabbtn-jobs\" role=\"tab\" aria-selected=\"{jobs_s}\" aria-controls=\"tab-jobs\" \
 tabindex=\"{jobs_i}\" class=\"tab{jobs_a}\" data-tab=\"jobs\">Jobs</button>\
+<button id=\"tabbtn-run\" role=\"tab\" aria-selected=\"{run_s}\" aria-controls=\"tab-run\" \
+tabindex=\"{run_i}\" class=\"tab{run_a}\" data-tab=\"run\">Run</button>\
 <button id=\"tabbtn-projects\" role=\"tab\" aria-selected=\"{proj_s}\" aria-controls=\"tab-projects\" \
 tabindex=\"{proj_i}\" class=\"tab{proj_a}\" data-tab=\"projects\">Projects</button>\
 <button id=\"tabbtn-stats\" role=\"tab\" aria-selected=\"{stats_s}\" aria-controls=\"tab-stats\" \
@@ -147,7 +148,6 @@ tabindex=\"{stats_i}\" class=\"tab{stats_a}\" data-tab=\"stats\">Stats</button>\
 <button id=\"tabbtn-setup\" role=\"tab\" aria-selected=\"{setup_s}\" aria-controls=\"tab-setup\" \
 tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
-<section class=\"tab-panel{run_p}\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">\n{start}</section>\n\
 <section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\" role=\"tabpanel\" aria-labelledby=\"tabbtn-jobs\">\n\
 <div class=\"chamfer card card--accent-left-cyan\">\n\
 <p class=\"section-label\">Jobs</p>\n{harness_stops}\
@@ -157,6 +157,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 <tbody id=\"sessions-body\">\n{rows}</tbody>\n</table></div>\n\
 </div>\n\
 </section>\n\
+<section class=\"tab-panel{run_p}\" id=\"tab-run\" role=\"tabpanel\" aria-labelledby=\"tabbtn-run\">\n{start}</section>\n\
 <section class=\"tab-panel{proj_p}\" id=\"tab-projects\" role=\"tabpanel\" aria-labelledby=\"tabbtn-projects\">\n{dirs}</section>\n\
 <section class=\"tab-panel{stats_p}\" id=\"tab-stats\" role=\"tabpanel\" aria-labelledby=\"tabbtn-stats\">\n{stats}</section>\n\
 <section class=\"tab-panel{setup_p}\" id=\"tab-setup\" role=\"tabpanel\" aria-labelledby=\"tabbtn-setup\">\n{images}</section>\n",
@@ -350,7 +351,7 @@ fn images_skeleton_row(name: &str, tag: &str, selectable: bool) -> String {
 /// The Run tab: open a git repo (POST `/api/v1/repos/open`, which reports whether it is
 /// runnable and why not), pick a harness definition, fill the rendered param form, and start a
 /// job (POST `/api/v1/jobs/start`, deep-linking to the spawned session). Start is disabled until
-/// the repo is runnable. Default landing tab on the index page.
+/// the repo is runnable. Reached at `/run`; the Jobs tab is the index's default landing.
 fn start_panel() -> &'static str {
   r##"<div class="chamfer card card--accent-left-green">
 <p class="section-label">Run</p>
