@@ -205,14 +205,14 @@ pub struct StartupStall {
 }
 
 /// No terminal output at all for this long after spawn = startup stall.
-pub const STARTUP_SILENCE_SECS: u64 = 15;
+pub const STARTUP_SILENCE_SECS: u64 = 60;
 /// Output stopped for this long straight while the startup window was still open = startup stall.
 pub const STARTUP_STALL_SECS: u64 = 30;
 /// The startup window: how long after spawn the stall rule stays armed.
 pub const STARTUP_WINDOW_SECS: u64 = 90;
 
 impl StartupStall {
-  /// The production policy: 15s of initial silence, or a 30s straight stall beginning within
+  /// The production policy: 60s of initial silence, or a 30s straight stall beginning within
   /// the first 90s, forces a restart.
   pub fn defaults() -> StartupStall {
     StartupStall {
@@ -221,6 +221,33 @@ impl StartupStall {
       window: Duration::from_secs(STARTUP_WINDOW_SECS),
     }
   }
+
+  /// [`defaults`] with each threshold independently perturbed by up to ±20%, driven by a
+  /// fresh per-spawn `entropy` seed (wall-clock nanos mixed with the run's container name).
+  ///
+  /// A whole fleet launched at once against one slow provider would otherwise trip the fixed
+  /// startup-silence threshold at the very same instant and force-restart in lockstep — the
+  /// thundering-herd the retry backoff already jitters away one layer down. Spreading the
+  /// thresholds fans those restarts out over a few seconds. Unlike the backoff's salt-keyed
+  /// jitter this is deliberately NOT reproducible across relaunches: each spawn draws fresh.
+  pub fn jittered(entropy: u64) -> StartupStall {
+    let base = StartupStall::defaults();
+    StartupStall {
+      silence: jitter_20pct(base.silence, entropy),
+      stall: jitter_20pct(base.stall, entropy.rotate_left(21)),
+      window: jitter_20pct(base.window, entropy.rotate_left(42)),
+    }
+  }
+}
+
+/// Scale `d` by a random factor in `[0.8, 1.2]` selected from `seed`. The ±20% keeps the
+/// watchdog's character intact (a 60s silence stays roughly a minute) while breaking up
+/// synchronized restarts. Milliseconds granularity so short test durations still spread.
+fn jitter_20pct(d: Duration, seed: u64) -> Duration {
+  let mixed = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15).rotate_left(31);
+  let permille = 800 + (mixed % 401); // 800..=1200 → ×0.8 .. ×1.2
+  let scaled_ms = (d.as_millis() as u64).saturating_mul(permille) / 1000;
+  Duration::from_millis(scaled_ms)
 }
 
 /// Stop waiting the moment the task crosses its own declared finish line, instead of waiting
@@ -899,6 +926,30 @@ fn summary_lines(model: &Model) -> Vec<String> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn startup_jitter_stays_within_20pct_and_varies_by_seed() {
+    // Every threshold lands inside [0.8×, 1.2×] of its base, for a spread of seeds.
+    for seed in [0u64, 1, 7, 42, 999, u64::MAX, 0x9E37_79B9_7F4A_7C15] {
+      let j = StartupStall::jittered(seed);
+      for (got, base) in
+        [(j.silence, STARTUP_SILENCE_SECS), (j.stall, STARTUP_STALL_SECS), (j.window, STARTUP_WINDOW_SECS)]
+      {
+        let lo = Duration::from_millis(base * 800);
+        let hi = Duration::from_millis(base * 1200);
+        assert!(got >= lo && got <= hi, "seed {seed}: {got:?} outside [{lo:?}, {hi:?}] for base {base}s");
+      }
+    }
+    // Different seeds spread the silence threshold apart — the whole point of the jitter.
+    let a = StartupStall::jittered(1).silence;
+    let b = StartupStall::jittered(2).silence;
+    assert_ne!(a, b, "distinct seeds must not collide on the same threshold");
+    // The three thresholds are perturbed independently (rotated seed), not by one shared factor.
+    let j = StartupStall::jittered(12345);
+    let silence_ratio = j.silence.as_millis() * STARTUP_STALL_SECS as u128;
+    let stall_ratio = j.stall.as_millis() * STARTUP_SILENCE_SECS as u128;
+    assert_ne!(silence_ratio, stall_ratio, "thresholds must jitter independently");
+  }
 
   #[test]
   fn summary_line_is_check_or_cross_with_detail() {
