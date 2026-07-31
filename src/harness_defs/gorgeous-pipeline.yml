@@ -2,7 +2,7 @@
 # review loop until it meets the approval bar — the workflow twin of the agent-driven
 # kickoff-gorgeous-pipeline skill (dkorolev/beautiful-skills), with the loop rendered as
 # cycles on the job page instead of living in a chat session. No scaffolding: the branch
-# already carries the work. `prepare` writes or updates PR-DESCRIPTION.md from the branch's
+# already carries the work. `prepare` normalizes PR-DESCRIPTION.md history and regenerates it from the branch's
 # own history, the first 15-route batch reviews it ONCE, and only then the loop runs:
 # decide -> fix -> journal -> 15 reviewers -> collect. `decide`, the first loop step, can
 # break before any fix when the previous batch passed; otherwise it requests changes and
@@ -30,17 +30,39 @@ steps:
       harness: claude
       model: claude-opus-4-8
     prompt: |
-      Read this repository's code and the current branch's git history: the commits since
-      the branch diverged from the repository's default branch (main or master). Write or
-      update `PR-DESCRIPTION.md` at the repository root describing that change set as if
-      opening a pull request. Use exactly these level-two headings, in this order, with no
-      other headings: `## Summary`, `## What This Changes`, and `## Implementation Details`.
-      Put the big picture and concise bullets first, then explanatory prose, then notable
-      implementation details. Commit only that file with the message
-      `Prepare PR description.` Never create any additional PR-description section for
-      verification commands, expected results, or checklists; that evidence belongs in
-      committed tests, README, or another committed verification document. Put a one-line
-      summary in the `summary` result field.
+      Read this repository's code and every commit since the current branch diverged from
+      the repository's default branch (main or master). Audit each commit's actual changed
+      paths for `PR-DESCRIPTION.md`, regardless of its message, author, or position. Read
+      the file at HEAD when present and every historical version before changing history;
+      use that prose only as context, because the final product tree and complete code diff
+      are authoritative and commits may have been reordered.
+
+      Normalize the branch before writing the final description. Create a backup ref, then
+      remove the `PR-DESCRIPTION.md` change from every commit that touched it, dropping a
+      commit that becomes empty and retaining every non-description change from a mixed
+      commit in the same logical place. Preserve product commit messages, order, authorship,
+      and the product tree. This cleanup is mandatory whether there were zero, one, or many
+      prior descriptions and regardless of who committed them. Verify the product tree is
+      byte-identical to the backup while excluding `PR-DESCRIPTION.md`; stop and explain the
+      mismatch instead of claiming success if it is not.
+
+      Write a fresh `PR-DESCRIPTION.md` at the repository root describing the normalized
+      change set as if opening a pull request. Augment still-accurate prior prose with
+      material behavior from the code, replace inaccurate claims, and discard stale text.
+      Use exactly these level-two headings, in this order, with no other headings:
+      `## Summary`, `## What This Changes`, and `## Implementation Details`. Put the big
+      picture and concise bullets first, then explanatory prose, then notable implementation
+      details. Never add a testing, test-plan, validation, verification-command, expected-
+      results, checklist, or task-checkbox section; that evidence belongs in committed
+      tests, README, or another committed verification document.
+
+      Commit only `PR-DESCRIPTION.md` as the final commit with the message
+      `Prepare PR description.` Audit the normalized range again before finishing: exactly
+      one commit may touch `PR-DESCRIPTION.md`; it must be HEAD, touch no other path, and use
+      the special notes identity for both author and committer. If any invariant fails, stop
+      and put the exact commit, identity, or unexpected path in `summary`; never report an
+      attempted normalization as successful. Otherwise put a one-line success summary in
+      `summary`.
     output:
       summary:
         type: string

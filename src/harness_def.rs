@@ -1705,7 +1705,23 @@ mod tests {
     assert!(prepare.needs.is_empty(), "prepare is the first step");
     assert!(prepare.commits, "the PR description lands as a commit on the caller's branch");
     let prepare_words = prepare.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(prepare_words.contains("Write or update `PR-DESCRIPTION.md`"), "updates an existing description too");
+    assert!(
+      prepare_words.contains("Audit each commit's actual changed paths for `PR-DESCRIPTION.md`"),
+      "finds every prior description change regardless of history simplification"
+    );
+    assert!(
+      prepare_words.contains("remove the `PR-DESCRIPTION.md` change from every commit that touched it"),
+      "normalization removes every earlier occurrence"
+    );
+    assert!(
+      prepare_words.contains("product tree is byte-identical to the backup"),
+      "history cleanup preserves the product"
+    );
+    assert!(
+      prepare_words.contains("exactly one commit may touch `PR-DESCRIPTION.md`; it must be HEAD"),
+      "the final audit pins the unique-last-commit invariant"
+    );
+    assert!(prepare_words.contains("task-checkbox"), "PR descriptions never grow test-plan checkboxes");
 
     let fix = def.steps.iter().find(|s| s.id == "fix").unwrap();
     assert_eq!(fix.needs, vec!["decide".to_string()]);
