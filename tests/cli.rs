@@ -161,6 +161,7 @@ fn help_topics_are_separate_pages() {
       && defs.out.contains("break: true")
       && defs.out.contains("SCSH_LOOP_BREAK")
       && defs.out.contains("Loop-carried")
+      && defs.out.contains("memory: 8G")
       && defs.out.contains("demo-loop-break")
       && !defs.out.contains("demo-beautiful-loop"),
     "got: {}",

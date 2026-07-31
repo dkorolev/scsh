@@ -8,7 +8,7 @@ use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use crate::config::Harness;
+use crate::config::{Harness, MemoryLimit};
 
 /// A located container runtime executable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1225,11 +1225,14 @@ pub enum RepoMountMode {
 /// `container`) map the UID directly and need no such flag.
 #[allow(clippy::too_many_arguments)]
 pub fn run_command(
-  runtime: &str, tag: &str, run_dir: &str, name: &str, env: &[(String, String)], volumes: &[(&str, &str)],
-  command: &str, repo_mount: RepoMountMode,
+  runtime: &str, tag: &str, run_dir: &str, name: &str, memory: Option<&MemoryLimit>, env: &[(String, String)],
+  volumes: &[(&str, &str)], command: &str, repo_mount: RepoMountMode,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
-  if runtime == "container" {
+  if let Some(memory) = memory {
+    v.push("--memory".into());
+    v.push(memory.as_str().into());
+  } else if runtime == "container" {
     v.push("--memory".into());
     v.push(APPLE_CONTAINER_MEMORY.into());
   }
@@ -3155,6 +3158,7 @@ TAG
         "scsh-opencode:latest",
         "/tmp/run",
         "run-s",
+        None,
         &[],
         &[],
         "opencode run 'run skill s'",
@@ -3180,6 +3184,7 @@ TAG
         "scsh-opencode:latest",
         "/tmp/run",
         "run-s",
+        None,
         &[],
         &[],
         "git clone",
@@ -3207,6 +3212,7 @@ TAG
         "scsh-claude:latest",
         "/tmp/run",
         "run-s",
+        None,
         &[],
         &[("/home/u/.claude", "/home/agent/.claude:ro")],
         "claude -p hi",
@@ -3237,6 +3243,7 @@ TAG
         "scsh-opencode:latest",
         "/tmp/run",
         "run-s",
+        None,
         &[],
         &[],
         "opencode run 'run skill s'",
@@ -3267,6 +3274,7 @@ TAG
         "scsh-opencode:latest",
         "/tmp/run",
         "run-s",
+        None,
         &env,
         &[],
         "opencode run 'run skill s'",
@@ -3290,6 +3298,26 @@ TAG
         "opencode run 'run skill s'"
       ]
     );
+  }
+
+  #[test]
+  fn run_command_applies_explicit_memory_to_every_runtime() {
+    let memory = MemoryLimit::parse("8G").unwrap();
+    for runtime in ["container", "docker", "podman"] {
+      let command = run_command(
+        runtime,
+        "scsh-opencode:latest",
+        "/tmp/run",
+        "run-s",
+        Some(&memory),
+        &[],
+        &[],
+        "opencode run 'run skill s'",
+        RepoMountMode::Full,
+      );
+      assert_eq!(&command[5..7], ["--memory", "8G"], "{runtime}");
+      assert_eq!(command.iter().filter(|arg| arg.as_str() == "--memory").count(), 1, "{runtime}");
+    }
   }
 
   #[test]
@@ -3488,6 +3516,7 @@ TAG
         harness: Harness::Opencode,
         model: Some("openai/gpt-5.5".into()),
         effort: None,
+        memory: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3507,6 +3536,7 @@ TAG
         harness: Harness::Claude,
         model: Some("sonnet".into()),
         effort: None,
+        memory: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3526,6 +3556,7 @@ TAG
         harness: Harness::Opencode,
         model: None,
         effort: None,
+        memory: None,
         profile: None,
         commits: false,
         commit_identity: None,
@@ -3582,6 +3613,7 @@ TAG
       harness: Harness::Opencode,
       model: None,
       effort: None,
+      memory: None,
       profile: None,
       commits: false,
       commit_identity: None,
