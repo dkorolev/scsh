@@ -50,6 +50,30 @@ impl Default for Terminal {
   }
 }
 
+/// A validated container-memory limit (`1536M`, `8G`). Workflow definitions may opt a
+/// resource-heavy step into more memory without weakening the bounded Apple Container default.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemoryLimit(String);
+
+impl MemoryLimit {
+  pub fn parse(value: &str) -> Option<MemoryLimit> {
+    let value = value.trim();
+    let (amount, unit) = if let Some(amount) = value.strip_suffix('M') {
+      (amount, 'M')
+    } else if let Some(amount) = value.strip_suffix('G') {
+      (amount, 'G')
+    } else {
+      return None;
+    };
+    let amount = amount.parse::<u64>().ok()?;
+    (amount > 0).then(|| MemoryLimit(format!("{amount}{unit}")))
+  }
+
+  pub fn as_str(&self) -> &str {
+    &self.0
+  }
+}
+
 /// One manifest row in `.scsh.yml`. The key must match the `.skills/<name>/` folder.
 /// Either declare direct run fields (`harness`, optional `model`, …) for a single
 /// invocation, or an `invocations:` matrix — each route expands to `{name}-{route}` at
@@ -118,6 +142,9 @@ pub struct ResolvedInvocation {
   pub model: Option<String>,
   /// Reasoning effort; only ever set for harnesses with an effort knob.
   pub effort: Option<String>,
+  /// Explicit run-container memory limit. Only workflow steps currently author this;
+  /// `None` preserves each runtime's existing default.
+  pub memory: Option<MemoryLimit>,
   pub timeout: Option<u64>,
   /// Seconds the recorded screen may stay frozen before the run is killed as inactive
   /// (`None` = harness default via [`effective_inactivity_timeout`] at run time).
@@ -187,6 +214,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       harness,
       model: skill.model.clone(),
       effort: effort_for(harness, None),
+      memory: None,
       timeout: skill.timeout,
       inactivity_timeout: skill.inactivity_timeout,
       retry_for: skill.retry_for,
@@ -210,6 +238,7 @@ fn expand_skill(skill: &Skill, terminal: Terminal) -> Vec<ResolvedInvocation> {
       harness: route.harness,
       model: route.model.clone(),
       effort: effort_for(route.harness, route.effort.as_ref()),
+      memory: None,
       timeout: skill.timeout,
       inactivity_timeout: route.inactivity_timeout.or(skill.inactivity_timeout),
       retry_for: route.retry_for.or(skill.retry_for),
@@ -914,6 +943,27 @@ pub(crate) fn parse_positive_secs_at(
       }
       Err(_) => {
         errors.push(format!("'{prefix}.{key}' must be an integer number of seconds (got '{}')", s.trim()));
+        None
+      }
+    },
+  }
+}
+
+/// Parse one optional workflow-step `memory:` limit. The deliberately small M/G grammar is
+/// accepted by Apple Container, Docker, and Podman and keeps runtime argv portable.
+pub(crate) fn parse_memory_limit_at(
+  fm: &BTreeMap<&str, &Node>, prefix: &str, errors: &mut Vec<String>,
+) -> Option<MemoryLimit> {
+  match fm.get("memory").copied() {
+    None => None,
+    Some(Node::Map(_)) => {
+      errors.push(format!("'{prefix}.memory' must be a memory size like 1536M or 8G, not a mapping"));
+      None
+    }
+    Some(Node::Scalar(s)) => match MemoryLimit::parse(s) {
+      Some(limit) => Some(limit),
+      None => {
+        errors.push(format!("'{prefix}.memory' must be a positive memory size like 1536M or 8G (got '{}')", s.trim()));
         None
       }
     },

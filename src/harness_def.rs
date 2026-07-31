@@ -394,6 +394,9 @@ pub struct Step {
   /// step's run (`inactivity_timeout: 3600`). `None` = the harness default (30m). For
   /// steps whose agent legitimately works quietly for long stretches (a big fix pass).
   pub inactivity_timeout: Option<u64>,
+  /// Explicit run-container memory limit (`1536M`, `8G`). `None` preserves the runtime
+  /// default (including scsh's bounded 1536M Apple Container default).
+  pub memory: Option<crate::config::MemoryLimit>,
   /// Who authors this step's `commits: true` work (`commit-identity: runner|notes`). `Notes`
   /// (the default) is the recognizable scsh bot — the special notes author reviewers exclude
   /// from review. `Runner` is the human running the pipeline, inferred from the caller repo's
@@ -855,12 +858,13 @@ fn validate_steps(
       "retry_for",
       "retry_signature_cap",
       "inactivity_timeout",
+      "memory",
       "max-iterations",
     ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout, memory)"
         ));
       }
     }
@@ -989,6 +993,7 @@ fn validate_steps(
     let retry_for = crate::config::parse_retry_for(&fm, &step_path, errors);
     let retry_signature_cap = crate::config::parse_retry_signature_cap(&fm, &step_path, errors);
     let inactivity_timeout = crate::config::parse_positive_secs_at(&fm, &step_path, "inactivity_timeout", errors);
+    let memory = crate::config::parse_memory_limit_at(&fm, &step_path, errors);
 
     if let (Some(agent), Some(task)) = (agent, task) {
       steps.push(Step {
@@ -1009,6 +1014,7 @@ fn validate_steps(
         retry_for,
         retry_signature_cap,
         inactivity_timeout,
+        memory,
       });
     }
   }

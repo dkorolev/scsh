@@ -455,6 +455,7 @@ steps:
         type: string
   sort_fruits:                    # sort_fruits and sort_vegetables run in parallel
     needs: categorize             # DAG edge (comma-separated for several)
+    memory: 8G                    # optional run-container limit
     agent:
       harness: claude
       model: sonnet
@@ -477,6 +478,8 @@ steps:
 - **`commits: true`** — optional; same contract as a skill's `commits: true`: commits the step
   makes inside the clone are rebased onto the caller's branch (and packed with packdiff when
   available). The step prompt should tell the agent what to commit.
+- **`memory: 8G`** — optional run-container limit for a resource-heavy step. Use a positive
+  integer with an `M` or `G` suffix. When omitted, each runtime keeps its existing default.
 
 Every `inputs:`/`when:` reference must resolve to a declared param or an upstream step's declared
 output field, and any referenced step must be in `needs:` — checked when the definition is

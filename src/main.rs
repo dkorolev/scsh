@@ -1986,6 +1986,7 @@ fn step_invocation(
     harness: step.agent.harness,
     model: step.agent.model.clone(),
     effort: step.agent.effort.clone(),
+    memory: step.memory.clone(),
     retry_for: step.retry_for,
     retry_signature_cap: step.retry_signature_cap,
     timeout: None,
@@ -3351,7 +3352,17 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
           } else {
             runtime::RepoMountMode::Full
           };
-          let run = runtime::run_command(&rt.name, &tag, &run_dir, &name, &env, &vol_refs, &cmd, repo_mount);
+          let run = runtime::run_command(
+            &rt.name,
+            &tag,
+            &run_dir,
+            &name,
+            skill.memory.as_ref(),
+            &env,
+            &vol_refs,
+            &cmd,
+            repo_mount,
+          );
           println!("  run:   {}", runtime::shell_join(&run));
         }
         Err(message) => println!("  run:   (skill would be REFUSED before running — {message})"),
@@ -5531,7 +5542,17 @@ fn run_one_skill(
     harness
   };
   let repo_mount = if git_transport { runtime::RepoMountMode::TmpOnly } else { runtime::RepoMountMode::Full };
-  let run = runtime::run_command(&rt.name, &tag, &run_dir_str, &name, &container_env, &vol_refs, &cmd, repo_mount);
+  let run = runtime::run_command(
+    &rt.name,
+    &tag,
+    &run_dir_str,
+    &name,
+    skill.memory.as_ref(),
+    &container_env,
+    &vol_refs,
+    &cmd,
+    repo_mount,
+  );
   let timeout = skill.timeout.map(Duration::from_secs);
   // Screen-inactivity watchdog: the bind-mounted cast is the heartbeat, counting only NOVEL
   // frames (timestamps stripped, digits erased) — so both a frozen TUI and a wedged one
@@ -9562,6 +9583,7 @@ fn print_help_defs() {
         a.kind: code       scalar = equality; or one operator: eq/ne/lt/lte/gt/gte/in
       artifacts: out.txt   extra files written next to $SCSH_RESULT, copied to the session dir
       commits: true        bring the step's commits back onto the caller's branch (packdiff'd)
+      memory: 8G           optional run-container limit; positive integer with M or G suffix
       commit-identity:     who authors those commits: `notes` (default — the recognizable scsh
                            bot, excluded from review as the notes author) or `runner` (the
                            person running the pipeline, from this repo's git user.name/email)
@@ -10245,8 +10267,8 @@ mod tests {
   }
 
   #[test]
-  fn workflow_steps_parse_retry_policy_keys() {
-    let yml = r#"description: "retry keys"
+  fn workflow_steps_parse_run_policy_keys() {
+    let yml = r#"description: "run policy keys"
 steps:
   one:
     agent:
@@ -10255,6 +10277,7 @@ steps:
     retry_for: 8h
     retry_signature_cap: 2
     inactivity_timeout: 3600
+    memory: 8G
     output:
       done:
         type: bool
@@ -10263,6 +10286,7 @@ steps:
     assert_eq!(def.steps[0].retry_for, Some(8 * 3600));
     assert_eq!(def.steps[0].retry_signature_cap, Some(2));
     assert_eq!(def.steps[0].inactivity_timeout, Some(3600));
+    assert_eq!(def.steps[0].memory.as_ref().map(config::MemoryLimit::as_str), Some("8G"));
 
     let bad = yml.replace("retry_for: 8h", "retry_for: whenever");
     let err = harness_def::validate("wf", &bad, harness_def::DefSource::Builtin).unwrap_err();
@@ -10274,6 +10298,14 @@ steps:
       err.iter().any(|e| e.contains("'steps.one.inactivity_timeout' must be an integer number of seconds")),
       "{err:?}"
     );
+    for invalid in ["unlimited", "0G", "1.5G", "8g", "8T", "é"] {
+      let bad = yml.replace("memory: 8G", &format!("memory: {invalid}"));
+      let err = harness_def::validate("wf", &bad, harness_def::DefSource::Builtin).unwrap_err();
+      assert!(err.iter().any(|e| e.contains("'steps.one.memory' must be a positive memory size")), "{err:?}");
+    }
+    let mapping = yml.replace("memory: 8G", "memory:\n      amount: 8G");
+    let err = harness_def::validate("wf", &mapping, harness_def::DefSource::Builtin).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("'steps.one.memory' must be a memory size")), "{err:?}");
   }
 
   #[test]
@@ -10818,6 +10850,7 @@ steps:
       harness: config::Harness::Opencode,
       model: None,
       effort: None,
+      memory: None,
       timeout: None,
       inactivity_timeout: None,
       retry_for: None,
@@ -11014,6 +11047,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       retry_for: None,
       retry_signature_cap: None,
       inactivity_timeout: Some(3600),
+      memory: config::MemoryLimit::parse("8G"),
       do_while: None,
       break_loop: false,
       max_iterations: None,
@@ -11024,6 +11058,7 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_eq!(inv.artifacts, vec!["tmp/scsh/abcdef/summary.txt".to_string()]);
     // The step's own novelty window rides into the invocation — the watchdog reads it from there.
     assert_eq!(inv.inactivity_timeout, Some(3600));
+    assert_eq!(inv.memory.as_ref().map(config::MemoryLimit::as_str), Some("8G"));
     // Side files are not journaled in the cache, so artifact steps must always run live.
     let caller = repo("artifacts-nocache");
     assert!(cache_key(&caller, &inv, &[]).is_none(), "artifact steps must bypass the cache");
@@ -11050,6 +11085,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       retry_for: None,
       retry_signature_cap: None,
       inactivity_timeout: None,
+      memory: None,
       do_while: None,
       break_loop: false,
       max_iterations: None,
@@ -11174,6 +11210,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       harness,
       model: None,
       effort: None,
+      memory: None,
       timeout: None,
       inactivity_timeout: None,
       retry_for: None,
