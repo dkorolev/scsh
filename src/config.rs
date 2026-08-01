@@ -58,13 +58,8 @@ pub struct MemoryLimit(String);
 impl MemoryLimit {
   pub fn parse(value: &str) -> Option<MemoryLimit> {
     let value = value.trim();
-    let (amount, unit) = if let Some(amount) = value.strip_suffix('M') {
-      (amount, 'M')
-    } else if let Some(amount) = value.strip_suffix('G') {
-      (amount, 'G')
-    } else {
-      return None;
-    };
+    let (amount, unit) =
+      if let Some(amount) = value.strip_suffix('M') { (amount, 'M') } else { (value.strip_suffix('G')?, 'G') };
     let amount = amount.parse::<u64>().ok()?;
     (amount > 0).then(|| MemoryLimit(format!("{amount}{unit}")))
   }
