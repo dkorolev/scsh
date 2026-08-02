@@ -1325,13 +1325,18 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         errors.push(format!("step '{}' cannot need itself", s.id));
       }
     }
-    // A reference from inside a do-while body to the body's final step: legal as an input
-    // (previous iteration's value), so the loop's data channel needs no committed files.
+    // A reference from inside a do-while body to any step of that same body — including the
+    // step itself — is legal as an input without a `needs` edge: it is the loop-carried
+    // channel, resolving to the PREVIOUS iteration's value (empty on the first) whenever the
+    // target has not already produced one this lap. That back-edge is what makes a loop able
+    // to carry state — the previous round's verdict, the story it was working on — without
+    // committing a file to pass it along.
     let loop_carried = |reference: &Ref| -> bool {
       let Ref::StepField { step, .. } = reference else { return false };
-      steps
-        .iter()
-        .any(|end| &end.id == step && end.do_while.is_some() && do_while_body(steps, end).contains(&s.id.as_str()))
+      steps.iter().any(|end| {
+        let Some(body) = end.do_while.is_some().then(|| do_while_body(steps, end)) else { return false };
+        body.contains(&s.id.as_str()) && body.contains(&step.as_str())
+      })
     };
     let check_ref = |reference: &Ref, ctx: &str, needs_edge: bool, errors: &mut Vec<String>| match reference {
       Ref::Param(n) => {
@@ -2322,6 +2327,35 @@ steps:
     format!(
       "description: \"x\"\nsteps:\n  a:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      do a\n    output:\n      kind:\n        type: string\n  b:\n{extra_second}\n"
     )
+  }
+
+  /// A two-step do-while: `pick` heads the body and can break it, `check` is the tail.
+  fn loop_wf(pick_inputs: &str) -> String {
+    format!(
+      "description: \"x\"\nsteps:\n  pick:\n    break: true\n    agent:\n      harness: claude\n      model: sonnet\n{pick_inputs}    prompt: |\n      decide\n    output:\n      kind:\n        type: string\n      SCSH_LOOP_BREAK:\n        type: bool\n  check:\n    needs: pick\n    do-while: pick\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      verdict:\n        type: string\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n"
+    )
+  }
+
+  #[test]
+  fn a_do_while_body_step_reads_any_body_step_s_previous_answer() {
+    // The loop-carried channel is not only "read the tail's verdict". A step that picks what to
+    // work on has to see what it picked last round, and that is a reference to ITSELF with no
+    // `needs:` edge — legal precisely because it resolves to the previous iteration, and the
+    // only way a loop carries state forward without committing a file to pass it along.
+    let src = loop_wf("    inputs:\n      LAST_VERDICT: check.verdict\n      PREVIOUS: pick.kind\n");
+    let def = validate("t", &src, DefSource::Repo).expect("a body step may read the body, itself included");
+    let pick = def.steps.iter().find(|s| s.id == "pick").unwrap();
+    assert_eq!(pick.inputs.len(), 2);
+    assert!(pick.needs.is_empty(), "neither binding is a graph edge — a back-edge is not a dependency");
+
+    // The exemption is scoped to the body: a step outside it is ordinary data and still needs
+    // its edge, or a workflow could read a value that has not been produced yet.
+    let outside = format!(
+      "{}  after:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      x\n    output:\n      z:\n        type: string\n",
+      src
+    );
+    let err = validate("t", &outside.replace("PREVIOUS: pick.kind", "PREVIOUS: after.z"), DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("after")), "{err:?}");
   }
 
   #[test]

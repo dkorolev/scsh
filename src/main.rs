@@ -2790,11 +2790,25 @@ fn run_workflow(
             }
           } else if again {
             repeat_done.insert(loop_key.to_string(), completed);
-            // The final step's outputs become the NEXT iteration's loop-carried values.
+            // This iteration's outputs become the NEXT one's loop-carried values — the final
+            // step's, and every other body step's as it is cleared. A body step can therefore
+            // read what any body step (itself included) produced last round, which is how a
+            // loop carries state forward without committing a file to pass it along.
             loop_prev.insert(s.id.clone(), StepState { skipped: false, outputs });
             if let Some(body) = do_while_bodies.get(loop_key) {
               for id in body {
-                state.remove(id);
+                // The tail's own fresh outputs were just carried over and must survive this
+                // sweep. They do because a do-while tail is never recorded in `state` on the
+                // repeat path — only the `break_requested` and non-loop arms insert it — so
+                // `state.remove` cannot hand back a staler value for it. Asserted, because the
+                // arm that broke this would look entirely reasonable.
+                debug_assert!(
+                  id != &s.id || !state.contains_key(id),
+                  "the loop tail must not be re-carried from state"
+                );
+                if let Some(previous) = state.remove(id) {
+                  loop_prev.insert(id.clone(), previous);
+                }
               }
             }
           } else {
@@ -9608,11 +9622,6 @@ fn print_help_defs() {
   break: true            on the loop body's FIRST step, lets that step exit before the rest of
                          the body runs. It must declare the boolean output `SCSH_LOOP_BREAK`;
                          true exits this loop, false continues through the body normally.
-                         A host step (`run:`) without `output:` returns no SCSH_DO_WHILE_REPEAT,
-                         so a loop ending in one always asks for another lap — such a loop must
-                         have a `break:` head, and scsh refuses the definition otherwise. Give
-                         the host step an `output:` block and it decides for itself, like an
-                         agent tail.
   Loop-carried inputs:   a body step may reference ANY body step's output — the final step's,
                          another step's, or its own — with no `needs:` edge, receiving the
                          PREVIOUS iteration's value (empty on round one) whenever that step has
