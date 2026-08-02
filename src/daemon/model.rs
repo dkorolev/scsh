@@ -222,6 +222,13 @@ pub struct ProcRecord {
   pub annotate_target: Option<String>,
 }
 
+impl ProcRecord {
+  /// Host workflow steps have no per-proc container or PID channel; stop them with the job.
+  pub fn is_host_step(&self) -> bool {
+    self.kind == ProcKind::Skill && self.harness.as_deref() == Some(crate::harness_def::HOST_EXECUTOR)
+  }
+}
+
 /// One skill listed in a session's start payload.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SkillMeta {

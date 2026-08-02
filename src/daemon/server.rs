@@ -2755,6 +2755,9 @@ fn proc_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>>, 
     let Some(p) = s.procs.iter_mut().find(|p| p.index == index) else {
       return (404, err_body("proc not found"), false);
     };
+    if p.is_host_step() {
+      return (400, err_body("host steps can only be stopped with the whole job"), false);
+    }
     if p.status != ProcStatus::Running && p.status != ProcStatus::Waiting {
       return (200, "{\"ok\":true,\"already_ended\":true}".into(), false);
     }
@@ -2851,6 +2854,9 @@ fn proc_restart_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
     let Some(p) = s.procs.iter_mut().find(|p| p.index == index) else {
       return (404, err_body("proc not found"), false);
     };
+    if p.is_host_step() {
+      return (400, err_body("host steps can only be restarted with the whole job"), false);
+    }
     if p.kind != ProcKind::Skill {
       return (400, err_body("only skill runs can be restarted — builds and annotations have no respawn path"), false);
     }
@@ -2930,6 +2936,9 @@ fn harness_stop_response_notifying<F: Fn()>(body: &str, store: &Arc<Mutex<Store>
     Some(h) if !h.trim().is_empty() => h.trim().to_string(),
     _ => return (400, err_body("give a harness name"), false),
   };
+  if harness == crate::harness_def::HOST_EXECUTOR {
+    return (400, err_body("host steps can only be stopped with the whole job"), false);
+  }
   let runtime = crate::runtime::detect_runtime().map(|r| r.name);
   let now = now_unix_secs();
   // (session, proc label, container) for every victim — teardown and logging happen
@@ -4285,6 +4294,12 @@ mod tests {
     // Unknown proc index → 404.
     let (status3, _, _) = proc_stop_response(r#"{"session":"kill01","proc":9}"#, &store);
     assert_eq!(status3, 404);
+
+    store.lock().unwrap().sessions.get_mut("kill01").unwrap().procs[0].harness = Some("host".into());
+    let (host_status, host_body, host_mutated) = proc_stop_response(r#"{"session":"kill01","proc":0}"#, &store);
+    assert_eq!(host_status, 400, "got: {host_body}");
+    assert!(!host_mutated);
+    assert_eq!(store.lock().unwrap().sessions["kill01"].procs[0].status, ProcStatus::Running);
   }
 
   #[test]
@@ -4404,6 +4419,13 @@ mod tests {
         },
       );
     }
+    store.lock().unwrap().sessions.get_mut("rst01").unwrap().procs[0].harness = Some("host".into());
+    let (host_status, host_body, host_mutated) = proc_restart_response(r#"{"session":"rst01","proc":0}"#, &store);
+    assert_eq!(host_status, 400, "got: {host_body}");
+    assert!(!host_mutated);
+    assert!(!crate::daemon::paths::proc_restart_marker("rst01", 0).exists());
+    store.lock().unwrap().sessions.get_mut("rst01").unwrap().procs[0].harness = Some("claude".into());
+
     let (status, body, mutated) = proc_restart_response(r#"{"session":"rst01","proc":1}"#, &store);
     assert_eq!(status, 200, "got: {body}");
     assert!(mutated);

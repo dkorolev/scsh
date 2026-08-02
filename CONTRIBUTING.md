@@ -167,7 +167,7 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   (to catch SIGINT/SIGTERM safely — std has no signal API); all of its own logic is
   standard-library only, so the binary stays self-contained.
 - **`git`** on `PATH` — required by `scsh` itself and by the integration tests.
-- **A container runtime** for real runs and for integration-test preflight:
+- **A container runtime** for agent runs and for integration-test preflight (host-only workflows need none):
   Apple `container` → `docker` → `podman` on macOS; `docker` → `podman` elsewhere.
   Override the detected runtime with `SCSH_RUNTIME=<docker|podman|container>`.
   **Apple Containers Dockerfile size:** Apple's builder rejects Dockerfiles ≥ 16 KB
@@ -338,11 +338,12 @@ reads like it belongs.
 - **Strict, all-at-once validation.** Unknown keys, a missing `skills` block, wrong
   types, empty values, a malformed env spec, a result path that escapes the repo — all
   rejected, all listed together.
-- **The skill never touches your working tree.** A run operates on a throwaway
+- **An agent step never touches your working tree.** It operates on a throwaway
   clone in the system temp dir; the only thing written back into your real repo
   is the collected `result`, and only into the gitignored `tmp/` (existing files
-  are backed up to `<name>.bak.YYYYMMDD-HHMMSS-utc`, never clobbered). Don't add
-  code paths that write elsewhere into the user's repo.
+  are backed up to `<name>.bak.YYYYMMDD-HHMMSS-utc`, never clobbered). A workflow
+  host step is the explicit exception: its configured `run:` command executes in
+  the caller's checkout with the side effects that command requests.
 - **Least privilege.** The container runs as a non-root `agent` user whose
   UID/GID match the host user's, so files it writes in the mount are owned by you.
 - **Match the surrounding style.** Follow the naming, comment density, and idiom

@@ -207,7 +207,7 @@ fn harness_stop_strip(store: &Store, now: u64) -> String {
     }
     for p in &s.procs {
       let live = p.status == ProcStatus::Running || p.status == ProcStatus::Waiting;
-      if live && p.kind == ProcKind::Skill {
+      if live && p.kind == ProcKind::Skill && !p.is_host_step() {
         if let Some(h) = p.harness.as_deref().filter(|h| !h.is_empty()) {
           let target = if matches!(
             p.fail_reason.as_deref(),

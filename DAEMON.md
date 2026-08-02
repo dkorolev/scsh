@@ -312,12 +312,13 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   process when its PID is known, and mark incomplete procs failed with `force_stopped`.
   Idempotent on an already-ended session.
 - `POST /api/v1/proc/stop` — body `{"session":"…","proc":N}`. Force-stop ONE run's container;
-  the rest of the job continues. The proc settles failed with `force_stopped`.
+  the rest of the job continues. The proc settles failed with `force_stopped`. Host steps are
+  refused (400); stop their whole job so the owning `scsh run` can terminate the process group.
 - `POST /api/v1/proc/restart` — body `{"session":"…","proc":N}`. Force-restart ONE skill run:
   record a restart marker for the owning `scsh run`, kill this attempt's container, and settle
   the proc failed with `force_restarted`; the runner consumes the marker and respawns the route
-  as a fresh attempt (a new proc row that supersedes this one). Builds and annotations are
-  refused (400), as is a session whose run client is gone (409) — there is no runner left to
+  as a fresh attempt (a new proc row that supersedes this one). Builds, annotations, and host
+  steps are refused (400), as is a session whose run client is gone (409) — there is no runner left to
   consume the marker, so the browser renders that route's restart blocked rather than offering
   a request it knows would be refused.
 - `POST /api/v1/repos/open` — body `{"path": "…"}`. Validate the path is a git repo, report
@@ -333,8 +334,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   run (exactly `session/stop`; idempotent on an ended job), then start the SAME job fresh from
   the session's persisted start recipe (`$SCSH_HOME/sessions/<id>/start.json` — def/profile +
   params; both web- and CLI-started runs write one). `mode:"resume"` (workflow jobs only)
-  spawns the fresh run with `--resume-from <old id>`, so every step the old session completed
-  is restored from its persisted result and only the unfinished steps run; the default
+  spawns the fresh run with `--resume-from <old id>`. Validated agent results are restored, except
+  that host steps and every agent step downstream of one rerun; the default
   (`"scratch"` or absent) runs everything anew. Answers `{"ok":true,"session":"<new id>"}`.
   The failed-job page's "Restart remaining" / "Restart from scratch" buttons call this. The
   old session records `restarted_as` and the chain's supervisor state (attempt count,

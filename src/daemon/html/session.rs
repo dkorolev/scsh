@@ -414,7 +414,7 @@ fn proc_accepts_kill(session: &Session, now: u64, proc: &crate::daemon::model::P
 /// annotations have no respawn path — and only while the run can still be acted on.
 fn proc_restart_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::ProcKind;
-  if proc.kind != ProcKind::Skill || !proc_accepts_kill(session, now, proc) {
+  if proc.kind != ProcKind::Skill || proc.is_host_step() || !proc_accepts_kill(session, now, proc) {
     return String::new();
   }
   format!(
@@ -428,7 +428,7 @@ fn proc_restart_btn_html(session: &Session, now: u64, proc: &crate::daemon::mode
 /// live session — finished/zombie steps omit it (no grayed-out stub).
 fn proc_kill_btn_html(session: &Session, now: u64, proc: &crate::daemon::model::ProcRecord) -> String {
   use crate::daemon::model::ProcKind;
-  if !proc_accepts_kill(session, now, proc) {
+  if proc.is_host_step() || !proc_accepts_kill(session, now, proc) {
     return String::new();
   }
   format!(

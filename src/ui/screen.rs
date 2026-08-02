@@ -37,7 +37,9 @@ use crossterm::{cursor, queue, style::Print, terminal};
 
 use super::clock::{clean_line, format_elapsed};
 use super::live::{Model, Row, Status, Sty};
-use super::signals::{isolate_child, register_child, terminate_all, terminate_child_group, unregister_child};
+use super::signals::{
+  child_group_exists, isolate_child, register_child, terminate_all, terminate_child_group, unregister_child,
+};
 use super::TICK;
 
 /// Optional session-browser event sink (see [`crate::daemon::Client`]).
@@ -272,6 +274,46 @@ pub struct ExecPlace<'a> {
   pub env: &'a [(String, String)],
 }
 
+/// Maximum output retained and forwarded for a child whose result is a bounded output tail.
+#[derive(Clone, Copy)]
+pub struct OutputLimit {
+  pub lines: usize,
+  pub bytes: usize,
+}
+
+/// Read one logical line while retaining only its newest `max_bytes` bytes.
+fn read_line_tail<R: BufRead>(reader: &mut R, max_bytes: usize) -> std::io::Result<Option<(String, bool)>> {
+  let mut kept = Vec::with_capacity(max_bytes.min(8192));
+  let mut read_any = false;
+  let mut trimmed = false;
+  loop {
+    let available = reader.fill_buf()?;
+    if available.is_empty() {
+      return Ok(read_any.then(|| (String::from_utf8_lossy(&kept).into_owned(), trimmed)));
+    }
+    let end = available.iter().position(|byte| *byte == b'\n').map(|i| i + 1).unwrap_or(available.len());
+    let chunk = &available[..end];
+    read_any = true;
+    if chunk.len() >= max_bytes {
+      trimmed |= !kept.is_empty() || chunk.len() > max_bytes;
+      kept.clear();
+      kept.extend_from_slice(&chunk[chunk.len() - max_bytes..]);
+    } else {
+      let overflow = kept.len().saturating_add(chunk.len()).saturating_sub(max_bytes);
+      if overflow > 0 {
+        kept.drain(..overflow);
+        trimmed = true;
+      }
+      kept.extend_from_slice(chunk);
+    }
+    let complete = chunk.last() == Some(&b'\n');
+    reader.consume(end);
+    if complete {
+      return Ok(Some((String::from_utf8_lossy(&kept).into_owned(), trimmed)));
+    }
+  }
+}
+
 /// This decides only WHEN TO STOP WAITING, never whether the run succeeded. The caller's normal
 /// collection path — copy out, validate against the workflow schema, bounded correction retry —
 /// stays authoritative, so an early stop can never launder a bad result into a pass.
@@ -447,17 +489,16 @@ fn kill_child_tree(child: &mut std::process::Child) {
 /// abandoning two blocked reader threads is strictly better than never returning.
 const PUMP_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
-/// Join the output-reader threads. Unbounded for a child that exited on its own — its pipes are
-/// closed, so the readers are already finishing — and bounded by [`PUMP_DRAIN_GRACE`] after a
-/// kill, where that guarantee is exactly what has been lost. Abandoned readers may still append
-/// a few late lines to a finished proc's buffer; a stale tail is a cosmetic cost, a hung run
-/// is not.
-fn drain_pumps(pumps: Vec<JoinHandle<()>>, killed: Killed) {
-  if killed == Killed::No {
+/// Join the output-reader threads. A command with no watchdog waits normally. Timed commands use
+/// their remaining wall-clock budget, and killed commands use [`PUMP_DRAIN_GRACE`]. Abandoned
+/// readers may still append a few late lines to a finished proc's buffer; a stale tail is a
+/// cosmetic cost, a hung run is not.
+fn drain_pumps(pumps: Vec<JoinHandle<()>>, deadline: Option<Duration>) -> bool {
+  if deadline.is_none() {
     for p in pumps {
       let _ = p.join();
     }
-    return;
+    return true;
   }
   let (tx, rx) = std::sync::mpsc::channel::<()>();
   let joiner = thread::spawn(move || {
@@ -466,8 +507,11 @@ fn drain_pumps(pumps: Vec<JoinHandle<()>>, killed: Killed) {
     }
     let _ = tx.send(());
   });
-  if rx.recv_timeout(PUMP_DRAIN_GRACE).is_err() {
+  if rx.recv_timeout(deadline.unwrap()).is_err() {
     drop(joiner); // detach: the readers keep waiting on a pipe nobody will close
+    false
+  } else {
+    true
   }
 }
 
@@ -537,7 +581,7 @@ impl Proc {
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
-    let (status, _killed, last) = self.exec(program, args, None, None, None, None, None)?;
+    let (status, _killed, last, _trimmed) = self.exec(program, args, None, None, None, None, None, None)?;
     Ok((status.success(), last))
   }
 
@@ -553,7 +597,7 @@ impl Proc {
     &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
     done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
-    let (status, killed, last) = self.exec(program, args, None, timeout, watch, done, None)?;
+    let (status, killed, last, _trimmed) = self.exec(program, args, None, timeout, watch, done, None, None)?;
     Ok((status.success(), killed, last))
   }
 
@@ -561,10 +605,11 @@ impl Proc {
   /// reporting the child's exact **exit code**. For a workflow host step, whose non-zero exit
   /// is a result to hand downstream rather than a failure of the step itself.
   pub fn run_in(
-    &self, program: &str, args: &[String], place: &ExecPlace, timeout: Option<Duration>,
-  ) -> std::io::Result<(Option<i32>, Killed, Option<String>)> {
-    let (status, killed, last) = self.exec(program, args, None, timeout, None, None, Some(place))?;
-    Ok((status.code(), killed, last))
+    &self, program: &str, args: &[String], place: &ExecPlace, timeout: Option<Duration>, output_limit: OutputLimit,
+  ) -> std::io::Result<(Option<i32>, Killed, Option<String>, bool)> {
+    let (status, killed, last, trimmed) =
+      self.exec(program, args, None, timeout, None, None, Some(place), Some(output_limit))?;
+    Ok((status.code(), killed, last, trimmed))
   }
 
   /// Spawn `program args`, pump both output streams into the model as timestamped lines,
@@ -578,7 +623,8 @@ impl Proc {
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
     watch: Option<&ActivityWatch>, done: Option<&DoneWatch>, place: Option<&ExecPlace>,
-  ) -> std::io::Result<(std::process::ExitStatus, Killed, Option<String>)> {
+    output_limit: Option<OutputLimit>,
+  ) -> std::io::Result<(std::process::ExitStatus, Killed, Option<String>, bool)> {
     let started = self.start_instant();
     let mut command = Command::new(program);
     command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
@@ -593,12 +639,28 @@ impl Proc {
     register_child(pid);
 
     let last = Arc::new(Mutex::new(None::<String>));
+    let output_trimmed = Arc::new(AtomicBool::new(false));
+    let output_forwarded = Arc::new(Mutex::new((0usize, 0usize)));
     let mut pumps: Vec<JoinHandle<()>> = Vec::new();
     if let Some(out) = child.stdout.take() {
-      pumps.push(self.pump(out, started, Arc::clone(&last)));
+      pumps.push(self.pump(
+        out,
+        started,
+        Arc::clone(&last),
+        output_limit,
+        Arc::clone(&output_trimmed),
+        Arc::clone(&output_forwarded),
+      ));
     }
     if let Some(err) = child.stderr.take() {
-      pumps.push(self.pump(err, started, Arc::clone(&last)));
+      pumps.push(self.pump(
+        err,
+        started,
+        Arc::clone(&last),
+        output_limit,
+        Arc::clone(&output_trimmed),
+        Arc::clone(&output_forwarded),
+      ));
     }
     // Feed stdin only after the pumps are draining output, so a large payload can't deadlock
     // against a full output pipe. Dropping the handle signals EOF.
@@ -667,10 +729,24 @@ impl Proc {
         thread::sleep(Duration::from_millis(100));
       }
     };
+    let drain_deadline = match killed {
+      Killed::No => timeout.map(|limit| limit.saturating_sub(started.elapsed())),
+      _ => Some(PUMP_DRAIN_GRACE),
+    };
+    let drained = drain_pumps(pumps, drain_deadline);
+    if !drained && killed == Killed::No {
+      // The direct child exited but a descendant retained its output pipes. The command is not
+      // complete until those pipes close, so the same wall-clock timeout tears its group down.
+      terminate_child_group(pid);
+      killed = Killed::Timeout;
+    } else if killed == Killed::No && child_group_exists(pid) {
+      // A background descendant may close or redirect the inherited pipes. It must still not
+      // escape a completed command and continue mutating the caller's machine.
+      terminate_child_group(pid);
+    }
     unregister_child(pid);
-    drain_pumps(pumps, killed);
     let last = last.lock().unwrap().clone();
-    Ok((status, killed, last))
+    Ok((status, killed, last, output_trimmed.load(Ordering::Relaxed)))
   }
 
   /// Finish green: set the proc ✓, freeze its clock, and attach an optional detail. Off-TTY,
@@ -734,24 +810,53 @@ impl Proc {
   /// model (stamped relative to `started`) and onto the header note. Off-TTY a tailing proc
   /// echoes the line so the build log survives in pipes/CI.
   fn pump<R: Read + Send + 'static>(
-    &self, reader: R, started: Instant, last: Arc<Mutex<Option<String>>>,
+    &self, reader: R, started: Instant, last: Arc<Mutex<Option<String>>>, output_limit: Option<OutputLimit>,
+    output_trimmed: Arc<AtomicBool>, output_forwarded: Arc<Mutex<(usize, usize)>>,
   ) -> JoinHandle<()> {
     let (i, attended, tail, model, sink) =
       (self.i, self.attended, self.tail, Arc::clone(&self.model), self.sink.clone());
     thread::spawn(move || {
-      for line in BufReader::new(reader).lines() {
-        let Ok(raw) = line else { break };
-        let cleaned = clean_line(&raw);
+      let process_line = |raw: String, read_trimmed: bool| {
+        if read_trimmed {
+          output_trimmed.store(true, Ordering::Relaxed);
+        }
+        let mut cleaned = clean_line(&raw);
         if cleaned.is_empty() {
-          continue;
+          return;
+        }
+        if let Some(limit) = output_limit {
+          if cleaned.len() > limit.bytes {
+            let mut cut = cleaned.len() - limit.bytes;
+            while !cleaned.is_char_boundary(cut) {
+              cut += 1;
+            }
+            cleaned = cleaned[cut..].to_string();
+            output_trimmed.store(true, Ordering::Relaxed);
+          }
         }
         let at = started.elapsed().as_secs_f64();
-        if let Some(s) = &sink {
+        let forward = output_limit.is_none_or(|limit| {
+          let mut forwarded = output_forwarded.lock().unwrap();
+          if forwarded.0 >= limit.lines || forwarded.1.saturating_add(cleaned.len()) > limit.bytes {
+            false
+          } else {
+            forwarded.0 += 1;
+            forwarded.1 += cleaned.len();
+            true
+          }
+        });
+        if let Some(s) = sink.as_ref().filter(|_| forward) {
           s.proc_line(i, at, &cleaned);
         }
         {
           let mut m = model.lock().unwrap();
-          m.push_line(i, at, cleaned.clone());
+          if let Some(limit) = output_limit {
+            if m.push_line_bounded(i, at, cleaned.clone(), limit.lines, limit.bytes) {
+              output_trimmed.store(true, Ordering::Relaxed);
+            }
+          } else {
+            m.push_line(i, at, cleaned.clone());
+          }
           if attended {
             m.set_note(i, Some(cleaned.clone()));
           }
@@ -760,6 +865,18 @@ impl Proc {
           eprintln!("  {}", style(&cleaned).dim());
         }
         *last.lock().unwrap() = Some(cleaned);
+      };
+
+      let mut reader = BufReader::new(reader);
+      if let Some(limit) = output_limit {
+        while let Ok(Some((raw, trimmed))) = read_line_tail(&mut reader, limit.bytes) {
+          process_line(raw, trimmed);
+        }
+      } else {
+        for line in reader.lines() {
+          let Ok(raw) = line else { break };
+          process_line(raw, false);
+        }
       }
     })
   }
@@ -1118,6 +1235,17 @@ mod tests {
   }
 
   #[test]
+  fn bounded_line_reader_keeps_the_tail_without_buffering_the_whole_line() {
+    let input = vec![b'x'; 100_000];
+    let mut reader = BufReader::new(std::io::Cursor::new(input));
+    let (line, trimmed) = read_line_tail(&mut reader, 1024).unwrap().expect("one unterminated line");
+    assert!(trimmed);
+    assert_eq!(line.len(), 1024);
+    assert!(line.bytes().all(|byte| byte == b'x'));
+    assert!(read_line_tail(&mut reader, 1024).unwrap().is_none());
+  }
+
+  #[test]
   fn restarting_one_logical_proc_preserves_its_original_clock() {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("schema repair", false);
@@ -1140,17 +1268,15 @@ mod tests {
     assert!(!ok, "the 5s sleep must be killed by the 150ms timeout");
   }
 
-  /// Whether `pid` still exists (`kill -0`), for the process-tree teardown test below.
+  /// Whether `pid` is still running, excluding a dead process waiting to be reaped.
   #[cfg(unix)]
-  fn process_alive(pid: u32) -> bool {
-    std::process::Command::new("kill")
-      .arg("-0")
-      .arg(pid.to_string())
-      .stdout(Stdio::null())
-      .stderr(Stdio::null())
-      .status()
-      .map(|s| s.success())
-      .unwrap_or(false)
+  fn process_running(pid: u32) -> bool {
+    let Ok(output) =
+      std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).stderr(Stdio::null()).output()
+    else {
+      return false;
+    };
+    output.status.success() && !String::from_utf8_lossy(&output.stdout).trim_start().starts_with('Z')
   }
 
   #[cfg(unix)]
@@ -1175,10 +1301,46 @@ mod tests {
     let child: u32 = line.trim_start_matches("child=").trim().parse().expect("a pid");
     // The group SIGKILL is asynchronous and init reaps at its own pace; poll rather than race.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while process_alive(child) && Instant::now() < deadline {
+    while process_running(child) && Instant::now() < deadline {
       thread::sleep(Duration::from_millis(100));
     }
-    assert!(!process_alive(child), "pid {child} outlived the kill — it reached `sh` only");
+    assert!(!process_running(child), "pid {child} outlived the kill — it reached `sh` only");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn proc_run_watched_times_out_descendants_after_the_shell_exits() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("detached tree", false);
+    p.start();
+    let began = Instant::now();
+    let (_ok, killed, _) = p
+      .run_watched("sh", &["-c".to_string(), "sleep 45 &".to_string()], Some(Duration::from_millis(300)), None, None)
+      .unwrap();
+    assert_eq!(killed, Killed::Timeout);
+    assert!(began.elapsed() < Duration::from_secs(30), "returned in {:?}, not on the timeout's clock", began.elapsed());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn proc_run_watched_cleans_up_background_descendants_that_closed_the_pipes() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("redirected tree", false);
+    p.start();
+    let (ok, killed, _) = p
+      .run_watched(
+        "sh",
+        &["-c".to_string(), "sleep 45 >/dev/null 2>&1 & printf 'child=%s\\n' \"$!\"".to_string()],
+        Some(Duration::from_secs(5)),
+        None,
+        None,
+      )
+      .unwrap();
+    assert!(ok);
+    assert_eq!(killed, Killed::No);
+    let line = p.tail_lines(20).into_iter().find(|line| line.starts_with("child=")).expect("child pid");
+    let child: u32 = line.trim_start_matches("child=").parse().unwrap();
+    assert!(!process_running(child), "background pid {child} survived its completed shell");
   }
 
   #[test]
