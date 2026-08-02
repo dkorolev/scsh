@@ -37,7 +37,7 @@ use crossterm::{cursor, queue, style::Print, terminal};
 
 use super::clock::{clean_line, format_elapsed};
 use super::live::{Model, Row, Status, Sty};
-use super::signals::{isolate_child, register_child, terminate_all, unregister_child};
+use super::signals::{isolate_child, register_child, terminate_all, terminate_child_group, unregister_child};
 use super::TICK;
 
 /// Optional session-browser event sink (see [`crate::daemon::Client`]).
@@ -421,6 +421,48 @@ pub enum Killed {
   Done,
 }
 
+/// Stop a watchdog-killed child and everything it started.
+///
+/// Killing the direct child is not enough for anything that forks — a `sh -c` wrapper around a
+/// build or a test suite is exactly that. Its descendants would survive, keep running on the
+/// developer's machine, and keep the stdout/stderr pipes open, so [`drain_pumps`] below would
+/// wait forever and a detected timeout would present as a hang. Signal the whole process group
+/// (which [`isolate_child`] made this child the leader of), then the child itself — the latter
+/// is also the only path off unix, where there are no groups.
+fn kill_child_tree(child: &mut std::process::Child) {
+  terminate_child_group(child.id());
+  let _ = child.kill();
+}
+
+/// How long the output readers get to finish after a child was killed. A descendant that put
+/// itself in a NEW session escapes even a group signal and can hold the pipes open indefinitely;
+/// abandoning two blocked reader threads is strictly better than never returning.
+const PUMP_DRAIN_GRACE: Duration = Duration::from_secs(5);
+
+/// Join the output-reader threads. Unbounded for a child that exited on its own — its pipes are
+/// closed, so the readers are already finishing — and bounded by [`PUMP_DRAIN_GRACE`] after a
+/// kill, where that guarantee is exactly what has been lost. Abandoned readers may still append
+/// a few late lines to a finished proc's buffer; a stale tail is a cosmetic cost, a hung run
+/// is not.
+fn drain_pumps(pumps: Vec<JoinHandle<()>>, killed: Killed) {
+  if killed == Killed::No {
+    for p in pumps {
+      let _ = p.join();
+    }
+    return;
+  }
+  let (tx, rx) = std::sync::mpsc::channel::<()>();
+  let joiner = thread::spawn(move || {
+    for p in pumps {
+      let _ = p.join();
+    }
+    let _ = tx.send(());
+  });
+  if rx.recv_timeout(PUMP_DRAIN_GRACE).is_err() {
+    drop(joiner); // detach: the readers keep waiting on a pipe nobody will close
+  }
+}
+
 /// A worker's handle to one proc: mark it started, run a child while pumping its output into the
 /// model as timestamped lines, and finish it ✓/✗.
 #[derive(Clone)]
@@ -509,6 +551,10 @@ impl Proc {
   /// Spawn `program args`, pump both output streams into the model as timestamped lines,
   /// optionally feed `stdin` then EOF, and optionally kill on `timeout`. The single core the
   /// public `run*` methods delegate to.
+  ///
+  /// A child killed by one of the watchdogs is taken down as a whole process TREE, and the
+  /// reader threads are then drained under a deadline — see [`kill_child_tree`] and
+  /// [`PUMP_DRAIN_GRACE`]. Both exist so "the watchdog fired" can never become "scsh hung".
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
     watch: Option<&ActivityWatch>, done: Option<&DoneWatch>,
@@ -555,7 +601,7 @@ impl Proc {
         }
         if let Some(limit) = timeout {
           if started.elapsed() >= limit {
-            let _ = child.kill();
+            kill_child_tree(&mut child);
             killed = Killed::Timeout;
             break child.wait()?;
           }
@@ -566,7 +612,7 @@ impl Proc {
         // poll until the file actually settles.
         if let Some(d) = done {
           if quiescence.as_mut().is_some_and(|q| q.poll(d.quiet_for)) && (d.confirm)() {
-            let _ = child.kill();
+            kill_child_tree(&mut child);
             killed = Killed::Done;
             break child.wait()?;
           }
@@ -583,13 +629,13 @@ impl Proc {
             let limit = if saw_novelty { su.stall } else { su.silence };
             let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
             if stall_began_in_window && last_activity.elapsed() >= limit {
-              let _ = child.kill();
+              kill_child_tree(&mut child);
               killed = Killed::StartupStalled { silent: !saw_novelty };
               break child.wait()?;
             }
           }
           if last_activity.elapsed() >= w.limit {
-            let _ = child.kill();
+            kill_child_tree(&mut child);
             killed = Killed::Inactive;
             break child.wait()?;
           }
@@ -598,9 +644,7 @@ impl Proc {
       }
     };
     unregister_child(pid);
-    for p in pumps {
-      let _ = p.join();
-    }
+    drain_pumps(pumps, killed);
     let last = last.lock().unwrap().clone();
     Ok((status.success(), killed, last))
   }
@@ -1070,6 +1114,47 @@ mod tests {
       p.run_watched("sleep", &["5".to_string()], Some(Duration::from_millis(150)), None, None).unwrap();
     assert_eq!(killed, Killed::Timeout);
     assert!(!ok, "the 5s sleep must be killed by the 150ms timeout");
+  }
+
+  /// Whether `pid` still exists (`kill -0`), for the process-tree teardown test below.
+  #[cfg(unix)]
+  fn process_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+      .arg("-0")
+      .arg(pid.to_string())
+      .stdout(Stdio::null())
+      .stderr(Stdio::null())
+      .status()
+      .map(|s| s.success())
+      .unwrap_or(false)
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn proc_run_watched_kills_the_childs_descendants_too() {
+    // The realistic shape of a killed child: `sh` is not the process doing the work. Here it
+    // forks a long sleeper and waits on it, as `make` forks a compiler. Killing `sh` alone
+    // would leave that sleeper running AND holding the output pipe, so the pump threads would
+    // never see EOF — the watchdog would fire and `exec` would still never return. Both halves
+    // are asserted: it comes back on the timeout's clock, and nothing is left behind.
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("tree", false);
+    p.start();
+    let script = "sleep 45 & printf 'child=%s\\n' \"$!\"; wait".to_string();
+    let began = Instant::now();
+    let (_ok, killed, _) =
+      p.run_watched("sh", &["-c".to_string(), script], Some(Duration::from_millis(300)), None, None).unwrap();
+    assert_eq!(killed, Killed::Timeout);
+    assert!(began.elapsed() < Duration::from_secs(30), "returned in {:?}, not on the sleeper's clock", began.elapsed());
+
+    let line = p.tail_lines(20).into_iter().find(|l| l.starts_with("child=")).expect("the fork announced its pid");
+    let child: u32 = line.trim_start_matches("child=").trim().parse().expect("a pid");
+    // The group SIGKILL is asynchronous and init reaps at its own pace; poll rather than race.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_alive(child) && Instant::now() < deadline {
+      thread::sleep(Duration::from_millis(100));
+    }
+    assert!(!process_alive(child), "pid {child} outlived the kill — it reached `sh` only");
   }
 
   #[test]

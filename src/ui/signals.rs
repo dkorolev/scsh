@@ -24,8 +24,8 @@ use signal_hook::iterator::Signals;
 /// Guards [`install`] so the signal thread is started exactly once.
 static INSTALLED: AtomicBool = AtomicBool::new(false);
 
-/// PIDs of scsh's live children (each in its own process group). On abort we SIGTERM these,
-/// wait one second, then SIGKILL any that remain.
+/// PIDs of scsh's live children (each in its own process group). On abort we SIGTERM these
+/// GROUPS, wait one second, then SIGKILL any that remain — see [`signal_child_group`].
 static CHILD_PIDS: Mutex<Vec<u32>> = Mutex::new(Vec::new());
 
 /// Named containers started by skill runs (`runtime`, `--name`). On abort we stop each one
@@ -66,6 +66,42 @@ pub fn isolate_child(cmd: &mut Command) {
   #[cfg(not(unix))]
   let _ = cmd;
 }
+
+/// Signal the whole process GROUP a child leads (`kill -<sig> -<pid>` — the negative pid is the
+/// group, which [`isolate_child`] made this child the leader of).
+///
+/// Signalling the child alone is not enough for anything that forks. A workflow host step runs
+/// `sh -c "make gate-all"`; killing `sh` leaves `make`, its compiler, and its `docker compose`
+/// children alive on the developer's machine — and, worse, still holding the stdout/stderr pipes
+/// scsh is reading, so the reader threads never see EOF. Group-signalling is what makes "the
+/// timeout killed it" true rather than aspirational.
+///
+/// No-op off unix, where there are no process groups; callers signal the child itself as well.
+pub fn signal_child_group(pid: u32, sig: &str) {
+  #[cfg(unix)]
+  {
+    let _ = Command::new("kill")
+      .arg(format!("-{sig}"))
+      .arg(format!("-{pid}"))
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status();
+  }
+  #[cfg(not(unix))]
+  let _ = (pid, sig);
+}
+
+/// Take down one child and everything it started: SIGTERM its process group, allow a short grace
+/// so a build can remove its temporary files, then SIGKILL the group. Used both by the abort path
+/// and by [`super::screen`]'s watchdogs when a child overruns its timeout.
+pub fn terminate_child_group(pid: u32) {
+  signal_child_group(pid, "TERM");
+  thread::sleep(GROUP_KILL_GRACE);
+  signal_child_group(pid, "KILL");
+}
+
+/// How long a SIGTERM'd process group has to exit before it is SIGKILLed.
+const GROUP_KILL_GRACE: Duration = Duration::from_millis(500);
 
 /// Track a live child so abort can take it down.
 pub fn register_child(pid: u32) {
@@ -114,16 +150,20 @@ impl Drop for ContainerGuard {
   }
 }
 
-/// SIGTERM every registered child, wait one second, then SIGKILL. Uses the `kill` command.
+/// SIGTERM every registered child's process GROUP, wait one second, then SIGKILL. Uses the `kill`
+/// command. The group, not the bare pid: see [`signal_child_group`] — a workflow host step's
+/// `sh -c` wrapper is rarely the process actually doing the work.
 pub fn terminate_children() {
   let pids = CHILD_PIDS.lock().map(|v| v.clone()).unwrap_or_default();
   for pid in &pids {
+    signal_child_group(*pid, "TERM");
     let _ = Command::new("kill").arg("-TERM").arg(pid.to_string()).status();
   }
   if !pids.is_empty() {
     thread::sleep(Duration::from_secs(1));
   }
   for pid in &pids {
+    signal_child_group(*pid, "KILL");
     let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
   }
 }
