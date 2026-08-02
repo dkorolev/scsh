@@ -38,7 +38,7 @@ use crossterm::{cursor, queue, style::Print, terminal};
 use super::clock::{clean_line, format_elapsed};
 use super::live::{Model, Row, Status, Sty};
 use super::signals::{
-  child_group_exists, isolate_child, register_child, terminate_all, terminate_child_group, unregister_child,
+  isolate_child, orphaned_child_group, register_child, terminate_all, terminate_child_group, unregister_child,
 };
 use super::TICK;
 
@@ -719,12 +719,17 @@ impl Proc {
       _ => Some(PUMP_DRAIN_GRACE),
     };
     let drained = drain_pumps(pumps, drain_deadline);
+    // Both sweeps run after the leader was reaped, so both ask [`orphaned_child_group`] whether
+    // the group is still ours before signalling it — a recycled pid must not cost a stranger a
+    // SIGKILL.
     if !drained && killed == Killed::No {
       // The direct child exited but a descendant retained its output pipes. The command is not
       // complete until those pipes close, so the same wall-clock timeout tears its group down.
-      terminate_child_group(pid);
+      if orphaned_child_group(pid) {
+        terminate_child_group(pid);
+      }
       killed = Killed::Timeout;
-    } else if killed == Killed::No && child_group_exists(pid) {
+    } else if killed == Killed::No && orphaned_child_group(pid) {
       // A background descendant may close or redirect the inherited pipes. It must still not
       // escape a completed command and continue mutating the caller's machine.
       terminate_child_group(pid);
