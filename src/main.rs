@@ -3011,7 +3011,20 @@ fn run_workflow(
     if ran_host_steps {
       // A host command may intentionally commit or move a ref. Later agent waves must clone the
       // resulting revision, not the tip captured before the host step ran.
-      caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|tip| tip.trim().to_string());
+      match git_capture(root, &["rev-parse", "HEAD"]).map(|tip| tip.trim().to_string()) {
+        Some(tip) => caller_tip = Some(tip),
+        // Losing the tip silently disables commit integration for every later step — they fall
+        // through to the cached-commits arm and simply bring nothing in. A host command can do
+        // this to a repo (an interrupted rebase, a checkout gone sideways), so say it out loud
+        // rather than letting the rest of the workflow quietly stop landing work.
+        None => {
+          caller_tip = None;
+          hint(&format!(
+            "could not read HEAD in {} after the host step — later steps' commits will not be integrated",
+            root.display()
+          ));
+        }
+      }
     }
 
     // Record each step's outcome in definition order; the first failure (run failure or an
