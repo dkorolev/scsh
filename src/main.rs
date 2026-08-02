@@ -2086,10 +2086,14 @@ fn run_host_step(
   if let Some(dir) = result_path.parent() {
     let _ = std::fs::create_dir_all(dir);
   }
+  // Start from no result at all, so "the command exited 0 but wrote nothing" can never read as
+  // a pass on whatever happened to be at this path already.
+  let _ = std::fs::remove_file(&result_path);
   let mut env = inputs;
   env.push(("SCSH_STEP".to_string(), step.id.clone()));
-  // A self-reporting command writes here; for the synthesized form scsh writes the same path
-  // afterwards. Absolute, unlike an agent step's container-relative one — this runs on the host.
+  // A self-reporting command writes here. The synthesized form OVERWRITES this path afterwards
+  // with scsh's own verdict, so a check-form command that writes it is writing to /dev/null with
+  // extra steps — `help def` says so. Absolute, unlike an agent step's container-relative one.
   env.push(("SCSH_RESULT".to_string(), result_path.to_string_lossy().into_owned()));
   let place = ui::screen::ExecPlace { cwd: root, env: &env };
   let args = vec!["-c".to_string(), host.command.clone()];
@@ -9941,6 +9945,8 @@ fn print_help_defs() {
      A NON-ZERO EXIT IS A RESULT, NOT A FAILURE: the step publishes its verdict and the
      workflow continues, which is what lets a `do-while` fix→gate→fix loop read the failure
      and repair it. Only failing to start, or overrunning `timeout:`, fails the step.
+     `$SCSH_RESULT` is set but scsh owns it here — it overwrites the file with the verdict
+     above, so a check-form command writing it is writing nothing. Declare `output:` instead.
 
   2. With `output:` — a DECISION. The command writes `$SCSH_RESULT` (scsh sets it to an
      absolute path) and scsh validates that JSON against the declared schema, exactly as it
@@ -11715,6 +11721,15 @@ Subject: [PATCH] add: 2 + 3 = 5
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&empty.steps[0], "empty", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_MISSING));
+
+    // Same, but with something already at $SCSH_RESULT: a silent command must not inherit a
+    // result it never wrote, so the path is cleared before the command runs.
+    let stale = dir.join("tmp/scsh/sess/stale.json");
+    std::fs::write(&stale, r#"{"story_id":"US-000-00","SCSH_LOOP_BREAK":true}"#).unwrap();
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&empty.steps[0], "stale", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_MISSING), "a stale result is not a verdict");
+    assert!(!stale.exists(), "the stale file is gone, not merely ignored");
 
     // Wrong type for a declared field is caught here, not by the step that consumes it.
     let mistyped = host_step_def("printf '{\"story_id\":1,\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"", schema);
