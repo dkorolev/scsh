@@ -2637,6 +2637,12 @@ fn workflow_needs_runtime(def: &harness_def::HarnessDef) -> bool {
 }
 
 /// Steps whose old results cannot be restored because this run re-executes a host dependency.
+///
+/// Scoped to `--resume-from`, deliberately. Within a single run the content-addressed cache
+/// already accounts for a host step: its verdict reaches downstream steps as `inputs`, which are
+/// part of the cache key, and anything it committed moves the caller tip that key is computed
+/// from. Only a RESTORED result is unsafe — it was validated against a checkout the host command
+/// has since been re-run against.
 fn workflow_resume_invalidated_steps(def: &harness_def::HarnessDef) -> std::collections::BTreeSet<String> {
   let mut invalid: std::collections::BTreeSet<String> =
     def.steps.iter().filter(|step| step.host().is_some()).map(|step| step.id.clone()).collect();
@@ -2964,7 +2970,7 @@ fn run_workflow(
           let caller_tip_ref = wave_caller_tip.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
-          let cache_allowed = !resume_invalidated.contains(&step.id);
+          let cache_allowed = resume.is_none() || !resume_invalidated.contains(&step.id);
           scope.spawn(move || {
             let run = run_workflow_step_with_retries(
               inv,
