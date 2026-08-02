@@ -489,6 +489,25 @@ fn kill_child_tree(child: &mut std::process::Child) {
 /// abandoning two blocked reader threads is strictly better than never returning.
 const PUMP_DRAIN_GRACE: Duration = Duration::from_secs(5);
 
+/// The floor under a self-exited command's drain deadline. When the child is really gone its
+/// pipes are already at EOF, so the readers join in microseconds and this costs nothing; it exists
+/// only so a command finishing on the last tick of its budget is not misread as a timeout because
+/// the joiner thread lost a scheduling race.
+const PUMP_DRAIN_CLOSE_GRACE: Duration = Duration::from_millis(250);
+
+/// How long the readers get to finish, given how the child ended and what is left of its budget.
+///
+/// A killed child gets [`PUMP_DRAIN_GRACE`]. One that exited on its own gets the remainder of its
+/// wall-clock budget — the command is not over until its pipes close — but never less than
+/// [`PUMP_DRAIN_CLOSE_GRACE`], so finishing on the last tick of a timeout cannot be misreported as
+/// overrunning it. An untimed command waits as long as it takes (`None`).
+fn drain_deadline(killed: Killed, timeout: Option<Duration>, elapsed: Duration) -> Option<Duration> {
+  match killed {
+    Killed::No => timeout.map(|limit| limit.saturating_sub(elapsed).max(PUMP_DRAIN_CLOSE_GRACE)),
+    _ => Some(PUMP_DRAIN_GRACE),
+  }
+}
+
 /// Join the output-reader threads. A command with no watchdog waits normally. Timed commands use
 /// their remaining wall-clock budget, and killed commands use [`PUMP_DRAIN_GRACE`]. Abandoned
 /// readers may still append a few late lines to a finished proc's buffer; a stale tail is a
@@ -714,11 +733,7 @@ impl Proc {
         thread::sleep(Duration::from_millis(100));
       }
     };
-    let drain_deadline = match killed {
-      Killed::No => timeout.map(|limit| limit.saturating_sub(started.elapsed())),
-      _ => Some(PUMP_DRAIN_GRACE),
-    };
-    let drained = drain_pumps(pumps, drain_deadline);
+    let drained = drain_pumps(pumps, drain_deadline(killed, timeout, started.elapsed()));
     // Both sweeps run after the leader was reaped, so both ask [`orphaned_child_group`] whether
     // the group is still ours before signalling it — a recycled pid must not cost a stranger a
     // SIGKILL.
@@ -1216,6 +1231,21 @@ mod tests {
     // Every captured line carries a non-negative relative timestamp.
     assert!(m.procs[0].lines.iter().all(|l| l.at >= 0.0));
     assert_eq!(m.procs[0].status, Status::Ok);
+  }
+
+  #[test]
+  fn a_command_that_finishes_on_the_last_tick_still_gets_time_to_drain() {
+    let limit = Duration::from_secs(90);
+    // Mid-run: whatever is left of the budget.
+    assert_eq!(drain_deadline(Killed::No, Some(limit), Duration::from_secs(30)), Some(Duration::from_secs(60)));
+    // On the wire, and past it: never zero, or the joiner loses a scheduling race and a command
+    // that exited 0 is reported as having overrun its timeout.
+    assert_eq!(drain_deadline(Killed::No, Some(limit), limit), Some(PUMP_DRAIN_CLOSE_GRACE));
+    assert_eq!(drain_deadline(Killed::No, Some(limit), Duration::from_secs(120)), Some(PUMP_DRAIN_CLOSE_GRACE));
+    // No budget at all: the readers are waited out, as they always were.
+    assert_eq!(drain_deadline(Killed::No, None, Duration::from_secs(30)), None);
+    // A killed child's pipes may be held by an escapee, so that wait is always bounded.
+    assert_eq!(drain_deadline(Killed::Timeout, None, Duration::from_secs(30)), Some(PUMP_DRAIN_GRACE));
   }
 
   #[test]
