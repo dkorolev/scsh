@@ -92,14 +92,15 @@ pub fn signal_child_group(pid: u32, sig: &str) {
   let _ = (pid, sig);
 }
 
-/// Whether the process group led by `pid` still has a member after the leader exited.
-pub fn child_group_exists(pid: u32) -> bool {
+/// Whether signalling `target` would reach something — `kill -0`. A bare pid checks one process,
+/// a `-pid` checks the whole group.
+fn signal_would_reach(target: &str) -> bool {
   #[cfg(unix)]
   {
     Command::new("kill")
       .arg("-0")
       .arg("--")
-      .arg(format!("-{pid}"))
+      .arg(target)
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::null())
       .status()
@@ -107,9 +108,27 @@ pub fn child_group_exists(pid: u32) -> bool {
   }
   #[cfg(not(unix))]
   {
-    let _ = pid;
+    let _ = target;
     false
   }
+}
+
+/// Whether the process group led by `pid` still has a member after the leader exited.
+pub fn child_group_exists(pid: u32) -> bool {
+  signal_would_reach(&format!("-{pid}"))
+}
+
+/// Whether a group led by `pid` has members AND that group is still the one scsh started —
+/// i.e. safe to take down now that the command is over.
+///
+/// Two checks, not one. The leader was reaped moments ago, so the kernel is free to hand its pid
+/// straight to somebody else, and scsh makes every child it spawns a group leader ([`isolate_child`])
+/// — so a recycled pid can be a live, unrelated process group that merely shares a number with the
+/// command that just finished. A group whose leader pid is ALIVE is therefore never ours: ours
+/// definitively exited. Skipping the sweep leaks a descendant at worst; not skipping it SIGKILLs a
+/// stranger, which may be another step of this very run.
+pub fn orphaned_child_group(pid: u32) -> bool {
+  child_group_exists(pid) && !signal_would_reach(&pid.to_string())
 }
 
 /// Take down one child and everything it started: SIGTERM its process group, allow a short grace
@@ -249,6 +268,23 @@ pub fn terminate_all() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[cfg(unix)]
+  #[test]
+  fn a_group_whose_leader_is_alive_is_never_treated_as_orphaned() {
+    // The reuse guard, stated on the one pid a test can be sure about: our own. A live leader
+    // means the group belongs to somebody still running, so a post-exit sweep must leave it
+    // alone — the leader scsh reaped is, by definition, gone.
+    let mut cmd = Command::new("sleep");
+    cmd.arg("30");
+    isolate_child(&mut cmd);
+    let mut child = cmd.spawn().expect("spawn sleep");
+    let pid = child.id();
+    assert!(child_group_exists(pid), "the live child leads a live group");
+    assert!(!orphaned_child_group(pid), "a group whose leader still holds the pid is not ours to kill");
+    let _ = child.kill();
+    let _ = child.wait();
+  }
 
   #[cfg(target_os = "linux")]
   #[test]
