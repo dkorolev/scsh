@@ -659,6 +659,18 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   assert!(page.contains(r#"data-proc-restart="0""#), "live skill runs offer per-proc Force restart: {page}");
   assert!(page.contains(r#"id="session-stop""#), "live job offers Force stop");
 
+  let mut host = store_with_cast_proc(ProcStatus::Running);
+  {
+    let session = host.sessions.get_mut("castab").unwrap();
+    session.last_seen_at = crate::daemon::paths::now_unix_secs();
+    session.procs[0].harness = Some("host".into());
+  }
+  let html = super::index_page(&host);
+  assert!(!html.contains(r#"data-harness-stop="host""#), "host steps have no container stop strip: {html}");
+  let page = session_page(&host, "castab").expect("host session renders");
+  assert!(!page.contains(r#"data-proc-stop="0""#), "a host step is stopped only with its whole job: {page}");
+  assert!(!page.contains(r#"data-proc-restart="0""#), "a host step has no per-proc restart channel: {page}");
+
   let proc = &mut live.sessions.get_mut("castab").unwrap().procs[0];
   proc.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());
   proc.detail = Some("terminating all claude containers from the session browser".into());

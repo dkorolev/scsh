@@ -825,7 +825,8 @@ function updateProcFields(det, p, nowUnix) {
   const killEl = det.querySelector('button[data-proc-stop]');
   const restartEl = det.querySelector('button[data-proc-restart]');
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
-  const wantRestart = live && (p.kind || 'skill') === 'skill';
+  const controllable = live && p.harness !== 'host';
+  const wantRestart = controllable && (p.kind || 'skill') === 'skill';
   // Keep the button, but blocked: vanishing silently would read as a missing feature, while
   // an enabled one promises a respawn the daemon cannot perform.
   if (restartEl && wantRestart) setRestartBlocked(restartEl, RUN_CLIENT_GONE);
@@ -845,8 +846,8 @@ function updateProcFields(det, p, nowUnix) {
     else actions.appendChild(btn);
     btn.addEventListener('click', () => restartProc(btn));
   }
-  if (killEl && !live) killEl.remove();
-  else if (!killEl && live) {
+  if (killEl && !controllable) killEl.remove();
+  else if (!killEl && controllable) {
     const actions = ensureProcActions(det);
     const btn = document.createElement('button');
     btn.type = 'button';
@@ -1261,6 +1262,7 @@ function procHtml(p, isOpen, nowUnix) {
   const taskAnchor = step ? '<span class="proc-task-anchor" id="task-' + esc(step) + '" aria-hidden="true"></span>' : '';
   const terminating = p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested';
   const live = (p.status === 'running' || p.status === 'waiting') && !terminating;
+  const controllable = live && p.harness !== 'host';
   const snapLabel = live ? 'Incomplete run ⬇' : 'Run snapshot ⬇';
   const snap = hasCast(p)
     ? '<a class="chamfer btn btn--cyan btn--sm proc-snapshot" href="/cast/' + encodeURIComponent(SESSION_ID) +
@@ -1268,12 +1270,12 @@ function procHtml(p, isOpen, nowUnix) {
       snapLabel + '</span></a>'
     : '';
   const diff = p.diff_path ? procDiffBtnHtml(p) : '';
-  const restart = live && (p.kind || 'skill') === 'skill'
+  const restart = controllable && (p.kind || 'skill') === 'skill'
     ? '<button type="button" class="chamfer btn btn--orange btn--sm proc-restart" data-proc-restart="' +
       esc(String(p.index)) + '" data-session="' + esc(SESSION_ID) +
       '" title="Force-restart this run only — the container is killed and a fresh attempt of the same route starts; the rest of the job continues"><span>Force restart</span></button>'
     : '';
-  const kill = live
+  const kill = controllable
     ? '<button type="button" class="chamfer btn btn--red btn--sm proc-kill" data-proc-stop="' +
       esc(String(p.index)) + '" data-proc-kind="' + esc(p.kind || 'skill') + '" data-session="' + esc(SESSION_ID) +
       '" title="' + (p.kind === 'annotate' ? 'Stop this annotation — the recording remains unchanged' :

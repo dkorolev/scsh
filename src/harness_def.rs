@@ -1553,6 +1553,13 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         }
       }
     }
+    if s.do_while.is_some() {
+      if let Some(field) = s.outputs.iter().find(|field| field.name == "SCSH_DO_WHILE_REPEAT") {
+        if field.ty != OutputType::Bool {
+          errors.push(format!("step '{}' output SCSH_DO_WHILE_REPEAT must have type bool", s.id));
+        }
+      }
+    }
     // A do-while ending in a SYNTHESIZED host step has no SCSH_DO_WHILE_REPEAT to return, so it
     // always asks for another lap and the body's `break: true` head is the only thing that can
     // stop it. Without such a head the loop can only ever end by exhausting its iteration budget
@@ -2614,6 +2621,10 @@ steps:
     // A decision-form tail needs no break head — it returns SCSH_DO_WHILE_REPEAT itself.
     let self_ending = "description: \"x\"\nsteps:\n  work:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: string\n  again:\n    needs: work\n    do-while: work\n    run: node scripts/more.mjs\n    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n";
     assert!(validate("t", self_ending, DefSource::Repo).is_ok());
+
+    let mistyped = self_ending.replace("type: bool", "type: string");
+    let err = validate("t", &mistyped, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("SCSH_DO_WHILE_REPEAT must have type bool")), "{err:?}");
   }
 
   #[test]

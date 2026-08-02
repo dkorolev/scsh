@@ -91,6 +91,25 @@ pub fn signal_child_group(pid: u32, sig: &str) {
   let _ = (pid, sig);
 }
 
+/// Whether the process group led by `pid` still has a member after the leader exited.
+pub fn child_group_exists(pid: u32) -> bool {
+  #[cfg(unix)]
+  {
+    Command::new("kill")
+      .arg("-0")
+      .arg(format!("-{pid}"))
+      .stdout(std::process::Stdio::null())
+      .stderr(std::process::Stdio::null())
+      .status()
+      .is_ok_and(|status| status.success())
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = pid;
+    false
+  }
+}
+
 /// Take down one child and everything it started: SIGTERM its process group, allow a short grace
 /// so a build can remove its temporary files, then SIGKILL the group. Used both by the abort path
 /// and by [`super::screen`]'s watchdogs when a child overruns its timeout.

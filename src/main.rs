@@ -1628,16 +1628,23 @@ fn preflight_then_def(name: &str, session: Option<&str>, resume_from: Option<&st
     return 1;
   }
 
+  // A workflow definition runs through the DAG orchestrator; a flat one goes through the
+  // existing matrix expander below.
+  if def.is_workflow() {
+    let rt = if workflow_needs_runtime(&def) {
+      match preflight_runtime_engine(true) {
+        Ok(rt) => Some(rt),
+        Err(code) => return code,
+      }
+    } else {
+      None
+    };
+    return run_workflow(rt.as_ref(), &root, &def, session, resume_from, base.as_ref());
+  }
   let rt = match preflight_runtime_engine(true) {
     Ok(rt) => rt,
     Err(code) => return code,
   };
-
-  // A workflow definition runs through the DAG orchestrator; a flat one goes through the
-  // existing matrix expander below.
-  if def.is_workflow() {
-    return run_workflow(&rt, &root, &def, session, resume_from, base.as_ref());
-  }
   if resume_from.is_some() {
     fail(&format!("'{name}' is a flat definition — --resume-from only applies to workflow definitions (steps:)"));
     hint("flat routes are independent; just run the definition again");
@@ -1870,8 +1877,8 @@ fn extract_step_outputs(
       .keys()
       .map(String::as_str)
       .filter(|name| {
-        !contract.outputs.iter().any(|field| field.name == *name)
-          && !(contract.require_do_while_repeat && *name == "SCSH_DO_WHILE_REPEAT")
+        !(contract.outputs.iter().any(|field| field.name == *name)
+          || contract.require_do_while_repeat && *name == "SCSH_DO_WHILE_REPEAT")
       })
       .collect();
     extras.sort_unstable();
@@ -2086,10 +2093,11 @@ fn run_host_step(
   env.push(("SCSH_RESULT".to_string(), result_path.to_string_lossy().into_owned()));
   let place = ui::screen::ExecPlace { cwd: root, env: &env };
   let args = vec!["-c".to_string(), host.command.clone()];
-  let outcome = p.run_in("sh", &args, &place, Some(Duration::from_secs(limit)));
+  let output_limit = ui::screen::OutputLimit { lines: HOST_OUTPUT_LINES_REQUESTED, bytes: HOST_OUTPUT_MAX_BYTES };
+  let outcome = p.run_in("sh", &args, &place, Some(Duration::from_secs(limit)), output_limit);
 
-  let (code, killed) = match outcome {
-    Ok((code, killed, _)) => (code, killed),
+  let (code, killed, output_trimmed) = match outcome {
+    Ok((code, killed, _, output_trimmed)) => (code, killed, output_trimmed),
     Err(e) => {
       let detail = format!("could not start `{}`: {e}", host.command);
       p.finish_fail(failure::reason::HOST_STEP_SPAWN, Some(&detail));
@@ -2146,7 +2154,10 @@ fn run_host_step(
 
   let passed = code == Some(0);
   let exit_code = code.unwrap_or(-1);
-  let output = host_output_tail(&p.tail_lines(HOST_OUTPUT_LINES_REQUESTED));
+  let mut output = host_output_tail(&p.tail_lines(HOST_OUTPUT_LINES_REQUESTED));
+  if output_trimmed && !output.starts_with("[earlier output omitted]") {
+    output = format!("[earlier output omitted]\n{output}");
+  }
   // The stringly-typed map is the workflow's internal channel (every `inputs:` binding is an
   // env var); the result FILE keeps the declared JSON types, so it reads like any other step's.
   let mut outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
@@ -2405,7 +2416,7 @@ fn backoff_sleep_interruptible(delay_secs: u64, session_id: &str, proc_index: us
 fn run_workflow_step_with_retries(
   invocation: &ResolvedInvocation, step: &harness_def::Step, rt: &Runtime, root: &Path, secs: u64,
   initial_proc: ui::screen::Proc, ui: &ui::screen::LiveUi, caller_tip: Option<&str>, base: Option<&RunBase>,
-  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str,
+  daemon_client: Option<std::sync::Arc<daemon::Client>>, session_id: &str, cache_allowed: bool,
 ) -> SkillRun {
   let contract = WorkflowResultContract {
     outputs: &step.outputs,
@@ -2434,6 +2445,7 @@ fn run_workflow_step_with_retries(
       Some(contract),
       daemon_client.clone(),
       session_id,
+      cache_allowed,
     );
     run.duration_secs = attempt_started.elapsed().as_secs_f64();
     run.proc_index = proc_index;
@@ -2620,6 +2632,38 @@ fn ensure_workflow_images(
   Ok(())
 }
 
+fn workflow_needs_runtime(def: &harness_def::HarnessDef) -> bool {
+  def.steps.iter().any(|step| step.agent().is_some())
+}
+
+/// Steps whose old results cannot be restored because this run re-executes a host dependency.
+fn workflow_resume_invalidated_steps(def: &harness_def::HarnessDef) -> std::collections::BTreeSet<String> {
+  let mut invalid: std::collections::BTreeSet<String> =
+    def.steps.iter().filter(|step| step.host().is_some()).map(|step| step.id.clone()).collect();
+  loop {
+    let before = invalid.len();
+    for step in &def.steps {
+      let depends_on_invalid = step.needs.iter().any(|need| invalid.contains(need))
+        || step.inputs.iter().any(|input| match &input.source {
+          harness_def::Ref::StepField { step, .. } => invalid.contains(step),
+          harness_def::Ref::Param(_) => false,
+        });
+      if depends_on_invalid {
+        invalid.insert(step.id.clone());
+      }
+    }
+    for end in def.steps.iter().filter(|step| step.do_while.is_some()) {
+      let body = harness_def::do_while_body(&def.steps, end);
+      if body.iter().any(|id| invalid.contains(*id)) {
+        invalid.extend(body.into_iter().map(str::to_string));
+      }
+    }
+    if invalid.len() == before {
+      return invalid;
+    }
+  }
+}
+
 /// Run a workflow definition: walk its DAG, running each step (via the same one-shot primitive a
 /// flat run uses) with its inputs bound from params and upstream outputs, validating each step's
 /// typed output, evaluating `when:` gates (a false gate — or a skipped dependency — skips the
@@ -2632,7 +2676,7 @@ fn ensure_workflow_images(
 /// that never completed actually run. Commits a restored step made are already on the caller's
 /// branch from the prior run, so nothing is re-integrated.
 fn run_workflow(
-  rt: &Runtime, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>, resume_from: Option<&str>,
+  rt: Option<&Runtime>, root: &Path, def: &harness_def::HarnessDef, session: Option<&str>, resume_from: Option<&str>,
   base: Option<&RunBase>,
 ) -> i32 {
   use std::collections::HashMap;
@@ -2705,10 +2749,13 @@ fn run_workflow(
       harnesses.push(agent.harness);
     }
   }
-  if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses, &session_id) {
-    ui.finish();
-    fail(&msg);
-    return code;
+  if !harnesses.is_empty() {
+    let rt = rt.expect("agent workflows preflight a container runtime");
+    if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses, &session_id) {
+      ui.finish();
+      fail(&msg);
+      return code;
+    }
   }
 
   let secs = now_secs();
@@ -2723,6 +2770,7 @@ fn run_workflow(
   let mut runner_identity_warned = false;
   let original_caller_tip = caller_tip.clone();
   let session_dir_rel = format!("{}/scsh/{session_id}", scratch_root(root).unwrap_or("tmp"));
+  let resume_invalidated = workflow_resume_invalidated_steps(def);
   let mut do_while_end_for: HashMap<String, String> = HashMap::new();
   let mut do_while_bodies: HashMap<String, Vec<String>> = HashMap::new();
   for end in def.steps.iter().filter(|s| s.do_while.is_some()) {
@@ -2780,6 +2828,7 @@ fn run_workflow(
   let mut skipped_count = 0usize;
   let mut failure: Option<String> = None;
   while state.len() < def.steps.len() && failure.is_none() {
+    let wave_caller_tip = caller_tip.clone();
     let ready: Vec<&harness_def::Step> = def
       .steps
       .iter()
@@ -2864,24 +2913,26 @@ fn run_workflow(
         run_ids.push(run_id);
         continue;
       }
-      if let Some((old_sid, results_dir)) = &resume {
-        let contract = WorkflowResultContract {
-          outputs: &s.outputs,
-          require_do_while_repeat: s.do_while.is_some()
-            && !s.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
-        };
-        if let Some((content, outputs, old_path)) = restored_step_result(results_dir, &run_id, contract) {
-          if let Some(dest) = fleet::persist_skill_result(&session_id, &run_id, &old_path) {
-            if let Some(c) = &daemon_client {
-              c.proc_result(p.index(), &dest);
+      if !resume_invalidated.contains(&s.id) {
+        if let Some((old_sid, results_dir)) = &resume {
+          let contract = WorkflowResultContract {
+            outputs: &s.outputs,
+            require_do_while_repeat: s.do_while.is_some()
+              && !s.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+          };
+          if let Some((content, outputs, old_path)) = restored_step_result(results_dir, &run_id, contract) {
+            if let Some(dest) = fleet::persist_skill_result(&session_id, &run_id, &old_path) {
+              if let Some(c) = &daemon_client {
+                c.proc_result(p.index(), &dest);
+              }
             }
+            p.finish_ok(Some(&format!("restored from session {old_sid} — result reused, no container run")));
+            let mut run = SkillRun::cached(None, content, Some(outputs));
+            run.proc_index = p.index();
+            restored_runs.push((run_id.clone(), run));
+            run_ids.push(run_id);
+            continue;
           }
-          p.finish_ok(Some(&format!("restored from session {old_sid} — result reused, no container run")));
-          let mut run = SkillRun::cached(None, content, Some(outputs));
-          run.proc_index = p.index();
-          restored_runs.push((run_id.clone(), run));
-          run_ids.push(run_id);
-          continue;
         }
       }
       let commit_identity = match s.commit_identity {
@@ -2908,13 +2959,27 @@ fn run_workflow(
         .zip(procs)
         .zip(live_steps.iter())
         .map(|((inv, p), step)| {
+          let rt = rt.expect("an agent step requires a preflighted container runtime");
           let dc = daemon_client.clone();
-          let caller_tip_ref = caller_tip.as_deref();
+          let caller_tip_ref = wave_caller_tip.as_deref();
           let id = inv.name.clone();
           let sid = session_id.as_str();
+          let cache_allowed = !resume_invalidated.contains(&step.id);
           scope.spawn(move || {
-            let run =
-              run_workflow_step_with_retries(inv, step, rt, root, secs, p, ui_ref, caller_tip_ref, base, dc, sid);
+            let run = run_workflow_step_with_retries(
+              inv,
+              step,
+              rt,
+              root,
+              secs,
+              p,
+              ui_ref,
+              caller_tip_ref,
+              base,
+              dc,
+              sid,
+              cache_allowed,
+            );
             (id, run)
           })
         })
@@ -2931,7 +2996,13 @@ fn run_workflow(
 
     let sink =
       ResultSink { session_id: &session_id, session_dir_rel: &session_dir_rel, client: daemon_client.as_deref() };
+    let ran_host_steps = !host_steps.is_empty();
     results.append(&mut run_host_steps(host_steps, root, &sink));
+    if ran_host_steps {
+      // A host command may intentionally commit or move a ref. Later agent waves must clone the
+      // resulting revision, not the tip captured before the host step ran.
+      caller_tip = git_capture(root, &["rev-parse", "HEAD"]).map(|tip| tip.trim().to_string());
+    }
 
     // Record each step's outcome in definition order; the first failure (run failure or an
     // output that does not match the declared schema) aborts the workflow. Commit-enabled
@@ -3043,7 +3114,7 @@ fn run_workflow(
         // A live clone integrates its commits directly; a commit-enabled cache HIT replays
         // the commits journaled in the cache — same contract as the flat path, so a hit
         // reproduces the commit, not just the result.
-        let integration = if let (Some(b), Some(clone)) = (caller_tip.as_deref(), run.clone_dir.as_ref()) {
+        let integration = if let (Some(b), Some(clone)) = (wave_caller_tip.as_deref(), run.clone_dir.as_ref()) {
           Some(integrate_commits(root, clone, b, &s.id, &stamp))
         } else {
           run.cached_commits.as_ref().map(|patch| apply_cached_commits(root, patch, &s.id, &stamp))
@@ -4975,8 +5046,20 @@ fn build_and_run(
           loop {
             attempts += 1;
             let attempt_started = std::time::Instant::now();
-            let mut run =
-              run_one_skill(skill, rt, root, secs, proc, caller_tip_ref, None, base, None, dc.clone(), session_ref);
+            let mut run = run_one_skill(
+              skill,
+              rt,
+              root,
+              secs,
+              proc,
+              caller_tip_ref,
+              None,
+              base,
+              None,
+              dc.clone(),
+              session_ref,
+              true,
+            );
             run.duration_secs = attempt_started.elapsed().as_secs_f64();
             run.proc_index = proc_index;
             run.attempts = attempts;
@@ -5570,7 +5653,7 @@ fn run_one_skill(
   skill: &ResolvedInvocation, rt: &Runtime, root: &Path, secs: u64, spinner: ui::screen::Proc,
   caller_tip: Option<&str>, source_revision: Option<&str>, base: Option<&RunBase>,
   result_contract: Option<WorkflowResultContract<'_>>, daemon_client: Option<std::sync::Arc<daemon::Client>>,
-  session_id: &str,
+  session_id: &str, cache_allowed: bool,
 ) -> SkillRun {
   // Mark the row running so its clock starts and output stamps are relative to here.
   spinner.start();
@@ -5593,7 +5676,7 @@ fn run_one_skill(
   // Content-addressed cache: if this exact repo content + skill + env was run before,
   // restore the cached result and finish — no clone, no container, no commit. (The key
   // is computed from the caller's committed state, which is what the clone would be.)
-  let key = cache_key_at(root, skill, &env, source_revision, base);
+  let key = cache_allowed.then(|| cache_key_at(root, skill, &env, source_revision, base)).flatten();
   if let Some(key) = &key {
     if let Some(entry) = cache_lookup(root, key) {
       let workflow_outputs = result_contract.and_then(|contract| extract_step_outputs(&entry.result, contract).ok());
@@ -8715,24 +8798,22 @@ fn install_from_manifest(
     if conflicts.is_empty() && refreshed.is_empty() {
       ok("the installed skills were already declared in .scsh.yml");
     }
-  } else {
-    if config::validate(&merged).is_ok() && write_file(&local_path, merged.as_bytes()) {
-      if !refreshed.is_empty() {
-        ok(&format!(
-          "updated {} skill declaration{} in .scsh.yml: {}",
-          refreshed.len(),
-          plural(refreshed.len()),
-          refreshed.join(", ")
-        ));
-      }
-      if !added.is_empty() {
-        ok(&format!("added {} skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
-      }
-    } else {
-      hint("installed the skill files, but updating .scsh.yml would make it invalid — left the manifest unchanged");
-      let affected: Vec<&str> = refreshed.iter().chain(&added).map(String::as_str).collect();
-      hint(&format!("update by hand: {}", affected.join(", ")));
+  } else if config::validate(&merged).is_ok() && write_file(&local_path, merged.as_bytes()) {
+    if !refreshed.is_empty() {
+      ok(&format!(
+        "updated {} skill declaration{} in .scsh.yml: {}",
+        refreshed.len(),
+        plural(refreshed.len()),
+        refreshed.join(", ")
+      ));
     }
+    if !added.is_empty() {
+      ok(&format!("added {} skill{} to .scsh.yml: {}", added.len(), plural(added.len()), added.join(", ")));
+    }
+  } else {
+    hint("installed the skill files, but updating .scsh.yml would make it invalid — left the manifest unchanged");
+    let affected: Vec<&str> = refreshed.iter().chain(&added).map(String::as_str).collect();
+    hint(&format!("update by hand: {}", affected.join(", ")));
   }
   Ok(c)
 }
@@ -9921,10 +10002,11 @@ fn print_help_defs() {
   restart budget — 25 by default, or `scsh run --retries N`, 0 to opt out — stopping
   early after 3 identical job
   failures or a human's Force stop.
-  scsh run --def <name> --resume-from <session>   restores every step whose validated result
-  the named session already produced (loop iterations included, commits already on the branch)
-  and runs only the rest. The session browser's "Restart remaining" button on a failed job
-  does exactly this; "Restart from scratch" re-runs everything.
+  scsh run --def <name> --resume-from <session>   restores validated agent results the named
+  session already produced (loop iterations included, commits already on the branch). Host steps
+  always rerun, as do agent steps downstream of them; their verdict describes the checkout at
+  that moment. The session browser's "Restart remaining" button does exactly this; "Restart from
+  scratch" re-runs everything.
 "#
   );
   println!();
@@ -11323,6 +11405,32 @@ Subject: [PATCH] add: 2 + 3 = 5
     harness_def::validate("t", &src, harness_def::DefSource::Repo).expect("valid host-step workflow")
   }
 
+  #[test]
+  fn host_only_workflows_need_no_container_runtime() {
+    let host_only = host_step_def("true", "");
+    assert!(!workflow_needs_runtime(&host_only));
+
+    let mixed = harness_def::validate(
+      "mixed",
+      "description: x\nsteps:\n  host:\n    run: true\n  agent:\n    needs: host\n    agent:\n      harness: claude\n    prompt: go\n    output:\n      ok:\n        type: bool\n",
+      harness_def::DefSource::Repo,
+    )
+    .unwrap();
+    assert!(workflow_needs_runtime(&mixed));
+  }
+
+  #[test]
+  fn resume_reruns_every_step_downstream_of_a_host_step() {
+    let def = harness_def::validate(
+      "resume-host",
+      "description: x\nsteps:\n  independent:\n    agent:\n      harness: claude\n    prompt: independent\n    output:\n      value:\n        type: string\n  gate:\n    run: make check\n  consume:\n    needs: gate\n    inputs:\n      PASSED: gate.passed\n    agent:\n      harness: claude\n    prompt: consume\n    output:\n      value:\n        type: string\n  finish:\n    needs: consume\n    agent:\n      harness: claude\n    prompt: finish\n    output:\n      value:\n        type: string\n",
+      harness_def::DefSource::Repo,
+    )
+    .unwrap();
+    let invalid = workflow_resume_invalidated_steps(&def);
+    assert_eq!(invalid.into_iter().collect::<Vec<_>>(), ["consume", "finish", "gate"]);
+  }
+
   /// Point `$SCSH_HOME` at a throwaway directory for the rest of the test, restoring it on drop.
   /// RAII rather than a restore line at the end of each test: an assertion that fires mid-test
   /// would skip that line and leak the override into whichever test takes the env lock next.
@@ -11398,6 +11506,29 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert!(output.starts_with("[earlier output omitted]"), "the cut is stated, not silent: {output:.80}");
     assert!(output.ends_with(&format!("{}", HOST_OUTPUT_MAX_LINES + 20)), "the TAIL is what survives");
     assert_eq!(output.lines().count(), HOST_OUTPUT_MAX_LINES + 1, "the budget plus the marker line");
+    assert_eq!(p.tail_lines(usize::MAX).len(), HOST_OUTPUT_LINES_REQUESTED, "capture stays bounded while running");
+  }
+
+  #[test]
+  fn a_wide_host_output_is_bounded_before_the_command_finishes() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-wide");
+    let _home = ScshHome::under(&dir);
+    let def = host_step_def("printf '%060000d\\n' 0", "");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-wide", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(&def.steps[0], "gate", &dir, Vec::new(), &p, &sink);
+
+    let output = &run.workflow_outputs.expect("result")["output"];
+    assert!(output.starts_with("[earlier output omitted]\n"), "the byte cut is stated: {output:.80}");
+    assert!(output.len() <= HOST_OUTPUT_MAX_BYTES + 32, "bounded output is {} bytes", output.len());
+    assert_eq!(p.tail_lines(usize::MAX).len(), 1, "the single retained line is truncated in place");
+
+    let spaces = host_step_def("printf 'meaningful%60000s' ''", "");
+    let p = ui.proc("host: spaces", false);
+    let run = run_host_step(&spaces.steps[0], "spaces", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.workflow_outputs.unwrap()["output"], "[earlier output omitted]\n");
   }
 
   #[test]

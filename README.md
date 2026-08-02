@@ -2,7 +2,7 @@
 
 **Run your repository's agent skills in parallel — each in its own throwaway
 container, on a clean clone of your repo — with one command.** No Dockerfiles, no
-`docker run`, no risk to your working tree.
+`docker run`, and no agent access to your working tree.
 
 ```sh
 scsh run
@@ -14,9 +14,10 @@ isolated, each producing a result file that `scsh` copies back into your repo.
 
 **Understand this first:** `scsh` is a single Rust binary plus a tiny per-repo config.
 You describe *what* to run (skills, with the environment they need); `scsh` owns *how* —
-the clean clone, the container, running as you, collecting results. Nothing touches your
-working tree, and a real run insists on a committed, clean repo so what runs is exactly
-what you committed.
+the clean clone, the container, running as you, collecting results. Agent steps never touch
+your working tree, and a real run insists on a committed, clean repo so what runs is exactly
+what you committed. An explicit workflow `run:` step is different: its configured command runs
+in your checkout and has exactly the host-side effects that command requests.
 
 **To see it in action:** clone this repo and `cargo build --release`, then — from **any
 empty directory that is not yet a git repository** — start your favorite skills-aware
@@ -224,8 +225,8 @@ command writes `$SCSH_RESULT` and scsh validates it against that schema exactly 
 agent's result, so a deterministic script can steer a loop (`break: true`, `SCSH_DO_WHILE_REPEAT`)
 where you would otherwise spend a model call. Bound either form with `timeout:` (overrunning fails
 the job — a check that hangs is what this replaces; scsh kills the whole process group). The command
-is fixed by the committed definition, so a workflow's host surface is auditable by reading the
-`.yml` — but quote your expansions, because an input bound to an agent step's output carries
+is fixed by the definition, so a workflow's host surface is auditable by reading its repo or
+`~/.harness/` `.yml` — but quote your expansions, because an input bound to an agent step's output carries
 model-written text into a host shell. See `scsh help def`, "Host steps".
 Run one from the console with `scsh run --def <name>` (params from the environment), or,
 when the daemon is up, open a repository in the browser (type/paste a path or use the native
@@ -449,9 +450,10 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
   [rustup](https://rustup.rs). Distro-packaged toolchains (e.g. Ubuntu's `apt install cargo`)
   are typically older and fail the build.
 - **`git`** on your `PATH`.
-- A **container runtime**: Apple `container` → Docker → Podman on macOS; Docker → Podman on Linux.
-- **Network** only for a real `scsh run` (it pulls the base image and installs
-  opencode). `list` and `init-demo-project` need none.
+- A **container runtime** for workflows or profiles with agent steps: Apple `container` → Docker
+  → Podman on macOS; Docker → Podman on Linux. A host-only `run:` workflow needs none.
+- **Network** only for an agent run that must pull or build an image. Host-only workflows,
+  `list`, and `init-demo-project` need none.
 - For skills to do real work, the container's opencode needs a configured model;
   `scsh` forwards your host opencode login into each run for its duration.
 
@@ -459,13 +461,16 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 
 ## Safety & guarantees
 
-- **Your working tree is never touched.** Containers only ever see a throwaway clone
+- **Agent steps never touch your working tree.** Containers only ever see a throwaway clone
   bind-mounted from the host (**push IN**). Skills must not `git fetch`, `git pull`, or
   `git clone` inside the container. After each skill, scsh **pulls OUT** on the host: the
   `result` file always; new commits only when `commits: true` and the skill committed
   (local fetch from the run clone — not GitHub). scsh never pushes to any remote.
   in the system temp dir; the only thing written back is each skill's `result`, into
   the gitignored `tmp/` (existing files backed up, never clobbered).
+- **Host steps are an explicit exception.** A workflow `run:` command executes in your checkout
+  with your permissions, so it may modify files, the index, refs, services, or anything else the
+  command itself can reach. Review the repo or `~/.harness/` definition before running it.
 - **A real run refuses unless the repo is clean and `/tmp` is gitignored**, so scratch
   and results can never be committed by accident.
 - **Least privilege.** The container runs as a non-root `agent` user whose UID/GID
@@ -476,8 +481,8 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
   the system temp dir is removed after the skill **succeeds**; a **failed** skill's clone is
   kept for inspection (its path is printed), and clones older than a day are swept at the next
   run's start. Keep every clone with `SCSH_KEEP_RUNS=1`.
-- **Nothing outward happens for you.** `scsh` builds and runs locally; it never
-  pushes, publishes, or deletes your data.
+- **`scsh` itself does nothing outward for you.** It never pushes or publishes. A host step may
+  do either when its configured command explicitly says to, just as running that command yourself would.
 
 > **A note on `tmp/`.** Throughout `scsh`, **`tmp/` means the gitignored `tmp/`
 > subdirectory of your repo** — never the operating system's temp dir (which we call

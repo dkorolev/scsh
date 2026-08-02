@@ -41,6 +41,7 @@ pub struct Proc {
   pub elapsed: f64,
   /// Every captured output line, in arrival order, each tagged with its relative time.
   pub lines: Vec<Line>,
+  line_bytes: usize,
   /// The dim trailing note on the header — the latest output line while running.
   pub note: Option<String>,
   /// The dim/red detail on the header once finished (e.g. the result headline, or why it failed).
@@ -110,6 +111,7 @@ impl Model {
       status: Status::Queued,
       elapsed: 0.0,
       lines: Vec::new(),
+      line_bytes: 0,
       note: None,
       detail: None,
       expanded: false,
@@ -144,8 +146,27 @@ impl Model {
   /// Append a captured output line, stamped with `at` seconds since the proc started.
   pub fn push_line(&mut self, i: usize, at: f64, text: impl Into<String>) {
     if let Some(p) = self.procs.get_mut(i) {
-      p.lines.push(Line { at, text: text.into() });
+      let text = text.into();
+      p.line_bytes += text.len();
+      p.lines.push(Line { at, text });
     }
+  }
+
+  /// Append one line while retaining only the newest bounded output window.
+  pub fn push_line_bounded(
+    &mut self, i: usize, at: f64, text: impl Into<String>, max_lines: usize, max_bytes: usize,
+  ) -> bool {
+    let mut trimmed = false;
+    if let Some(p) = self.procs.get_mut(i) {
+      let text = text.into();
+      p.line_bytes += text.len();
+      p.lines.push(Line { at, text });
+      while p.lines.len() > max_lines || p.line_bytes > max_bytes {
+        p.line_bytes -= p.lines.remove(0).text.len();
+        trimmed = true;
+      }
+    }
+    trimmed
   }
 
   /// Last `max` captured lines for proc `i` (for failure messages).
