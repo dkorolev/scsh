@@ -82,6 +82,7 @@ pub fn signal_child_group(pid: u32, sig: &str) {
   {
     let _ = Command::new("kill")
       .arg(format!("-{sig}"))
+      .arg("--")
       .arg(format!("-{pid}"))
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::null())
@@ -97,6 +98,7 @@ pub fn child_group_exists(pid: u32) -> bool {
   {
     Command::new("kill")
       .arg("-0")
+      .arg("--")
       .arg(format!("-{pid}"))
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::null())
