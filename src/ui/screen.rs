@@ -640,27 +640,12 @@ impl Proc {
 
     let last = Arc::new(Mutex::new(None::<String>));
     let output_trimmed = Arc::new(AtomicBool::new(false));
-    let output_forwarded = Arc::new(Mutex::new((0usize, 0usize)));
     let mut pumps: Vec<JoinHandle<()>> = Vec::new();
     if let Some(out) = child.stdout.take() {
-      pumps.push(self.pump(
-        out,
-        started,
-        Arc::clone(&last),
-        output_limit,
-        Arc::clone(&output_trimmed),
-        Arc::clone(&output_forwarded),
-      ));
+      pumps.push(self.pump(out, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed)));
     }
     if let Some(err) = child.stderr.take() {
-      pumps.push(self.pump(
-        err,
-        started,
-        Arc::clone(&last),
-        output_limit,
-        Arc::clone(&output_trimmed),
-        Arc::clone(&output_forwarded),
-      ));
+      pumps.push(self.pump(err, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed)));
     }
     // Feed stdin only after the pumps are draining output, so a large payload can't deadlock
     // against a full output pipe. Dropping the handle signals EOF.
@@ -811,7 +796,7 @@ impl Proc {
   /// echoes the line so the build log survives in pipes/CI.
   fn pump<R: Read + Send + 'static>(
     &self, reader: R, started: Instant, last: Arc<Mutex<Option<String>>>, output_limit: Option<OutputLimit>,
-    output_trimmed: Arc<AtomicBool>, output_forwarded: Arc<Mutex<(usize, usize)>>,
+    output_trimmed: Arc<AtomicBool>,
   ) -> JoinHandle<()> {
     let (i, attended, tail, model, sink) =
       (self.i, self.attended, self.tail, Arc::clone(&self.model), self.sink.clone());
@@ -835,17 +820,11 @@ impl Proc {
           }
         }
         let at = started.elapsed().as_secs_f64();
-        let forward = output_limit.is_none_or(|limit| {
-          let mut forwarded = output_forwarded.lock().unwrap();
-          if forwarded.0 >= limit.lines || forwarded.1.saturating_add(cleaned.len()) > limit.bytes {
-            false
-          } else {
-            forwarded.0 += 1;
-            forwarded.1 += cleaned.len();
-            true
-          }
-        });
-        if let Some(s) = sink.as_ref().filter(|_| forward) {
+        // Every line goes to the session browser, bounded output or not: the daemon keeps its
+        // own newest-5000 window (`push_proc_lines`), so capping here would leave the browser
+        // showing a build's HEAD while the terminal, the model, and the published `output`
+        // field all show its TAIL — the half that says why a gate went red.
+        if let Some(s) = &sink {
           s.proc_line(i, at, &cleaned);
         }
         {
