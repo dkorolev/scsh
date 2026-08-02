@@ -3018,7 +3018,7 @@ fn signal_run_pid(pid: u32) {
 /// its page immediately lists what is about to run instead of a blank board.
 fn planned_skills(def: &crate::harness_def::HarnessDef, def_name: &str) -> Vec<SkillMeta> {
   if def.is_workflow() {
-    def.steps.iter().map(|s| SkillMeta { name: s.id.clone(), harness: s.agent.harness.as_str().to_string() }).collect()
+    def.steps.iter().map(|s| SkillMeta { name: s.id.clone(), harness: s.executor().to_string() }).collect()
   } else {
     def
       .invocations
@@ -3180,7 +3180,7 @@ fn def_json(def: &crate::harness_def::HarnessDef) -> String {
     )
   };
   let agents: Vec<String> = if def.is_workflow() {
-    def.steps.iter().map(|s| agent_obj(&s.id, s.agent.harness.as_str(), s.agent.model.as_deref())).collect()
+    def.steps.iter().map(|s| agent_obj(&s.id, s.executor(), s.agent().and_then(|a| a.model.as_deref()))).collect()
   } else {
     def.invocations.iter().map(|r| agent_obj(&r.name, r.harness.as_str(), r.model.as_deref())).collect()
   };

@@ -472,6 +472,27 @@ impl HarnessDef {
 }
 
 impl Step {
+  /// The agent running this step.
+  ///
+  /// `Option`, and every reader goes through it, because what a step runs is about to become a
+  /// choice rather than a given: a step will be able to name a command that runs on the host
+  /// with no agent and no container at all. Routing the readers now keeps that change to the
+  /// three accessors here instead of scattering it across the board, the daemon, and the runner.
+  pub fn agent(&self) -> Option<&StepAgent> {
+    Some(&self.agent)
+  }
+
+  /// The authored prompt or skill — see [`Step::agent`] for why it is optional.
+  pub fn task(&self) -> Option<&StepTask> {
+    Some(&self.task)
+  }
+
+  /// The word shown wherever a step's executor is named: the board, the job page, the JSON API.
+  /// Today always the harness; see [`Step::agent`].
+  pub fn executor(&self) -> &str {
+    self.agent.harness.as_str()
+  }
+
   /// Whether this step is a loop (`repeat` or `do-while`) — its iterations run sequentially as
   /// distinct workflow runs, discovered by the graph only as they start.
   pub fn is_loop(&self) -> bool {
@@ -506,7 +527,7 @@ impl Step {
   /// Delivered as a harness custom prompt ([`crate::config::SkillDelivery::DirectPrompt`]), not
   /// as a synthetic `SKILL.md`.
   pub fn render_skill_body(&self) -> String {
-    let mut s = self.task.body().trim_end().to_string();
+    let mut s = self.task().map(StepTask::body).unwrap_or_default().trim_end().to_string();
     s.push_str("\n\n## Inputs\n\n");
     if self.inputs.is_empty() {
       s.push_str("This step takes no inputs.\n");
@@ -1595,7 +1616,8 @@ mod tests {
     assert_eq!(def.params.len(), 4);
     assert!(def.params.iter().all(|p| p.default.is_some()));
     // Three DIFFERENT harnesses — the whole point is watching a heterogeneous fleet.
-    let harnesses: std::collections::BTreeSet<&str> = def.steps.iter().map(|s| s.agent.harness.as_str()).collect();
+    let harnesses: std::collections::BTreeSet<&str> =
+      def.steps.iter().map(|s| s.agent().unwrap().harness.as_str()).collect();
     assert_eq!(harnesses.len(), 3, "steps must ride three distinct harnesses");
     let summarize = def.steps.iter().find(|s| s.id == "summarize").expect("summarize step");
     assert_eq!(summarize.needs, vec!["add".to_string(), "multiply".to_string()]);
@@ -1628,15 +1650,15 @@ mod tests {
       assert_eq!(step.needs, initial_needs);
       assert!(step.commits, "{id} commits its corrected report");
       for file in report_files {
-        assert!(step.task.body().contains(file), "{id} reads {file}");
+        assert!(step.task().unwrap().body().contains(file), "{id} reads {file}");
       }
     }
 
     let compose = def.steps.iter().find(|s| s.id == "compose_summary").unwrap();
     assert_eq!(compose.needs, correction_ids.map(str::to_string).to_vec());
-    assert_eq!(compose.agent.harness, crate::config::Harness::Cursor);
-    assert_eq!(compose.agent.model.as_deref(), Some("composer-2.5-fast"));
-    assert!(compose.commits && compose.task.body().contains("COMMIT-SUMMARY.md"));
+    assert_eq!(compose.agent().unwrap().harness, crate::config::Harness::Cursor);
+    assert_eq!(compose.agent().unwrap().model.as_deref(), Some("composer-2.5-fast"));
+    assert!(compose.commits && compose.task().unwrap().body().contains("COMMIT-SUMMARY.md"));
   }
 
   #[test]
@@ -1663,9 +1685,12 @@ mod tests {
     assert_eq!(def.steps[1].repeat, Some(3));
     assert_eq!(def.steps[1].needs, vec!["initialize".to_string()]);
     assert!(def.steps.iter().all(|s| s.commits));
-    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
-    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.6-luna")));
-    assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
+    assert!(def.steps.iter().all(|s| s.agent().unwrap().harness == crate::config::Harness::Codex));
+    assert!(def.steps.iter().all(|s| s.agent().unwrap().model.as_deref() == Some("gpt-5.6-luna")));
+    assert!(
+      def.steps.iter().all(|s| s.agent().unwrap().effort.is_none()),
+      "default effort: low skips commit instructions"
+    );
   }
 
   #[test]
@@ -1681,9 +1706,12 @@ mod tests {
     assert_eq!(compare.do_while.as_deref(), Some("increment"));
     assert_eq!(do_while_body(&def.steps, compare), ["increment", "compare"]);
     assert!(compare.render_skill_body().contains("SCSH_DO_WHILE_REPEAT"));
-    assert!(def.steps.iter().all(|s| s.agent.harness == crate::config::Harness::Codex));
-    assert!(def.steps.iter().all(|s| s.agent.model.as_deref() == Some("gpt-5.6-luna")));
-    assert!(def.steps.iter().all(|s| s.agent.effort.is_none()), "default effort: low skips commit instructions");
+    assert!(def.steps.iter().all(|s| s.agent().unwrap().harness == crate::config::Harness::Codex));
+    assert!(def.steps.iter().all(|s| s.agent().unwrap().model.as_deref() == Some("gpt-5.6-luna")));
+    assert!(
+      def.steps.iter().all(|s| s.agent().unwrap().effort.is_none()),
+      "default effort: low skips commit instructions"
+    );
   }
 
   #[test]
@@ -1710,7 +1738,7 @@ mod tests {
     let prepare = def.steps.iter().find(|s| s.id == "prepare").unwrap();
     assert!(prepare.needs.is_empty(), "prepare is the first step");
     assert!(prepare.commits, "the PR description lands as a commit on the caller's branch");
-    let prepare_words = prepare.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    let prepare_words = prepare.task().unwrap().body().split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
       prepare_words.contains("Audit each commit's actual changed paths for `PR-DESCRIPTION.md`"),
       "finds every prior description change regardless of history simplification"
@@ -1737,10 +1765,10 @@ mod tests {
       CommitIdentity::Runner,
       "review fixes are authored by the runner, not the notes bot"
     );
-    assert_eq!(fix.agent.harness, crate::config::Harness::Claude);
-    assert_eq!(fix.agent.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(fix.agent().unwrap().harness, crate::config::Harness::Claude);
+    assert_eq!(fix.agent().unwrap().model.as_deref(), Some("claude-opus-4-8"));
     assert_eq!(fix.inactivity_timeout, Some(3600), "a healthy fix pass outlives the default novelty window");
-    assert!(fix.task.body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
+    assert!(fix.task().unwrap().body().contains("Narrate your progress"), "the fix agent must keep the screen alive");
     assert!(
       fix.outputs.iter().any(|o| o.name == "message" && o.ty == OutputType::String),
       "one-line changes summary — the job-page headline"
@@ -1750,7 +1778,7 @@ mod tests {
       fix.outputs.iter().any(|o| o.name == "decisions" && o.ty == OutputType::StringList),
       "declined requests come back typed, for the journal step to record"
     );
-    let fix_words = fix.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    let fix_words = fix.task().unwrap().body().split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
       !fix_words.contains("append a short entry to `STYLE-NOTES.md`"),
       "declining is journaled as a decision now, not appended to a notes file in the tree"
@@ -1770,7 +1798,7 @@ mod tests {
       CommitIdentity::Notes,
       "decisions are the change's notes — the identity packdiff lifts off the review page"
     );
-    let journal_words = journal.task.body().split_whitespace().collect::<Vec<_>>().join(" ");
+    let journal_words = journal.task().unwrap().body().split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(journal_words.contains("PR-DECISION-<topic>.md"), "the journal names the file convention");
     assert!(journal_words.contains("Bottom line up front"), "decisions are BLUF-first");
     assert!(
@@ -1794,10 +1822,10 @@ mod tests {
     // The loop: decide (breaks when the bar is met) … collect (do-while back to decide).
     let decide = def.steps.iter().find(|s| s.id == "decide").unwrap();
     assert!(decide.break_loop);
-    assert_eq!(decide.agent.harness, crate::config::Harness::Claude);
-    assert_eq!(decide.agent.model.as_deref(), Some("claude-opus-4-8"));
+    assert_eq!(decide.agent().unwrap().harness, crate::config::Harness::Claude);
+    assert_eq!(decide.agent().unwrap().model.as_deref(), Some("claude-opus-4-8"));
     assert!(
-      decide.task.body().contains("SCSH_LOOP_ITERATION"),
+      decide.task().unwrap().body().contains("SCSH_LOOP_ITERATION"),
       "decide branches on the loop iteration, not on env-var emptiness"
     );
     assert!(decide.outputs.iter().any(|o| o.name == "SCSH_LOOP_BREAK" && o.ty == OutputType::Bool));
@@ -1811,10 +1839,13 @@ mod tests {
     assert_eq!(resolution.ty, OutputType::Enum);
     assert_eq!(resolution.choices, ["approved", "approved_with_reservations", "changes_requested"]);
     assert!(decide.outputs.iter().any(|o| o.name == "reservations" && o.ty == OutputType::StringList));
-    assert!(decide.task.body().contains("approved_with_reservations"), "the prompt spells out the reservations exit");
     assert!(
-      decide.task.body().contains("no grade is poor and no comment is\n      [blocking]")
-        || decide.task.body().contains("no grade is poor"),
+      decide.task().unwrap().body().contains("approved_with_reservations"),
+      "the prompt spells out the reservations exit"
+    );
+    assert!(
+      decide.task().unwrap().body().contains("no grade is poor and no comment is\n      [blocking]")
+        || decide.task().unwrap().body().contains("no grade is poor"),
       "the reservations exit is fenced off from real defects"
     );
     let collect = def.steps.iter().find(|s| s.id == "collect").unwrap();
@@ -1845,7 +1876,7 @@ mod tests {
         })
         .unwrap_or_else(|| panic!("{} has a known reviewer specialty", r.id));
       let expected_body = crate::config::bundled_skill_body(expected_name).expect("reviewer is bundled");
-      match &r.task {
+      match r.task().unwrap() {
         StepTask::Skill { name, body } => {
           actual_reviewer_skills.insert(name.as_str());
           assert_eq!(name, expected_name, "{} references its canonical reviewer", r.id);
@@ -1853,16 +1884,20 @@ mod tests {
         }
         StepTask::Prompt(_) => panic!("{} must reference the canonical skill, not copy its prompt", r.id),
       }
-      assert!(r.task.body().contains("Look, understand, analyze — never execute"), "{} is static-only", r.id);
       assert!(
-        r.task.body().contains("When scsh appends a workflow-specific `## Output` contract"),
+        r.task().unwrap().body().contains("Look, understand, analyze — never execute"),
+        "{} is static-only",
+        r.id
+      );
+      assert!(
+        r.task().unwrap().body().contains("When scsh appends a workflow-specific `## Output` contract"),
         "{} explicitly supports the lossless workflow adapter",
         r.id
       );
       if r.id.ends_with("_terra") {
-        assert_eq!(r.agent.harness, crate::config::Harness::Codex);
-        assert_eq!(r.agent.model.as_deref(), Some("gpt-5.6-terra"));
-        assert_eq!(r.agent.effort.as_deref(), Some("high"));
+        assert_eq!(r.agent().unwrap().harness, crate::config::Harness::Codex);
+        assert_eq!(r.agent().unwrap().model.as_deref(), Some("gpt-5.6-terra"));
+        assert_eq!(r.agent().unwrap().effort.as_deref(), Some("high"));
       }
     }
     assert_eq!(
@@ -1873,7 +1908,7 @@ mod tests {
 
     for id in ["prepare", "decide", "fix", "collect"] {
       assert!(
-        matches!(def.steps.iter().find(|step| step.id == id).unwrap().task, StepTask::Prompt(_)),
+        matches!(def.steps.iter().find(|step| step.id == id).unwrap().task(), Some(StepTask::Prompt(_))),
         "{id} remains native orchestration, not a reviewer substitution"
       );
     }
@@ -2192,11 +2227,11 @@ steps:
     assert_eq!(build.params[0].ty, ParamType::Text);
     assert!(build.params[0].required);
     let step = &build.steps[0];
-    assert_eq!(step.agent.harness, crate::config::Harness::Cursor);
-    assert_eq!(step.agent.model.as_deref(), Some("auto"));
+    assert_eq!(step.agent().unwrap().harness, crate::config::Harness::Cursor);
+    assert_eq!(step.agent().unwrap().model.as_deref(), Some("auto"));
     assert!(step.commits);
     assert_eq!(step.artifacts, ["big-beautiful-build.md"]);
-    match &step.task {
+    match step.task().unwrap() {
       StepTask::Skill { name, body } => {
         assert_eq!(name, "big-beautiful-build");
         assert_eq!(body, stub, "the INSTALLED body is what the agent gets");
