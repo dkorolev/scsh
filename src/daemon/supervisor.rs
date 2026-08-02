@@ -71,6 +71,31 @@ fn job_failure_signature(s: &Session) -> String {
   format!("{}|{}", stalled.unwrap_or("(no live step)"), "session_stale")
 }
 
+/// The host step that terminal-failed this job in a way another run cannot improve on, if any.
+///
+/// A host step runs a fixed command on the host, so its failures are deterministic in a way a
+/// container harness's are not: a gate that hung will hang again, one that could not be spawned
+/// still has no `sh`, and a decision command that exited non-zero exits non-zero again. Restarting
+/// resumes, re-runs the host step and everything downstream of it, and buys another hour of the
+/// same. A hanging check is the exact failure this step type exists to make visible — the
+/// supervisor must not spend three restarts hiding it.
+fn unretryable_host_failure(s: &Session) -> Option<String> {
+  use crate::failure::reason;
+  let p = s.procs.iter().find(|p| {
+    p.status == ProcStatus::Fail
+      && !s.proc_is_superseded(p)
+      && matches!(
+        p.fail_reason.as_deref(),
+        Some(reason::HOST_STEP_TIMEOUT | reason::HOST_STEP_SPAWN | reason::HOST_STEP_NONZERO)
+      )
+  })?;
+  Some(format!(
+    "host step '{}' failed with {} — a fixed command on the host fails the same way every run",
+    p.skill_name.as_deref().unwrap_or(&p.label),
+    p.fail_reason.as_deref().unwrap_or("")
+  ))
+}
+
 /// Phase one, under the store lock: decide. Returns the ids whose supervisor state
 /// changed (they need persisting and a websocket tick).
 pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
@@ -93,7 +118,14 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
     if s.lifecycle_status(now) != SessionLifecycle::Failed {
       continue;
     }
-    // Newly observed terminal failure: ceilings first, then the breaker, then schedule.
+    // Newly observed terminal failure: what no restart can fix, then ceilings, then the breaker,
+    // then schedule.
+    if let Some(why) = unretryable_host_failure(s) {
+      s.supervisor.gave_up = Some(why.clone());
+      crate::failure::log_session_proc(&id, "supervisor_gave_up", "(supervisor)", &why);
+      dirty.push(id);
+      continue;
+    }
     let attempt = s.supervisor.attempt();
     let max = s.supervisor.retries;
     if attempt > max {
@@ -226,6 +258,33 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: SupervisorState::fresh(DEFAULT_JOB_RETRIES),
+    }
+  }
+
+  #[test]
+  fn a_job_a_host_step_failed_is_never_restarted() {
+    let now = 1_000_000;
+    // A hung gate is the failure host steps exist to make visible. Restarting resumes, re-runs
+    // the same fixed command, and buys another hour of the same silence — so the supervisor
+    // gives up at once instead of spending three restarts on it.
+    for reason in [
+      crate::failure::reason::HOST_STEP_TIMEOUT,
+      crate::failure::reason::HOST_STEP_SPAWN,
+      crate::failure::reason::HOST_STEP_NONZERO,
+    ] {
+      let mut store = Store::new(DaemonMode::Persistent, 7274, now);
+      let mut session = failed_supervised_session("hostfl", now);
+      session.procs[0].label = "host: gate".into();
+      session.procs[0].skill_name = Some("gate".into());
+      session.procs[0].harness = Some("host".into());
+      session.procs[0].fail_reason = Some(reason.into());
+      store.insert_session("hostfl".into(), session);
+
+      assert_eq!(schedule_pass(&mut store, now), vec!["hostfl".to_string()]);
+      let s = &store.sessions["hostfl"];
+      assert!(s.supervisor.next_retry_at.is_none(), "{reason}: nothing may be scheduled");
+      let why = s.supervisor.gave_up.as_deref().expect("{reason}: the give-up is recorded, not silent");
+      assert!(why.contains("gate") && why.contains(reason), "{reason}: names the step and the reason — {why}");
     }
   }
 
