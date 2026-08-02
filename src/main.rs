@@ -9925,7 +9925,10 @@ fn print_help_defs() {
                            paths, and the wrong localhost. The command is fixed by the committed
                            definition: no model chooses what runs on your machine.
     timeout: 90m           wall-clock bound (default 1h). Overrunning FAILS the job — a check
-                           that hangs is exactly what this replaces, so it is never auto-retried.
+                           that hangs is exactly what this replaces, so it is never auto-retried:
+                           not within the run, and not by the daemon's job supervisor either,
+                           which gives up on a host-step failure instead of spending restarts on
+                           a fixed command that fails the same way every time.
                            scsh kills the command's whole process group; anything it started in
                            a NEW session (a detached daemon, a compose stack) is the command's
                            own to clean up, since scsh never sees it.
