@@ -212,7 +212,22 @@ definition declares a `description`, typed `params` (which become environment va
 `commits: true` (same as a skill — rebase the step's commits onto your branch / packdiff), optional
 `memory: 8G` (an explicit run-container limit; positive integer with an `M` or `G` suffix), and feeds later steps
 whose `inputs` bind to `params.NAME` or `stepid.field` (`needs:` gives the edges, `when:` gates a
-step). Run one from the console with `scsh run --def <name>` (params from the environment), or,
+step). A step declaring `run: <command>` instead of an `agent` is a **host step**: `scsh` runs that
+command on the host, in your own repository, with no container — the escape hatch for checks that
+cannot work inside a run container, such as a docker-compose end-to-end suite that needs the real
+docker daemon, the real paths, and the real `localhost`. Declaring no `output:` makes it a **check**:
+scsh publishes `passed`, `exit_code`, and a tail-bounded `output`, and a non-zero exit is a *result*,
+not a failure — the workflow continues, so a `do-while` loop can bind `output` into the next agent
+step and have it fix what the check caught, in one job with the failure text carried across, instead
+of a second run that starts cold. Declaring an `output:` block instead makes it a **decision**: the
+command writes `$SCSH_RESULT` and scsh validates it against that schema exactly as it validates an
+agent's result, so a deterministic script can steer a loop (`break: true`, `SCSH_DO_WHILE_REPEAT`)
+where you would otherwise spend a model call. Bound either form with `timeout:` (overrunning fails
+the job — a check that hangs is what this replaces; scsh kills the whole process group). The command
+is fixed by the committed definition, so a workflow's host surface is auditable by reading the
+`.yml` — but quote your expansions, because an input bound to an agent step's output carries
+model-written text into a host shell. See `scsh help def`, "Host steps".
+Run one from the console with `scsh run --def <name>` (params from the environment), or,
 when the daemon is up, open a repository in the browser (type/paste a path or use the native
 folder picker) and start a job from a rendered parameter form — the daemon runs at most one job
 per directory. Here the word "harness" means the runnable definition; the CLI it dispatches to

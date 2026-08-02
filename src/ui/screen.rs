@@ -264,6 +264,14 @@ fn jitter_20pct(d: Duration, seed: u64) -> Duration {
 /// asked whether the content is a usable result. A writer still working keeps resetting the
 /// clock.
 ///
+/// Where a child runs: its working directory and the variables added to the inherited
+/// environment. Used by workflow host steps, which execute in the caller's own repository and
+/// receive their declared `inputs:` as environment variables.
+pub struct ExecPlace<'a> {
+  pub cwd: &'a std::path::Path,
+  pub env: &'a [(String, String)],
+}
+
 /// This decides only WHEN TO STOP WAITING, never whether the run succeeded. The caller's normal
 /// collection path — copy out, validate against the workflow schema, bounded correction retry —
 /// stays authoritative, so an early stop can never launder a bad result into a pass.
@@ -423,8 +431,8 @@ pub enum Killed {
 
 /// Stop a watchdog-killed child and everything it started.
 ///
-/// Killing the direct child is not enough for anything that forks — a `sh -c` wrapper around a
-/// build or a test suite is exactly that. Its descendants would survive, keep running on the
+/// Killing the direct child is not enough for anything that forks — and a workflow host step's
+/// `sh -c "make gate-all"` is exactly that. Its descendants would survive, keep running on the
 /// developer's machine, and keep the stdout/stderr pipes open, so [`drain_pumps`] below would
 /// wait forever and a detected timeout would present as a hang. Signal the whole process group
 /// (which [`isolate_child`] made this child the leader of), then the child itself — the latter
@@ -529,8 +537,8 @@ impl Proc {
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
-    let (ok, _killed, last) = self.exec(program, args, None, None, None, None)?;
-    Ok((ok, last))
+    let (status, _killed, last) = self.exec(program, args, None, None, None, None, None)?;
+    Ok((status.success(), last))
   }
 
   /// Last `max` lines captured for this proc (stdout/stderr pump output).
@@ -545,7 +553,18 @@ impl Proc {
     &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
     done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
-    self.exec(program, args, None, timeout, watch, done)
+    let (status, killed, last) = self.exec(program, args, None, timeout, watch, done, None)?;
+    Ok((status.success(), killed, last))
+  }
+
+  /// Like [`Proc::run_watched`], but in an explicit working directory and environment, and
+  /// reporting the child's exact **exit code**. For a workflow host step, whose non-zero exit
+  /// is a result to hand downstream rather than a failure of the step itself.
+  pub fn run_in(
+    &self, program: &str, args: &[String], place: &ExecPlace, timeout: Option<Duration>,
+  ) -> std::io::Result<(Option<i32>, Killed, Option<String>)> {
+    let (status, killed, last) = self.exec(program, args, None, timeout, None, None, Some(place))?;
+    Ok((status.code(), killed, last))
   }
 
   /// Spawn `program args`, pump both output streams into the model as timestamped lines,
@@ -555,14 +574,19 @@ impl Proc {
   /// A child killed by one of the watchdogs is taken down as a whole process TREE, and the
   /// reader threads are then drained under a deadline — see [`kill_child_tree`] and
   /// [`PUMP_DRAIN_GRACE`]. Both exist so "the watchdog fired" can never become "scsh hung".
+  #[allow(clippy::too_many_arguments)]
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
-    watch: Option<&ActivityWatch>, done: Option<&DoneWatch>,
-  ) -> std::io::Result<(bool, Killed, Option<String>)> {
+    watch: Option<&ActivityWatch>, done: Option<&DoneWatch>, place: Option<&ExecPlace>,
+  ) -> std::io::Result<(std::process::ExitStatus, Killed, Option<String>)> {
     let started = self.start_instant();
     let mut command = Command::new(program);
     command.args(args).stdout(Stdio::piped()).stderr(Stdio::piped());
     command.stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() });
+    if let Some(place) = place {
+      command.current_dir(place.cwd);
+      command.envs(place.env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    }
     isolate_child(&mut command);
     let mut child = command.spawn()?;
     let pid = child.id();
@@ -646,7 +670,7 @@ impl Proc {
     unregister_child(pid);
     drain_pumps(pumps, killed);
     let last = last.lock().unwrap().clone();
-    Ok((status.success(), killed, last))
+    Ok((status, killed, last))
   }
 
   /// Finish green: set the proc ✓, freeze its clock, and attach an optional detail. Off-TTY,

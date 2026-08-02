@@ -59,6 +59,17 @@ pub mod reason {
   pub const FORCE_RESTARTED: &str = "force_restarted";
   pub const DAEMON_DRAIN_TIMEOUT: &str = "daemon_poster_drain_timeout";
   pub const DAEMON_POST_FAILED: &str = "daemon_post_failed";
+  /// A workflow host step (`run:`) ran past its `timeout:` and was killed. Deliberately NOT
+  /// transient: a host check that hangs is the failure this step type exists to make visible,
+  /// and silently running it again would hide it for another hour.
+  pub const HOST_STEP_TIMEOUT: &str = "host_step_timeout";
+  /// A workflow host step could not be started at all (no `sh`, unreadable working directory).
+  pub const HOST_STEP_SPAWN: &str = "host_step_spawn_failed";
+  /// A DECISION-form host step (one declaring `output:`) exited non-zero, so it never wrote the
+  /// result file that is its only way of speaking. Distinct from [`HARNESS_NONZERO`], which is
+  /// transient because a container harness can fail for reasons another attempt may not hit: a
+  /// host command is deterministic, and re-running it would only spend the same wall clock again.
+  pub const HOST_STEP_NONZERO: &str = "host_step_nonzero";
 }
 
 const LOG_NAME: &str = "failures.log";
