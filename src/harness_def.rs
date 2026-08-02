@@ -341,6 +341,66 @@ impl StepTask {
   }
 }
 
+/// A shell command `scsh` runs **on the host**, in the caller's repository, with no container
+/// and no agent. The escape hatch for checks that cannot work inside a run container: a
+/// docker-compose end-to-end suite, a GPU test, anything bound to host-only tooling. The
+/// command is fixed by the committed definition — no model chooses it — so a workflow's host
+/// surface is auditable by reading the `.yml`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostRun {
+  /// The command line, run via `sh -c` from the caller repository root.
+  pub command: String,
+  /// Wall-clock ceiling in seconds. `None` = [`HOST_RUN_DEFAULT_TIMEOUT`]. A host step that
+  /// overruns fails the workflow rather than reporting a result: an unbounded gate that hangs
+  /// is the failure mode this step type exists to replace.
+  pub timeout: Option<u64>,
+  /// The step declared its own `output:`, so the command writes `$SCSH_RESULT` and scsh
+  /// validates it against that schema — the same contract an agent step reports under. When
+  /// false, scsh synthesizes the command's verdict instead (see [`host_outputs`]).
+  ///
+  /// The two forms read a non-zero exit differently, deliberately. Synthesized: a non-zero exit
+  /// is DATA — a red gate the workflow is expected to react to. Self-reporting: the result file
+  /// is how the command speaks, so a non-zero exit means it never got to speak, and the step
+  /// fails.
+  pub reports_result: bool,
+}
+
+/// Default wall-clock ceiling for a host step (1 hour).
+pub const HOST_RUN_DEFAULT_TIMEOUT: u64 = 3600;
+
+/// The name a host step reports where an agent step reports its harness.
+pub const HOST_EXECUTOR: &str = "host";
+
+/// The three result fields every host step publishes. Declared by scsh, never by the author:
+/// a host command reports through its exit code and its output, and giving that a fixed shape
+/// keeps downstream `inputs:` bindings identical across every definition.
+pub const HOST_OUTPUT_PASSED: &str = "passed";
+pub const HOST_OUTPUT_EXIT_CODE: &str = "exit_code";
+pub const HOST_OUTPUT_OUTPUT: &str = "output";
+
+/// The synthesized `output:` block of a host step (see [`HOST_OUTPUT_PASSED`]).
+fn host_outputs() -> Vec<OutputField> {
+  vec![
+    OutputField { name: HOST_OUTPUT_PASSED.into(), ty: OutputType::Bool, choices: Vec::new() },
+    OutputField { name: HOST_OUTPUT_EXIT_CODE.into(), ty: OutputType::Int, choices: Vec::new() },
+    OutputField { name: HOST_OUTPUT_OUTPUT.into(), ty: OutputType::String, choices: Vec::new() },
+  ]
+}
+
+/// What a step actually does. Exactly one of these, decided by whether the step declares
+/// `run:` — the parser rejects any mixture, so downstream code can match without guarding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepWork {
+  /// A CLI + model, in its own container, on a clean clone.
+  Agent {
+    agent: StepAgent,
+    /// The task prompt or canonical bundled skill; scsh appends the I/O contract.
+    task: StepTask,
+  },
+  /// A command on the host, in the caller's repository.
+  Host(HostRun),
+}
+
 /// One node in a workflow DAG. A step is a context-free unit: it receives its `inputs` as
 /// named environment variables and writes its `output` fields to `$SCSH_RESULT` — it knows
 /// nothing about the graph, other steps, or its own position (scsh resolves all of that).
@@ -348,10 +408,8 @@ impl StepTask {
 pub struct Step {
   /// Unique step id (`[A-Za-z0-9_]`).
   pub id: String,
-  /// The agent that runs this step.
-  pub agent: StepAgent,
-  /// The task prompt or canonical bundled skill; scsh appends the I/O contract.
-  pub task: StepTask,
+  /// What this step runs: an agent in a container, or a command on the host.
+  pub work: StepWork,
   /// Input bindings: each names an env var the step sees and where its value comes from.
   pub inputs: Vec<InputBinding>,
   /// The typed result fields this step must produce (validated against `$SCSH_RESULT`).
@@ -472,25 +530,48 @@ impl HarnessDef {
 }
 
 impl Step {
-  /// The agent running this step.
-  ///
-  /// `Option`, and every reader goes through it, because what a step runs is about to become a
-  /// choice rather than a given: a step will be able to name a command that runs on the host
-  /// with no agent and no container at all. Routing the readers now keeps that change to the
-  /// three accessors here instead of scattering it across the board, the daemon, and the runner.
+  /// The agent running this step, or `None` for a host step.
   pub fn agent(&self) -> Option<&StepAgent> {
-    Some(&self.agent)
+    match &self.work {
+      StepWork::Agent { agent, .. } => Some(agent),
+      StepWork::Host(_) => None,
+    }
   }
 
-  /// The authored prompt or skill — see [`Step::agent`] for why it is optional.
+  /// The authored prompt or skill, or `None` for a host step.
   pub fn task(&self) -> Option<&StepTask> {
-    Some(&self.task)
+    match &self.work {
+      StepWork::Agent { task, .. } => Some(task),
+      StepWork::Host(_) => None,
+    }
   }
 
-  /// The word shown wherever a step's executor is named: the board, the job page, the JSON API.
-  /// Today always the harness; see [`Step::agent`].
+  /// The host command this step runs, or `None` for an agent step.
+  pub fn host(&self) -> Option<&HostRun> {
+    match &self.work {
+      StepWork::Host(run) => Some(run),
+      StepWork::Agent { .. } => None,
+    }
+  }
+
+  /// Whether an earlier result for this step may stand in for running it — the cache, and
+  /// `--resume-from`'s restore of a previous session's results.
+  ///
+  /// False for a host step, always. An agent step's result describes work done on a clean clone
+  /// of a known revision, so an identical clone yields an identical result. A host step's result
+  /// describes the caller's working tree AS IT WAS: replaying "the gate passed" onto a tree that
+  /// has since changed is a green light for a state nobody checked.
+  pub fn result_is_reusable(&self) -> bool {
+    self.host().is_none()
+  }
+
+  /// The word shown wherever an agent step shows its harness — `host` for a host step, so the
+  /// board, the job page, and the JSON API all name the step's executor the same way.
   pub fn executor(&self) -> &str {
-    self.agent.harness.as_str()
+    match &self.work {
+      StepWork::Agent { agent, .. } => agent.harness.as_str(),
+      StepWork::Host(_) => HOST_EXECUTOR,
+    }
   }
 
   /// Whether this step is a loop (`repeat` or `do-while`) — its iterations run sequentially as
@@ -881,19 +962,46 @@ fn validate_steps(
       "inactivity_timeout",
       "memory",
       "max-iterations",
+      "run",
+      "timeout",
     ];
     for (k, _) in fields {
       if !SK.contains(&k.as_str()) {
         errors.push(format!(
-          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout, memory)"
+          "unknown key 'steps.{id}.{k}' (allowed: agent, prompt, skill, run, timeout, inputs, output, when, needs, artifacts, commits, repeat, do-while, break, max-iterations, retry_for, retry_signature_cap, inactivity_timeout, memory)"
         ));
       }
     }
 
-    let agent = validate_step_agent(id, fm.get("agent").copied(), errors);
-    let task = validate_step_task(id, fm.get("prompt").copied(), fm.get("skill").copied(), errors, repo_root);
+    // `run:` picks the step's whole execution model, so it is resolved before anything else:
+    // a host step has no agent and no prompt, and saying otherwise is a definition error rather
+    // than a silently ignored key.
+    let work = match fm.get("run") {
+      Some(node) => validate_host_run(id, node, &fm, errors).map(StepWork::Host),
+      None => {
+        let agent = validate_step_agent(id, fm.get("agent").copied(), errors);
+        let task = validate_step_task(id, fm.get("prompt").copied(), fm.get("skill").copied(), errors, repo_root);
+        if let Some(timeout) = fm.get("timeout") {
+          let _ = timeout;
+          errors.push(format!(
+            "'steps.{id}.timeout' applies only to a 'run:' host step (an agent step bounds itself with retry_for / inactivity_timeout)"
+          ));
+        }
+        agent.zip(task).map(|(agent, task)| StepWork::Agent { agent, task })
+      }
+    };
+    let host = matches!(work, Some(StepWork::Host(_)));
     let inputs = validate_step_inputs(id, fm.get("inputs").copied(), errors);
-    let outputs = validate_step_outputs(id, fm.get("output").copied(), errors);
+    // A host step comes in two forms. Declare `output:` and it reports like an agent step —
+    // writing `$SCSH_RESULT`, validated against that schema — which is how a deterministic
+    // script can return a typed decision instead of a model doing it. Omit `output:` and scsh
+    // synthesizes the command's own verdict (see [`host_outputs`]).
+    let outputs = if host && !fm.contains_key("output") {
+      host_outputs()
+    } else {
+      validate_step_outputs(id, fm.get("output").copied(), errors)
+    };
+    let host_reports_itself = host && fm.contains_key("output");
     let when = validate_step_cond_block(id, "when", fm.get("when").copied(), errors);
     let do_while = match fm.get("do-while") {
       None => None,
@@ -1016,11 +1124,34 @@ fn validate_steps(
     let inactivity_timeout = crate::config::parse_positive_secs_at(&fm, &step_path, "inactivity_timeout", errors);
     let memory = crate::config::parse_memory_limit_at(&fm, &step_path, errors);
 
-    if let (Some(agent), Some(task)) = (agent, task) {
+    if host {
+      // A host step runs the caller's own repository, not a throwaway clone: there is no
+      // container to size, no clone whose commits could be rebased back, and no agent to
+      // nudge with a retry budget. Rejecting these keys keeps that model unambiguous.
+      for (key, why) in [
+        ("commits", "a host step runs in the caller's repository — commit from an agent step instead"),
+        ("artifacts", "a host step reports through its exit code and output"),
+        ("memory", "a host step runs outside any container"),
+        ("retry_for", "use 'timeout' to bound a host step"),
+        ("retry_signature_cap", "use 'timeout' to bound a host step"),
+        ("inactivity_timeout", "use 'timeout' to bound a host step"),
+      ] {
+        if fm.contains_key(key) {
+          errors.push(format!("'steps.{id}.{key}' does not apply to a 'run:' host step ({why})"));
+        }
+      }
+      // Ending a loop takes a typed SCSH_LOOP_BREAK, which only the self-reporting form can
+      // return. The synthesized form has no channel for it.
+      if break_loop && !host_reports_itself {
+        errors.push(format!(
+          "step '{id}' uses 'break: true', so it must declare an 'output:' block containing boolean SCSH_LOOP_BREAK and write it to $SCSH_RESULT"
+        ));
+      }
+    }
+    if let Some(work) = work {
       steps.push(Step {
         id: id.to_string(),
-        agent,
-        task,
+        work,
         inputs,
         outputs,
         when,
@@ -1042,6 +1173,39 @@ fn validate_steps(
 
   validate_step_graph(&steps, params, errors);
   steps
+}
+
+/// Resolve a `run:` host step: the command itself, its `timeout:`, and the keys that becoming a
+/// host step forbids. `agent`/`prompt`/`skill` are rejected rather than ignored — a definition
+/// carrying both is ambiguous about where its work actually runs, and that is exactly the
+/// question a reader of the `.yml` must be able to answer at a glance.
+fn validate_host_run(id: &str, node: &Node, fm: &BTreeMap<&str, &Node>, errors: &mut Vec<String>) -> Option<HostRun> {
+  for key in ["agent", "prompt", "skill"] {
+    if fm.contains_key(key) {
+      errors.push(format!("step '{id}' declares both 'run' and '{key}' — a step runs on the host OR in a container"));
+    }
+  }
+  let timeout = match fm.get("timeout").copied() {
+    None => None,
+    Some(Node::Scalar(s)) => match crate::failure::parse_duration_secs(s) {
+      Some(n) if n >= 1 => Some(n),
+      _ => {
+        errors
+          .push(format!("'steps.{id}.timeout' must be a positive duration like 90s, 45m, or 8h (got '{}')", s.trim()));
+        None
+      }
+    },
+    Some(_) => {
+      errors.push(format!("'steps.{id}.timeout' must be a duration like 90s, 45m, or 8h — not a mapping"));
+      None
+    }
+  };
+  let command = required_scalar(Some(node), &format!("steps.{id}.run"), errors)?;
+  if command.trim().is_empty() {
+    errors.push(format!("'steps.{id}.run' must be a shell command"));
+    return None;
+  }
+  Some(HostRun { command: command.trim().to_string(), timeout, reports_result: fm.contains_key("output") })
 }
 
 /// Resolve exactly one of a step's `prompt:` or `skill:` declarations. Bundled skill lookup is
@@ -1387,6 +1551,21 @@ fn validate_step_graph(steps: &[Step], params: &[Param], errors: &mut Vec<String
         None => {
           errors.push(format!("step '{}' uses 'break: true' and must declare boolean output SCSH_LOOP_BREAK", s.id))
         }
+      }
+    }
+    // A do-while ending in a SYNTHESIZED host step has no SCSH_DO_WHILE_REPEAT to return, so it
+    // always asks for another lap and the body's `break: true` head is the only thing that can
+    // stop it. Without such a head the loop can only ever end by exhausting its iteration budget
+    // — a runaway the author should hear about now, not on iteration 25. (A self-reporting host
+    // tail declares SCSH_DO_WHILE_REPEAT like an agent tail and needs no such head.)
+    if s.do_while.is_some() && s.host().is_some_and(|h| !h.reports_result) {
+      let body = do_while_body(steps, s);
+      let has_break = body.iter().any(|id| steps.iter().any(|b| &b.id == id && b.break_loop));
+      if !has_break {
+        errors.push(format!(
+          "step '{}' is a host step ending a do-while, so its loop needs a 'break: true' first step to end it — declare an 'output:' block if the command should decide with SCSH_DO_WHILE_REPEAT instead",
+          s.id
+        ));
       }
     }
   }
@@ -2329,33 +2508,112 @@ steps:
     )
   }
 
-  /// A two-step do-while: `pick` heads the body and can break it, `check` is the tail.
-  fn loop_wf(pick_inputs: &str) -> String {
-    format!(
-      "description: \"x\"\nsteps:\n  pick:\n    break: true\n    agent:\n      harness: claude\n      model: sonnet\n{pick_inputs}    prompt: |\n      decide\n    output:\n      kind:\n        type: string\n      SCSH_LOOP_BREAK:\n        type: bool\n  check:\n    needs: pick\n    do-while: pick\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      verdict:\n        type: string\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n"
-    )
+  #[test]
+  fn a_host_step_declares_a_command_and_gets_scshs_fixed_result_fields() {
+    let src = wf("    needs: a\n    run: make gate-all\n    timeout: 90m");
+    let def = validate("t", &src, DefSource::Repo).unwrap();
+    let gate = def.steps.iter().find(|s| s.id == "b").unwrap();
+    let host = gate.host().expect("b is a host step");
+    assert_eq!(host.command, "make gate-all");
+    assert_eq!(host.timeout, Some(90 * 60), "durations use the same grammar as retry_for");
+    assert_eq!(gate.agent(), None, "a host step has no agent");
+    assert_eq!(gate.executor(), HOST_EXECUTOR, "and reports as 'host' wherever a harness is named");
+    // A cached or resumed verdict would describe the tree as it was, not as it is.
+    assert!(!gate.result_is_reusable(), "a host verdict is never cached nor restored on resume");
+    let agent_step = def.steps.iter().find(|s| s.id == "a").unwrap();
+    assert!(agent_step.result_is_reusable(), "an agent step's clean clone makes its result reusable");
+    // The author never writes these; downstream `inputs:` bindings are identical everywhere.
+    let fields: Vec<(&str, OutputType)> = gate.outputs.iter().map(|o| (o.name.as_str(), o.ty)).collect();
+    assert_eq!(
+      fields,
+      vec![
+        (HOST_OUTPUT_PASSED, OutputType::Bool),
+        (HOST_OUTPUT_EXIT_CODE, OutputType::Int),
+        (HOST_OUTPUT_OUTPUT, OutputType::String)
+      ]
+    );
+    // A later step binds them like any other step's output.
+    let reader = format!(
+      "{}\n  c:\n    needs: b\n    inputs:\n      GATE: b.output\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      read it\n    output:\n      z:\n        type: string\n",
+      src.trim_end()
+    );
+    assert!(validate("t", &reader, DefSource::Repo).is_ok());
+    // And a typo in one is caught at definition time, not after an hour-long gate.
+    let typo = reader.replace("b.output", "b.stdout");
+    let err = validate("t", &typo, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("b.stdout")), "{err:?}");
   }
 
   #[test]
-  fn a_do_while_body_step_reads_any_body_step_s_previous_answer() {
-    // The loop-carried channel is not only "read the tail's verdict". A step that picks what to
-    // work on has to see what it picked last round, and that is a reference to ITSELF with no
-    // `needs:` edge — legal precisely because it resolves to the previous iteration, and the
-    // only way a loop carries state forward without committing a file to pass it along.
-    let src = loop_wf("    inputs:\n      LAST_VERDICT: check.verdict\n      PREVIOUS: pick.kind\n");
-    let def = validate("t", &src, DefSource::Repo).expect("a body step may read the body, itself included");
-    let pick = def.steps.iter().find(|s| s.id == "pick").unwrap();
-    assert_eq!(pick.inputs.len(), 2);
-    assert!(pick.needs.is_empty(), "neither binding is a graph edge — a back-edge is not a dependency");
+  fn a_host_step_refuses_the_keys_that_only_make_sense_in_a_container() {
+    // Where the work runs must be unambiguous to anyone reading the yml.
+    for both in [
+      "    run: make check\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go",
+      "    run: make check\n    prompt: |\n      go",
+    ] {
+      let err = validate("t", &wf(both), DefSource::Repo).unwrap_err();
+      assert!(err.iter().any(|e| e.contains("runs on the host OR in a container")), "{both}: {err:?}");
+    }
+    // No clone to commit from, no container to size, no agent to nudge.
+    for (key, line) in [
+      ("commits", "    commits: true\n"),
+      ("artifacts", "    artifacts: notes.txt\n"),
+      ("memory", "    memory: 8G\n"),
+      ("retry_for", "    retry_for: 2h\n"),
+      ("inactivity_timeout", "    inactivity_timeout: 600\n"),
+    ] {
+      let err = validate("t", &wf(&format!("    run: make check\n{line}")), DefSource::Repo).unwrap_err();
+      assert!(err.iter().any(|e| e.contains(key) && e.contains("host step")), "{key}: {err:?}");
+    }
+    // `timeout` is the host step's own bound and means nothing to an agent step.
+    let on_agent = wf("    timeout: 5m\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: string");
+    let err = validate("t", &on_agent, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("applies only to a 'run:' host step")), "{err:?}");
+  }
 
-    // The exemption is scoped to the body: a step outside it is ordinary data and still needs
-    // its edge, or a workflow could read a value that has not been produced yet.
-    let outside = format!(
-      "{}  after:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      x\n    output:\n      z:\n        type: string\n",
-      src
-    );
-    let err = validate("t", &outside.replace("PREVIOUS: pick.kind", "PREVIOUS: after.z"), DefSource::Repo).unwrap_err();
-    assert!(err.iter().any(|e| e.contains("after")), "{err:?}");
+  #[test]
+  fn a_host_step_ending_a_do_while_needs_an_agent_head_that_can_break_it() {
+    // A host command returns no SCSH_DO_WHILE_REPEAT, so without a `break: true` head the
+    // loop could only ever end by exhausting its budget. Say so now, not on iteration 25.
+    let runaway = wf("    needs: a\n    do-while: a\n    run: make gate-all");
+    let err = validate("t", &runaway, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("needs a 'break: true' first step")), "{err:?}");
+
+    // With one, the loop is well-formed: the head decides, the host step reports.
+    let bounded = "description: \"x\"\nsteps:\n  head:\n    break: true\n    agent:\n      harness: claude\n      model: sonnet\n    inputs:\n      LAST: gate.output\n      MINE: head.kind\n    prompt: |\n      decide\n    output:\n      kind:\n        type: string\n      SCSH_LOOP_BREAK:\n        type: bool\n  gate:\n    needs: head\n    do-while: head\n    run: make gate-all\n";
+    let def = validate("t", bounded, DefSource::Repo).unwrap();
+    assert_eq!(def.steps.len(), 2);
+    // The head reads the host step's verdict AND its own previous answer over the
+    // loop-carried channel — neither needs a `needs:` edge, and neither commits a file.
+    let head = def.steps.iter().find(|s| s.id == "head").unwrap();
+    assert_eq!(head.inputs.len(), 2);
+
+    // A CHECK-form host step cannot be the head: breaking takes a typed SCSH_LOOP_BREAK.
+    let breaking = "description: \"x\"\nsteps:\n  head:\n    break: true\n    run: make check\n  tail:\n    needs: head\n    do-while: head\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n";
+    let err = validate("t", breaking, DefSource::Repo).unwrap_err();
+    assert!(err.iter().any(|e| e.contains("boolean SCSH_LOOP_BREAK")), "{err:?}");
+  }
+
+  #[test]
+  fn a_host_step_declaring_output_reports_like_an_agent_and_can_steer_a_loop() {
+    // The decision form: a deterministic script replaces a model call at a step boundary.
+    let src = wf("    needs: a\n    run: node scripts/next-story.mjs\n    output:\n      story_id:\n        type: string\n      mode:\n        type: enum\n        choices: implement, repair");
+    let def = validate("t", &src, DefSource::Repo).unwrap();
+    let pick = def.steps.iter().find(|s| s.id == "b").unwrap();
+    assert!(pick.host().unwrap().reports_result, "declaring output: opts into $SCSH_RESULT");
+    let names: Vec<&str> = pick.outputs.iter().map(|o| o.name.as_str()).collect();
+    assert_eq!(names, vec!["story_id", "mode"], "the author's schema, not the synthesized one");
+
+    // With a typed result it can head a loop, which the check form cannot.
+    let steering = "description: \"x\"\nsteps:\n  pick:\n    break: true\n    run: node scripts/next-story.mjs\n    output:\n      story_id:\n        type: string\n      SCSH_LOOP_BREAK:\n        type: bool\n  gate:\n    needs: pick\n    do-while: pick\n    run: make gate-all\n";
+    let def = validate("t", steering, DefSource::Repo).unwrap();
+    assert!(def.steps.iter().find(|s| s.id == "pick").unwrap().break_loop);
+    // ... and the check-form tail is legal here precisely BECAUSE that head can break.
+    assert!(!def.steps.iter().find(|s| s.id == "gate").unwrap().host().unwrap().reports_result);
+
+    // A decision-form tail needs no break head — it returns SCSH_DO_WHILE_REPEAT itself.
+    let self_ending = "description: \"x\"\nsteps:\n  work:\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      go\n    output:\n      y:\n        type: string\n  again:\n    needs: work\n    do-while: work\n    run: node scripts/more.mjs\n    output:\n      SCSH_DO_WHILE_REPEAT:\n        type: bool\n";
+    assert!(validate("t", self_ending, DefSource::Repo).is_ok());
   }
 
   #[test]

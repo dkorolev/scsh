@@ -1980,7 +1980,7 @@ fn step_invocation(
   step: &harness_def::Step, run_id: &str, session_dir_rel: &str, inputs: Vec<(String, String)>,
   commit_identity: Option<(String, String)>,
 ) -> ResolvedInvocation {
-  let agent = step.agent().expect("every step names an agent");
+  let agent = step.agent().expect("only agent steps become invocations");
   ResolvedInvocation {
     name: run_id.to_string(),
     skill_source: step.id.clone(),
@@ -2004,6 +2004,213 @@ fn step_invocation(
     delivery: config::SkillDelivery::DirectPrompt(step.render_skill_body()),
     artifacts: step.artifacts.iter().map(|a| format!("{session_dir_rel}/{a}")).collect(),
   }
+}
+
+/// How much of a host step's output is handed to the next step. The value travels as an
+/// environment variable into a container, so it is bounded twice — by lines and by bytes,
+/// keeping the tail (where a failing command says why) rather than the head.
+const HOST_OUTPUT_MAX_LINES: usize = 500;
+const HOST_OUTPUT_MAX_BYTES: usize = 48 * 1024;
+
+/// How many captured lines [`host_output_tail`] must be given: one more than it will keep, so a
+/// command that produced exactly one line too many is still reported as truncated rather than
+/// silently trimmed.
+const HOST_OUTPUT_LINES_REQUESTED: usize = HOST_OUTPUT_MAX_LINES + 1;
+
+/// The tail of a host step's output, bounded by [`HOST_OUTPUT_MAX_LINES`] and
+/// [`HOST_OUTPUT_MAX_BYTES`], with a marker when anything was dropped.
+///
+/// Callers must hand this MORE lines than the budget — see [`host_output_lines_requested`].
+/// Handing it exactly the budget would make the line cut undetectable here, and the next step's
+/// agent would read a headless build log with nothing saying it was cut.
+fn host_output_tail(lines: &[String]) -> String {
+  let kept = lines.len().saturating_sub(HOST_OUTPUT_MAX_LINES);
+  let mut text = lines[kept..].join("\n");
+  let mut trimmed = kept > 0;
+  if text.len() > HOST_OUTPUT_MAX_BYTES {
+    // Cut on a char boundary so the value stays valid UTF-8 for the env var.
+    let mut cut = text.len() - HOST_OUTPUT_MAX_BYTES;
+    while cut < text.len() && !text.is_char_boundary(cut) {
+      cut += 1;
+    }
+    text = text[cut..].to_string();
+    trimmed = true;
+  }
+  if trimmed {
+    format!("[earlier output omitted]\n{text}")
+  } else {
+    text
+  }
+}
+
+/// One host step waiting to run: everything the wave resolved for it before deciding that it
+/// executes outside a container.
+struct PendingHostStep<'a> {
+  step: &'a harness_def::Step,
+  proc: ui::screen::Proc,
+  run_id: String,
+  inputs: Vec<(String, String)>,
+}
+
+/// Where a step's result is published: the caller-repo scratch dir it is written to, the durable
+/// session it is persisted under, and the daemon to tell about it.
+struct ResultSink<'a> {
+  session_id: &'a str,
+  session_dir_rel: &'a str,
+  client: Option<&'a daemon::Client>,
+}
+
+/// Run one workflow host step: the definition's `run:` command, on the host, in the caller's
+/// repository, with the step's `inputs:` in its environment.
+///
+/// A non-zero exit is a RESULT, not a failure — that is the whole contract. The step publishes
+/// `passed`/`exit_code`/`output` and the workflow continues, so a loop's agent steps can read
+/// what went wrong and fix it. Only being unable to run the command, or running past `timeout:`,
+/// fails the step and with it the workflow.
+fn run_host_step(
+  step: &harness_def::Step, run_id: &str, root: &Path, inputs: Vec<(String, String)>, p: &ui::screen::Proc,
+  sink: &ResultSink,
+) -> SkillRun {
+  let host = step.host().expect("only host steps reach run_host_step");
+  let limit = host.timeout.unwrap_or(harness_def::HOST_RUN_DEFAULT_TIMEOUT);
+  p.start();
+  p.note(&format!("host: {}", host.command));
+  let result_path = root.join(sink.session_dir_rel).join(format!("{run_id}.json"));
+  if let Some(dir) = result_path.parent() {
+    let _ = std::fs::create_dir_all(dir);
+  }
+  let mut env = inputs;
+  env.push(("SCSH_STEP".to_string(), step.id.clone()));
+  // A self-reporting command writes here; for the synthesized form scsh writes the same path
+  // afterwards. Absolute, unlike an agent step's container-relative one — this runs on the host.
+  env.push(("SCSH_RESULT".to_string(), result_path.to_string_lossy().into_owned()));
+  let place = ui::screen::ExecPlace { cwd: root, env: &env };
+  let args = vec!["-c".to_string(), host.command.clone()];
+  let outcome = p.run_in("sh", &args, &place, Some(Duration::from_secs(limit)));
+
+  let (code, killed) = match outcome {
+    Ok((code, killed, _)) => (code, killed),
+    Err(e) => {
+      let detail = format!("could not start `{}`: {e}", host.command);
+      p.finish_fail(failure::reason::HOST_STEP_SPAWN, Some(&detail));
+      return SkillRun::failed(failure::reason::HOST_STEP_SPAWN, None, None, None).with_fail_detail(&detail);
+    }
+  };
+  if matches!(killed, ui::screen::Killed::Timeout) {
+    let detail = format!("`{}` ran past its {limit}s timeout and was killed", host.command);
+    p.finish_fail(failure::reason::HOST_STEP_TIMEOUT, Some(&detail));
+    return SkillRun::failed(failure::reason::HOST_STEP_TIMEOUT, None, None, None).with_fail_detail(&detail);
+  }
+
+  // Self-reporting form: the result file is how this command speaks, so a non-zero exit means it
+  // never got to — that is a failed step, not a verdict. Then validate exactly as an agent's
+  // result is validated, so a script and an agent are interchangeable at a step boundary.
+  if host.reports_result {
+    if code != Some(0) {
+      let label = code.map_or_else(|| "on a signal".to_string(), |n| format!("{n}"));
+      let detail = format!("`{}` exited {label} without reporting a result", host.command);
+      p.finish_fail(failure::reason::HOST_STEP_NONZERO, Some(&detail));
+      return SkillRun::failed(failure::reason::HOST_STEP_NONZERO, None, None, None).with_fail_detail(&detail);
+    }
+    let contract = WorkflowResultContract {
+      outputs: &step.outputs,
+      require_do_while_repeat: step.do_while.is_some()
+        && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+    };
+    let content = match std::fs::read_to_string(&result_path) {
+      Ok(content) => content,
+      Err(e) => {
+        let detail = format!("`{}` wrote no result at $SCSH_RESULT ({e})", host.command);
+        p.finish_fail(failure::reason::RESULT_MISSING, Some(&detail));
+        return SkillRun::failed(failure::reason::RESULT_MISSING, None, None, None).with_fail_detail(&detail);
+      }
+    };
+    return match extract_step_outputs(&content, contract) {
+      Ok(outputs) => {
+        if let Some(dest) = fleet::persist_skill_result(sink.session_id, run_id, &result_path) {
+          if let Some(c) = sink.client {
+            c.proc_result(p.index(), &dest);
+          }
+        }
+        let glimpse = workflow_outputs_glimpse(contract, &outputs)
+          .unwrap_or_else(|| format!("`{}` reported its result", host.command));
+        p.finish_ok(Some(&glimpse));
+        SkillRun::ok(String::new(), None, Some(content), Some(outputs))
+      }
+      Err(detail) => {
+        p.finish_fail(failure::reason::RESULT_INVALID, Some(&detail));
+        SkillRun::failed(failure::reason::RESULT_INVALID, None, None, None).with_fail_detail(&detail)
+      }
+    };
+  }
+
+  let passed = code == Some(0);
+  let exit_code = code.unwrap_or(-1);
+  let output = host_output_tail(&p.tail_lines(HOST_OUTPUT_LINES_REQUESTED));
+  // The stringly-typed map is the workflow's internal channel (every `inputs:` binding is an
+  // env var); the result FILE keeps the declared JSON types, so it reads like any other step's.
+  let mut outputs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+  let mut fields: Vec<(String, json::Value)> = vec![
+    (harness_def::HOST_OUTPUT_PASSED.into(), json::Value::Bool(passed)),
+    (harness_def::HOST_OUTPUT_EXIT_CODE.into(), json::Value::Number(f64::from(exit_code))),
+    (harness_def::HOST_OUTPUT_OUTPUT.into(), json::Value::String(output.clone())),
+  ];
+  outputs.insert(harness_def::HOST_OUTPUT_PASSED.into(), passed.to_string());
+  outputs.insert(harness_def::HOST_OUTPUT_EXIT_CODE.into(), exit_code.to_string());
+  outputs.insert(harness_def::HOST_OUTPUT_OUTPUT.into(), output);
+  // A host command has no SCSH_DO_WHILE_REPEAT of its own to return, so as a loop's final step
+  // it always asks for another lap; the body's validated `break: true` head is what ends it.
+  if step.do_while.is_some() {
+    outputs.insert("SCSH_DO_WHILE_REPEAT".into(), "true".into());
+    fields.push(("SCSH_DO_WHILE_REPEAT".into(), json::Value::Bool(true)));
+  }
+  let content = json::write_pretty(&json::Value::Object(fields));
+  // The verdict above is already in hand, so a failed write does not fail the step — the next
+  // step still gets its inputs. It does cost the job page its result and a later `--resume-from`
+  // its record, which is worth a visible line rather than a silent skip.
+  match std::fs::write(&result_path, &content) {
+    Ok(()) => {
+      if let Some(dest) = fleet::persist_skill_result(sink.session_id, run_id, &result_path) {
+        if let Some(c) = sink.client {
+          c.proc_result(p.index(), &dest);
+        }
+      }
+    }
+    Err(e) => {
+      p.emit(&format!("could not write {} ({e}) — the verdict still reaches the next step", result_path.display()))
+    }
+  }
+
+  let detail = match code {
+    Some(0) => format!("`{}` passed", host.command),
+    Some(n) => format!("`{}` exited {n} — reported to the workflow", host.command),
+    None => format!("`{}` was terminated by a signal", host.command),
+  };
+  // Amber, not green, when the command failed: the step did its job, but the board must not
+  // read as "all clear" while the workflow loops on a red gate.
+  if passed {
+    p.finish_ok(Some(&detail));
+  } else {
+    p.finish_graceful(Some(&detail));
+  }
+  SkillRun::ok(String::new(), None, Some(content), Some(outputs))
+}
+
+/// Run a wave's host steps, in definition order, **one at a time**.
+///
+/// Sequential is the contract, not an implementation detail: every host step executes in the
+/// caller's own working tree — the whole point, since that is where Docker, Compose, and
+/// localhost behave the way they do when the check is run by hand — and two commands sharing
+/// one checkout would corrupt each other's verdict. The caller runs this AFTER joining the
+/// wave's containers, for the same reason.
+fn run_host_steps(pending: Vec<PendingHostStep>, root: &Path, sink: &ResultSink) -> Vec<(String, SkillRun)> {
+  pending
+    .into_iter()
+    .map(|PendingHostStep { step, proc, run_id, inputs }| {
+      let run = run_host_step(step, &run_id, root, inputs, &proc, sink);
+      (run_id, run)
+    })
+    .collect()
 }
 
 /// Clone a workflow invocation for its single result-schema repair attempt. The task runs from
@@ -2614,6 +2821,7 @@ fn run_workflow(
     let mut live_steps: Vec<&harness_def::Step> = Vec::new();
     let mut run_ids: Vec<String> = Vec::new();
     let mut restored_runs: Vec<(String, SkillRun)> = Vec::new();
+    let mut host_steps: Vec<PendingHostStep> = Vec::new();
     for s in &to_run {
       let loop_key = do_while_end_for.get(&s.id).map(String::as_str).unwrap_or(&s.id);
       let iteration = repeat_done.get(loop_key).copied().unwrap_or(0) + 1;
@@ -2649,6 +2857,13 @@ fn run_workflow(
       } else {
         step_procs.remove(&s.id).expect("every undecided step has its pre-declared proc")
       };
+      // Deferred, not restored: see [`harness_def::Step::result_is_reusable`]. Host steps execute
+      // after this wave's containers rather than beside them (see `run_host_steps` below).
+      if !s.result_is_reusable() {
+        host_steps.push(PendingHostStep { step: s, proc: p, run_id: run_id.clone(), inputs });
+        run_ids.push(run_id);
+        continue;
+      }
       if let Some((old_sid, results_dir)) = &resume {
         let contract = WorkflowResultContract {
           outputs: &s.outputs,
@@ -2713,6 +2928,10 @@ fn run_workflow(
         .collect()
     });
     results.append(&mut restored_runs);
+
+    let sink =
+      ResultSink { session_id: &session_id, session_dir_rel: &session_dir_rel, client: daemon_client.as_deref() };
+    results.append(&mut run_host_steps(host_steps, root, &sink));
 
     // Record each step's outcome in definition order; the first failure (run failure or an
     // output that does not match the declared schema) aborts the workflow. Commit-enabled
@@ -9605,6 +9824,52 @@ fn print_help_defs() {
 "#
   );
   println!();
+  println!("{}", h_head("Host steps — a check that cannot run in a container"));
+  print!(
+    r#"  <id>:
+    run: make gate-all     a shell command scsh runs ON THE HOST, in the caller's repository,
+                           with no container and no agent. The escape hatch for checks bound to
+                           host-only tooling — a docker-compose e2e suite, a GPU test — which
+                           inside a run container would see the wrong docker daemon, the wrong
+                           paths, and the wrong localhost. The command is fixed by the committed
+                           definition: no model chooses what runs on your machine.
+    timeout: 90m           wall-clock bound (default 1h). Overrunning FAILS the job — a check
+                           that hangs is exactly what this replaces, so it is never auto-retried.
+                           scsh kills the command's whole process group; anything it started in
+                           a NEW session (a detached daemon, a compose stack) is the command's
+                           own to clean up, since scsh never sees it.
+    inputs:                as for an agent step; they arrive as environment variables.
+                           QUOTE THEM. The command string is yours, but an input bound to an
+                           agent step's output (`FAILURE_REPORT: gate.output`) carries model-
+                           written text into a host shell: `make gate STORY="$STORY_ID"` is safe,
+                           the same line unquoted is command execution on your machine. Inputs
+                           are also plain environment variables, so naming one PATH or LD_PRELOAD
+                           changes how the command itself resolves.
+  Two forms, chosen by whether the step declares `output:`.
+
+  1. No `output:` — a CHECK. scsh synthesizes the command's verdict:
+       passed (bool)       the command exited 0
+       exit_code (int)     its exact exit status
+       output (string)     stdout+stderr, tail-bounded, ready to bind into the next step
+     A NON-ZERO EXIT IS A RESULT, NOT A FAILURE: the step publishes its verdict and the
+     workflow continues, which is what lets a `do-while` fix→gate→fix loop read the failure
+     and repair it. Only failing to start, or overrunning `timeout:`, fails the step.
+
+  2. With `output:` — a DECISION. The command writes `$SCSH_RESULT` (scsh sets it to an
+     absolute path) and scsh validates that JSON against the declared schema, exactly as it
+     validates an agent's result — so a deterministic script and an agent are interchangeable
+     at a step boundary. Here a non-zero exit FAILS the step: the result file is how this
+     command speaks, so exiting without one means it never spoke. Such a step may carry
+     `break: true` (declaring boolean SCSH_LOOP_BREAK) or end a `do-while` (declaring
+     SCSH_DO_WHILE_REPEAT) — a loop can be steered by a script instead of a model.
+
+  Host steps run after their wave's containers and one at a time (they share the caller's one
+  checkout), and are never cached or restored on resume — a stale verdict is about a tree that
+  no longer exists. `commits`, `artifacts`, `memory`, `retry_for`, `inactivity_timeout` do not
+  apply.
+"#
+  );
+  println!();
   println!("{}", h_head("Loops"));
   print!(
     r#"  repeat: 3              run this one step N times, sequentially — each iteration is its
@@ -9622,6 +9887,11 @@ fn print_help_defs() {
   break: true            on the loop body's FIRST step, lets that step exit before the rest of
                          the body runs. It must declare the boolean output `SCSH_LOOP_BREAK`;
                          true exits this loop, false continues through the body normally.
+                         A host step (`run:`) without `output:` returns no SCSH_DO_WHILE_REPEAT,
+                         so a loop ending in one always asks for another lap — such a loop must
+                         have a `break:` head, and scsh refuses the definition otherwise. Give
+                         the host step an `output:` block and it decides for itself, like an
+                         agent tail.
   Loop-carried inputs:   a body step may reference ANY body step's output — the final step's,
                          another step's, or its own — with no `needs:` edge, receiving the
                          PREVIOUS iteration's value (empty on round one) whenever that step has
@@ -11047,12 +11317,306 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_ne!(git_capture(&caller, &["rev-parse", "HEAD"]).unwrap().trim(), base, "HEAD advanced past base");
   }
 
+  /// Parse a one-host-step workflow and hand back that step.
+  fn host_step_def(command: &str, extra: &str) -> harness_def::HarnessDef {
+    let src = format!("description: \"x\"\nsteps:\n  gate:\n    run: {command}\n{extra}");
+    harness_def::validate("t", &src, harness_def::DefSource::Repo).expect("valid host-step workflow")
+  }
+
+  /// Point `$SCSH_HOME` at a throwaway directory for the rest of the test, restoring it on drop.
+  /// RAII rather than a restore line at the end of each test: an assertion that fires mid-test
+  /// would skip that line and leak the override into whichever test takes the env lock next.
+  struct ScshHome(Option<std::ffi::OsString>);
+
+  impl ScshHome {
+    fn under(dir: &Path) -> ScshHome {
+      let prior = std::env::var_os("SCSH_HOME");
+      std::env::set_var("SCSH_HOME", dir.join("scsh-home"));
+      ScshHome(prior)
+    }
+  }
+
+  impl Drop for ScshHome {
+    fn drop(&mut self) {
+      match self.0.take() {
+        Some(v) => std::env::set_var("SCSH_HOME", v),
+        None => std::env::remove_var("SCSH_HOME"),
+      }
+    }
+  }
+
+  #[test]
+  fn a_failing_host_step_reports_a_verdict_and_lets_the_workflow_carry_on() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-verdict");
+    let _home = ScshHome::under(&dir);
+
+    // Writes to stdout AND stderr, then exits non-zero — a gate reporting why it failed.
+    let def = host_step_def("printf 'building\\n'; printf 'FAIL: assertion x\\n' >&2; exit 3", "");
+    let step = &def.steps[0];
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let inputs = vec![("STORY_ID".to_string(), "US-029-01".to_string())];
+    let sink = ResultSink { session_id: "host-step-verdict", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(step, "gate", &dir, inputs, &p, &sink);
+
+    // The step SUCCEEDED at running the gate. A red gate is data for the next step, not an
+    // aborted workflow — without this the repair loop could never take its second lap.
+    assert!(run.ok, "a non-zero command must not fail the step");
+    let out = run.workflow_outputs.expect("a host step always publishes its result");
+    assert_eq!(out["passed"], "false");
+    assert_eq!(out["exit_code"], "3");
+    assert!(out["output"].contains("FAIL: assertion x"), "stderr is captured: {:?}", out["output"]);
+    assert!(out["output"].contains("building"), "stdout is captured too: {:?}", out["output"]);
+    // Not a loop tail, so it asks for nothing.
+    assert!(!out.contains_key("SCSH_DO_WHILE_REPEAT"));
+    // The result lands beside every other step's, in the caller's session scratch dir.
+    let written = std::fs::read_to_string(dir.join("tmp/scsh/sess/gate.json")).expect("result file");
+    assert!(written.contains("\"passed\": false"), "declared JSON types are kept: {written}");
+    assert!(written.contains("\"exit_code\": 3"), "{written}");
+    // Short output is handed over whole — the truncation marker is for real cuts only.
+    assert!(!out["output"].contains("[earlier output omitted]"), "{:?}", out["output"]);
+  }
+
+  #[test]
+  fn a_noisy_host_step_says_where_its_output_was_cut() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-noisy");
+    let _home = ScshHome::under(&dir);
+
+    // The live path, not host_output_tail in isolation: run_host_step must ask the proc for MORE
+    // lines than it keeps, or an over-budget command arrives at the next step's agent as a
+    // headless log with nothing saying it was cut.
+    let def = host_step_def(&format!("seq 1 {}", HOST_OUTPUT_MAX_LINES + 20), "");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-noisy", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(&def.steps[0], "gate", &dir, Vec::new(), &p, &sink);
+
+    let out = run.workflow_outputs.expect("result");
+    let output = &out["output"];
+    assert!(output.starts_with("[earlier output omitted]"), "the cut is stated, not silent: {output:.80}");
+    assert!(output.ends_with(&format!("{}", HOST_OUTPUT_MAX_LINES + 20)), "the TAIL is what survives");
+    assert_eq!(output.lines().count(), HOST_OUTPUT_MAX_LINES + 1, "the budget plus the marker line");
+  }
+
+  #[test]
+  fn a_host_step_runs_in_the_caller_repo_with_its_inputs_in_the_environment() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-place");
+    let _home = ScshHome::under(&dir);
+    std::fs::write(dir.join("marker.txt"), "here\n").unwrap();
+
+    // Proves both halves of the contract at once: the command sees the caller's own tree
+    // (not a clone), and its declared inputs arrive as environment variables.
+    let def = host_step_def("cat marker.txt; printf 'story=%s\\n' \"$STORY_ID\"", "    timeout: 60s\n");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let inputs = vec![("STORY_ID".to_string(), "US-029-02".to_string())];
+    let sink = ResultSink { session_id: "host-step-place", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(&def.steps[0], "gate", &dir, inputs, &p, &sink);
+
+    let out = run.workflow_outputs.expect("result");
+    assert_eq!(out["passed"], "true");
+    assert_eq!(out["exit_code"], "0");
+    assert!(out["output"].contains("here"), "ran in the caller repo: {:?}", out["output"]);
+    assert!(out["output"].contains("story=US-029-02"), "inputs are env vars: {:?}", out["output"]);
+  }
+
+  #[test]
+  fn a_host_step_that_overruns_its_timeout_fails_the_workflow() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-timeout");
+    let _home = ScshHome::under(&dir);
+
+    // A gate that hangs is the failure this step type exists to make visible: it stops the
+    // job loudly instead of being retried into another silent hour.
+    let def = host_step_def("sleep 30", "    timeout: 1s\n");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-timeout", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(&def.steps[0], "gate", &dir, Vec::new(), &p, &sink);
+
+    assert!(!run.ok);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::HOST_STEP_TIMEOUT));
+    assert!(run.workflow_outputs.is_none(), "a killed command publishes no verdict");
+    assert!(!failure::is_transient(failure::reason::HOST_STEP_TIMEOUT), "a hung host check is never auto-retried");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_host_step_whose_command_forked_still_times_out_promptly() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-tree");
+    let _home = ScshHome::under(&dir);
+
+    // The realistic shape of a host gate: `sh` is not the process doing the work — `make` forks
+    // a compiler, a compose stack forks a daemon client. The step must still fail on its own
+    // clock rather than the fork's. (That the descendants are actually killed is asserted where
+    // the killing lives: `ui::screen::tests::proc_run_watched_kills_the_childs_descendants_too`.)
+    let def = host_step_def("sleep 45 & wait", "    timeout: 2s\n");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-tree", session_dir_rel: "tmp/scsh/sess", client: None };
+    let began = std::time::Instant::now();
+    let run = run_host_step(&def.steps[0], "gate", &dir, Vec::new(), &p, &sink);
+
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::HOST_STEP_TIMEOUT));
+    assert!(began.elapsed() < Duration::from_secs(30), "returned in {:?}, not on the fork's clock", began.elapsed());
+  }
+
+  #[test]
+  fn a_loop_tail_host_step_always_asks_for_another_lap() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-loop");
+    let _home = ScshHome::under(&dir);
+
+    let src = "description: \"x\"\nsteps:\n  head:\n    break: true\n    agent:\n      harness: claude\n      model: sonnet\n    prompt: |\n      decide\n    output:\n      SCSH_LOOP_BREAK:\n        type: bool\n  gate:\n    needs: head\n    do-while: head\n    run: true\n";
+    let def = harness_def::validate("t", src, harness_def::DefSource::Repo).unwrap();
+    let gate = def.steps.iter().find(|s| s.id == "gate").unwrap();
+    let ui = ui::screen::LiveUi::new(false, None);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-loop", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(gate, "gate-while-head-1", &dir, Vec::new(), &p, &sink);
+
+    // Even on a PASS: ending the loop is the `break: true` head's job, never the gate's.
+    let out = run.workflow_outputs.expect("result");
+    assert_eq!(out["passed"], "true");
+    assert_eq!(out["SCSH_DO_WHILE_REPEAT"], "true");
+
+    // Nothing validates a synthesized result at runtime — the author declared no schema for
+    // scsh to check it against — so harness_def's `host_outputs()` and the JSON written here
+    // could drift apart unnoticed. Run the file through the same contract the resume path
+    // builds: it pins the field names, their JSON types, and the extra SCSH_DO_WHILE_REPEAT a
+    // loop tail is allowed to carry.
+    let contract = WorkflowResultContract {
+      outputs: &gate.outputs,
+      require_do_while_repeat: gate.do_while.is_some()
+        && !gate.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
+    };
+    let written = std::fs::read_to_string(dir.join("tmp/scsh/sess/gate-while-head-1.json")).expect("result file");
+    let typed = extract_step_outputs(&written, contract).expect("scsh's own result satisfies scsh's own schema");
+    assert_eq!(typed["passed"], "true");
+    assert_eq!(typed["exit_code"], "0");
+    assert_eq!(typed["SCSH_DO_WHILE_REPEAT"], "true");
+  }
+
+  #[test]
+  fn host_steps_in_one_wave_run_in_order_and_never_at_the_same_time() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-serial");
+    let _home = ScshHome::under(&dir);
+
+    // Host steps share the caller's ONE working tree, so overlapping two of them would let each
+    // see the other's mess. Each command brackets a sleep with an enter/exit marker: run in
+    // parallel the log interleaves, run in order it nests. The wave's containers are joined
+    // before this is called, which is the other half of the same reason.
+    let step = |id: &str| {
+      format!("  {id}:\n    run: printf 'enter-{id}\\n' >> run.log; sleep 1; printf 'exit-{id}\\n' >> run.log\n")
+    };
+    let src = format!("description: \"x\"\nsteps:\n{}{}", step("first"), step("second"));
+    let def = harness_def::validate("t", &src, harness_def::DefSource::Repo).expect("valid host-only workflow");
+    let ui = ui::screen::LiveUi::new(false, None);
+    let sink = ResultSink { session_id: "host-step-serial", session_dir_rel: "tmp/scsh/sess", client: None };
+    let pending: Vec<PendingHostStep> = def
+      .steps
+      .iter()
+      .map(|s| PendingHostStep {
+        step: s,
+        proc: ui.proc(format!("host: {}", s.id), false),
+        run_id: s.id.clone(),
+        inputs: Vec::new(),
+      })
+      .collect();
+
+    let results = run_host_steps(pending, &dir, &sink);
+
+    assert_eq!(results.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+    assert!(results.iter().all(|(_, run)| run.ok));
+    let log = std::fs::read_to_string(dir.join("run.log")).expect("both commands ran in the caller repo");
+    assert_eq!(
+      log.lines().collect::<Vec<_>>(),
+      ["enter-first", "exit-first", "enter-second", "exit-second"],
+      "one at a time, in definition order"
+    );
+  }
+
+  #[test]
+  fn a_host_step_declaring_output_is_validated_exactly_like_an_agents_result() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-typed");
+    let _home = ScshHome::under(&dir);
+
+    let schema = "    output:\n      story_id:\n        type: string\n      SCSH_LOOP_BREAK:\n        type: bool\n";
+    let ui = ui::screen::LiveUi::new(false, None);
+
+    // The command writes $SCSH_RESULT; scsh types it. This is what lets a script decide.
+    let good =
+      host_step_def("printf '{\"story_id\":\"US-029-01\",\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"", schema);
+    let p = ui.proc("host: gate", false);
+    let sink = ResultSink { session_id: "host-step-typed", session_dir_rel: "tmp/scsh/sess", client: None };
+    let run = run_host_step(&good.steps[0], "gate", &dir, Vec::new(), &p, &sink);
+    let out = run.workflow_outputs.expect("a typed host step publishes its declared fields");
+    assert!(run.ok);
+    assert_eq!(out["story_id"], "US-029-01");
+    assert_eq!(out["SCSH_LOOP_BREAK"], "false");
+    assert!(!out.contains_key("passed"), "the synthesized fields are not mixed in: {out:?}");
+
+    // Exiting non-zero means it never got to speak — a failed step, not a verdict. This is the
+    // opposite of the check form, and the difference the two forms exist to draw.
+    let silent = host_step_def("exit 4", schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&silent.steps[0], "silent", &dir, Vec::new(), &p, &sink);
+    assert!(!run.ok);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::HOST_STEP_NONZERO));
+    // Its own reason, not a container harness's: re-running a deterministic command that already
+    // failed would only spend the same wall clock again.
+    assert!(!failure::is_transient(failure::reason::HOST_STEP_NONZERO));
+
+    // Exit 0 but no result file at all.
+    let empty = host_step_def("true", schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&empty.steps[0], "empty", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_MISSING));
+
+    // Wrong type for a declared field is caught here, not by the step that consumes it.
+    let mistyped = host_step_def("printf '{\"story_id\":1,\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"", schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&mistyped.steps[0], "mistyped", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+  }
+
+  #[test]
+  fn host_output_keeps_the_tail_where_a_failure_explains_itself() {
+    let short: Vec<String> = vec!["a".into(), "b".into()];
+    assert_eq!(host_output_tail(&short), "a\nb", "small output passes through untouched");
+
+    // Past the line budget the HEAD is dropped: a build that fails says why at the end.
+    let many: Vec<String> = (0..HOST_OUTPUT_MAX_LINES + 50).map(|i| format!("line {i}")).collect();
+    let tail = host_output_tail(&many);
+    assert!(tail.starts_with("[earlier output omitted]"), "the cut is stated, not silent");
+    assert!(tail.ends_with(&format!("line {}", HOST_OUTPUT_MAX_LINES + 49)));
+    assert!(!tail.contains("line 0\n"));
+
+    // The byte budget binds too — the value becomes an env var for the next container.
+    let huge: Vec<String> = (0..40).map(|_| "x".repeat(4000)).collect();
+    let tail = host_output_tail(&huge);
+    assert!(tail.len() <= HOST_OUTPUT_MAX_BYTES + 64, "bounded by bytes as well as lines: {}", tail.len());
+
+    // Multi-byte text must survive the byte cut as valid UTF-8, or the env var is unusable.
+    let wide: Vec<String> = (0..40).map(|_| "é".repeat(2000)).collect();
+    let tail = host_output_tail(&wide);
+    assert!(tail.contains('é'));
+  }
+
   #[test]
   fn step_invocation_routes_artifacts_into_the_session_dir_and_bypasses_the_cache() {
     let step = harness_def::Step {
       id: "summarize".into(),
-      agent: harness_def::StepAgent { harness: config::Harness::Grok, model: Some("grok-4.5".into()), effort: None },
-      task: harness_def::StepTask::Prompt("p".into()),
+      work: harness_def::StepWork::Agent {
+        agent: harness_def::StepAgent { harness: config::Harness::Grok, model: Some("grok-4.5".into()), effort: None },
+        task: harness_def::StepTask::Prompt("p".into()),
+      },
       inputs: Vec::new(),
       outputs: Vec::new(),
       commit_identity: harness_def::CommitIdentity::Notes,
@@ -11085,12 +11649,14 @@ Subject: [PATCH] add: 2 + 3 = 5
   fn commits_enabled_skills_key_on_history_not_only_the_tree() {
     let step = harness_def::Step {
       id: "prepare".into(),
-      agent: harness_def::StepAgent {
-        harness: config::Harness::Claude,
-        model: Some("claude-opus-4-8".into()),
-        effort: None,
+      work: harness_def::StepWork::Agent {
+        agent: harness_def::StepAgent {
+          harness: config::Harness::Claude,
+          model: Some("claude-opus-4-8".into()),
+          effort: None,
+        },
+        task: harness_def::StepTask::Prompt("write or update PR-DESCRIPTION.md".into()),
       },
-      task: harness_def::StepTask::Prompt("write or update PR-DESCRIPTION.md".into()),
       inputs: Vec::new(),
       outputs: Vec::new(),
       commit_identity: harness_def::CommitIdentity::Notes,
