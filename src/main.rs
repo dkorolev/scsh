@@ -1980,12 +1980,13 @@ fn step_invocation(
   step: &harness_def::Step, run_id: &str, session_dir_rel: &str, inputs: Vec<(String, String)>,
   commit_identity: Option<(String, String)>,
 ) -> ResolvedInvocation {
+  let agent = step.agent().expect("every step names an agent");
   ResolvedInvocation {
     name: run_id.to_string(),
     skill_source: step.id.clone(),
-    harness: step.agent.harness,
-    model: step.agent.model.clone(),
-    effort: step.agent.effort.clone(),
+    harness: agent.harness,
+    model: agent.model.clone(),
+    effort: agent.effort.clone(),
     memory: step.memory.clone(),
     retry_for: step.retry_for,
     retry_signature_cap: step.retry_signature_cap,
@@ -2461,7 +2462,7 @@ fn run_workflow(
   let mut daemon_session = DaemonSession { client: None, ping_active: None, registered: false };
   if daemon::ensure_for_run().is_ok() {
     let client = std::sync::Arc::new(daemon::Client::new(session_id.clone()));
-    let skill_meta: Vec<(&str, &str)> = def.steps.iter().map(|s| (s.id.as_str(), s.agent.harness.as_str())).collect();
+    let skill_meta: Vec<(&str, &str)> = def.steps.iter().map(|s| (s.id.as_str(), s.executor())).collect();
     let workflow = daemon::workflow_meta_from_def(def);
     if client.register_session_with_workflow(
       &repo_path_for_session(root),
@@ -2490,11 +2491,11 @@ fn run_workflow(
   let daemon_client = daemon_session.client.clone();
   let ui = ui::screen::LiveUi::new(console::user_attended_stderr(), daemon_client.clone());
 
-  // Build the images every step agent needs (in first-seen order).
+  // Build the images every step agent needs (in first-seen order). Host steps need none.
   let mut harnesses = Vec::new();
-  for s in &def.steps {
-    if !harnesses.contains(&s.agent.harness) {
-      harnesses.push(s.agent.harness);
+  for agent in def.steps.iter().filter_map(harness_def::Step::agent) {
+    if !harnesses.contains(&agent.harness) {
+      harnesses.push(agent.harness);
     }
   }
   if let Err((msg, code)) = ensure_workflow_images(rt, &ui, &daemon_client, &harnesses, &session_id) {
@@ -2534,7 +2535,7 @@ fn run_workflow(
     if s.is_loop() || do_while_end_for.contains_key(&s.id) {
       continue; // loop iterations appear only when they actually start
     }
-    let label = format!("{}: {}", s.agent.harness.as_str(), s.id);
+    let label = format!("{}: {}", s.executor(), s.id);
     let p = ui.proc(label.clone(), false);
     let mut note = format!("step {}/{total_steps}", i + 1);
     if !s.needs.is_empty() {
@@ -2546,8 +2547,8 @@ fn run_workflow(
         &label,
         daemon::ProcKind::Skill,
         Some(&s.id),
-        Some(s.agent.harness.as_str()),
-        s.agent.model.as_deref(),
+        Some(s.executor()),
+        s.agent().and_then(|a| a.model.as_deref()),
         Some(&s.id),
         None,
         None,
@@ -2624,7 +2625,7 @@ fn run_workflow(
         s.iteration_run_id(iteration)
       };
       let p = if s.is_loop() || do_while_end_for.contains_key(&s.id) {
-        let label = format!("{}: {} · iteration {iteration}", s.agent.harness.as_str(), s.id);
+        let label = format!("{}: {} · iteration {iteration}", s.executor(), s.id);
         let p = ui.proc(label.clone(), false);
         if let Some(c) = &daemon_client {
           c.proc_add(
@@ -2632,8 +2633,8 @@ fn run_workflow(
             &label,
             daemon::ProcKind::Skill,
             Some(&run_id),
-            Some(s.agent.harness.as_str()),
-            s.agent.model.as_deref(),
+            Some(s.executor()),
+            s.agent().and_then(|a| a.model.as_deref()),
             Some(&s.id),
             None,
             None,
@@ -2766,7 +2767,7 @@ fn run_workflow(
                 }
                 let skipped = def.steps.iter().find(|step| &step.id == id).expect("validated loop step");
                 let run_id = format!("{}-while-{}-{completed}", skipped.id, loop_key);
-                let label = format!("{}: {} · iteration {completed}", skipped.agent.harness.as_str(), skipped.id);
+                let label = format!("{}: {} · iteration {completed}", skipped.executor(), skipped.id);
                 let p = ui.proc(label.clone(), false);
                 if let Some(c) = &daemon_client {
                   c.proc_add(
@@ -2774,8 +2775,8 @@ fn run_workflow(
                     &label,
                     daemon::ProcKind::Skill,
                     Some(&run_id),
-                    Some(skipped.agent.harness.as_str()),
-                    skipped.agent.model.as_deref(),
+                    Some(skipped.executor()),
+                    skipped.agent().and_then(|a| a.model.as_deref()),
                     Some(&skipped.id),
                     None,
                     None,
@@ -9607,10 +9608,17 @@ fn print_help_defs() {
   break: true            on the loop body's FIRST step, lets that step exit before the rest of
                          the body runs. It must declare the boolean output `SCSH_LOOP_BREAK`;
                          true exits this loop, false continues through the body normally.
-  Loop-carried inputs:   a body step may reference the FINAL step's output with no `needs:` edge
-                         — it receives the PREVIOUS iteration's value (empty on round one). This
-                         is the loop's data channel: feedback flows between rounds as typed
-                         outputs under gitignored tmp/, never as committed files.
+                         A host step (`run:`) without `output:` returns no SCSH_DO_WHILE_REPEAT,
+                         so a loop ending in one always asks for another lap — such a loop must
+                         have a `break:` head, and scsh refuses the definition otherwise. Give
+                         the host step an `output:` block and it decides for itself, like an
+                         agent tail.
+  Loop-carried inputs:   a body step may reference ANY body step's output — the final step's,
+                         another step's, or its own — with no `needs:` edge, receiving the
+                         PREVIOUS iteration's value (empty on round one) whenever that step has
+                         not already produced one this lap. This is the loop's data channel:
+                         last round's verdict, or the item a step was working on, flows between
+                         rounds as typed outputs under gitignored tmp/, never as committed files.
   Loop freshness:        body steps receive `SCSH_LOOP_ITERATION` (1-based). From iteration 2 on,
                          inputs bound to steps OUTSIDE the body bind to the empty string — data
                          from before the loop is round-0 history, not current state. The SCSH_
