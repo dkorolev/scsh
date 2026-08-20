@@ -159,7 +159,9 @@ cd "$REPO" && WORDS="pear, onion, apple, carrot" "$SCSH_BIN" run --def fruits-ho
 **Expect:** `categorize` and `write_files` are Claude nodes, while `sort_fruits` and
 `sort_vegetables` are visibly labeled `host`. Both sorters become runnable after `categorize`,
 then execute one at a time because host steps share the caller's checkout. Their typed result
-files feed the final agent step exactly as the original agent sorters do.
+files feed the final agent step exactly as the original agent sorters do. Open either host row:
+its inline terminal player shows the native Python command, printed sorted list, and exit status
+from a Rust-generated asciicast — no tmux, asciinema process, PTY, or container ran the command.
 
 ## 10. (Optional) The three-harness bundle, with a file artifact
 

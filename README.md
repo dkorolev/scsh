@@ -228,6 +228,11 @@ the job — a check that hangs is what this replaces; scsh kills the whole proce
 is fixed by the definition, so a workflow's host surface is auditable by reading its repo or
 `~/.harness/` `.yml` — but quote your expansions, because an input bound to an agent step's output carries
 model-written text into a host shell. See `scsh help def`, "Host steps".
+The Rust host runner also mirrors each command's captured stdout/stderr into a durable asciicast
+v3 recording for the session browser. It does not put the command under tmux, asciinema, or even
+a PTY: `isatty()` behavior, exit status, timeouts, and process-tree cleanup stay exactly as they
+are for a direct shell command, while the browser gets the same live terminal player and `.cast`
+download as an agent step.
 Run one from the console with `scsh run --def <name>` (params from the environment), or,
 when the daemon is up, open a repository in the browser (type/paste a path or use the native
 folder picker) and start a job from a rendered parameter form — the daemon runs at most one job

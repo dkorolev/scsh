@@ -2067,6 +2067,54 @@ struct ResultSink<'a> {
   client: Option<&'a daemon::Client>,
 }
 
+/// Start the durable synthetic terminal recording for one host step. The command itself still
+/// runs directly under [`ui::screen::Proc::run_in`]; this writer only mirrors what Rust captures
+/// into asciicast v3 so the browser can present the same player as an agent step.
+fn start_host_cast(
+  step: &harness_def::Step, run_id: &str, p: &ui::screen::Proc, sink: &ResultSink,
+) -> Option<ptyrec::CastSink> {
+  let casts_dir = runtime::session_casts_dir(sink.session_id);
+  if let Err(e) = std::fs::create_dir_all(&casts_dir) {
+    p.emit(&format!("could not create host recording directory {} ({e})", casts_dir.display()));
+    return None;
+  }
+  let safe_run_id: String =
+    run_id.chars().map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '_' }).collect();
+  let cast_path = casts_dir.join(format!(
+    "host-{safe_run_id}-utc-{}-{}.cast",
+    runtime::format_utc_timestamp(now_secs()),
+    runtime::random_nonce_6()
+  ));
+  let term = config::Terminal::default();
+  let cast = match ptyrec::CastSink::create(&cast_path, term.cols, term.rows) {
+    Ok(cast) => cast,
+    Err(e) => {
+      p.emit(&format!("could not start host recording {} ({e})", cast_path.display()));
+      return None;
+    }
+  };
+  if let Some(client) = sink.client {
+    client.proc_cast(p.index(), &cast_path.to_string_lossy());
+  }
+  let command =
+    step.host().expect("only host steps are recorded here").command.replace("\r\n", "\n").replace('\r', "\n");
+  cast.output(&format!(
+    "\x1b[1;36mscsh host step:\x1b[0m \x1b[1m{}\x1b[0m\r\n\r\n\x1b[1;32m$\x1b[0m {}\r\n",
+    step.id,
+    command.replace('\n', "\r\n")
+  ));
+  Some(cast)
+}
+
+/// Close a host recording with a visible outcome line followed by asciicast v3's numeric `x`
+/// event. `CastSink` ignores any late pump write after this point, keeping the exit event last.
+fn finish_host_cast(cast: Option<&ptyrec::CastSink>, exit_code: i32, detail: &str, ok: bool) {
+  let Some(cast) = cast else { return };
+  let color = if ok { 32 } else { 31 };
+  cast.output(&format!("\r\n\x1b[1;{color}mscsh: {detail}\x1b[0m\r\n"));
+  cast.finish(exit_code);
+}
+
 /// Run one workflow host step: the definition's `run:` command, on the host, in the caller's
 /// repository, with the step's `inputs:` in its environment.
 ///
@@ -2098,21 +2146,31 @@ fn run_host_step(
   let place = ui::screen::ExecPlace { cwd: root, env: &env };
   let args = vec!["-c".to_string(), host.command.clone()];
   let output_limit = ui::screen::OutputLimit { lines: HOST_OUTPUT_LINES_REQUESTED, bytes: HOST_OUTPUT_MAX_BYTES };
-  let outcome = p.run_in("sh", &args, &place, Some(Duration::from_secs(limit)), output_limit);
+  let cast = start_host_cast(step, run_id, p, sink);
+  let outcome = p.run_in("sh", &args, &place, Some(Duration::from_secs(limit)), output_limit, cast.clone());
 
   let (code, killed, output_trimmed) = match outcome {
     Ok((code, killed, _, output_trimmed)) => (code, killed, output_trimmed),
     Err(e) => {
       let detail = format!("could not start `{}`: {e}", host.command);
+      finish_host_cast(cast.as_ref(), 127, &detail, false);
       p.finish_fail(failure::reason::HOST_STEP_SPAWN, Some(&detail));
       return SkillRun::failed(failure::reason::HOST_STEP_SPAWN, None, None, None).with_fail_detail(&detail);
     }
   };
   if matches!(killed, ui::screen::Killed::Timeout) {
     let detail = format!("`{}` ran past its {limit}s timeout and was killed", host.command);
+    finish_host_cast(cast.as_ref(), 124, &format!("timed out after {limit}s"), false);
     p.finish_fail(failure::reason::HOST_STEP_TIMEOUT, Some(&detail));
     return SkillRun::failed(failure::reason::HOST_STEP_TIMEOUT, None, None, None).with_fail_detail(&detail);
   }
+  let recorded_code = code.unwrap_or(-1);
+  finish_host_cast(
+    cast.as_ref(),
+    recorded_code,
+    &code.map_or_else(|| "terminated by a signal".to_string(), |n| format!("exited {n}")),
+    code == Some(0),
+  );
 
   // Self-reporting form: the result file is how this command speaks, so a non-zero exit means it
   // never got to — that is a failed step, not a verdict. Then validate exactly as an agent's
@@ -3474,16 +3532,21 @@ fn attach_override_skill_bodies(invocations: &mut [ResolvedInvocation], skills_r
   Ok(())
 }
 
-/// A session's SKILL recordings (its `sessions/<id>/casts/` minus `build-*` image-build
-/// casts) — the set worth annotating after a run. The dir is per-session, so everything in
-/// it belongs to this run; no before/after snapshot dance needed.
+/// A session's agent recordings (its `sessions/<id>/casts/` minus image-build and deterministic
+/// host-step casts) — the set worth spending a model call to annotate after a run. Host casts
+/// remain manually annotatable; they are merely excluded from the automatic chapter pass.
 fn session_skill_casts(session_id: &str) -> Vec<std::path::PathBuf> {
   std::fs::read_dir(runtime::session_casts_dir(session_id))
     .map(|entries| {
       entries
         .filter_map(|e| e.ok().map(|e| e.path()))
         .filter(|p| p.extension().is_some_and(|x| x == "cast"))
-        .filter(|p| !p.file_name().is_some_and(|n| n.to_string_lossy().starts_with("build-")))
+        .filter(|p| {
+          !p.file_name().is_some_and(|n| {
+            let name = n.to_string_lossy();
+            name.starts_with("build-") || name.starts_with("host-")
+          })
+        })
         .collect()
     })
     .unwrap_or_default()
@@ -9937,6 +10000,9 @@ fn print_help_defs() {
                            inside a run container would see the wrong docker daemon, the wrong
                            paths, and the wrong localhost. The command is fixed by the committed
                            definition: no model chooses what runs on your machine.
+                           Rust mirrors captured stdout/stderr into a live browser recording;
+                           the command itself still runs directly — no PTY, tmux, asciinema,
+                           container, or changed isatty() behavior.
     timeout: 90m           wall-clock bound (default 1h). Overrunning FAILS the job — a check
                            that hangs is exactly what this replaces, so it is never auto-retried:
                            not within the run, and not by the daemon's job supervisor either,
@@ -11482,6 +11548,47 @@ Subject: [PATCH] add: 2 + 3 = 5
   }
 
   #[test]
+  fn automatic_annotation_skips_build_and_host_recordings() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-cast-annotation");
+    let _home = ScshHome::under(&dir);
+    let casts = runtime::session_casts_dir("cast-filter");
+    std::fs::create_dir_all(&casts).unwrap();
+    for name in ["agent.cast", "build-claude.cast", "host-gate.cast"] {
+      std::fs::write(casts.join(name), "recording").unwrap();
+    }
+
+    let selected = session_skill_casts("cast-filter");
+    assert_eq!(selected, [casts.join("agent.cast")], "deterministic host output needs no automatic model annotation");
+  }
+
+  /// Read the sole host recording for `session`, checking the v3 envelope along the way.
+  fn host_cast_events(session: &str) -> Vec<(String, String)> {
+    let casts_dir = runtime::session_casts_dir(session);
+    let casts: Vec<PathBuf> = std::fs::read_dir(&casts_dir)
+      .unwrap()
+      .map(|entry| entry.unwrap().path())
+      .filter(|path| path.extension().is_some_and(|ext| ext == "cast"))
+      .collect();
+    assert_eq!(casts.len(), 1, "one recording per host invocation: {casts:?}");
+    assert!(casts[0].file_name().unwrap().to_string_lossy().starts_with("host-"));
+    let recording = std::fs::read_to_string(&casts[0]).unwrap();
+    let mut lines = recording.lines();
+    let header = json::parse(lines.next().expect("cast header")).unwrap();
+    let json::Value::Object(header) = header else { panic!("header is an object") };
+    assert!(header.iter().any(|(key, value)| key == "version" && value == &json::Value::Number(3.0)));
+    lines
+      .map(|line| match json::parse(line).unwrap() {
+        json::Value::Array(event) => match (&event[1], &event[2]) {
+          (json::Value::String(code), json::Value::String(data)) => (code.clone(), data.clone()),
+          _ => panic!("event code/data are strings: {line}"),
+        },
+        _ => panic!("event is an array: {line}"),
+      })
+      .collect()
+  }
+
+  #[test]
   fn a_failing_host_step_reports_a_verdict_and_lets_the_workflow_carry_on() {
     let _guard = runtime::test_env_lock();
     let dir = mt_dir("host-step-verdict");
@@ -11512,6 +11619,17 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert!(written.contains("\"exit_code\": 3"), "{written}");
     // Short output is handed over whole — the truncation marker is for real cuts only.
     assert!(!out["output"].contains("[earlier output omitted]"), "{:?}", out["output"]);
+
+    // The host command was never moved under a PTY, but its captured streams are also a valid,
+    // durable asciicast: the browser gets terminal playback without tmux/asciinema dependencies.
+    let events = host_cast_events("host-step-verdict");
+    let playback: String = events.iter().filter(|(code, _)| code == "o").map(|(_, data)| data.as_str()).collect();
+    assert!(
+      playback.contains("scsh host step:\u{1b}[0m \u{1b}[1mgate\u{1b}[0m\r\n\r\n\u{1b}[1;32m$\u{1b}[0m printf"),
+      "{playback:?}"
+    );
+    assert!(playback.contains("building\r\n") && playback.contains("FAIL: assertion x\r\n"), "{playback:?}");
+    assert_eq!(events.last(), Some(&("x".into(), "3".into())), "numeric exit event is last");
   }
 
   #[test]
@@ -11600,6 +11718,11 @@ Subject: [PATCH] add: 2 + 3 = 5
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::HOST_STEP_TIMEOUT));
     assert!(run.workflow_outputs.is_none(), "a killed command publishes no verdict");
     assert!(!failure::is_transient(failure::reason::HOST_STEP_TIMEOUT), "a hung host check is never auto-retried");
+
+    let events = host_cast_events("host-step-timeout");
+    let playback: String = events.iter().filter(|(code, _)| code == "o").map(|(_, data)| data.as_str()).collect();
+    assert!(playback.contains("timed out after 1s"), "the player explains the kill: {playback:?}");
+    assert_eq!(events.last(), Some(&("x".into(), "124".into())), "the timeout code terminates the cast");
   }
 
   #[cfg(unix)]
