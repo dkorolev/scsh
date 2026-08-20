@@ -32,12 +32,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Read the version
+      - name: Read the release metadata
         id: version
         run: |
           version="$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
+          rust_version="$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml | head -1)"
           [ -n "$version" ] || { echo "no version found in Cargo.toml"; exit 1; }
+          [ -n "$rust_version" ] || { echo "no rust-version found in Cargo.toml"; exit 1; }
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "rust_version=$rust_version" >> "$GITHUB_OUTPUT"
 
       - name: Ask the index whether this version still needs publishing
         id: todo
@@ -50,6 +53,12 @@ jobs:
             echo "scsh ${{ steps.version.outputs.version }} needs publishing"
             echo "missing=scsh" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Install the declared Rust toolchain
+        if: steps.todo.outputs.missing != ''
+        run: |
+          rustup toolchain install "${{ steps.version.outputs.rust_version }}" --profile minimal
+          rustup default "${{ steps.version.outputs.rust_version }}"
 
       - name: Mint a short-lived crates.io token (Trusted Publishing)
         if: steps.todo.outputs.missing != ''
