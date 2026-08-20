@@ -2533,6 +2533,7 @@ steps:
     assert_eq!(write_files.needs, vec!["sort_fruits", "sort_vegetables"]);
     assert_eq!(write_files.executor(), "claude");
     assert!(write_files.commits);
+    assert_eq!(write_files.commit_identity, CommitIdentity::Runner);
   }
 
   /// A minimal two-step workflow source for negative tests.

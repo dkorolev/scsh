@@ -63,6 +63,7 @@ steps:
       harness: claude
       model: sonnet
     commits: true
+    commit-identity: runner
     inputs:
       FRUITS: sort_fruits.sorted
       VEGGIES: sort_vegetables.sorted
