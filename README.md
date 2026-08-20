@@ -451,7 +451,7 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 
 ## What you need
 
-- A **Rust toolchain** (`cargo`) **1.89 or newer** to build the binary — install via
+- A **Rust toolchain** (`cargo`) **1.98 or newer** to build the binary — install via
   [rustup](https://rustup.rs). Distro-packaged toolchains (e.g. Ubuntu's `apt install cargo`)
   are typically older and fail the build.
 - **`git`** on your `PATH`.
