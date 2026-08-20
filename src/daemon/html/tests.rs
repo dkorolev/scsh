@@ -670,6 +670,10 @@ fn stop_strip_and_kill_buttons_ignore_zombie_sessions() {
   let page = session_page(&host, "castab").expect("host session renders");
   assert!(!page.contains(r#"data-proc-stop="0""#), "a host step is stopped only with its whole job: {page}");
   assert!(!page.contains(r#"data-proc-restart="0""#), "a host step has no per-proc restart channel: {page}");
+  assert!(
+    page.contains(r#"data-cast-url="/cast/castab/0""#),
+    "a recorded host step still gets the generic terminal player: {page}"
+  );
 
   let proc = &mut live.sessions.get_mut("castab").unwrap().procs[0];
   proc.fail_reason = Some(crate::failure::reason::STOP_REQUESTED.into());

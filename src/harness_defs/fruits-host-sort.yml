@@ -33,8 +33,10 @@ steps:
       import os
 
       items = [item.strip() for item in os.environ["LIST"].split(",") if item.strip()]
+      sorted_items = ", ".join(sorted(items, key=str.casefold))
       with open(os.environ["SCSH_RESULT"], "w", encoding="utf-8") as result:
-        json.dump({"sorted": ", ".join(sorted(items, key=str.casefold))}, result)
+        json.dump({"sorted": sorted_items}, result)
+      print(f"sorted: {sorted_items}")
       PY
     timeout: 30s
     output:
@@ -50,8 +52,10 @@ steps:
       import os
 
       items = [item.strip() for item in os.environ["LIST"].split(",") if item.strip()]
+      sorted_items = ", ".join(sorted(items, key=str.casefold))
       with open(os.environ["SCSH_RESULT"], "w", encoding="utf-8") as result:
-        json.dump({"sorted": ", ".join(sorted(items, key=str.casefold))}, result)
+        json.dump({"sorted": sorted_items}, result)
+      print(f"sorted: {sorted_items}")
       PY
     timeout: 30s
     output:

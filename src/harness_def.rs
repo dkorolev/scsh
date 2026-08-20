@@ -2524,6 +2524,7 @@ steps:
       assert_eq!(sorter.executor(), HOST_EXECUTOR);
       assert!(sorter.host().is_some_and(|host| host.reports_result));
       assert!(sorter.host().unwrap().command.contains("python3 - <<'PY'"));
+      assert!(sorter.host().unwrap().command.contains("print(f\"sorted: {sorted_items}\")"));
       assert_eq!(sorter.outputs.iter().map(|output| output.name.as_str()).collect::<Vec<_>>(), ["sorted"]);
       let binding = sorter.inputs.iter().find(|binding| binding.name == "LIST").unwrap();
       assert_eq!(binding.source, Ref::StepField { step: "categorize".into(), field: field.into() });

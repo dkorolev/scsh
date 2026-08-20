@@ -600,7 +600,7 @@ impl Proc {
   /// Run `program args` to completion, pumping each output line into the model (stamped relative
   /// to this proc's start) and onto the header note. Returns `(success, last_line)`.
   pub fn run(&self, program: &str, args: &[String]) -> std::io::Result<(bool, Option<String>)> {
-    let (status, _killed, last, _trimmed) = self.exec(program, args, None, None, None, None, None, None)?;
+    let (status, _killed, last, _trimmed) = self.exec(program, args, None, None, None, None, None, None, None)?;
     Ok((status.success(), last))
   }
 
@@ -616,18 +616,20 @@ impl Proc {
     &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
     done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
-    let (status, killed, last, _trimmed) = self.exec(program, args, None, timeout, watch, done, None, None)?;
+    let (status, killed, last, _trimmed) = self.exec(program, args, None, timeout, watch, done, None, None, None)?;
     Ok((status.success(), killed, last))
   }
 
   /// Like [`Proc::run_watched`], but in an explicit working directory and environment, and
   /// reporting the child's exact **exit code**. For a workflow host step, whose non-zero exit
-  /// is a result to hand downstream rather than a failure of the step itself.
+  /// is a result to hand downstream rather than a failure of the step itself. `cast` mirrors
+  /// the already-captured stream into an asciicast without putting the command under a PTY.
   pub fn run_in(
     &self, program: &str, args: &[String], place: &ExecPlace, timeout: Option<Duration>, output_limit: OutputLimit,
+    cast: Option<crate::ptyrec::CastSink>,
   ) -> std::io::Result<(Option<i32>, Killed, Option<String>, bool)> {
     let (status, killed, last, trimmed) =
-      self.exec(program, args, None, timeout, None, None, Some(place), Some(output_limit))?;
+      self.exec(program, args, None, timeout, None, None, Some(place), Some(output_limit), cast)?;
     Ok((status.code(), killed, last, trimmed))
   }
 
@@ -642,7 +644,7 @@ impl Proc {
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
     watch: Option<&ActivityWatch>, done: Option<&DoneWatch>, place: Option<&ExecPlace>,
-    output_limit: Option<OutputLimit>,
+    output_limit: Option<OutputLimit>, cast: Option<crate::ptyrec::CastSink>,
   ) -> std::io::Result<(std::process::ExitStatus, Killed, Option<String>, bool)> {
     let started = self.start_instant();
     let mut command = Command::new(program);
@@ -661,10 +663,10 @@ impl Proc {
     let output_trimmed = Arc::new(AtomicBool::new(false));
     let mut pumps: Vec<JoinHandle<()>> = Vec::new();
     if let Some(out) = child.stdout.take() {
-      pumps.push(self.pump(out, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed)));
+      pumps.push(self.pump(out, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed), cast.clone()));
     }
     if let Some(err) = child.stderr.take() {
-      pumps.push(self.pump(err, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed)));
+      pumps.push(self.pump(err, started, Arc::clone(&last), output_limit, Arc::clone(&output_trimmed), cast.clone()));
     }
     // Feed stdin only after the pumps are draining output, so a large payload can't deadlock
     // against a full output pipe. Dropping the handle signals EOF.
@@ -816,12 +818,26 @@ impl Proc {
   /// echoes the line so the build log survives in pipes/CI.
   fn pump<R: Read + Send + 'static>(
     &self, reader: R, started: Instant, last: Arc<Mutex<Option<String>>>, output_limit: Option<OutputLimit>,
-    output_trimmed: Arc<AtomicBool>,
+    output_trimmed: Arc<AtomicBool>, cast: Option<crate::ptyrec::CastSink>,
   ) -> JoinHandle<()> {
     let (i, attended, tail, model, sink) =
       (self.i, self.attended, self.tail, Arc::clone(&self.model), self.sink.clone());
     thread::spawn(move || {
       let process_line = |raw: String, read_trimmed: bool| {
+        if let Some(cast) = &cast {
+          let terminal_line = if let Some(line) = raw.strip_suffix('\n') {
+            if line.ends_with('\r') {
+              raw.clone()
+            } else {
+              format!("{line}\r\n")
+            }
+          } else if raw.ends_with('\r') {
+            format!("{raw}\n")
+          } else {
+            format!("{raw}\r\n")
+          };
+          cast.output(&terminal_line);
+        }
         if read_trimmed {
           output_trimmed.store(true, Ordering::Relaxed);
         }

@@ -51,7 +51,7 @@ harness output and container names.
 | Skill clone / harness phases | Proc notes |
 | Container start / stop | Named container around each skill |
 | Every stdout/stderr line | Build tail + harness tee (`scsh-run.log` stream) |
-| Terminal recording (`.cast`) | asciinema PTY recording of each harness (see below) |
+| Terminal recording (`.cast`) | asciicast recording of each harness and workflow host step (see below) |
 | Image-build recording (`.cast`) | scsh's own PTY recorder around each image build |
 
 ## Terminal recordings (asciinema)
@@ -78,6 +78,14 @@ as a timeout (a real setup bug) rather than being auto-clicked. Per harness:
 
 Missing/invalid credentials fail fast with a clear "log in on the host" error before any
 container starts — scsh never tries to drive a login screen.
+
+Workflow **host steps** use the same player without changing how their commands run. Rust keeps
+the direct `sh -c` process, pipes, timeout, and process-group supervision, and mirrors the
+captured stdout/stderr into asciicast v3 events as lines arrive. A command banner and final exit
+line make even a quiet script readable. No host tmux, asciinema binary, PTY, or container is
+involved, so recording cannot change a check merely because it starts seeing `isatty() == true`.
+Host casts are not automatically chaptered with a model; they remain available for manual
+annotation and `.cast` download.
 
 Each recorded skill — and each image build — is shown as an **inline player** in the
 session page. Builds are recorded by scsh itself (`scsh __record-pty` runs the builder

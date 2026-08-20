@@ -10,6 +10,7 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::json;
@@ -52,6 +53,84 @@ mod sys {
   }
 }
 
+/// A small asciicast v3 writer shared by direct host-command output pumps.
+///
+/// It is deliberately a FORMAT writer, not a PTY: workflow host steps keep their existing
+/// pipe-based execution, exit-status, timeout, and process-group semantics while the captured
+/// stream is serialized into the recording the session browser understands.
+struct CastWriter {
+  cast: BufWriter<File>,
+  started: Instant,
+  last_event: f64,
+  finished: bool,
+}
+
+impl CastWriter {
+  fn create(cast_path: &Path, cols: u16, rows: u16) -> std::io::Result<CastWriter> {
+    let mut cast = BufWriter::new(File::create(cast_path)?);
+    let header = format!(
+      "{{\"version\": 3, \"term\": {{\"cols\": {cols}, \"rows\": {rows}}}, \"timestamp\": {}}}\n",
+      crate::now_secs()
+    );
+    cast.write_all(header.as_bytes())?;
+    cast.flush()?;
+    Ok(CastWriter { cast, started: Instant::now(), last_event: 0.0, finished: false })
+  }
+
+  fn event(&mut self, code: &str, data: &str) -> std::io::Result<()> {
+    if self.finished {
+      return Ok(());
+    }
+    let now = self.started.elapsed().as_secs_f64();
+    let interval = now - self.last_event;
+    self.last_event = now;
+    let line = format!("[{interval:.6}, {}, {}]\n", json::quote(code), json::quote(data));
+    self.cast.write_all(line.as_bytes())?;
+    self.cast.flush()
+  }
+
+  fn output(&mut self, text: &str) -> std::io::Result<()> {
+    if text.is_empty() {
+      Ok(())
+    } else {
+      self.event("o", text)
+    }
+  }
+
+  fn finish(&mut self, exit_code: i32) -> std::io::Result<()> {
+    if self.finished {
+      return Ok(());
+    }
+    self.event("x", &exit_code.to_string())?;
+    self.finished = true;
+    self.cast.flush()
+  }
+}
+
+/// Cloneable, lock-serialized handle for stdout and stderr pumps writing one host-step cast.
+/// Recording failures never change the command's verdict: the cast is observability, while the
+/// existing process status and `$SCSH_RESULT` remain authoritative.
+#[derive(Clone)]
+pub(crate) struct CastSink(Arc<Mutex<CastWriter>>);
+
+impl CastSink {
+  pub(crate) fn create(cast_path: &Path, cols: u16, rows: u16) -> std::io::Result<CastSink> {
+    CastWriter::create(cast_path, cols, rows).map(|writer| CastSink(Arc::new(Mutex::new(writer))))
+  }
+
+  pub(crate) fn output(&self, text: &str) {
+    if let Ok(mut writer) = self.0.lock() {
+      let _ = writer.output(text);
+    }
+  }
+
+  pub(crate) fn finish(&self, exit_code: i32) {
+    if let Ok(mut writer) = self.0.lock() {
+      let _ = writer.finish(exit_code);
+    }
+  }
+}
+
 /// Record `argv` under a fresh PTY of `cols`×`rows` into `cast_path` (asciicast v3,
 /// NDJSON, flushed per event so the daemon's cast probe streams it live). The PTY output
 /// is also mirrored to this process's stdout, byte for byte, so a parent pumping our
@@ -66,21 +145,13 @@ pub fn record(cast_path: &Path, cols: u16, rows: u16, argv: &[String]) -> i32 {
     }
   };
 
-  let mut cast = match File::create(cast_path).map(BufWriter::new) {
+  let mut cast = match CastWriter::create(cast_path, cols, rows) {
     Ok(f) => f,
     Err(e) => {
       eprintln!("scsh __record-pty: could not create {}: {e}", cast_path.display());
       return 1;
     }
   };
-  let header = format!(
-    "{{\"version\": 3, \"term\": {{\"cols\": {cols}, \"rows\": {rows}}}, \"timestamp\": {}}}\n",
-    crate::now_secs()
-  );
-  if cast.write_all(header.as_bytes()).and_then(|()| cast.flush()).is_err() {
-    eprintln!("scsh __record-pty: could not write the cast header");
-    return 1;
-  }
 
   let mut cmd = Command::new(&argv[0]);
   cmd.args(&argv[1..]);
@@ -117,15 +188,16 @@ pub fn record(cast_path: &Path, cols: u16, rows: u16, argv: &[String]) -> i32 {
   drop(cmd);
 
   pump(master, &mut cast);
-  let _ = cast.flush();
 
-  match child.wait() {
+  let code = match child.wait() {
     Ok(status) => status.code().unwrap_or(1),
     Err(e) => {
       eprintln!("scsh __record-pty: wait failed: {e}");
       1
     }
-  }
+  };
+  let _ = cast.finish(code);
+  code
 }
 
 /// A connected (master, slave) PTY pair sized to `cols`×`rows`.
@@ -159,11 +231,9 @@ fn open_pty(cols: u16, rows: u16) -> std::io::Result<(OwnedFd, OwnedFd)> {
 /// Drain the PTY master into cast events and this process's stdout until the child hangs
 /// up (EOF on macOS, EIO on Linux). Event times are intervals since the previous event —
 /// asciicast v3 — and each event line is flushed so a mid-build reader sees live growth.
-fn pump(master: OwnedFd, cast: &mut BufWriter<File>) {
+fn pump(master: OwnedFd, cast: &mut CastWriter) {
   let mut pty = File::from(master);
   let mut stdout = std::io::stdout();
-  let started = Instant::now();
-  let mut last_event = 0f64;
   // Carry for a UTF-8 sequence split across reads; ANSI output is UTF-8 in practice, and
   // anything genuinely invalid becomes U+FFFD rather than corrupting the cast JSON.
   let mut pending: Vec<u8> = Vec::new();
@@ -176,14 +246,8 @@ fn pump(master: OwnedFd, cast: &mut BufWriter<File>) {
         let _ = stdout.flush();
         pending.extend_from_slice(&buf[..n]);
         let text = take_decodable_prefix(&mut pending);
-        if !text.is_empty() {
-          let now = started.elapsed().as_secs_f64();
-          let interval = now - last_event;
-          last_event = now;
-          let line = format!("[{interval:.6}, \"o\", {}]\n", json::quote(&text));
-          if cast.write_all(line.as_bytes()).and_then(|()| cast.flush()).is_err() {
-            break;
-          }
+        if !text.is_empty() && cast.output(&text).is_err() {
+          break;
         }
       }
       Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
@@ -193,9 +257,7 @@ fn pump(master: OwnedFd, cast: &mut BufWriter<File>) {
   // A trailing incomplete sequence at hangup can never complete; flush it lossily.
   if !pending.is_empty() {
     let text = String::from_utf8_lossy(&pending).into_owned();
-    let now = started.elapsed().as_secs_f64();
-    let line = format!("[{:.6}, \"o\", {}]\n", now - last_event, json::quote(&text));
-    let _ = cast.write_all(line.as_bytes());
+    let _ = cast.output(&text);
   }
 }
 
@@ -248,11 +310,16 @@ mod tests {
     assert!(header.contains("\"version\": 3") && header.contains("\"cols\": 120"), "{header}");
     let mut total = 0f64;
     let mut saw_bold = false;
+    let mut last_event = None;
     for line in lines {
       let parsed = json::parse(line).expect("event line parses");
       let json::Value::Array(items) = parsed else { panic!("event is an array: {line}") };
       let json::Value::Number(t) = &items[0] else { panic!("interval first: {line}") };
       total += t;
+      last_event = match (&items[1], &items[2]) {
+        (json::Value::String(code), json::Value::String(data)) => Some((code.clone(), data.clone())),
+        _ => panic!("event code and data are strings: {line}"),
+      };
       if let json::Value::String(data) = &items[2] {
         if data.contains("\u{1b}[1mbold") {
           saw_bold = true;
@@ -260,6 +327,7 @@ mod tests {
       }
     }
     assert!(saw_bold, "ANSI output captured through the pty: {text}");
+    assert_eq!(last_event, Some(("x".into(), "0".into())), "the v3 exit event is last");
     assert!(total >= 0.0);
     std::fs::remove_file(&cast).unwrap();
   }
