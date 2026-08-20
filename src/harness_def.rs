@@ -22,12 +22,13 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and the workflow demos are always
 /// available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 18] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
     ("research", include_str!("harness_defs/research.yml")),
     ("fruits", include_str!("harness_defs/fruits.yml")),
+    ("fruits-host-sort", include_str!("harness_defs/fruits-host-sort.yml")),
     ("code-review", include_str!("harness_defs/code-review.yml")),
     ("arith", include_str!("harness_defs/arith.yml")),
     ("commit-summary", include_str!("harness_defs/commit-summary.yml")),
@@ -2506,6 +2507,32 @@ steps:
       assert!(body.contains(path), "final step must require {path}");
     }
     assert!(body.contains("fruits: add sorted produce lists"), "final step fixes the commit subject");
+  }
+
+  #[test]
+  fn builtin_fruits_host_sort_workflow_uses_typed_host_steps() {
+    let f = builtin("fruits-host-sort");
+    assert!(f.is_workflow(), "fruits-host-sort is a workflow");
+    assert_eq!(f.steps.len(), 4);
+
+    let categorize = f.steps.iter().find(|s| s.id == "categorize").unwrap();
+    assert_eq!(categorize.executor(), "claude");
+
+    for (id, field) in [("sort_fruits", "fruits"), ("sort_vegetables", "vegetables")] {
+      let sorter = f.steps.iter().find(|s| s.id == id).unwrap();
+      assert_eq!(sorter.needs, vec!["categorize"]);
+      assert_eq!(sorter.executor(), HOST_EXECUTOR);
+      assert!(sorter.host().is_some_and(|host| host.reports_result));
+      assert!(sorter.host().unwrap().command.contains("python3 - <<'PY'"));
+      assert_eq!(sorter.outputs.iter().map(|output| output.name.as_str()).collect::<Vec<_>>(), ["sorted"]);
+      let binding = sorter.inputs.iter().find(|binding| binding.name == "LIST").unwrap();
+      assert_eq!(binding.source, Ref::StepField { step: "categorize".into(), field: field.into() });
+    }
+
+    let write_files = f.steps.iter().find(|s| s.id == "write_files").unwrap();
+    assert_eq!(write_files.needs, vec!["sort_fruits", "sort_vegetables"]);
+    assert_eq!(write_files.executor(), "claude");
+    assert!(write_files.commits);
   }
 
   /// A minimal two-step workflow source for negative tests.

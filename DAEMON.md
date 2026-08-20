@@ -385,7 +385,8 @@ sources shadowing earlier ones by name (repo > home > built-in):
 
 - **built-in** (embedded in the binary, always available): `doctor` (report which agent images
   and credentials are present, then run a trivial end-to-end confirm task), `add` (an a+b math
-  self-test), `research` (a trivial tool-calling demo), and `fruits` (a workflow demo, below).
+  self-test), `research` (a trivial tool-calling demo), `fruits` (an all-agent workflow demo),
+  and `fruits-host-sort` (the same graph with typed host sorting steps, below).
 - `~/.harness/<name>.yml` — the running user's personal definitions.
 - `<repo>/.harness/<name>.yml` — definitions that ship with a repository.
 
@@ -521,10 +522,12 @@ daemon captures the spawned run's output and, when the process exits, reconciles
 run that finished normally is left alone, but one that died before it ever registered becomes a
 **failed** session showing the captured error, never a stranded "running" one.
 
-Two built-in definitions make good demos: **`doctor`** (no params — confirms the agent images
-are built and each agent's credentials proxy through, then runs a trivial end-to-end task) and
-**`fruits`** (the workflow demo — give it `WORDS` like `apple, carrot, pear, onion` and watch
-`categorize` fan out into `sort_fruits` and `sort_vegetables` running in parallel). For a
+Three built-in definitions make good demos: **`doctor`** (no params — confirms the agent images
+are built and each agent's credentials proxy through, then runs a trivial end-to-end task),
+**`fruits`** (give it `WORDS` like `apple, carrot, pear, onion` and watch `categorize` fan out into
+two parallel agent sorters), and **`fruits-host-sort`** (the same graph, but the sorter nodes use
+executor `host`, become ready together, and run sequentially in the caller's shared checkout
+before the final agent fan-in). For a
 **fake PR** in the Web UI (DAG + packdiff ⇄ commits diff with a Description panel), run
 **`greet`**: `scaffold` → `implement` → `describe` seeds a broken `greet()`, fixes it, then
 commits `PR-DESCRIPTION.md`. For the **minimal** one-shot version (just a feature note +

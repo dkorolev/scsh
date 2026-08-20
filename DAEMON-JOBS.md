@@ -150,6 +150,17 @@ the session board shows all three step rows. The per-step results land under the
 session dir (`tmp/scsh/<session>/` or `.harness/tmp/scsh/<session>/`), `sort_fruits.json` has a
 `sorted` field with the fruits in alphabetical order, and `git -C "$REPO" status` is clean.
 
+For the host-step version of the same graph:
+
+```console
+cd "$REPO" && WORDS="pear, onion, apple, carrot" "$SCSH_BIN" run --def fruits-host-sort
+```
+
+**Expect:** `categorize` and `write_files` are Claude nodes, while `sort_fruits` and
+`sort_vegetables` are visibly labeled `host`. Both sorters become runnable after `categorize`,
+then execute one at a time because host steps share the caller's checkout. Their typed result
+files feed the final agent step exactly as the original agent sorters do.
+
 ## 10. (Optional) The three-harness bundle, with a file artifact
 
 `arith` is the built-in cross-harness demo: **claude** (sonnet) adds A+B, **codex** (Luna)
@@ -184,7 +195,7 @@ fix and **describe** for the Description panel lifted from `PR-DESCRIPTION.md`.
 
 ## 12. Job graph — interaction acceptance (manual)
 
-Use an `arith` or `fruits` session URL from steps 9–10. Report PASS/FAIL per bullet.
+Use an `arith`, `fruits`, or `fruits-host-sort` session URL from steps 9–10. Report PASS/FAIL per bullet.
 
 ### Fan-out (`fruits`)
 
