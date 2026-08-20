@@ -11,7 +11,7 @@ pub fn sha1_digest(data: &[u8]) -> [u8; 20] {
   }
   msg.extend_from_slice(&bit_len.to_be_bytes());
 
-  for block in msg.chunks_exact(64) {
+  for block in msg.as_chunks::<64>().0 {
     let mut w = [0u32; 80];
     for (i, word) in w.iter_mut().enumerate().take(16) {
       let j = i * 4;
