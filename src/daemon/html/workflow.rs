@@ -464,6 +464,7 @@ impl StatusCounts {
       (self.failed, WorkflowDisplayState::Failed),
       (self.stopped, WorkflowDisplayState::ForceStopped),
       (self.stalled, WorkflowDisplayState::Stalled),
+      (self.awaiting_limits, WorkflowDisplayState::AwaitingLimits),
       (self.skipped, WorkflowDisplayState::Skipped),
     ] {
       if n == 0 {
@@ -493,6 +494,7 @@ fn legend_html(present: &std::collections::BTreeSet<WorkflowDisplayState>) -> St
   const ORDER: &[WorkflowDisplayState] = &[
     WorkflowDisplayState::Running,
     WorkflowDisplayState::Terminating,
+    WorkflowDisplayState::AwaitingLimits,
     WorkflowDisplayState::Done,
     WorkflowDisplayState::Graceful,
     WorkflowDisplayState::Failed,
@@ -678,6 +680,7 @@ fn node_html(session: &Session, meta: &WorkflowMeta, node: &WorkflowNodeMeta, po
       | WorkflowDisplayState::Failed
       | WorkflowDisplayState::ForceStopped
       | WorkflowDisplayState::Stalled
+      | WorkflowDisplayState::AwaitingLimits
   );
   let state_elapsed = elapsed.filter(|_| show_elapsed).map(|e| format!(" · {}", esc(&e))).unwrap_or_default();
   if state == WorkflowDisplayState::Waiting && unmet > 0 {

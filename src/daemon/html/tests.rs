@@ -1747,6 +1747,41 @@ fn offline_export_includes_workflow_graph() {
   assert!(html.contains(".wf-bookend"), "bookend CSS is inlined in the export");
 }
 
+#[test]
+fn awaiting_limits_has_live_ssr_and_offline_export_parity() {
+  use super::session_export::CastExport;
+
+  let now = crate::daemon::paths::now_unix_secs();
+  let mut store = store_with_cast_proc(ProcStatus::Running);
+  {
+    let session = store.sessions.get_mut("castab").unwrap();
+    session.started_at = now.saturating_sub(65);
+    session.last_seen_at = now;
+    let proc = &mut session.procs[0];
+    proc.started_at = Some(now.saturating_sub(65));
+    proc.elapsed = Some(65.0);
+    proc.phase = Some(crate::daemon::model::PROC_PHASE_AWAITING_LIMITS.into());
+    proc.phase_until = Some(now + 3600);
+  }
+
+  let page = session_page(&store, "castab").expect("session page");
+  let ssr = page.split("<script").next().unwrap();
+  let session = store.sessions.get("castab").unwrap();
+  let export = session_export_page(session, &[CastExport::Note { text: "waiting".into(), diff_html: None }], now);
+  for html in [ssr, export.as_str()] {
+    assert!(html.contains(r#"data-wf-status="awaiting_limits" title="Jump to first awaiting limits task">1 awaiting limits</a>"#));
+    assert!(html.contains(r#"<li class="wf-leg wf-leg-awaiting_limits""#));
+    assert!(html.contains(r#"> Awaiting limits</li>"#));
+    assert!(html.contains(r#"data-wf-state="awaiting_limits""#));
+    assert!(html.contains(r#"<span class="wf-state-elapsed"> · 1m05s</span>"#));
+    assert!(html.contains("Awaiting limits — resumes"));
+  }
+
+  let js = live_client_js();
+  assert!(js.contains("st === 'awaiting_limits' ? 'awaiting limits' : st"));
+  assert!(!js.contains("bits.push(kind, st);"), "dependency tips must not expose the raw state identifier");
+}
+
 /// The standalone play page accepts BOTH deep-link forms: '#t=' (primary — what its copy
 /// button writes) and '?t=' (what beecast-generated offline pages link with), so links
 /// work across surfaces. Also parse-gates the page's inline script under Node, same

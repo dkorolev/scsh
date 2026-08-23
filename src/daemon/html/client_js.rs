@@ -1364,7 +1364,7 @@ function wfBlockerLine(session, id, nowUnix) {
   const st = wfDisplayState(session, dep, nowUnix);
   const bits = [];
   if (!isBuild && p.harness) bits.push(p.harness);
-  bits.push(kind, st);
+  bits.push(kind, st === 'awaiting_limits' ? 'awaiting limits' : st);
   return title + ' (' + bits.join(' · ') + ')';
 }
 function wfNodeTip(session, node, state, unmetIds, nowUnix) {
