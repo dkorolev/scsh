@@ -426,7 +426,7 @@ fn park_quiet(limit: Duration) -> Duration {
 /// Slack allowed past the provider's own reset instant before a still-parked run is given up on.
 /// Covers clock skew, a status line that refreshed a little stale, and the seconds claude takes
 /// to notice its own reset — but not a screen that is simply stuck.
-const LIMIT_RESET_GRACE: Duration = Duration::from_secs(300);
+pub(crate) const LIMIT_RESET_GRACE: Duration = Duration::from_secs(300);
 
 /// Bookkeeping for one [`LimitWait`]: what the screen last said, how long the run has been
 /// parked on a limit, and how much of that the watchdogs must not count.

@@ -28,6 +28,7 @@ Follow the steps in order and check each **Expect** line. Report PASS/FAIL per s
 | A parked run is legible | the job page shows **Awaiting limits**, in its own colour, with the reset time |
 | Stuck screens get unstuck | `Enter` crosses a host-owned, read-only-mounted key channel into the tmux pane |
 | A limit that kills a run is not a failure | the retry is scheduled for the reset, not the backoff |
+| Long accepted waits survive | resets up to Claude's 24-hour continuation horizon remain parked through reset grace |
 
 ## Setup
 
@@ -135,6 +136,10 @@ and not `harness_overloaded`, whose backoff tops out in minutes. The retry row n
 route's 30-minute retry budget. If the whole job failed this way, the supervisor's
 `supervisor_scheduled` line names a delay reaching the reset instant rather than the
 ordinary 5-minute backoff.
+
+A reported reset up to 24 hours away uses the full deadline plus grace, including a 10-hour
+wait that the former six-hour cap cut short. A farther or stale deadline is capped so neither
+the run nor its supervisor can remain parked indefinitely.
 
 ## Cleanup
 

@@ -2480,12 +2480,12 @@ const LIMIT_RETRY_GRACE_SECS: u64 = 60;
 
 /// How long to sleep before retrying a route the account's usage limit stopped.
 ///
-/// Bounded at both ends: never longer than [`LIMIT_WAIT_MAX_SECS`] (a reset time from a stale
-/// capture must not park a job for a day), and never shorter than the grace (a reset instant
-/// that has already passed means retry now, not spin).
+/// Bounded at both ends: never longer than [`LIMIT_RETRY_MAX_SECS`] (a reset time beyond Claude's
+/// supported automatic-continuation horizon is stale or requires a fresh session), and never
+/// shorter than the grace (a reset instant that has already passed means retry now, not spin).
 fn limit_retry_delay_secs(resume_at: Option<u64>, now: u64) -> u64 {
   let Some(at) = resume_at else { return LIMIT_RETRY_BLIND_SECS };
-  (at.saturating_sub(now) + LIMIT_RETRY_GRACE_SECS).clamp(LIMIT_RETRY_GRACE_SECS, LIMIT_WAIT_MAX_SECS)
+  at.saturating_sub(now).saturating_add(LIMIT_RETRY_GRACE_SECS).clamp(LIMIT_RETRY_GRACE_SECS, LIMIT_RETRY_MAX_SECS)
 }
 
 /// Park a retry until the account's quota window reopens, reporting the wait as the row's live
@@ -5803,13 +5803,15 @@ fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
 /// usual way a wedged-but-finished harness gets stopped.
 const RESULT_QUIESCENCE_SECS: u64 = 30;
 
-/// Ceiling on how long one run may sit parked on a usage limit before scsh stops waiting on it.
+/// Ceiling on how long one run may sit parked on a usage limit before `scsh` stops waiting on it.
 ///
-/// Six hours is claude's own ceiling on the wait it arms, so a longer one here could only ever
-/// hold a container open past the point where the harness itself has given up. The reset instant
-/// the provider reports shortens it further whenever it is known; this is the bound for a limit
-/// whose end nobody has stated.
-const LIMIT_WAIT_MAX_SECS: u64 = 6 * 60 * 60;
+/// Claude preserves the session for resets no more than 24 hours away. Add the same post-reset
+/// grace the screen watcher uses so a reset at that boundary can reopen before the run is stopped;
+/// a farther or missing deadline remains bounded rather than parking a container indefinitely.
+const LIMIT_WAIT_MAX_SECS: u64 = quota::CLAUDE_AUTO_CONTINUE_MAX_RESET_SECS + ui::screen::LIMIT_RESET_GRACE.as_secs();
+
+/// Longest route-retry delay: Claude's supported reset horizon plus retry clock-skew grace.
+const LIMIT_RETRY_MAX_SECS: u64 = quota::CLAUDE_AUTO_CONTINUE_MAX_RESET_SECS + LIMIT_RETRY_GRACE_SECS;
 
 /// Host-owned source for the read-only key-channel mount. It is a sibling of the run clone,
 /// never a child: a skill controls the clone mount and must not be able to replace any component
@@ -10641,14 +10643,19 @@ mod tests {
     // The provider said when: wait until then, plus a little, so the fresh attempt does not
     // race its clock and get refused on the limit it just waited out.
     assert_eq!(limit_retry_delay_secs(Some(now + 3600), now), 3600 + LIMIT_RETRY_GRACE_SECS);
+    // A reset accepted by Claude's in-session wait must not be cut short by the old six-hour cap.
+    assert_eq!(limit_retry_delay_secs(Some(now + 10 * 3600), now), 10 * 3600 + LIMIT_RETRY_GRACE_SECS);
     // Already reset (a stale capture, or a slow hand-off): retry now, do not spin.
     assert_eq!(limit_retry_delay_secs(Some(now - 10), now), LIMIT_RETRY_GRACE_SECS);
-    // A reset time from a stale capture cannot park a job for a day.
-    assert_eq!(limit_retry_delay_secs(Some(now + 86_400), now), LIMIT_WAIT_MAX_SECS);
+    // The exact supported horizon gets its grace; farther stale deadlines cannot park forever.
+    assert_eq!(limit_retry_delay_secs(Some(now + 24 * 3600), now), LIMIT_RETRY_MAX_SECS);
+    assert_eq!(limit_retry_delay_secs(Some(now + 7 * 24 * 3600), now), LIMIT_RETRY_MAX_SECS);
+    assert_eq!(limit_retry_delay_secs(Some(u64::MAX), now), LIMIT_RETRY_MAX_SECS);
     // Nothing reported: bounded blind wait, never the 60s backoff that would just re-hit it.
     assert_eq!(limit_retry_delay_secs(None, now), LIMIT_RETRY_BLIND_SECS);
     // A blind wait shorter than the backoff's own cap would buy nothing over just backing off.
     const _: () = assert!(LIMIT_RETRY_BLIND_SECS > 15 * 60);
+    const _: () = assert!(LIMIT_WAIT_MAX_SECS > 24 * 60 * 60);
   }
 
   #[test]
