@@ -171,8 +171,9 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
 /// its own runs reported. `None` when no live proc failed that way, which leaves the ordinary
 /// exponential backoff in charge.
 ///
-/// Bounded by the same ceiling the in-run wait uses: a reset time read from a stale capture
-/// must not be able to park a job for a day.
+/// Bounded by Claude's supported automatic-continuation horizon plus grace: a valid reset may
+/// hold the job for up to a day, while a farther stale deadline schedules a fresh check rather
+/// than parking it indefinitely.
 fn job_usage_limit_reset(s: &Session, now: u64) -> Option<u64> {
   let limited = s.procs.iter().filter(|p| {
     p.status == crate::daemon::ProcStatus::Fail
@@ -182,15 +183,19 @@ fn job_usage_limit_reset(s: &Session, now: u64) -> Option<u64> {
   // The LATEST reported reset among the limited steps: restarting while any of them is still
   // inside its window just spends another attempt on the same refusal.
   let at = limited.filter_map(|p| p.phase_until).max()?;
-  Some((at.saturating_sub(now) + LIMIT_RESTART_GRACE_SECS).clamp(LIMIT_RESTART_GRACE_SECS, LIMIT_RESTART_MAX_SECS))
+  Some(
+    at.saturating_sub(now)
+      .saturating_add(LIMIT_RESTART_GRACE_SECS)
+      .clamp(LIMIT_RESTART_GRACE_SECS, LIMIT_RESTART_MAX_SECS),
+  )
 }
 
 /// Slack past a reported reset before restarting a limited job, so the fresh run does not race
 /// the provider's clock and get refused on the limit it just waited out.
 const LIMIT_RESTART_GRACE_SECS: u64 = 60;
 
-/// Ceiling on a usage-limit hold, matching the in-run wait's own six-hour bound.
-const LIMIT_RESTART_MAX_SECS: u64 = 6 * 60 * 60;
+/// Ceiling on a usage-limit hold: Claude's longest supported reset plus clock-skew grace.
+const LIMIT_RESTART_MAX_SECS: u64 = crate::quota::CLAUDE_AUTO_CONTINUE_MAX_RESET_SECS + LIMIT_RESTART_GRACE_SECS;
 
 /// Phase two: fire the restarts whose time has come, one at a time, through the same
 /// `jobs/restart` path the browser uses (workflow jobs resume; flat jobs restart from
@@ -330,12 +335,22 @@ mod tests {
     let mut store = Store::new(DaemonMode::Persistent, 7274, now);
     let mut session = failed_supervised_session("limitd", now);
     session.procs[0].fail_reason = Some(crate::failure::reason::HARNESS_USAGE_LIMIT.into());
-    session.procs[0].phase_until = Some(now + 2 * 3600);
+    session.procs[0].phase_until = Some(now + 10 * 3600);
     store.insert_session("limitd".into(), session);
 
     assert_eq!(schedule_pass(&mut store, now), vec!["limitd".to_string()]);
     let at = store.sessions["limitd"].supervisor.next_retry_at.expect("scheduled");
-    assert_eq!(at, now + 2 * 3600 + LIMIT_RESTART_GRACE_SECS, "held to the reported reset, plus a grace");
+    assert_eq!(at, now + 10 * 3600 + LIMIT_RESTART_GRACE_SECS, "held to the reported reset, plus a grace");
+  }
+
+  #[test]
+  fn a_usage_limit_reset_beyond_the_supported_horizon_is_bounded() {
+    let now = 1_000_000;
+    let mut session = failed_supervised_session("limitf", now);
+    session.procs[0].fail_reason = Some(crate::failure::reason::HARNESS_USAGE_LIMIT.into());
+    session.procs[0].phase_until = Some(now + 7 * 24 * 3600);
+
+    assert_eq!(job_usage_limit_reset(&session, now), Some(LIMIT_RESTART_MAX_SECS));
   }
 
   #[test]

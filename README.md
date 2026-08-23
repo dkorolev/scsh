@@ -269,7 +269,9 @@ frozen rather than widened, the job page shows the task as **Awaiting limits** w
 reset time, and the two screens that stop dead waiting for a keypress get one. If the wait
 never arms or the harness gives up on it, the run ends as `harness_usage_limit` and its
 retry is scheduled for the reset instant instead of spending a backoff that could never
-reach it. See [`USAGE-LIMIT-DEMO.md`](USAGE-LIMIT-DEMO.md).
+reach it. Claude accepts in-session waits whose reset is no more than 24 hours away; `scsh`
+honors that full window plus reset grace, while farther or missing deadlines stay bounded.
+See [`USAGE-LIMIT-DEMO.md`](USAGE-LIMIT-DEMO.md).
 
 The built-in `big-beautiful-build` workflow is the browser's complete feature factory: open an existing clean repository or create a new project, paste the full feature brief into its multiline form, and start the job. Cursor Auto executes the canonical `big-beautiful-build` skill — which lives in [dkorolev/beautiful-skills](https://github.com/dkorolev/beautiful-skills), not in the binary: the definition resolves it from the repo's `.skills/` or the machine-wide install, and is listed only where it is installed — commits working code, a runnable demo, documentation, and verification. The job page preserves the structured result and commits diff; the full report is copied into the repository's job scratch directory. No terminal is required to start or follow the build; see [`DEMO-BIG-BEAUTIFUL-BUILD.md`](DEMO-BIG-BEAUTIFUL-BUILD.md).
 

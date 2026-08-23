@@ -56,6 +56,11 @@ pub fn result_file_name(harness: Harness) -> String {
 /// File the in-container status line writes, inside the forwarded claude config dir.
 pub const CAPTURE_FILE: &str = "scsh-quota.json";
 
+/// Furthest reported reset for which Claude Code will preserve the current session. Its
+/// refusal screen says automatic continuation is unavailable only when the reset is more
+/// than 24 hours away; callers add their own post-reset grace to this horizon.
+pub const CLAUDE_AUTO_CONTINUE_MAX_RESET_SECS: u64 = 24 * 60 * 60;
+
 /// The status line scsh installs into claude containers. POSIX sh with no `jq`: it just
 /// parks the JSON next to itself (atomically, so the host never reads a torn file) and
 /// prints a short line. Parsing happens on the host, where the real parser lives.
@@ -116,33 +121,39 @@ pub fn harvest_claude_capture(claude_config_dir: &std::path::Path) -> bool {
   std::fs::write(&path, doc).is_ok()
 }
 
-/// The soonest limit reset a RUNNING claude container has reported, as a unix epoch.
+/// The reset that unblocks a RUNNING claude container, as a unix epoch.
 ///
 /// The status line installed by [`container_settings_json`] refreshes every few seconds, so the
 /// capture file inside a live run's forwarded config dir carries the account's current windows
 /// with exact epoch reset times — no prose to parse, no extra request, no guessing at the
 /// container's timezone. That is what tells the usage-limit wait how long it is waiting for.
 ///
-/// `claude_config_dir` is the HOST path of the run's forwarded `.claude` dir. Windows that have
-/// already reset (or never carried a time) are ignored; `None` means the run has not reported a
-/// future reset, which callers must treat as "wait blind, under the cap" rather than "no limit".
+/// `claude_config_dir` is the HOST path of the run's forwarded `.claude` dir. Only exhausted
+/// windows block progress; when more than one is exhausted, all must reopen, so the latest reset
+/// wins. Windows that have already reset (or never carried a time) are ignored; `None` means the
+/// run has not reported a future blocking reset, which callers must treat as "wait blind, under
+/// the cap" rather than "no limit".
 pub fn live_reset_epoch(claude_config_dir: &std::path::Path, now: u64) -> Option<u64> {
   let text = std::fs::read_to_string(claude_config_dir.join(CAPTURE_FILE)).ok()?;
+  blocking_reset_epoch(&text, now)
+}
+
+fn blocking_reset_epoch(text: &str, now: u64) -> Option<u64> {
   // Straight off the provider's own blob: `resets_at` is already a unix epoch here. The
   // normalized [`QuotaWindow`] renders it as ISO prose for humans, which would only have to be
   // parsed back.
-  let Ok(Value::Object(root)) = json::parse(&text) else { return None };
+  let Ok(Value::Object(root)) = json::parse(text) else { return None };
   let limits = get_obj(&root, "rate_limits")?;
   limits
     .iter()
     .filter_map(|(_, v)| match v {
-      Value::Object(w) => get_num(w, "resets_at"),
+      Value::Object(w) if get_num(w, "used_percentage").is_some_and(|used| used >= 100.0) => get_num(w, "resets_at"),
       _ => None,
     })
     .filter(|s| s.is_finite() && *s > 0.0)
     .map(|s| s as u64)
     .filter(|&at| at > now)
-    .min()
+    .max()
 }
 
 /// The newest captured claude quota, if any: `(windows, observed_at)`.
@@ -1318,6 +1329,24 @@ mod tests {
       "seven_day": {"used_percentage": 64, "resets_at": 1785081600}
     }
   }"#;
+
+  #[test]
+  fn live_reset_uses_the_latest_exhausted_window_only() {
+    let now = 1_800_000_000;
+    let capture = |five_hour_used: u64, five_hour_reset: u64, weekly_used: u64, weekly_reset: u64| {
+      format!(
+        r#"{{"rate_limits": {{
+          "five_hour": {{"used_percentage": {five_hour_used}, "resets_at": {five_hour_reset}}},
+          "seven_day": {{"used_percentage": {weekly_used}, "resets_at": {weekly_reset}}}
+        }}}}"#
+      )
+    };
+
+    assert_eq!(blocking_reset_epoch(&capture(20, now + 3600, 100, now + 10 * 3600), now), Some(now + 10 * 3600));
+    assert_eq!(blocking_reset_epoch(&capture(100, now + 3600, 20, now + 10 * 3600), now), Some(now + 3600));
+    assert_eq!(blocking_reset_epoch(&capture(100, now + 3600, 100, now + 10 * 3600), now), Some(now + 10 * 3600));
+    assert_eq!(blocking_reset_epoch(&capture(20, now + 3600, 99, now + 10 * 3600), now), None);
+  }
 
   #[test]
   fn statusline_capture_normalizes_into_windows_with_utc_resets() {
