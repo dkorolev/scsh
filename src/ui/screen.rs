@@ -473,15 +473,10 @@ impl LimitWatch {
     self.frozen_closed + self.open_stretch()
   }
 
-  /// How long this parked stretch may run: up to the provider's reset plus a grace, and never
-  /// past the policy ceiling. With no reported reset the ceiling is all there is — the run is
-  /// waiting on a limit it cannot see the end of, which is still better than being killed.
-  fn deadline(&self, policy: &LimitWait<'_>, now_epoch: u64) -> Duration {
-    let by_reset = self
-      .resets_at
-      .map(|at| Duration::from_secs(at.saturating_sub(now_epoch)) + LIMIT_RESET_GRACE)
-      .unwrap_or(policy.max);
-    by_reset.min(policy.max)
+  /// Whether this parked stretch has reached either the provider's absolute reset plus grace
+  /// or the policy ceiling. With no reported reset the ceiling is all there is.
+  fn expired(&self, policy: &LimitWait<'_>, now_epoch: u64) -> bool {
+    limit_wait_expired(self.open_stretch(), policy.max, self.resets_at, now_epoch)
   }
 
   /// Hand one tmux key name to the container's recorder, at most once per cooldown. Failure is
@@ -493,6 +488,10 @@ impl LimitWatch {
     self.last_key = Some(std::time::Instant::now());
     let _ = std::fs::write(&policy.keys, format!("{key}\n"));
   }
+}
+
+fn limit_wait_expired(open_stretch: Duration, max: Duration, resets_at: Option<u64>, now_epoch: u64) -> bool {
+  open_stretch >= max || resets_at.is_some_and(|at| now_epoch >= at.saturating_add(LIMIT_RESET_GRACE.as_secs()))
 }
 
 /// Bounded memory of normalized cast-line hashes already seen, plus the read cursor into the
@@ -912,7 +911,7 @@ impl Proc {
             if lw.parked_since.is_none() {
               lw.parked_since = Some(std::time::Instant::now());
             }
-            if lw.open_stretch() >= lw.deadline(policy, crate::daemon::now_unix_secs()) {
+            if lw.expired(policy, crate::daemon::now_unix_secs()) {
               kill_child_tree(&mut child);
               killed = Killed::LimitExhausted { resets_at: lw.resets_at };
               break child.wait()?;
@@ -1635,6 +1634,38 @@ mod tests {
   // retried from a fresh clone, losing everything the agent worked out. These tests pin the
   // three outcomes: hold the clocks while it waits, give up when it says it will not resume,
   // and press the key the screens that need one are waiting for.
+
+  const SIX_HOURS: Duration = Duration::from_secs(6 * 60 * 60);
+
+  #[test]
+  fn a_known_reset_does_not_expire_at_the_old_halfway_point() {
+    let resets_at = 600;
+    let halfway = (resets_at + LIMIT_RESET_GRACE.as_secs()) / 2;
+    assert!(!limit_wait_expired(Duration::from_secs(halfway), SIX_HOURS, Some(resets_at), halfway));
+  }
+
+  #[test]
+  fn a_known_reset_expires_exactly_at_reset_plus_grace() {
+    let resets_at = 10_000;
+    let expiry = resets_at + LIMIT_RESET_GRACE.as_secs();
+    assert!(!limit_wait_expired(Duration::from_secs(1_000), SIX_HOURS, Some(resets_at), expiry - 1));
+    assert!(limit_wait_expired(Duration::from_secs(1_000), SIX_HOURS, Some(resets_at), expiry));
+    assert!(limit_wait_expired(Duration::ZERO, SIX_HOURS, Some(u64::MAX), u64::MAX));
+  }
+
+  #[test]
+  fn an_unknown_reset_expires_only_at_the_policy_maximum() {
+    assert!(!limit_wait_expired(SIX_HOURS - Duration::from_nanos(1), SIX_HOURS, None, u64::MAX));
+    assert!(limit_wait_expired(SIX_HOURS, SIX_HOURS, None, 0));
+  }
+
+  #[test]
+  fn a_distant_reset_cannot_extend_the_policy_maximum() {
+    let now = 10_000;
+    let resets_at = now + 24 * 60 * 60;
+    assert!(!limit_wait_expired(SIX_HOURS - Duration::from_nanos(1), SIX_HOURS, Some(resets_at), now));
+    assert!(limit_wait_expired(SIX_HOURS, SIX_HOURS, Some(resets_at), now));
+  }
 
   /// Write an asciicast v3 file whose output events render to `screens`, in order. The leading
   /// header line is what a real recording starts with — and what `rendered_tail` skips.
