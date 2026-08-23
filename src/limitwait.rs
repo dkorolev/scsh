@@ -16,8 +16,8 @@
 //!
 //! The screen is the only channel. Claude writes no machine-readable marker for any of this, so
 //! the needles below are its literal TUI prose. They are matched case-insensitively, and the LAST
-//! match in one scan wins. The supervisor consumes each scan batch after classifying it, so an old
-//! banner cannot outlive later ordinary work; see [`crate::ui::screen::NoveltyWatch`].
+//! match in one scan wins. A confirmed stopped state survives unrelated terminal events until a
+//! later recognized limit phrase replaces it; see [`crate::ui::screen::NoveltyWatch`].
 
 /// What the harness screen currently says about a usage limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

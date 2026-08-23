@@ -5796,6 +5796,24 @@ fn harness_exited_on_usage_limit(harness: config::Harness, sample: &str) -> bool
     && limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed)
 }
 
+/// Recover a usage-limit verdict when a watchdog won the race with live screen classification.
+/// `captured_reset` already came from [`quota::live_reset_epoch`], so it proves both an exhausted
+/// window and a future provider reset. Requiring that evidence plus stopped Claude TUI prose keeps
+/// every non-Claude and ordinary-watchdog verdict unchanged.
+fn reclassify_watchdog_usage_limit(
+  harness: config::Harness, killed: ui::screen::Killed, sample: &str, captured_reset: Option<u64>,
+) -> ui::screen::Killed {
+  if matches!(killed, ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive)
+    && harness == config::Harness::Claude
+    && captured_reset.is_some()
+    && limitwait::detect(sample).is_some_and(limitwait::LimitState::is_stopped)
+  {
+    ui::screen::Killed::LimitExhausted { resets_at: captured_reset }
+  } else {
+    killed
+  }
+}
+
 fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
   last.is_some_and(|line| {
     line.contains("failed to send signal") && line.contains("missing signal in xpc message") && line.contains("signal")
@@ -6332,6 +6350,19 @@ fn run_one_skill(
   if cursor_auth {
     scrub_cursor_credentials(&run_dir);
   }
+  // A watchdog can fire after a live limit classification was missed. Before assigning its
+  // ordinary stall verdict, use Claude's two independent artifacts: stopped-limit prose in the
+  // cast and a future exhausted-window reset in the captured status line. Reclassification feeds
+  // the existing LimitExhausted arm below, including reset propagation and retry scheduling.
+  let result = match result {
+    Ok((false, killed @ (ui::screen::Killed::StartupStalled { .. } | ui::screen::Killed::Inactive), last))
+      if skill.harness == config::Harness::Claude && observed_reset_at.is_some() =>
+    {
+      let sample = cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL));
+      Ok((false, reclassify_watchdog_usage_limit(skill.harness, killed, &sample, observed_reset_at), last))
+    }
+    other => other,
+  };
   match result {
     Ok((true, _, _)) => {
       if let Some(durable) = durable_cast.as_deref() {
@@ -10513,6 +10544,51 @@ mod tests {
       config::Harness::Claude,
       "Usage limit reset \u{b7} continuing automatically"
     ));
+  }
+
+  #[test]
+  fn watchdog_usage_limit_fallback_preserves_the_reset_for_retry() {
+    let reset = 1_800_000_000;
+    for killed in [ui::screen::Killed::StartupStalled { silent: false }, ui::screen::Killed::Inactive] {
+      assert_eq!(
+        reclassify_watchdog_usage_limit(
+          config::Harness::Claude,
+          killed,
+          "Usage limit reached \u{b7} continuing automatically at 8:50am",
+          Some(reset),
+        ),
+        ui::screen::Killed::LimitExhausted { resets_at: Some(reset) }
+      );
+    }
+
+    let stopped = "Usage limit reached \u{b7} continuing automatically at 8:50am";
+    assert_eq!(
+      reclassify_watchdog_usage_limit(config::Harness::Claude, ui::screen::Killed::Inactive, stopped, None),
+      ui::screen::Killed::Inactive,
+      "cast prose without a future exhausted-window reset is insufficient"
+    );
+    assert_eq!(
+      reclassify_watchdog_usage_limit(config::Harness::Codex, ui::screen::Killed::Inactive, stopped, Some(reset)),
+      ui::screen::Killed::Inactive,
+      "non-Claude watchdog behavior is unchanged"
+    );
+    assert_eq!(
+      reclassify_watchdog_usage_limit(
+        config::Harness::Claude,
+        ui::screen::Killed::StartupStalled { silent: false },
+        "Usage limit reset \u{b7} continuing automatically",
+        Some(reset),
+      ),
+      ui::screen::Killed::StartupStalled { silent: false },
+      "an explicit resume is not a stopped limit"
+    );
+
+    let run = SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, None, None, None).with_limit_reset(Some(reset));
+    let policy = failure::RetryPolicy::resolve(None, None);
+    assert_eq!(
+      retry_decision(run.fail_reason.as_deref(), false, false, policy, 0, 0, 1, true, true, true, run.limit_resets_at,),
+      RetryDecision::LimitWait { resume_at: Some(reset) }
+    );
   }
 
   #[test]
