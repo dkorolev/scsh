@@ -209,7 +209,7 @@ pub struct LimitWait<'a> {
   /// can prove the screen still means what it said, so the wait is always bounded.
   pub max: Duration,
   /// Where to drop tmux key names for the container's recorder to forward
-  /// ([`crate::runtime::RUN_KEYS_REL`]). Two claude screens stop dead waiting for a keypress
+  /// ([`crate::runtime::RUN_KEYS_DIR`]). Two claude screens stop dead waiting for a keypress
   /// that, unattended, never comes: the limit dialog (whose default choice IS the wait) and the
   /// post-reset "press enter to continue". One byte here restarts both.
   pub keys: std::path::PathBuf,
@@ -449,6 +449,8 @@ struct LimitWatch {
   resets_at: Option<u64>,
   /// When a key was last handed to the container, for [`LIMIT_KEY_COOLDOWN`].
   last_key: Option<std::time::Instant>,
+  /// Monotonic record id so the same key can be delivered again after the cooldown.
+  key_sequence: u64,
 }
 
 impl LimitWatch {
@@ -460,6 +462,7 @@ impl LimitWatch {
       frozen_closed: Duration::ZERO,
       resets_at: None,
       last_key: None,
+      key_sequence: 0,
     }
   }
 
@@ -479,15 +482,37 @@ impl LimitWatch {
     limit_wait_expired(self.open_stretch(), policy.max, self.resets_at, now_epoch)
   }
 
-  /// Hand one tmux key name to the container's recorder, at most once per cooldown. Failure is
-  /// silent and harmless: the wait simply continues until its deadline.
+  /// Hand one tmux key name to the container's recorder, at most once per cooldown. Publication
+  /// is atomic, and its directory is mounted read-only into the container, so neither a partial
+  /// read nor a container-created symlink can redirect the host write. Failure is silent and
+  /// harmless: the wait simply continues until its deadline.
   fn send_key(&mut self, policy: &LimitWait<'_>, key: &str) {
     if self.last_key.is_some_and(|t| t.elapsed() < LIMIT_KEY_COOLDOWN) {
       return;
     }
     self.last_key = Some(std::time::Instant::now());
-    let _ = std::fs::write(&policy.keys, format!("{key}\n"));
+    self.key_sequence = self.key_sequence.saturating_add(1);
+    let _ = publish_key(&policy.keys, self.key_sequence, key);
   }
+}
+
+/// Write-close-rename publication replaces the destination entry itself, never anything a
+/// pre-existing symlink points at. The channel parent is host-only; the container sees a
+/// read-only bind mount of it.
+fn publish_key(path: &std::path::Path, sequence: u64, key: &str) -> std::io::Result<()> {
+  let parent = path.parent().ok_or_else(|| std::io::Error::other("key channel has no parent directory"))?;
+  let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("key");
+  let temp = parent.join(format!(".{name}.{}.{}.tmp", std::process::id(), sequence));
+  let result = (|| {
+    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp)?;
+    writeln!(file, "{sequence} {key}")?;
+    drop(file);
+    std::fs::rename(&temp, path)
+  })();
+  if result.is_err() {
+    let _ = std::fs::remove_file(&temp);
+  }
+  result
 }
 
 fn limit_wait_expired(open_stretch: Duration, max: Duration, resets_at: Option<u64>, now_epoch: u64) -> bool {
@@ -1697,6 +1722,29 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn key_publication_replaces_a_symlink_without_following_it() {
+    use std::os::unix::fs::symlink;
+
+    let dir = std::env::temp_dir().join(format!("scsh-key-publish-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir(&dir).unwrap();
+    let victim = dir.join("victim");
+    let key = dir.join("key");
+    std::fs::write(&victim, "untouched").unwrap();
+    symlink(&victim, &key).unwrap();
+
+    publish_key(&key, 1, "Enter").unwrap();
+    assert_eq!(std::fs::read_to_string(&victim).unwrap(), "untouched");
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), "1 Enter\n");
+    assert!(!std::fs::symlink_metadata(&key).unwrap().file_type().is_symlink());
+
+    publish_key(&key, 2, "Enter").unwrap();
+    assert_eq!(std::fs::read_to_string(&key).unwrap(), "2 Enter\n", "a repeated key gets a new record id");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 2, "atomic publication leaves no temporary file");
+    let _ = std::fs::remove_dir_all(&dir);
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn a_run_waiting_out_a_usage_limit_is_not_killed_as_inactive() {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("limited", false);
@@ -1778,7 +1826,7 @@ mod tests {
       let _ = std::fs::remove_file(&keys);
 
       assert_eq!(killed, Killed::LimitExhausted { resets_at: None }, "{name}");
-      assert_eq!(sent.trim(), "Enter", "{name}: the container recorder is handed the keypress");
+      assert_eq!(sent.split_whitespace().collect::<Vec<_>>(), ["1", "Enter"], "{name}: one Enter record is published");
     }
   }
 

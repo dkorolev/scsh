@@ -143,10 +143,10 @@ RUN printf '%s\n' \
   'mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true' \
   'dbg="$SCSH_RUN_LOG.tuidebug"' \
   'exit_file="$SCSH_RUN_LOG.exit"' \
-  '# Host->pane keystroke channel: scsh writes tmux key names (one per line) here when a' \
-  '# screen needs a keypress it cannot reach (claude asking to press enter to continue' \
-  '# after a usage-limit reset). Consumed and deleted by the watcher below.' \
-  'keys="$SCSH_RUN_LOG.keys"' \
+  '# Host->pane keystroke channel: a host-only directory is mounted read-only here.' \
+  '# Each atomic record is "sequence key"; the watcher forwards every new record once.' \
+  'keys="/run/scsh-keys/key"' \
+  'last_keys=' \
   'log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }' \
   '' \
   'case "$result" in /*) : ;; *) result="$(pwd)/$result" ;; esac' \
@@ -175,8 +175,11 @@ RUN printf '%s\n' \
   '{' \
   '  while tmux has-session -t scsh 2>/dev/null; do' \
   '    if [ -f "$keys" ]; then' \
-  '      while read -r k; do [ -n "$k" ] && tmux send-keys -t scsh "$k" 2>/dev/null; done < "$keys"' \
-  '      log "watcher: forwarded host keys"; rm -f "$keys"' \
+  '      current="$(cat "$keys" 2>/dev/null || true)"' \
+  '      if [ -n "$current" ] && [ "$current" != "$last_keys" ]; then' \
+  '        printf "%s\n" "$current" | while read -r _ k; do [ -n "$k" ] && tmux send-keys -t scsh "$k" 2>/dev/null; done' \
+  '        last_keys=$current; log "watcher: forwarded host keys"' \
+  '      fi' \
   '    fi' \
   '    if [ -f "$result" ]; then' \
   '      log "watcher: result appeared -> quit via $quit"' \

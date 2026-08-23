@@ -26,7 +26,7 @@ Follow the steps in order and check each **Expect** line. Report PASS/FAIL per s
 | The CLI is new enough to honour it | `ARG CLAUDE_CODE_VERSION` is pinned, and bumping it rebuilds the image |
 | A parked run is not killed | the inactivity and wall-clock clocks freeze while a limit banner is on screen |
 | A parked run is legible | the job page shows **Awaiting limits**, in its own colour, with the reset time |
-| Stuck screens get unstuck | `Enter` reaches the container's tmux pane through `tmp/scsh-run.log.keys` |
+| Stuck screens get unstuck | `Enter` crosses a host-owned, read-only-mounted key channel into the tmux pane |
 | A limit that kills a run is not a failure | the retry is scheduled for the reset, not the backoff |
 
 ## Setup
@@ -111,14 +111,15 @@ Repeat step 4 with the screen that stops dead waiting for a human:
 ```console
 printf '[999.0, "o", "Your usage limit has reset \\u00b7 press enter to continue"]\n' >> "$CAST"
 sleep 5
-ls -l "$(dirname "$CAST")/scsh-run.log.keys" 2>/dev/null || echo "consumed"
+RUN_DIR=$(dirname "$(dirname "$CAST")")
+ls -l "$(dirname "$RUN_DIR")/.$(basename "$RUN_DIR").keys-"*/key
 grep "forwarded host keys" "$(dirname "$CAST")/scsh-run.log.tuidebug"
 ```
 
-**Expect:** the keys file is written by the host and then **consumed and deleted** by the
-container's recorder, which logs `watcher: forwarded host keys`. The pane receives `Enter`.
-(The same path un-sticks the `/rate-limit-options` dialog, whose default choice is the wait
-`scsh` wants — so one keypress converts a dead screen into an armed one.)
+**Expect:** the host atomically publishes `1 Enter` outside the writable run mount. The
+container sees that directory read-only, forwards the record once, and logs `watcher:
+forwarded host keys`; the pane receives `Enter`. The same channel un-sticks the
+`/rate-limit-options` dialog, whose default choice is the wait `scsh` wants.
 
 ## 6. A limit that ends a run schedules its retry for the reset
 

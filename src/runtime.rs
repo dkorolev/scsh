@@ -371,15 +371,13 @@ pub const RUN_CAST_REL: &str = "tmp/scsh-run.log.cast";
 /// path the harness command tees its output to.
 pub const RUN_LOG_VAR: &str = "SCSH_RUN_LOG";
 
-/// Host->pane keystroke channel, RELATIVE to the repo: `<run_dir>/tmp/scsh-run.log.keys`.
+/// Read-only in-container mount for the host->pane keystroke channel.
 ///
-/// The harness TUI lives inside the container's tmux session, so the host has no way to type
-/// at it. `scsh-tui-record`'s watcher polls this file every two seconds and forwards each
-/// line to `tmux send-keys`, then deletes it. One line = one tmux key name (`Enter`, `C-c`).
-///
-/// Written today only by the usage-limit wait: claude parks on "Your usage limit has reset ·
-/// press enter to continue" and will sit there forever unless somebody presses enter.
-pub const RUN_KEYS_REL: &str = "tmp/scsh-run.log.keys";
+/// The source is a host-owned directory beside the run clone, never inside its writable bind
+/// mount. The container can read published records but cannot replace the file with a symlink
+/// that redirects a later host write. `scsh-tui-record` forwards each new sequenced record once.
+pub const RUN_KEYS_DIR: &str = "/run/scsh-keys";
+pub const RUN_KEYS_FILE: &str = "key";
 
 /// The Dockerfile scsh builds every skill container from. The source of truth is the
 /// sibling [`src/Dockerfile`](./Dockerfile) — a static, platform-agnostic file embedded at
@@ -1236,7 +1234,7 @@ pub enum RepoMountMode {
 #[allow(clippy::too_many_arguments)]
 pub fn run_command(
   runtime: &str, tag: &str, run_dir: &str, name: &str, memory: Option<&MemoryLimit>, env: &[(String, String)],
-  volumes: &[(&str, &str)], command: &str, repo_mount: RepoMountMode,
+  volumes: &[(&str, &str)], key_channel: Option<&str>, command: &str, repo_mount: RepoMountMode,
 ) -> Vec<String> {
   let mut v = vec![runtime.into(), "run".into(), "--rm".into(), "--name".into(), name.into()];
   if let Some(memory) = memory {
@@ -1256,6 +1254,10 @@ pub fn run_command(
   for (host, mount) in volumes {
     v.push("-v".into());
     v.push(format!("{host}:{mount}"));
+  }
+  if let Some(host) = key_channel {
+    v.push("-v".into());
+    v.push(format!("{host}:{RUN_KEYS_DIR}:ro"));
   }
   match repo_mount {
     RepoMountMode::Full => {
@@ -2625,6 +2627,11 @@ TAG
       df.contains(&format!("ENV {RUN_LOG_VAR}={AGENT_REPO}/{RUN_LOG_REL}")),
       "Dockerfile run-log ENV must match RUN_LOG_VAR and RUN_LOG_REL"
     );
+    assert!(
+      df.contains(&format!("keys=\"{RUN_KEYS_DIR}/{RUN_KEYS_FILE}\"")),
+      "recorder must read the mounted key file"
+    );
+    assert!(!df.contains("rm -f \"$keys\""), "the read-only key channel must not be deleted in-container");
   }
 
   #[test]
@@ -3177,6 +3184,7 @@ TAG
         None,
         &[],
         &[],
+        None,
         "opencode run 'run skill s'",
         RepoMountMode::Full,
       ),
@@ -3203,6 +3211,7 @@ TAG
         None,
         &[],
         &[],
+        None,
         "git clone",
         RepoMountMode::TmpOnly,
       ),
@@ -3231,6 +3240,7 @@ TAG
         None,
         &[],
         &[("/home/u/.claude", "/home/agent/.claude:ro")],
+        Some("/tmp/run.keys"),
         "claude -p hi",
         RepoMountMode::Full,
       ),
@@ -3243,6 +3253,8 @@ TAG
         "--userns=keep-id",
         "-v",
         "/home/u/.claude:/home/agent/.claude:ro",
+        "-v",
+        "/tmp/run.keys:/run/scsh-keys:ro",
         "-v",
         "/tmp/run:/home/agent/repo",
         "scsh-claude:latest",
@@ -3262,6 +3274,7 @@ TAG
         None,
         &[],
         &[],
+        None,
         "opencode run 'run skill s'",
         RepoMountMode::Full,
       ),
@@ -3293,6 +3306,7 @@ TAG
         None,
         &env,
         &[],
+        None,
         "opencode run 'run skill s'",
         RepoMountMode::Full,
       ),
@@ -3328,6 +3342,7 @@ TAG
         Some(&memory),
         &[],
         &[],
+        None,
         "opencode run 'run skill s'",
         RepoMountMode::Full,
       );
