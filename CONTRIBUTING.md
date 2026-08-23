@@ -177,6 +177,14 @@ folder containing `SKILL.md` (YAML frontmatter + markdown body) plus optional
   `dockerfile_stays_under_apple_containers_grpc_header_limit`). `scsh` also
   comment-strips the file at build time for Apple; do not grow the embedded source past
   the soft limit and assume compaction will always save you — heredoc *code* still counts.
+  **Pinned harness CLIs:** image rebuilds are keyed on the Dockerfile *text*
+  (`runtime::image_build_fingerprint`), so an *unpinned* `npm install -g` freezes whichever
+  version happened to be latest the day a machine first built the image — and never moves
+  again. `ARG CLAUDE_CODE_VERSION` and `ARG CURSOR_AGENT_VERSION` exist for that reason:
+  **bumping the ARG is how a harness CLI moves**, because the changed text flips the
+  fingerprint and forces the rebuild. Both are asserted by unit tests, so a bump is a
+  deliberate, reviewed edit. `autoContinueAtUsageLimit` (the usage-limit wait, see
+  `quota::container_settings_json`) needs claude no older than the pinned floor.
 - **Network** only for a *real* container run (it pulls the base image and
   installs opencode). Building, `scsh list`, and the whole test suite
   need no network.

@@ -371,6 +371,16 @@ pub const RUN_CAST_REL: &str = "tmp/scsh-run.log.cast";
 /// path the harness command tees its output to.
 pub const RUN_LOG_VAR: &str = "SCSH_RUN_LOG";
 
+/// Host->pane keystroke channel, RELATIVE to the repo: `<run_dir>/tmp/scsh-run.log.keys`.
+///
+/// The harness TUI lives inside the container's tmux session, so the host has no way to type
+/// at it. `scsh-tui-record`'s watcher polls this file every two seconds and forwards each
+/// line to `tmux send-keys`, then deletes it. One line = one tmux key name (`Enter`, `C-c`).
+///
+/// Written today only by the usage-limit wait: claude parks on "Your usage limit has reset ·
+/// press enter to continue" and will sit there forever unless somebody presses enter.
+pub const RUN_KEYS_REL: &str = "tmp/scsh-run.log.keys";
+
 /// The Dockerfile scsh builds every skill container from. The source of truth is the
 /// sibling [`src/Dockerfile`](./Dockerfile) — a static, platform-agnostic file embedded at
 /// compile time. It needs no Rust-side substitution: UID/GID/TZ are `ARG`s passed as build
@@ -2342,7 +2352,7 @@ mod tests {
     assert!(df.contains("FROM scsh-base AS scsh-claude"));
     assert!(df.contains("FROM scsh-base AS scsh-codex"));
     assert!(df.contains("npm install -g opencode-ai"));
-    assert!(df.contains("npm install -g @anthropic-ai/claude-code"));
+    assert!(df.contains("npm install -g \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\""));
     assert!(df.contains("npm install -g @openai/codex"));
     assert!(!df.contains("CMD ["));
     assert!(df.contains("ENV SCSH_RUN_LOG=/home/agent/repo/tmp/scsh-run.log"));
@@ -2470,6 +2480,12 @@ TAG
     let df = dockerfile();
     assert!(df.contains("FROM scsh-base AS scsh-cursor"));
     assert!(df.contains("ARG CURSOR_AGENT_VERSION=2026.07.09-c59fd9a"));
+    // claude is pinned for the same reason, plus one of its own: image rebuilds are keyed on
+    // the Dockerfile TEXT, so an UNPINNED `npm install -g` would freeze whichever version was
+    // latest the day the image was first built and never move again. Bumping the ARG is the
+    // only thing that makes a machine pick up a newer claude — and `autoContinueAtUsageLimit`
+    // (the usage-limit wait) needs one no older than this.
+    assert!(df.contains("ARG CLAUDE_CODE_VERSION=2.1.239"));
     assert!(df.contains("downloads.cursor.com/lab/"));
     assert!(df.contains("ENV CURSOR_AGENT_HOME=/usr/local/share/cursor-agent"));
     assert!(df.contains("mv \"$tmp/dist-package\" \"$CURSOR_AGENT_HOME\""));

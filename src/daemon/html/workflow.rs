@@ -430,6 +430,7 @@ struct StatusCounts {
   stopped: usize,
   stalled: usize,
   skipped: usize,
+  awaiting_limits: usize,
 }
 
 impl StatusCounts {
@@ -445,6 +446,7 @@ impl StatusCounts {
       WorkflowDisplayState::ForceStopped => self.stopped += 1,
       WorkflowDisplayState::Stalled => self.stalled += 1,
       WorkflowDisplayState::Skipped => self.skipped += 1,
+      WorkflowDisplayState::AwaitingLimits => self.awaiting_limits += 1,
     }
   }
 
@@ -627,9 +629,11 @@ fn status_stack_rank(state: WorkflowDisplayState) -> u8 {
     WorkflowDisplayState::Skipped => 4,
     WorkflowDisplayState::Terminating => 5,
     WorkflowDisplayState::Running => 6,
-    WorkflowDisplayState::Stalled => 7,
-    WorkflowDisplayState::Queued => 8,
-    WorkflowDisplayState::Waiting => 9,
+    // Above the plainly-stalled: it is the one non-moving state that is expected to move again.
+    WorkflowDisplayState::AwaitingLimits => 7,
+    WorkflowDisplayState::Stalled => 8,
+    WorkflowDisplayState::Queued => 9,
+    WorkflowDisplayState::Waiting => 10,
   }
 }
 
@@ -788,11 +792,25 @@ fn node_tip(
     WorkflowDisplayState::ForceStopped => lines.push("Stopped from the session browser".into()),
     WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
     WorkflowDisplayState::Stalled => lines.push("Abandoned — job stopped updating".into()),
+    WorkflowDisplayState::AwaitingLimits => lines.push(awaiting_limits_line(session, node)),
   }
   if node.conditional && !matches!(state, WorkflowDisplayState::Skipped) {
     lines.push("Runs only when its gate passes".into());
   }
   lines.join("\n")
+}
+
+/// "Awaiting limits — resumes 2026-08-22 08:50 UTC". The reset time is the whole point of the
+/// state: without it the tip says only that nothing is happening, which the node already showed.
+fn awaiting_limits_line(session: &Session, node: &WorkflowNodeMeta) -> String {
+  let until = node
+    .proc_index
+    .and_then(|index| session.procs.iter().find(|proc| proc.index == index))
+    .and_then(|proc| proc.phase_until);
+  match until {
+    Some(at) => format!("Awaiting limits \u{2014} resumes {}", crate::quota::human_epoch(at)),
+    None => "Awaiting limits \u{2014} waiting for the provider quota window to reopen".to_string(),
+  }
 }
 
 fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64) -> String {
@@ -812,6 +830,7 @@ fn unmet_blocker_line(session: &Session, meta: &WorkflowMeta, id: &str, now: u64
         WorkflowDisplayState::Waiting => "waiting",
         WorkflowDisplayState::Queued => "queued",
         WorkflowDisplayState::Stalled => "stalled",
+        WorkflowDisplayState::AwaitingLimits => "awaiting limits",
         WorkflowDisplayState::Done => "done",
         WorkflowDisplayState::Graceful => "graceful",
         WorkflowDisplayState::Failed => "failed",
@@ -844,6 +863,9 @@ fn state_icon(state: WorkflowDisplayState) -> &'static str {
     WorkflowDisplayState::ForceStopped => "✕",
     WorkflowDisplayState::Skipped => "⊘",
     WorkflowDisplayState::Stalled => "!",
+    // An hourglass, not the running diamond: the task is alive but not moving, and the icon is
+    // the only part of a node visible at a glance across a big graph.
+    WorkflowDisplayState::AwaitingLimits => "⧗",
   }
 }
 

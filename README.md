@@ -259,6 +259,18 @@ browser — "Restart remaining" reuses every completed step's result — or from
 with `--resume-from <session>`. See [`RESILIENCE-DEMO.md`](RESILIENCE-DEMO.md) for the
 agent-followable walkthrough.
 
+An account's usage limit is handled apart from that machinery, because it is not a failure
+and no backoff can outlast it. Claude containers arm Claude Code's own limit wait
+(`autoContinueAtUsageLimit`), so a limited session waits for the reset and continues **the
+same conversation** — the only outcome that keeps what the agent had worked out, since every
+retry is otherwise a fresh clone and a fresh session. `scsh` reads the harness's screen to
+see it happening: while a limit banner is up, the inactivity and wall-clock watchdogs are
+frozen rather than widened, the job page shows the task as **Awaiting limits** with the
+reset time, and the two screens that stop dead waiting for a keypress get one. If the wait
+never arms or the harness gives up on it, the run ends as `harness_usage_limit` and its
+retry is scheduled for the reset instant instead of spending a backoff that could never
+reach it. See [`USAGE-LIMIT-DEMO.md`](USAGE-LIMIT-DEMO.md).
+
 The built-in `big-beautiful-build` workflow is the browser's complete feature factory: open an existing clean repository or create a new project, paste the full feature brief into its multiline form, and start the job. Cursor Auto executes the canonical `big-beautiful-build` skill — which lives in [dkorolev/beautiful-skills](https://github.com/dkorolev/beautiful-skills), not in the binary: the definition resolves it from the repo's `.skills/` or the machine-wide install, and is listed only where it is installed — commits working code, a runnable demo, documentation, and verification. The job page preserves the structured result and commits diff; the full report is copied into the repository's job scratch directory. No terminal is required to start or follow the build; see [`DEMO-BIG-BEAUTIFUL-BUILD.md`](DEMO-BIG-BEAUTIFUL-BUILD.md).
 
 The built-in `gorgeous-pipeline` workflow prepares the current branch, runs the five-specialty Opus/Codex/Cursor review fleet, and loops through fixes until the score bar passes: Opus 4.8 orchestrates the loop, applies the fixes, and journals the decisions, while Opus 4.8, Codex Spark, and Cursor Auto grade every profile independently. Whatever a fix cycle deliberately declines is journaled as a `PR-DECISION-<topic>.md` note that the next cycle's reviewers read before grading, so a settled question is argued once instead of re-litigated every round. When, from the third round on, everything still holding a route below the bar is a journaled human-adjudication item (split-the-PR requests, product direction) with no poor grades and nothing blocking, the loop exits honestly as `approved_with_reservations` — listing each reservation for the human — instead of grinding the iteration backstop. Every one of its 30 review steps references the same canonical reviewer body embedded for `scsh installskills` from this repository's `.skills/` (originally derived from [dkorolev/code-review-skills](https://github.com/dkorolev/code-review-skills)); `scsh` appends only the workflow's grade/comments output contract. The reviewers inspect commits, diffs, source, tests, documentation, and repository guidelines statically — they never build, run, lint, format, test, execute repository scripts, or invoke the product.

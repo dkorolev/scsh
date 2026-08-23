@@ -754,6 +754,8 @@ mod tests {
       route: None,
       result_path: result,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     let procs = vec![
       // Registered out of order, to prove the trajectory is sorted by cycle.
@@ -824,6 +826,8 @@ mod tests {
         route: Some("opencode".into()),
         result_path: Some(p1),
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       },
       ProcRecord {
         index: 1,
@@ -848,6 +852,8 @@ mod tests {
         route: Some("claude".into()),
         result_path: Some(p2),
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       },
     ];
     let written = write_rollups(session, &procs);

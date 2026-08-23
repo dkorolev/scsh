@@ -58,6 +58,11 @@ pub enum WorkflowDisplayState {
   ForceStopped,
   Skipped,
   Stalled,
+  /// Running, holding its container and its conversation, but blocked on a provider usage
+  /// limit rather than doing work. Its own state because the alternatives both lie: `Running`
+  /// hides why nothing is moving, and `Stalled` claims the job stopped updating when it is in
+  /// fact waiting for a quota window with a known reopening time.
+  AwaitingLimits,
 }
 
 impl WorkflowDisplayState {
@@ -73,6 +78,7 @@ impl WorkflowDisplayState {
       Self::ForceStopped => "stopped",
       Self::Skipped => "skipped",
       Self::Stalled => "stalled",
+      Self::AwaitingLimits => "awaiting_limits",
     }
   }
 
@@ -88,6 +94,7 @@ impl WorkflowDisplayState {
       Self::ForceStopped => "Stopped",
       Self::Skipped => "Skipped",
       Self::Stalled => "Abandoned",
+      Self::AwaitingLimits => "Awaiting limits",
     }
   }
 }
@@ -784,6 +791,17 @@ pub fn display_state(
     {
       WorkflowDisplayState::Terminating
     }
+    // A live sub-state of an unfinished proc, checked ahead of `status` because it applies to
+    // two different ones: `Running` while the container itself sits on the limit banner, and
+    // `Waiting` for the replacement attempt parked until the window reopens. Only while the job
+    // is live — a phase left behind by a job that stopped is stale decoration, not a state.
+    Some(p)
+      if live
+        && p.phase.as_deref() == Some(crate::daemon::model::PROC_PHASE_AWAITING_LIMITS)
+        && matches!(p.status, ProcStatus::Running | ProcStatus::Waiting) =>
+    {
+      WorkflowDisplayState::AwaitingLimits
+    }
     Some(p) => match p.status {
       ProcStatus::Ok => WorkflowDisplayState::Done,
       ProcStatus::Graceful => WorkflowDisplayState::Graceful,
@@ -932,6 +950,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       }],
       last_seen_at: 60, // running-idle timeout elapses at 60 + 30 minutes
       client_connected: true,
@@ -989,6 +1009,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1013,6 +1035,8 @@ mod tests {
           route: Some("run".into()),
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 50,
@@ -1084,6 +1108,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1108,6 +1134,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 2,
@@ -1132,6 +1160,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 3,
@@ -1156,6 +1186,8 @@ mod tests {
           route: Some("claude-sonnet".into()),
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 4,
@@ -1180,6 +1212,8 @@ mod tests {
           route: Some("cursor-composer-fast".into()),
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 1,
@@ -1237,6 +1271,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1261,6 +1297,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 2,
@@ -1285,6 +1323,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 3,
@@ -1309,6 +1349,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 1,
@@ -1366,6 +1408,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1390,6 +1434,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 2,
@@ -1414,6 +1460,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 1,
@@ -1494,6 +1542,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1518,6 +1568,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 2,
@@ -1542,6 +1594,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 1,

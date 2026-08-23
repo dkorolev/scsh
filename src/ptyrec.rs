@@ -289,6 +289,29 @@ fn trailing_incomplete_len(bytes: &[u8]) -> usize {
   0
 }
 
+/// The rendered terminal text carried by a stretch of asciicast NDJSON: concatenate the `"o"`
+/// (output) events' payloads and strip the terminal escapes, discarding everything else.
+///
+/// This is the only way to read what a TUI harness actually SAID. Its stdout carries the
+/// wrapper's own bookkeeping; the screen — a login demand, a 529 page, a usage-limit banner —
+/// exists solely inside the recording. Both the post-mortem failure classifier and the live
+/// usage-limit watch (see [`crate::limitwait`]) need it, so it lives with the format.
+///
+/// Deliberately lenient: unparsable lines are skipped rather than failing the whole read, so a
+/// caller may hand it a mid-file chunk or a recording still being written.
+pub fn cast_output_text(ndjson: &str) -> String {
+  let mut text = String::new();
+  for line in ndjson.lines() {
+    let Ok(json::Value::Array(event)) = json::parse(line) else { continue };
+    if let (Some(json::Value::String(kind)), Some(json::Value::String(data))) = (event.get(1), event.get(2)) {
+      if kind == "o" {
+        text.push_str(&console::strip_ansi_codes(data));
+      }
+    }
+  }
+  text
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;

@@ -210,6 +210,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       }],
       last_seen_at: 1,
       client_connected: false,

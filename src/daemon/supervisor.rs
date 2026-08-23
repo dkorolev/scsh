@@ -147,7 +147,14 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
       dirty.push(id);
       continue;
     }
-    let delay = job_backoff_secs(attempt.saturating_sub(1), salt_of(&id));
+    // A job whose last word was a usage limit is not backing off from a broken thing — it is
+    // waiting for a quota window. The ordinary backoff tops out at an hour, so on its own it
+    // would restart the job into the same limit several times and burn the streak breaker
+    // before the window ever reopened. The provider's reset instant is the schedule.
+    let delay = match job_usage_limit_reset(s, now) {
+      Some(secs) => secs,
+      None => job_backoff_secs(attempt.saturating_sub(1), salt_of(&id)),
+    };
     s.supervisor.next_retry_at = Some(now + delay);
     crate::failure::log_session_proc(
       &id,
@@ -159,6 +166,31 @@ pub fn schedule_pass(store: &mut Store, now: u64) -> Vec<String> {
   }
   dirty
 }
+
+/// How long to hold a job whose failure was the account's usage limit, from the reset instant
+/// its own runs reported. `None` when no live proc failed that way, which leaves the ordinary
+/// exponential backoff in charge.
+///
+/// Bounded by the same ceiling the in-run wait uses: a reset time read from a stale capture
+/// must not be able to park a job for a day.
+fn job_usage_limit_reset(s: &Session, now: u64) -> Option<u64> {
+  let limited = s.procs.iter().filter(|p| {
+    p.status == crate::daemon::ProcStatus::Fail
+      && p.fail_reason.as_deref() == Some(crate::failure::reason::HARNESS_USAGE_LIMIT)
+      && !s.proc_is_superseded(p)
+  });
+  // The LATEST reported reset among the limited steps: restarting while any of them is still
+  // inside its window just spends another attempt on the same refusal.
+  let at = limited.filter_map(|p| p.phase_until).max()?;
+  Some((at.saturating_sub(now) + LIMIT_RESTART_GRACE_SECS).clamp(LIMIT_RESTART_GRACE_SECS, LIMIT_RESTART_MAX_SECS))
+}
+
+/// Slack past a reported reset before restarting a limited job, so the fresh run does not race
+/// the provider's clock and get refused on the limit it just waited out.
+const LIMIT_RESTART_GRACE_SECS: u64 = 60;
+
+/// Ceiling on a usage-limit hold, matching the in-run wait's own six-hour bound.
+const LIMIT_RESTART_MAX_SECS: u64 = 6 * 60 * 60;
 
 /// Phase two: fire the restarts whose time has come, one at a time, through the same
 /// `jobs/restart` path the browser uses (workflow jobs resume; flat jobs restart from
@@ -251,6 +283,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       }],
       last_seen_at: now - 10,
       client_connected: false,
@@ -286,6 +320,37 @@ mod tests {
       let why = s.supervisor.gave_up.as_deref().expect("{reason}: the give-up is recorded, not silent");
       assert!(why.contains("gate") && why.contains(reason), "{reason}: names the step and the reason — {why}");
     }
+  }
+
+  #[test]
+  fn a_job_stopped_by_a_usage_limit_is_held_until_the_window_reopens() {
+    let now = 1_000_000;
+    // The ordinary backoff would restart this in five minutes, straight into the same limit —
+    // three times, and then the streak breaker would give up on a job that was never broken.
+    let mut store = Store::new(DaemonMode::Persistent, 7274, now);
+    let mut session = failed_supervised_session("limitd", now);
+    session.procs[0].fail_reason = Some(crate::failure::reason::HARNESS_USAGE_LIMIT.into());
+    session.procs[0].phase_until = Some(now + 2 * 3600);
+    store.insert_session("limitd".into(), session);
+
+    assert_eq!(schedule_pass(&mut store, now), vec!["limitd".to_string()]);
+    let at = store.sessions["limitd"].supervisor.next_retry_at.expect("scheduled");
+    assert_eq!(at, now + 2 * 3600 + LIMIT_RESTART_GRACE_SECS, "held to the reported reset, plus a grace");
+  }
+
+  #[test]
+  fn a_usage_limit_with_no_reported_reset_falls_back_to_the_ordinary_backoff() {
+    let now = 1_000_000;
+    // Nothing to schedule against, so this must not invent a wait — the backoff is the answer
+    // it already had for "we do not know when this gets better".
+    let mut store = Store::new(DaemonMode::Persistent, 7274, now);
+    let mut session = failed_supervised_session("limitn", now);
+    session.procs[0].fail_reason = Some(crate::failure::reason::HARNESS_USAGE_LIMIT.into());
+    store.insert_session("limitn".into(), session);
+
+    assert_eq!(schedule_pass(&mut store, now), vec!["limitn".to_string()]);
+    let at = store.sessions["limitn"].supervisor.next_retry_at.expect("scheduled");
+    assert!(at >= now + 4 * 60 && at <= now + 6 * 60, "5m±20% backoff, got +{}s", at - now);
   }
 
   #[test]

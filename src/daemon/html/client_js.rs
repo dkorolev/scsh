@@ -1309,11 +1309,11 @@ function workflowStepIdForProc(p) {
   return p.skill_name || p.skill_source || null;
 }
 function wfStateIcon(state) {
-  return ({waiting:'◇',queued:'◈',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!'})[state] || '◇';
+  return ({waiting:'◇',queued:'◈',running:'◆',terminating:'◆',done:'✓',graceful:'!',failed:'✗',stopped:'✕',skipped:'⊘',stalled:'!',awaiting_limits:'⧗'})[state] || '◇';
 }
 function wfStateLabel(state) {
   return ({waiting:'Waiting',queued:'Queued',running:'Running',terminating:'Terminating',done:'Succeeded',graceful:'Graceful shutdown',failed:'Failed',
-    stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned'})[state] || state;
+    stopped:'Stopped',skipped:'Skipped',stalled:'Abandoned',awaiting_limits:'Awaiting limits'})[state] || state;
 }
 function wfJobOutcome(session, nowUnix) {
   const life = sessionLifecycle(session, nowUnix);
@@ -1387,6 +1387,12 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'stopped') lines.push('Stopped from the session browser');
   else if (state === 'skipped') lines.push('Skipped');
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
+  // The reset time is the whole point of the state — without it the tip only repeats that
+  // nothing is happening. Rendered in the VIEWER's timezone (the server-side tip in
+  // workflow.rs has no viewer to ask, so it says UTC and labels it).
+  else if (state === 'awaiting_limits') lines.push(p && p.phase_until
+    ? 'Awaiting limits — resumes ' + formatUnixTime(p.phase_until)
+    : 'Awaiting limits — waiting for the provider quota window to reopen');
   if (node.conditional && state !== 'skipped') lines.push('Runs only when its gate passes');
   // Mirrors node_html in workflow.rs: the node is bound to the route's newest attempt.
   if (p) {
@@ -1406,6 +1412,10 @@ function wfDisplayState(session, node, nowUnix) {
   const p = node.proc_index != null ? procs.find(x => x.index === node.proc_index) : null;
   if (!p) return live ? 'waiting' : 'stalled';
   if (p.fail_reason === 'stop_requested' || p.fail_reason === 'restart_requested') return 'terminating';
+  // Mirrors display_state in workflow.rs: a usage-limit wait is a live sub-state of an
+  // unfinished proc, and covers both a parked container ('running') and the replacement
+  // attempt sleeping until the window reopens ('waiting').
+  if (live && p.phase === 'awaiting_limits' && (p.status === 'running' || p.status === 'waiting')) return 'awaiting_limits';
   if (p.status === 'ok') return 'done';
   if (p.status === 'graceful') return 'graceful';
   if (p.status === 'fail') {
@@ -1421,7 +1431,7 @@ function wfDisplayState(session, node, nowUnix) {
   return 'waiting';
 }
 function wfLegendHtml(present) {
-  const order = ['running','terminating','done','graceful','failed','stopped','stalled','waiting','queued','skipped'];
+  const order = ['running','terminating','awaiting_limits','done','graceful','failed','stopped','stalled','waiting','queued','skipped'];
   const items = order.filter(s => present[s]).map(s =>
     '<li class="wf-leg wf-leg-' + s + '"><span class="wf-ico" aria-hidden="true">' +
     wfStateIcon(s) + '</span> ' + wfStateLabel(s) + '</li>'
@@ -1431,10 +1441,10 @@ function wfLegendHtml(present) {
 function wfSummaryHtml(counts, total, first) {
   const parts = [total + (total === 1 ? ' task' : ' tasks')];
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
-    (key === 'graceful' ? 'graceful shutdown' : key));
+    (key === 'graceful' ? 'graceful shutdown' : (key === 'awaiting_limits' ? 'awaiting limits' : key)));
   for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
     [counts.queued,'queued'],[counts.failed,'failed'],[counts.stopped,'stopped'],
-    [counts.stalled,'stalled'],[counts.skipped,'skipped']]) {
+    [counts.stalled,'stalled'],[counts.awaiting_limits,'awaiting_limits'],[counts.skipped,'skipped']]) {
     if (n <= 0) continue;
     const id = first && first[label];
     const word = shown(label);
@@ -1482,7 +1492,7 @@ function wfNodeRanks(nodes) {
   return nodes.map(n => rankOf(n.id));
 }
 function wfStatusStackRank(state) {
-  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,stalled:6,queued:7,waiting:8})[state] ?? 10;
+  return ({done:0,failed:1,stopped:2,skipped:3,terminating:4,running:5,awaiting_limits:6,stalled:7,queued:8,waiting:9})[state] ?? 10;
 }
 function wfLayoutNodes(session, nodes, nowUnix) {
   const ranks = wfNodeRanks(nodes);
@@ -1694,7 +1704,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   const w = Math.max(...all.map(n => n.x + n.w)) + WF_PAD;
   const h = Math.max(...all.map(n => n.y + (n.h || WF_NODE_H))) + WF_PAD;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
   const byId = Object.fromEntries(layout.map(n => [n.id, n]));
   const nodesHtml = wfBookendHtml(start, true) + nodes.map(node => {
     const pos = byId[node.id];
@@ -1710,6 +1720,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     else if (state === 'failed') counts.failed++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
+    else if (state === 'awaiting_limits') counts.awaiting_limits++;
     else if (state === 'skipped') counts.skipped++;
     const p = (session.procs || []).find(x => x.index === node.proc_index);
     const isBuild = node.id === 'build_base' || node.id.indexOf('build_') === 0;
@@ -1732,7 +1743,7 @@ function wfBuildGraphHtml(session, nowUnix) {
     const tipRunning = (state === 'running' && p && p.started_at)
       ? ' data-tip-running="' + esc(String(p.started_at)) + '"' : '';
     const elapsed = p ? procElapsed(p, nowUnix) : null;
-    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
+    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled','awaiting_limits'].includes(state);
     const stateElapsed = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     const attempt = p ? procAttempt(session, p) : [1, 1];
     const attemptHtml = attempt[1] > 1 ? '<span class="wf-attempt"> · attempt ' + attempt[0] + '</span>' : '';
@@ -1835,7 +1846,7 @@ function updateWorkflowGraph(session, nowUnix) {
   const root = ensureWorkflowGraphMounted(session, nowUnix);
   if (!root) return;
   const present = Object.create(null);
-  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0 };
+  const counts = { done: 0, graceful: 0, running: 0, terminating: 0, waiting: 0, queued: 0, failed: 0, stopped: 0, stalled: 0, skipped: 0, awaiting_limits: 0 };
   nodes.forEach(node => {
     const el = root.querySelector('.wf-node[data-workflow-step="' + CSS.escape(node.id) + '"]');
     if (!el) return;
@@ -1850,6 +1861,7 @@ function updateWorkflowGraph(session, nowUnix) {
     else if (state === 'failed') counts.failed++;
     else if (state === 'stopped') counts.stopped++;
     else if (state === 'stalled') counts.stalled++;
+    else if (state === 'awaiting_limits') counts.awaiting_limits++;
     else if (state === 'skipped') counts.skipped++;
     const prev = el.dataset.wfState;
     if (prev !== state) {
@@ -1877,7 +1889,7 @@ function updateWorkflowGraph(session, nowUnix) {
     if (state === 'running' && p && p.started_at) el.setAttribute('data-tip-running', String(p.started_at));
     else el.removeAttribute('data-tip-running');
     const elapsed = p ? procElapsed(p, nowUnix) : null;
-    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled'].includes(state);
+    const showElapsed = ['running','terminating','done','graceful','failed','stopped','stalled','awaiting_limits'].includes(state);
     const stateElapsed = el.querySelector('.wf-state-elapsed');
     if (stateElapsed) stateElapsed.textContent = elapsed != null && showElapsed ? ' · ' + formatElapsedClock(elapsed) : '';
     // The node rebinds to the retry when one registers mid-run: surface the attempt.
