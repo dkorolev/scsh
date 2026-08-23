@@ -941,9 +941,6 @@ impl Proc {
                 lw.resets_at = None;
               }
             }
-            if let Some(key) = seen.and_then(|s| s.wants_key()) {
-              lw.send_key(policy, key);
-            }
           }
           // Nothing here freezes a clock over time in which something happened. Reading a
           // banner off a screen is a guess, and the cost of a wrong one — hours of watchdog
@@ -956,6 +953,11 @@ impl Proc {
           // Safe in both directions, which is why the guard is cheap: a still screen is
           // frozen here, and a moving one keeps resetting the inactivity clock on its own.
           let quiet = last_activity.elapsed() >= park_quiet(w.limit);
+          if quiet {
+            if let Some(key) = lw.state.and_then(crate::limitwait::LimitState::wants_key) {
+              lw.send_key(policy, key);
+            }
+          }
           let moved_since_park = lw.parked_since.is_some_and(|since| last_activity > since);
           let park =
             lw.state.is_some_and(|s| s.is_parked()) && !moved_since_park && (lw.parked_since.is_some() || quiet);
@@ -1908,6 +1910,38 @@ mod tests {
 
     assert_eq!(killed, Killed::No);
     assert!(ok, "continued novel output proves the refusal prose was only being quoted");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn active_output_that_quotes_a_limit_prompt_gets_no_keypress() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("quotes-limit-prompt", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let nonce = crate::runtime::random_nonce_6();
+    let file = dir.join(format!("scsh-limit-quoted-prompt-{nonce}.cast"));
+    let keys = dir.join(format!("scsh-limit-quoted-prompt-{nonce}.keys"));
+    write_cast(&file, &["The error said: Your usage limit has reset \u{b7} press enter to continue"]);
+    let writer_file = file.clone();
+    let writer = std::thread::spawn(move || {
+      for (index, word) in ["checking", "reading", "tracing", "testing", "fixing", "finishing"].iter().enumerate() {
+        std::thread::sleep(Duration::from_millis(100));
+        append_cast(&writer_file, index + 1, word);
+      }
+    });
+
+    let mut watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    watch.limit = Duration::from_millis(500);
+    let (ok, killed, _) = p.run_watched("sleep", &["1".to_string()], None, Some(&watch), None).unwrap();
+    writer.join().unwrap();
+    let sent = std::fs::read_to_string(&keys).unwrap_or_default();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::No);
+    assert!(ok, "the quoted prompt did not stop active work");
+    assert!(sent.is_empty(), "the quoted prompt must not inject Enter into the active TUI");
   }
 
   #[cfg(unix)]

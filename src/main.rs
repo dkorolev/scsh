@@ -5789,6 +5789,13 @@ fn cast_tail_text(cast: &Path) -> String {
   }
 }
 
+/// Claude is the only harness whose literal TUI limit prose is understood here. Other harnesses
+/// can quote those words while reporting an unrelated failure and must retain their real verdict.
+fn harness_exited_on_usage_limit(harness: config::Harness, sample: &str) -> bool {
+  harness == config::Harness::Claude
+    && limitwait::detect(sample).is_some_and(|state| state != limitwait::LimitState::Resumed)
+}
+
 fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
   last.is_some_and(|line| {
     line.contains("failed to send signal") && line.contains("missing signal in xpc message") && line.contains("signal")
@@ -5854,14 +5861,23 @@ impl Drop for HostKeyChannel {
   }
 }
 
-/// The one-line status shown on the board and in the session browser while a run is parked (or,
-/// with `phase: None`, when it stops being parked).
-fn limit_wait_detail(phase: Option<limitwait::LimitState>, resets_at: Option<u64>) -> String {
-  let Some(state) = phase else { return "resumed after the usage limit reset".to_string() };
-  match resets_at {
-    Some(at) => format!("{} \u{2014} resumes {}", state.label(), quota::human_epoch(at)),
-    None => state.label().to_string(),
-  }
+/// The coded live phase and one-line status shown when the screen's limit state changes. A
+/// refusal clears the parked phase but keeps its own terminal detail; only no state means resumed.
+fn limit_wait_status(
+  state: Option<limitwait::LimitState>, resets_at: Option<u64>,
+) -> (Option<limitwait::LimitState>, String) {
+  let phase = state.filter(|s| s.is_parked());
+  let detail = match (state, resets_at) {
+    (Some(state), Some(at)) if state.is_parked() => {
+      format!("{} \u{2014} resumes {}", state.label(), quota::human_epoch(at))
+    }
+    (Some(limitwait::LimitState::Refused), Some(at)) => {
+      format!("{} \u{2014} limit resets {}", limitwait::LimitState::Refused.label(), quota::human_epoch(at))
+    }
+    (Some(state), _) => state.label().to_string(),
+    (None, _) => "resumed after the usage limit reset".to_string(),
+  };
+  (phase, detail)
 }
 
 fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
@@ -6202,8 +6218,7 @@ fn run_one_skill(
       let spinner = &spinner;
       let client = daemon_client.clone();
       Box::new(move |state, resets_at| {
-        let phase = state.filter(|s| s.is_parked());
-        let detail = limit_wait_detail(phase, resets_at);
+        let (phase, detail) = limit_wait_status(state, resets_at);
         spinner.note(&detail);
         if let Some(c) = &client {
           c.proc_phase(spinner.index(), phase.map(|_| daemon::PROC_PHASE_AWAITING_LIMITS), resets_at, &detail);
@@ -6409,7 +6424,7 @@ fn run_one_skill(
       // it is the same event and needs the same answer: retry when the window reopens, not on a
       // backoff that tops out in minutes. Checked ahead of the overload needles, which would
       // otherwise claim it and hand it that useless backoff.
-      let limited = limitwait::detect(&sample).is_some_and(|state| state != limitwait::LimitState::Resumed);
+      let limited = harness_exited_on_usage_limit(skill.harness, &sample);
       if limited {
         if let Some(c) = &daemon_client {
           c.proc_phase(spinner.index(), None, observed_reset_at, &why);
@@ -10485,6 +10500,32 @@ mod tests {
     drop(channel);
     assert!(!channel_dir.exists(), "the host-only channel is removed after the run");
     let _ = std::fs::remove_dir_all(&parent);
+  }
+
+  #[test]
+  fn post_exit_usage_limit_detection_is_claude_only() {
+    let sample = "The failed command printed: Usage limit reached";
+    assert!(harness_exited_on_usage_limit(config::Harness::Claude, sample));
+    for harness in [config::Harness::Opencode, config::Harness::Codex, config::Harness::Grok, config::Harness::Cursor] {
+      assert!(!harness_exited_on_usage_limit(harness, sample), "{} retained its real failure", harness.as_str());
+    }
+    assert!(!harness_exited_on_usage_limit(
+      config::Harness::Claude,
+      "Usage limit reset \u{b7} continuing automatically"
+    ));
+  }
+
+  #[test]
+  fn refused_limit_wait_clears_the_phase_without_claiming_resume() {
+    let (phase, detail) = limit_wait_status(Some(limitwait::LimitState::Refused), Some(1_800_000_000));
+    assert_eq!(phase, None);
+    assert!(detail.starts_with(limitwait::LimitState::Refused.label()));
+    assert!(detail.contains("limit resets"));
+    assert!(!detail.contains(" \u{2014} resumes"));
+
+    let (phase, detail) = limit_wait_status(None, None);
+    assert_eq!(phase, None);
+    assert_eq!(detail, "resumed after the usage limit reset");
   }
 
   #[test]
