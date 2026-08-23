@@ -47,7 +47,7 @@ impl LimitState {
 
   /// The tmux key this state needs from the host, if any. Claude's own wait cannot arm itself
   /// from a dialog, and a reset session will not pick the task back up, without a keypress that
-  /// only a human would otherwise supply — see [`crate::runtime::RUN_KEYS_REL`].
+  /// only a human would otherwise supply — see [`crate::runtime::RUN_KEYS_DIR`].
   pub fn wants_key(self) -> Option<&'static str> {
     matches!(self, LimitState::Blocked | LimitState::NeedsEnter).then_some("Enter")
   }

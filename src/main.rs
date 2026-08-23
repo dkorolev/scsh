@@ -3849,6 +3849,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
           } else {
             runtime::RepoMountMode::Full
           };
+          let key_channel = (skill.harness == config::Harness::Claude).then(|| format!("{run_dir}.keys"));
           let run = runtime::run_command(
             &rt.name,
             &tag,
@@ -3857,6 +3858,7 @@ fn list_skills(cfg: &config::Config, rt: &Runtime, root: &std::path::Path, verbo
             skill.memory.as_ref(),
             &env,
             &vol_refs,
+            key_channel.as_deref(),
             &cmd,
             repo_mount,
           );
@@ -5809,6 +5811,47 @@ const RESULT_QUIESCENCE_SECS: u64 = 30;
 /// whose end nobody has stated.
 const LIMIT_WAIT_MAX_SECS: u64 = 6 * 60 * 60;
 
+/// Host-owned source for the read-only key-channel mount. It is a sibling of the run clone,
+/// never a child: a skill controls the clone mount and must not be able to replace any component
+/// of the path the host writes through.
+struct HostKeyChannel {
+  dir: PathBuf,
+  file: PathBuf,
+}
+
+impl HostKeyChannel {
+  fn create(run_dir: &Path) -> std::io::Result<Self> {
+    let parent = run_dir.parent().ok_or_else(|| std::io::Error::other("run directory has no parent"))?;
+    let run_name = run_dir.file_name().and_then(|n| n.to_str()).unwrap_or("run");
+    for _ in 0..16 {
+      let dir = parent.join(format!(".{run_name}.keys-{}", runtime::random_nonce_6()));
+      match std::fs::create_dir(&dir) {
+        Ok(()) => {
+          #[cfg(unix)]
+          {
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(error) = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)) {
+              let _ = std::fs::remove_dir(&dir);
+              return Err(error);
+            }
+          }
+          let file = dir.join(runtime::RUN_KEYS_FILE);
+          return Ok(HostKeyChannel { dir, file });
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+        Err(error) => return Err(error),
+      }
+    }
+    Err(std::io::Error::new(std::io::ErrorKind::AlreadyExists, "could not allocate a unique key channel"))
+  }
+}
+
+impl Drop for HostKeyChannel {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_dir_all(&self.dir);
+  }
+}
+
 /// The one-line status shown on the board and in the session browser while a run is parked (or,
 /// with `phase: None`, when it stops being parked).
 fn limit_wait_detail(phase: Option<limitwait::LimitState>, resets_at: Option<u64>) -> String {
@@ -6028,6 +6071,19 @@ fn run_one_skill(
     if skill.harness == config::Harness::Grok && grok_auth_enabled() { forward_grok(&run_dir) } else { None };
   let cursor_auth =
     if skill.harness == config::Harness::Cursor && cursor_auth_enabled() { forward_cursor(&run_dir) } else { false };
+  let key_channel = if skill.harness == config::Harness::Claude {
+    match HostKeyChannel::create(&run_dir) {
+      Ok(channel) => Some(channel),
+      Err(error) => {
+        let why = format!("could not create host key channel: {error}");
+        spinner.finish_fail(failure::reason::RUN_DIR, Some(&why));
+        return SkillRun::failed(failure::reason::RUN_DIR, Some(run_dir_str), Some(log), clone_dir)
+          .with_fail_detail(&why);
+      }
+    }
+  } else {
+    None
+  };
   let tag = runtime::image_tag(skill.harness);
   // Claude needs no extra mounts: its forwarded config lives under the run clone's
   // tmp/.claude-auth (the image's CLAUDE_CONFIG_DIR), riding along with the repo mount —
@@ -6099,6 +6155,7 @@ fn run_one_skill(
     skill.memory.as_ref(),
     &container_env,
     &vol_refs,
+    key_channel.as_ref().map(|channel| channel.dir.to_string_lossy()).as_deref(),
     &cmd,
     repo_mount,
   );
@@ -6129,7 +6186,7 @@ fn run_one_skill(
   // claude-only: the needles are its literal TUI prose, and no other harness parks like this.
   let limit_wait = (skill.harness == config::Harness::Claude).then(|| ui::screen::LimitWait {
     max: Duration::from_secs(LIMIT_WAIT_MAX_SECS),
-    keys: run_dir.join(runtime::RUN_KEYS_REL),
+    keys: key_channel.as_ref().expect("claude key channel").file.clone(),
     resets_at: {
       // The run's own status line writes the account's windows — with exact epoch resets —
       // into the forwarded config dir every few seconds while it works.
@@ -10407,6 +10464,26 @@ fn print_help_cache() {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn host_key_channel_is_a_private_sibling_of_the_container_mount() {
+    let parent = std::env::temp_dir().join(format!("scsh-key-channel-{}", runtime::random_nonce_6()));
+    let run_dir = parent.join("run");
+    std::fs::create_dir_all(&run_dir).unwrap();
+    let channel = HostKeyChannel::create(&run_dir).unwrap();
+    assert_eq!(channel.dir.parent(), run_dir.parent());
+    assert!(!channel.dir.starts_with(&run_dir), "the container-writable run mount must not contain the channel");
+    assert_eq!(channel.file, channel.dir.join(runtime::RUN_KEYS_FILE));
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      assert_eq!(std::fs::metadata(&channel.dir).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+    let channel_dir = channel.dir.clone();
+    drop(channel);
+    assert!(!channel_dir.exists(), "the host-only channel is removed after the run");
+    let _ = std::fs::remove_dir_all(&parent);
+  }
 
   #[test]
   fn apple_shell_response_recovery_requires_valid_json_and_inner_exit_zero() {
