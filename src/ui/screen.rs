@@ -530,11 +530,13 @@ struct NoveltyWatch {
   seen: std::collections::HashSet<u64>,
   /// Insertion order for FIFO eviction, so `seen` stays bounded on long runs.
   order: std::collections::VecDeque<u64>,
-  /// The last [`NOVELTY_TAIL_BYTES`] of RAW cast bytes, kept only when something asks to read
-  /// the screen (today: the usage-limit watch). Held undecoded on purpose — rendering costs a
-  /// JSON parse and an ANSI strip per event, far too much to pay on a 100ms poll, and the
-  /// reader needs it only every few seconds. [`Self::rendered_tail`] pays it on demand.
-  tail: Option<Vec<u8>>,
+  /// Complete raw cast lines since the last limit scan, kept only when something asks to read
+  /// the screen. Scan-local input prevents an old banner from surviving ordinary work that
+  /// resumed later. Held undecoded because rendering on every 100ms poll is needlessly costly.
+  recent: Option<Vec<u8>>,
+  /// Whether the current scan-local input contained a novel frame. Repeated redraw fragments
+  /// that omit the banner do not by themselves prove the screen moved on.
+  recent_novel: bool,
 }
 
 /// Spinner cycles are tiny; this only needs to exceed the largest realistic set of distinct
@@ -543,7 +545,7 @@ struct NoveltyWatch {
 const NOVELTY_MEMORY: usize = 4096;
 /// Per-poll read cap so one poll never stalls the supervision loop on a runaway file.
 const NOVELTY_READ_CAP: u64 = 1 << 20;
-/// Raw cast bytes kept for [`NoveltyWatch::rendered_tail`]. Generous next to the few hundred
+/// Raw cast bytes kept for one limit scan. Generous next to the few hundred
 /// characters any banner occupies: a redrawn TUI frame carries far more escape sequence than
 /// text, so this renders down to a much smaller screenful.
 const NOVELTY_TAIL_BYTES: usize = 64 * 1024;
@@ -556,19 +558,21 @@ impl NoveltyWatch {
       carry: Vec::new(),
       seen: std::collections::HashSet::new(),
       order: std::collections::VecDeque::new(),
-      tail: keep_tail.then(Vec::new),
+      recent: keep_tail.then(Vec::new),
+      recent_novel: false,
     }
   }
 
-  /// The rendered terminal text of the retained tail — what the harness's screen most recently
-  /// SAID, escapes stripped. Empty when no tail is being kept or nothing has been read yet.
-  fn rendered_tail(&self) -> String {
-    let Some(tail) = &self.tail else { return String::new() };
-    let raw = String::from_utf8_lossy(tail);
-    // The buffer starts mid-file, so its first line is usually a truncated event; dropping it
-    // costs at most one frame of a screen that is being redrawn constantly anyway.
-    let body: String = raw.lines().skip(1).collect::<Vec<_>>().join("\n");
-    crate::ptyrec::cast_output_text(&body)
+  /// Render and consume complete cast lines gathered since the previous limit scan. `None`
+  /// means the screen emitted no complete event, so the previous classification still stands.
+  fn take_rendered_recent(&mut self) -> Option<(String, bool)> {
+    let recent = self.recent.as_mut()?;
+    if recent.is_empty() {
+      return None;
+    }
+    let bytes = std::mem::take(recent);
+    let novel = std::mem::replace(&mut self.recent_novel, false);
+    Some((crate::ptyrec::cast_output_text(&String::from_utf8_lossy(&bytes)), novel))
   }
 
   /// Hash one raw cast line with its volatile parts erased: the leading `[<time>,` of an
@@ -607,18 +611,21 @@ impl NoveltyWatch {
     let mut chunk = Vec::new();
     let Ok(read) = f.take(NOVELTY_READ_CAP).read_to_end(&mut chunk) else { return false };
     self.offset += read as u64;
-    if let Some(tail) = &mut self.tail {
-      tail.extend_from_slice(&chunk);
-      if tail.len() > NOVELTY_TAIL_BYTES {
-        tail.drain(..tail.len() - NOVELTY_TAIL_BYTES);
-      }
-    }
     let mut novel = false;
     for byte in chunk {
       if byte == b'\n' {
         let hash = Self::normalized_hash(&self.carry);
+        let new = self.seen.insert(hash);
+        if let Some(recent) = &mut self.recent {
+          recent.extend_from_slice(&self.carry);
+          recent.push(b'\n');
+          if recent.len() > NOVELTY_TAIL_BYTES {
+            recent.drain(..recent.len() - NOVELTY_TAIL_BYTES);
+          }
+          self.recent_novel |= new;
+        }
         self.carry.clear();
-        if self.seen.insert(hash) {
+        if new {
           novel = true;
           self.order.push_back(hash);
           if self.order.len() > NOVELTY_MEMORY {
@@ -632,6 +639,20 @@ impl NoveltyWatch {
       }
     }
     novel
+  }
+}
+
+/// Update a screen classification from scan-local cast events. A fresh limit phrase wins; novel
+/// ordinary output clears the old state; duplicate redraw fragments preserve it.
+fn recent_limit_state(
+  novelty: &mut NoveltyWatch, previous: Option<crate::limitwait::LimitState>,
+) -> Option<crate::limitwait::LimitState> {
+  let Some((text, novel)) = novelty.take_rendered_recent() else { return previous };
+  let detected = crate::limitwait::detect(&text);
+  if detected.is_some() || novel {
+    detected
+  } else {
+    previous
   }
 }
 
@@ -885,7 +906,8 @@ impl Proc {
         // Read the cast FIRST — the novelty hashes and, when a limit wait is armed, the
         // rendered screen come from the same bytes, and the limit scan below is worthless
         // against a tail nothing has read into yet.
-        if novelty.as_mut().is_some_and(NoveltyWatch::poll) {
+        let novel_activity = novelty.as_mut().is_some_and(NoveltyWatch::poll);
+        if novel_activity {
           saw_novelty = true;
           last_activity = std::time::Instant::now();
         }
@@ -893,11 +915,19 @@ impl Proc {
         // usage limit has not stalled and has not overrun anything, and every clock below has
         // to know that before it decides. See [`LimitWait`].
         if let (Some(w), Some(policy), Some(lw), Some(nov)) =
-          (watch, watch.and_then(|w| w.limit_wait.as_ref()), limits.as_mut(), novelty.as_ref())
+          (watch, watch.and_then(|w| w.limit_wait.as_ref()), limits.as_mut(), novelty.as_mut())
         {
+          // A classification describes a still screen, not the session forever. Any later
+          // novel frame invalidates it immediately; the next scan can classify a new banner.
+          if novel_activity && lw.state.is_some_and(crate::limitwait::LimitState::is_stopped) {
+            let resets_at = lw.resets_at;
+            lw.state = None;
+            (policy.on_state)(None, resets_at);
+            lw.resets_at = None;
+          }
           if std::time::Instant::now() >= lw.next_scan {
             lw.next_scan = std::time::Instant::now() + LIMIT_SCAN_EVERY;
-            let seen = crate::limitwait::detect(&nov.rendered_tail());
+            let seen = recent_limit_state(nov, lw.state);
             // The reset instant arrives with the run's own status-line capture, which is only
             // written once the session has talked to the provider — so it is asked for while
             // parked, not up front, and re-asked until it answers.
@@ -907,6 +937,9 @@ impl Proc {
             if seen != lw.state {
               lw.state = seen;
               (policy.on_state)(seen, lw.resets_at);
+              if seen.is_none() || seen == Some(crate::limitwait::LimitState::Resumed) {
+                lw.resets_at = None;
+              }
             }
             if let Some(key) = seen.and_then(|s| s.wants_key()) {
               lw.send_key(policy, key);
@@ -922,19 +955,22 @@ impl Proc {
           //
           // Safe in both directions, which is why the guard is cheap: a still screen is
           // frozen here, and a moving one keeps resetting the inactivity clock on its own.
+          let quiet = last_activity.elapsed() >= park_quiet(w.limit);
           let moved_since_park = lw.parked_since.is_some_and(|since| last_activity > since);
-          let park = lw.state.is_some_and(|s| s.is_parked())
-            && !moved_since_park
-            && (lw.parked_since.is_some() || last_activity.elapsed() >= park_quiet(w.limit));
-          if lw.state == Some(crate::limitwait::LimitState::Refused) {
+          let park =
+            lw.state.is_some_and(|s| s.is_parked()) && !moved_since_park && (lw.parked_since.is_some() || quiet);
+          if lw.state == Some(crate::limitwait::LimitState::Refused) && quiet {
             // Said outright that it will not come back. Nothing is gained by holding the
-            // container open, and retrying now would only hit the same limit.
+            // container open, and retrying now would only hit the same limit. Stillness is
+            // required because an active task can display or quote the same prose.
             kill_child_tree(&mut child);
             killed = Killed::LimitExhausted { resets_at: lw.resets_at };
             break child.wait()?;
           } else if park {
             if lw.parked_since.is_none() {
-              lw.parked_since = Some(std::time::Instant::now());
+              // The quiet gate proved that nothing happened throughout this interval. Freeze
+              // it from the last real frame, not from this later confirmation instant.
+              lw.parked_since = Some(last_activity);
             }
             if lw.expired(policy, crate::daemon::now_unix_secs()) {
               kill_child_tree(&mut child);
@@ -956,6 +992,8 @@ impl Proc {
         }
         let frozen = limits.as_ref().map(LimitWatch::frozen).unwrap_or_default();
         let parked = limits.as_ref().map(LimitWatch::open_stretch).unwrap_or_default();
+        let limit_stopped =
+          limits.as_ref().and_then(|lw| lw.state).is_some_and(crate::limitwait::LimitState::is_stopped);
         if let Some(limit) = timeout {
           if started.elapsed().saturating_sub(frozen) >= limit {
             kill_child_tree(&mut child);
@@ -982,7 +1020,9 @@ impl Proc {
           if let Some(su) = &w.startup {
             let limit = if saw_novelty { su.stall } else { su.silence };
             let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
-            if stall_began_in_window && silent_for >= limit {
+            // A confirmed limit screen still has to pass the quiet gate before clocks freeze,
+            // but a shorter jittered startup threshold must not kill it during that guard.
+            if !limit_stopped && stall_began_in_window && silent_for >= limit {
               kill_child_tree(&mut child);
               killed = Killed::StartupStalled { silent: !saw_novelty };
               break child.wait()?;
@@ -1692,8 +1732,7 @@ mod tests {
     assert!(limit_wait_expired(SIX_HOURS, SIX_HOURS, Some(resets_at), now));
   }
 
-  /// Write an asciicast v3 file whose output events render to `screens`, in order. The leading
-  /// header line is what a real recording starts with — and what `rendered_tail` skips.
+  /// Write an asciicast v3 file whose output events render to `screens`, in order.
   #[cfg(unix)]
   fn write_cast(path: &std::path::Path, screens: &[&str]) {
     let mut out = String::from("{\"version\": 3, \"term\": {\"cols\": 80, \"rows\": 24}}\n");
@@ -1701,6 +1740,12 @@ mod tests {
       out.push_str(&format!("[{}.0, \"o\", {}]\n", i, crate::json::quote(screen)));
     }
     std::fs::write(path, out).unwrap();
+  }
+
+  #[cfg(unix)]
+  fn append_cast(path: &std::path::Path, index: usize, screen: &str) {
+    let mut out = std::fs::OpenOptions::new().append(true).open(path).unwrap();
+    writeln!(out, "[{}.0, \"o\", {}]", index, crate::json::quote(screen)).unwrap();
   }
 
   #[cfg(unix)]
@@ -1774,6 +1819,38 @@ mod tests {
 
   #[cfg(unix)]
   #[test]
+  fn a_limit_banner_during_startup_outlives_the_shortest_stall_threshold() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("limited-during-startup", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let nonce = crate::runtime::random_nonce_6();
+    let file = dir.join(format!("scsh-limit-startup-{nonce}.cast"));
+    let keys = dir.join(format!("scsh-limit-startup-{nonce}.keys"));
+    write_cast(
+      &file,
+      &["starting claude", "Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel"],
+    );
+
+    let mut watch = limit_watch(&file, &keys, Duration::from_millis(600));
+    watch.startup = Some(StartupStall {
+      silence: Duration::from_millis(50),
+      stall: Duration::from_millis(50),
+      window: Duration::from_secs(2),
+    });
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::LimitExhausted { resets_at: None });
+    assert!(!ok);
+    assert!(started.elapsed() >= Duration::from_millis(600), "the quota wait, not startup jitter, owned the run");
+    assert!(started.elapsed() < Duration::from_secs(2), "the quiet gate was included in the frozen stretch");
+  }
+
+  #[cfg(unix)]
+  #[test]
   fn a_harness_that_says_it_will_not_resume_is_given_up_on_at_once() {
     let ui = LiveUi::new(false, None);
     let p = ui.proc("refused", false);
@@ -1799,6 +1876,92 @@ mod tests {
     assert_eq!(killed, Killed::LimitExhausted { resets_at: None });
     assert!(!ok);
     assert!(started.elapsed() < Duration::from_secs(5), "a stated refusal ends the wait immediately");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn active_output_that_quotes_a_refusal_is_not_killed() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("quotes-refusal", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let nonce = crate::runtime::random_nonce_6();
+    let file = dir.join(format!("scsh-limit-quoted-refusal-{nonce}.cast"));
+    let keys = dir.join(format!("scsh-limit-quoted-refusal-{nonce}.keys"));
+    write_cast(&file, &["The provider said this task will not resume on its own; investigating why."]);
+    let writer_file = file.clone();
+    let writer = std::thread::spawn(move || {
+      for (index, word) in
+        ["checking", "reading", "tracing", "testing", "fixing", "building", "reviewing", "finishing"].iter().enumerate()
+      {
+        std::thread::sleep(Duration::from_millis(100));
+        append_cast(&writer_file, index + 1, word);
+      }
+    });
+
+    let mut watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    watch.limit = Duration::from_millis(500);
+    let (ok, killed, _) = p.run_watched("sleep", &["1".to_string()], None, Some(&watch), None).unwrap();
+    writer.join().unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::No);
+    assert!(ok, "continued novel output proves the refusal prose was only being quoted");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn ordinary_work_after_a_limit_banner_does_not_repark_on_stale_text() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("resumed-after-limit", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let nonce = crate::runtime::random_nonce_6();
+    let file = dir.join(format!("scsh-limit-stale-{nonce}.cast"));
+    let keys = dir.join(format!("scsh-limit-stale-{nonce}.keys"));
+    write_cast(&file, &["Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel"]);
+    let writer_file = file.clone();
+    let writer = std::thread::spawn(move || {
+      std::thread::sleep(Duration::from_millis(300));
+      append_cast(&writer_file, 1, "ordinary work resumed");
+    });
+
+    let watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+    writer.join().unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::Inactive, "the resumed run spends its ordinary silence budget");
+    assert!(!ok);
+    assert!(started.elapsed() < Duration::from_secs(2), "the stale banner did not reopen the quota wait");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn limit_scans_forget_old_banners_but_detect_later_new_ones() {
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("scsh-limit-recent-{}.cast", crate::runtime::random_nonce_6()));
+    write_cast(&file, &["Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel"]);
+    let mut novelty = NoveltyWatch::new(&file, true);
+
+    assert!(novelty.poll());
+    let waiting = Some(crate::limitwait::LimitState::Waiting);
+    assert_eq!(recent_limit_state(&mut novelty, None), waiting);
+    append_cast(&file, 1, "ordinary work resumed");
+    assert!(novelty.poll());
+    assert_eq!(recent_limit_state(&mut novelty, waiting), None);
+    append_cast(
+      &file,
+      2,
+      "Usage limit reached again after you continued \u{b7} continuing automatically at 10:30am \u{b7} esc to cancel",
+    );
+    assert!(novelty.poll());
+    assert_eq!(recent_limit_state(&mut novelty, None), waiting);
+
+    let _ = std::fs::remove_file(&file);
   }
 
   #[cfg(unix)]

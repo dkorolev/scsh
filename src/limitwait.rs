@@ -15,9 +15,9 @@
 //! that will come back and one that never will.
 //!
 //! The screen is the only channel. Claude writes no machine-readable marker for any of this, so
-//! the needles below are its literal TUI prose. They are matched case-insensitively against a
-//! rolling window of recent terminal output, and the LAST match wins: the window still holds the
-//! banner from ten minutes ago when the resume line arrives, and the newest line is the true state.
+//! the needles below are its literal TUI prose. They are matched case-insensitively, and the LAST
+//! match in one scan wins. The supervisor consumes each scan batch after classifying it, so an old
+//! banner cannot outlive later ordinary work; see [`crate::ui::screen::NoveltyWatch`].
 
 /// What the harness screen currently says about a usage limit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +43,13 @@ impl LimitState {
   /// watchdog clocks are frozen for exactly these states.
   pub fn is_parked(self) -> bool {
     matches!(self, LimitState::Waiting | LimitState::Blocked | LimitState::NeedsEnter)
+  }
+
+  /// Whether the screen says quota has stopped this session. A refusal is not parked because
+  /// its clocks must not be frozen, but it still needs the same stillness guard before scsh acts
+  /// on prose that an active task could merely be quoting.
+  pub fn is_stopped(self) -> bool {
+    !matches!(self, LimitState::Resumed)
   }
 
   /// The tmux key this state needs from the host, if any. Claude's own wait cannot arm itself
