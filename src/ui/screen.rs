@@ -177,7 +177,7 @@ impl Drop for LiveUi {
 /// erased, so a spinner cycling a fixed frame set (even with a ticking elapsed-seconds
 /// counter) stops registering once every frame has been seen, while genuine agent output
 /// keeps producing never-seen lines.
-pub struct ActivityWatch {
+pub struct ActivityWatch<'a> {
   /// Polled (`~100ms`) for new content; a file that never appears counts as never active.
   pub file: std::path::PathBuf,
   /// Silence budget: kill the child when `file` has shown nothing novel for this long.
@@ -185,6 +185,41 @@ pub struct ActivityWatch {
   /// Tighter silence budgets for the launch phase, when a wedged run has burned nothing yet
   /// and an immediate relaunch is cheaper than waiting out the full inactivity budget.
   pub startup: Option<StartupStall>,
+  /// Read the screen for a usage-limit banner and hold the clocks while one is up. `None`
+  /// leaves every watchdog exactly as it was.
+  pub limit_wait: Option<LimitWait<'a>>,
+}
+
+/// What to do when the harness stops because the account hit a usage limit.
+///
+/// A limited claude session is not a failed one: it is a session that will pick the task back up
+/// when the limit resets, keeping everything it has worked out — which no scsh retry can, since
+/// every attempt is a fresh clone, container, and conversation. But it looks identical to a
+/// hang, so without this the inactivity watchdog kills it half an hour in and the retry backoff
+/// gives up long before a reset hours away.
+///
+/// So while a limit banner is on screen, the inactivity and wall-clock clocks are FROZEN — not
+/// extended, frozen — and they start again the moment the screen moves. A run that resumes has
+/// spent nothing; a run that genuinely wedges behind the banner is still caught by [`max`] and,
+/// after it, by the ordinary budgets it never got to spend.
+///
+/// [`max`]: LimitWait::max
+pub struct LimitWait<'a> {
+  /// Ceiling on one parked stretch, however long the provider says the reset is. Nothing here
+  /// can prove the screen still means what it said, so the wait is always bounded.
+  pub max: Duration,
+  /// Where to drop tmux key names for the container's recorder to forward
+  /// ([`crate::runtime::RUN_KEYS_REL`]). Two claude screens stop dead waiting for a keypress
+  /// that, unattended, never comes: the limit dialog (whose default choice IS the wait) and the
+  /// post-reset "press enter to continue". One byte here restarts both.
+  pub keys: std::path::PathBuf,
+  /// The reset instant the provider reported, when it has. Asked while parked, because the
+  /// number arrives with the run's own status-line capture rather than up front. Used only to
+  /// shorten the wait — it never extends it past [`Self::max`].
+  pub resets_at: Box<dyn Fn() -> Option<u64> + Send + Sync + 'a>,
+  /// Called whenever the parked state changes, so the caller can say so on the board and in
+  /// the session browser. Not called for the polls in between.
+  pub on_state: Box<dyn Fn(Option<crate::limitwait::LimitState>, Option<u64>) + Send + Sync + 'a>,
 }
 
 /// Launch-phase stall policy for [`ActivityWatch`]. A harness that wedges before doing any
@@ -363,6 +398,103 @@ impl QuiescenceWatch {
   }
 }
 
+/// How often the screen is re-read for a usage-limit banner. Rendering the tail costs a JSON
+/// parse and an ANSI strip per event; a limit is a multi-hour event, so seconds of latency in
+/// noticing one is free, and paying this on every 100ms poll would not be.
+const LIMIT_SCAN_EVERY: Duration = Duration::from_secs(2);
+
+/// Minimum gap between keypresses sent to a parked screen. A dialog that ignores the first
+/// Enter is a screen scsh has misread; hammering it would type into whatever is really there.
+const LIMIT_KEY_COOLDOWN: Duration = Duration::from_secs(30);
+
+/// How still the screen must already be before a limit banner is allowed to freeze the clocks.
+///
+/// A genuinely parked session is still for hours, so this costs nothing real — and it is what
+/// keeps a misread screen from being expensive: output that merely mentions a limit comes from a
+/// run that is still producing frames, and never parks.
+const LIMIT_PARK_QUIET: Duration = Duration::from_secs(30);
+
+/// [`LIMIT_PARK_QUIET`], but never more than half the silence budget it is guarding. Expressed
+/// against `limit` rather than absolutely because that is what it actually means: "still for a
+/// meaningful fraction of the time this run is allowed to be silent". A fixed 30s would be
+/// unreachable under any budget shorter than that, which would disable the freeze entirely
+/// instead of gating it.
+fn park_quiet(limit: Duration) -> Duration {
+  LIMIT_PARK_QUIET.min(limit / 2)
+}
+
+/// Slack allowed past the provider's own reset instant before a still-parked run is given up on.
+/// Covers clock skew, a status line that refreshed a little stale, and the seconds claude takes
+/// to notice its own reset — but not a screen that is simply stuck.
+const LIMIT_RESET_GRACE: Duration = Duration::from_secs(300);
+
+/// Bookkeeping for one [`LimitWait`]: what the screen last said, how long the run has been
+/// parked on a limit, and how much of that the watchdogs must not count.
+///
+/// The frozen time is tracked in two pieces because the two clocks it feeds are different
+/// shapes. The wall-clock budget is cumulative, so every closed stretch stays subtracted from
+/// it forever. The inactivity budget is a gap since the last novel frame, and a resumed run
+/// produces one immediately — so a closed stretch is pushed into `last_activity` once and then
+/// forgotten, and only the stretch still open is subtracted.
+struct LimitWatch {
+  /// Next time the screen is worth rendering again.
+  next_scan: std::time::Instant,
+  /// What [`crate::limitwait::detect`] last read, and what was reported upward.
+  state: Option<crate::limitwait::LimitState>,
+  /// Start of the stretch currently being frozen; `None` while the run is making progress.
+  parked_since: Option<std::time::Instant>,
+  /// Frozen time from stretches that have already ended.
+  frozen_closed: Duration,
+  /// The provider's reset instant (unix epoch), once a status-line capture has carried one.
+  resets_at: Option<u64>,
+  /// When a key was last handed to the container, for [`LIMIT_KEY_COOLDOWN`].
+  last_key: Option<std::time::Instant>,
+}
+
+impl LimitWatch {
+  fn new() -> Self {
+    LimitWatch {
+      next_scan: std::time::Instant::now(),
+      state: None,
+      parked_since: None,
+      frozen_closed: Duration::ZERO,
+      resets_at: None,
+      last_key: None,
+    }
+  }
+
+  /// The stretch currently being frozen (zero when the run is moving).
+  fn open_stretch(&self) -> Duration {
+    self.parked_since.map(|t| t.elapsed()).unwrap_or_default()
+  }
+
+  /// Total time frozen so far — subtracted from the cumulative wall-clock budget.
+  fn frozen(&self) -> Duration {
+    self.frozen_closed + self.open_stretch()
+  }
+
+  /// How long this parked stretch may run: up to the provider's reset plus a grace, and never
+  /// past the policy ceiling. With no reported reset the ceiling is all there is — the run is
+  /// waiting on a limit it cannot see the end of, which is still better than being killed.
+  fn deadline(&self, policy: &LimitWait<'_>, now_epoch: u64) -> Duration {
+    let by_reset = self
+      .resets_at
+      .map(|at| Duration::from_secs(at.saturating_sub(now_epoch)) + LIMIT_RESET_GRACE)
+      .unwrap_or(policy.max);
+    by_reset.min(policy.max)
+  }
+
+  /// Hand one tmux key name to the container's recorder, at most once per cooldown. Failure is
+  /// silent and harmless: the wait simply continues until its deadline.
+  fn send_key(&mut self, policy: &LimitWait<'_>, key: &str) {
+    if self.last_key.is_some_and(|t| t.elapsed() < LIMIT_KEY_COOLDOWN) {
+      return;
+    }
+    self.last_key = Some(std::time::Instant::now());
+    let _ = std::fs::write(&policy.keys, format!("{key}\n"));
+  }
+}
+
 /// Bounded memory of normalized cast-line hashes already seen, plus the read cursor into the
 /// watched file. Backs one [`ActivityWatch`] evaluation loop.
 struct NoveltyWatch {
@@ -374,6 +506,11 @@ struct NoveltyWatch {
   seen: std::collections::HashSet<u64>,
   /// Insertion order for FIFO eviction, so `seen` stays bounded on long runs.
   order: std::collections::VecDeque<u64>,
+  /// The last [`NOVELTY_TAIL_BYTES`] of RAW cast bytes, kept only when something asks to read
+  /// the screen (today: the usage-limit watch). Held undecoded on purpose — rendering costs a
+  /// JSON parse and an ANSI strip per event, far too much to pay on a 100ms poll, and the
+  /// reader needs it only every few seconds. [`Self::rendered_tail`] pays it on demand.
+  tail: Option<Vec<u8>>,
 }
 
 /// Spinner cycles are tiny; this only needs to exceed the largest realistic set of distinct
@@ -382,16 +519,32 @@ struct NoveltyWatch {
 const NOVELTY_MEMORY: usize = 4096;
 /// Per-poll read cap so one poll never stalls the supervision loop on a runaway file.
 const NOVELTY_READ_CAP: u64 = 1 << 20;
+/// Raw cast bytes kept for [`NoveltyWatch::rendered_tail`]. Generous next to the few hundred
+/// characters any banner occupies: a redrawn TUI frame carries far more escape sequence than
+/// text, so this renders down to a much smaller screenful.
+const NOVELTY_TAIL_BYTES: usize = 64 * 1024;
 
 impl NoveltyWatch {
-  fn new(file: &std::path::Path) -> Self {
+  fn new(file: &std::path::Path, keep_tail: bool) -> Self {
     NoveltyWatch {
       file: file.to_path_buf(),
       offset: 0,
       carry: Vec::new(),
       seen: std::collections::HashSet::new(),
       order: std::collections::VecDeque::new(),
+      tail: keep_tail.then(Vec::new),
     }
+  }
+
+  /// The rendered terminal text of the retained tail — what the harness's screen most recently
+  /// SAID, escapes stripped. Empty when no tail is being kept or nothing has been read yet.
+  fn rendered_tail(&self) -> String {
+    let Some(tail) = &self.tail else { return String::new() };
+    let raw = String::from_utf8_lossy(tail);
+    // The buffer starts mid-file, so its first line is usually a truncated event; dropping it
+    // costs at most one frame of a screen that is being redrawn constantly anyway.
+    let body: String = raw.lines().skip(1).collect::<Vec<_>>().join("\n");
+    crate::ptyrec::cast_output_text(&body)
   }
 
   /// Hash one raw cast line with its volatile parts erased: the leading `[<time>,` of an
@@ -430,6 +583,12 @@ impl NoveltyWatch {
     let mut chunk = Vec::new();
     let Ok(read) = f.take(NOVELTY_READ_CAP).read_to_end(&mut chunk) else { return false };
     self.offset += read as u64;
+    if let Some(tail) = &mut self.tail {
+      tail.extend_from_slice(&chunk);
+      if tail.len() > NOVELTY_TAIL_BYTES {
+        tail.drain(..tail.len() - NOVELTY_TAIL_BYTES);
+      }
+    }
     let mut novel = false;
     for byte in chunk {
       if byte == b'\n' {
@@ -465,6 +624,12 @@ pub enum Killed {
   /// produced a single novel frame, the rest went quiet mid-boot. Either way nothing of
   /// value was in flight, so the caller force-restarts immediately instead of backing off.
   StartupStalled { silent: bool },
+  /// The harness was stopped by a usage limit and will not come back on its own — it said so,
+  /// or it sat behind the banner past [`LimitWait::max`]. Distinct from every other kill: the
+  /// run did not fail and retrying it now would only hit the same limit, so the caller waits
+  /// for the reset instead of spending its backoff. `resets_at` is the provider's reset instant
+  /// (unix epoch) when it reported one.
+  LimitExhausted { resets_at: Option<u64> },
   /// Not a failure: the task's declared result file went quiet and passed [`DoneWatch::confirm`],
   /// so the harness was stopped deliberately rather than waited out. The caller still validates
   /// the result before calling the run a success.
@@ -613,7 +778,7 @@ impl Proc {
   /// `watch` sees no screen activity for its limit (`None`s wait forever), and stops it early
   /// when `done` sees the task's result file finished. Returns `(success, why_killed, last_line)`.
   pub fn run_watched(
-    &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch>,
+    &self, program: &str, args: &[String], timeout: Option<Duration>, watch: Option<&ActivityWatch<'_>>,
     done: Option<&DoneWatch>,
   ) -> std::io::Result<(bool, Killed, Option<String>)> {
     let (status, killed, last, _trimmed) = self.exec(program, args, None, timeout, watch, done, None, None, None)?;
@@ -643,7 +808,7 @@ impl Proc {
   #[allow(clippy::too_many_arguments)]
   fn exec(
     &self, program: &str, args: &[String], stdin: Option<&[u8]>, timeout: Option<Duration>,
-    watch: Option<&ActivityWatch>, done: Option<&DoneWatch>, place: Option<&ExecPlace>,
+    watch: Option<&ActivityWatch<'_>>, done: Option<&DoneWatch>, place: Option<&ExecPlace>,
     output_limit: Option<OutputLimit>, cast: Option<crate::ptyrec::CastSink>,
   ) -> std::io::Result<(std::process::ExitStatus, Killed, Option<String>, bool)> {
     let started = self.start_instant();
@@ -682,8 +847,10 @@ impl Proc {
     } else {
       // The activity clock starts now: a watched file that never appears (or never shows a
       // novel line) still trips the watchdog once the limit elapses.
-      let mut novelty = watch.map(|w| NoveltyWatch::new(&w.file));
+      let keep_tail = watch.is_some_and(|w| w.limit_wait.is_some());
+      let mut novelty = watch.map(|w| NoveltyWatch::new(&w.file, keep_tail));
       let mut quiescence = done.map(|d| QuiescenceWatch::new(&d.file));
+      let mut limits = watch.and_then(|w| w.limit_wait.as_ref()).map(|_| LimitWatch::new());
       let watch_started = std::time::Instant::now();
       let mut last_activity = watch_started;
       let mut saw_novelty = false;
@@ -691,8 +858,82 @@ impl Proc {
         if let Some(s) = child.try_wait()? {
           break s;
         }
+        // Read the cast FIRST — the novelty hashes and, when a limit wait is armed, the
+        // rendered screen come from the same bytes, and the limit scan below is worthless
+        // against a tail nothing has read into yet.
+        if novelty.as_mut().is_some_and(NoveltyWatch::poll) {
+          saw_novelty = true;
+          last_activity = std::time::Instant::now();
+        }
+        // Then read the screen, before any watchdog does its arithmetic: a run parked on a
+        // usage limit has not stalled and has not overrun anything, and every clock below has
+        // to know that before it decides. See [`LimitWait`].
+        if let (Some(w), Some(policy), Some(lw), Some(nov)) =
+          (watch, watch.and_then(|w| w.limit_wait.as_ref()), limits.as_mut(), novelty.as_ref())
+        {
+          if std::time::Instant::now() >= lw.next_scan {
+            lw.next_scan = std::time::Instant::now() + LIMIT_SCAN_EVERY;
+            let seen = crate::limitwait::detect(&nov.rendered_tail());
+            // The reset instant arrives with the run's own status-line capture, which is only
+            // written once the session has talked to the provider — so it is asked for while
+            // parked, not up front, and re-asked until it answers.
+            if seen.is_some_and(|s| s.is_parked()) && lw.resets_at.is_none() {
+              lw.resets_at = (policy.resets_at)();
+            }
+            if seen != lw.state {
+              lw.state = seen;
+              (policy.on_state)(seen, lw.resets_at);
+            }
+            if let Some(key) = seen.and_then(|s| s.wants_key()) {
+              lw.send_key(policy, key);
+            }
+          }
+          // Nothing here freezes a clock over time in which something happened. Reading a
+          // banner off a screen is a guess, and the cost of a wrong one — hours of watchdog
+          // immunity for a genuinely wedged run — is far worse than the cost of ignoring a
+          // right one for a few extra seconds. So the freeze is gated on the screen actually
+          // being STILL: a run that merely printed the words (a skill summarizing quota, an
+          // agent quoting an error) keeps producing novel frames and is never parked, and one
+          // that starts producing them again is unparked whatever the banner still says.
+          //
+          // Safe in both directions, which is why the guard is cheap: a still screen is
+          // frozen here, and a moving one keeps resetting the inactivity clock on its own.
+          let moved_since_park = lw.parked_since.is_some_and(|since| last_activity > since);
+          let park = lw.state.is_some_and(|s| s.is_parked())
+            && !moved_since_park
+            && (lw.parked_since.is_some() || last_activity.elapsed() >= park_quiet(w.limit));
+          if lw.state == Some(crate::limitwait::LimitState::Refused) {
+            // Said outright that it will not come back. Nothing is gained by holding the
+            // container open, and retrying now would only hit the same limit.
+            kill_child_tree(&mut child);
+            killed = Killed::LimitExhausted { resets_at: lw.resets_at };
+            break child.wait()?;
+          } else if park {
+            if lw.parked_since.is_none() {
+              lw.parked_since = Some(std::time::Instant::now());
+            }
+            if lw.open_stretch() >= lw.deadline(policy, crate::daemon::now_unix_secs()) {
+              kill_child_tree(&mut child);
+              killed = Killed::LimitExhausted { resets_at: lw.resets_at };
+              break child.wait()?;
+            }
+          } else if let Some(since) = lw.parked_since.take() {
+            // Moving again (or never really stopped): bank the stretch.
+            let stretch = since.elapsed();
+            lw.frozen_closed += stretch;
+            // The inactivity clock is pushed forward only when its silence gap actually spans
+            // the park. A run that resumed by producing output moved `last_activity` to now
+            // already; adding the stretch on top would put it in the future and buy a wedged
+            // harness a free extra window.
+            if last_activity < since {
+              last_activity = last_activity.checked_add(stretch).unwrap_or(last_activity);
+            }
+          }
+        }
+        let frozen = limits.as_ref().map(LimitWatch::frozen).unwrap_or_default();
+        let parked = limits.as_ref().map(LimitWatch::open_stretch).unwrap_or_default();
         if let Some(limit) = timeout {
-          if started.elapsed() >= limit {
+          if started.elapsed().saturating_sub(frozen) >= limit {
             kill_child_tree(&mut child);
             killed = Killed::Timeout;
             break child.wait()?;
@@ -710,23 +951,20 @@ impl Proc {
           }
         }
         if let Some(w) = watch {
-          if novelty.as_mut().is_some_and(NoveltyWatch::poll) {
-            saw_novelty = true;
-            last_activity = std::time::Instant::now();
-          }
           // Startup rules first (they are strictly tighter): the initial-silence budget
           // until the first novel frame, then the stall budget for any silence that BEGINS
           // while the startup window is still open.
+          let silent_for = last_activity.elapsed().saturating_sub(parked);
           if let Some(su) = &w.startup {
             let limit = if saw_novelty { su.stall } else { su.silence };
             let stall_began_in_window = last_activity.duration_since(watch_started) < su.window;
-            if stall_began_in_window && last_activity.elapsed() >= limit {
+            if stall_began_in_window && silent_for >= limit {
               kill_child_tree(&mut child);
               killed = Killed::StartupStalled { silent: !saw_novelty };
               break child.wait()?;
             }
           }
-          if last_activity.elapsed() >= w.limit {
+          if silent_for >= w.limit {
             kill_child_tree(&mut child);
             killed = Killed::Inactive;
             break child.wait()?;
@@ -1383,10 +1621,158 @@ mod tests {
       file: std::env::temp_dir().join(format!("scsh-watch-never-{}", std::process::id())),
       limit: Duration::from_millis(200),
       startup: None,
+      limit_wait: None,
     };
     let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
     assert_eq!(killed, Killed::Inactive);
     assert!(!ok);
+  }
+
+  // ---- usage-limit wait ----
+  //
+  // The whole point of the feature: a claude session stopped by a usage limit looks EXACTLY
+  // like a wedged one — a static screen — and without this it is killed half an hour in and
+  // retried from a fresh clone, losing everything the agent worked out. These tests pin the
+  // three outcomes: hold the clocks while it waits, give up when it says it will not resume,
+  // and press the key the screens that need one are waiting for.
+
+  /// Write an asciicast v3 file whose output events render to `screens`, in order. The leading
+  /// header line is what a real recording starts with — and what `rendered_tail` skips.
+  #[cfg(unix)]
+  fn write_cast(path: &std::path::Path, screens: &[&str]) {
+    let mut out = String::from("{\"version\": 3, \"term\": {\"cols\": 80, \"rows\": 24}}\n");
+    for (i, screen) in screens.iter().enumerate() {
+      out.push_str(&format!("[{}.0, \"o\", {}]\n", i, crate::json::quote(screen)));
+    }
+    std::fs::write(path, out).unwrap();
+  }
+
+  #[cfg(unix)]
+  fn limit_watch(file: &std::path::Path, keys: &std::path::Path, max: Duration) -> ActivityWatch<'static> {
+    ActivityWatch {
+      file: file.to_path_buf(),
+      // Deliberately tiny: without the limit wait this alone would kill the child at once, so
+      // a passing test proves the clock really is frozen rather than merely generous.
+      limit: Duration::from_millis(200),
+      startup: None,
+      limit_wait: Some(LimitWait {
+        max,
+        keys: keys.to_path_buf(),
+        resets_at: Box::new(|| None),
+        on_state: Box::new(|_, _| {}),
+      }),
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_run_waiting_out_a_usage_limit_is_not_killed_as_inactive() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("limited", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("scsh-limit-armed-{}.cast", std::process::id()));
+    let keys = dir.join(format!("scsh-limit-armed-{}.keys", std::process::id()));
+    let _ = std::fs::remove_file(&keys);
+    write_cast(
+      &file,
+      &["working…", "Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel"],
+    );
+
+    let watch = limit_watch(&file, &keys, Duration::from_secs(2));
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    // Held past the 200ms inactivity budget, then stopped at the wait's own ceiling — with the
+    // reason that says "quota", not "this harness hung".
+    assert_eq!(killed, Killed::LimitExhausted { resets_at: None });
+    assert!(!ok);
+    assert!(started.elapsed() >= Duration::from_secs(2), "the inactivity clock was frozen, not merely widened");
+    assert!(started.elapsed() < Duration::from_secs(10), "the wait is bounded by `max`");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn a_harness_that_says_it_will_not_resume_is_given_up_on_at_once() {
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("refused", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("scsh-limit-refused-{}.cast", std::process::id()));
+    let keys = dir.join(format!("scsh-limit-refused-{}.keys", std::process::id()));
+    write_cast(
+      &file,
+      &[
+        "Usage limit reached \u{b7} continuing automatically at 8:50am \u{b7} esc to cancel",
+        "Automatic continue stopped after repeated usage-limit hits \u{b7} this task will not resume on its own",
+      ],
+    );
+
+    // A long ceiling: nothing but the screen's own verdict should end this wait.
+    let watch = limit_watch(&file, &keys, Duration::from_secs(3600));
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::LimitExhausted { resets_at: None });
+    assert!(!ok);
+    assert!(started.elapsed() < Duration::from_secs(5), "a stated refusal ends the wait immediately");
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn the_screens_that_need_a_keypress_get_one() {
+    // Unattended, both of these sit forever: the limit dialog (whose DEFAULT choice is the
+    // wait scsh wants) and the post-reset "press enter to continue".
+    for (name, screen) in [
+      ("dialog", "You've hit your session limit \u{b7} resets 8:50am (Europe/Stockholm)"),
+      ("stale", "Your usage limit has reset \u{b7} press enter to continue"),
+    ] {
+      let ui = LiveUi::new(false, None);
+      let p = ui.proc(name, false);
+      p.start();
+      let dir = std::env::temp_dir();
+      let file = dir.join(format!("scsh-limit-key-{name}-{}.cast", std::process::id()));
+      let keys = dir.join(format!("scsh-limit-key-{name}-{}.keys", std::process::id()));
+      let _ = std::fs::remove_file(&keys);
+      write_cast(&file, &["working…", screen]);
+
+      let watch = limit_watch(&file, &keys, Duration::from_millis(600));
+      let (_, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+      let sent = std::fs::read_to_string(&keys).unwrap_or_default();
+      let _ = std::fs::remove_file(&file);
+      let _ = std::fs::remove_file(&keys);
+
+      assert_eq!(killed, Killed::LimitExhausted { resets_at: None }, "{name}");
+      assert_eq!(sent.trim(), "Enter", "{name}: the container recorder is handed the keypress");
+    }
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn an_ordinary_frozen_screen_is_still_an_inactivity_kill() {
+    // The guard on all of the above: arming the limit wait must not turn every wedged harness
+    // into a patient one. A screen that says nothing about limits is killed on schedule.
+    let ui = LiveUi::new(false, None);
+    let p = ui.proc("wedged", false);
+    p.start();
+    let dir = std::env::temp_dir();
+    let file = dir.join(format!("scsh-limit-none-{}.cast", std::process::id()));
+    let keys = dir.join(format!("scsh-limit-none-{}.keys", std::process::id()));
+    write_cast(&file, &["compiling scsh v1.42.0", "  Finished dev profile"]);
+
+    let watch = limit_watch(&file, &keys, Duration::from_secs(3600));
+    let started = Instant::now();
+    let (ok, killed, _) = p.run_watched("sleep", &["30".to_string()], None, Some(&watch), None).unwrap();
+    let _ = std::fs::remove_file(&file);
+    let _ = std::fs::remove_file(&keys);
+
+    assert_eq!(killed, Killed::Inactive);
+    assert!(!ok);
+    assert!(started.elapsed() < Duration::from_secs(5), "killed on the 200ms budget, not the hour-long limit ceiling");
   }
 
   #[test]
@@ -1400,7 +1786,8 @@ mod tests {
     // (Letters, not a counter: digits are normalized away, so `line 1`/`line 2` would count
     // as the same frame — that is the spinner-thrash case the watchdog now kills.)
     let script = format!("for w in a b c d e f g h; do echo tok-$w >> {}; sleep 0.1; done", file.display());
-    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(600), startup: None };
+    let watch =
+      ActivityWatch { file: file.clone(), limit: Duration::from_millis(600), startup: None, limit_wait: None };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::No);
@@ -1421,7 +1808,8 @@ mod tests {
       r#"i=0; while true; do echo "[$i.5, \"o\", \"thinking ${{i}}s\"]" >> {}; i=$((i+1)); sleep 0.05; done"#,
       file.display()
     );
-    let watch = ActivityWatch { file: file.clone(), limit: Duration::from_millis(500), startup: None };
+    let watch =
+      ActivityWatch { file: file.clone(), limit: Duration::from_millis(500), startup: None, limit_wait: None };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
     assert_eq!(killed, Killed::Inactive, "repeating frames are not activity");
@@ -1443,6 +1831,7 @@ mod tests {
         stall: Duration::from_millis(400),
         window: Duration::from_millis(900),
       }),
+      limit_wait: None,
     };
     let started = Instant::now();
     let (ok, killed, _) = p.run_watched("sleep", &["5".to_string()], None, Some(&watch), None).unwrap();
@@ -1471,6 +1860,7 @@ mod tests {
         stall: Duration::from_millis(400),
         window: Duration::from_millis(5000),
       }),
+      limit_wait: None,
     };
     let started = Instant::now();
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
@@ -1501,6 +1891,7 @@ mod tests {
         stall: Duration::from_millis(500),
         window: Duration::from_millis(300),
       }),
+      limit_wait: None,
     };
     let (ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), None).unwrap();
     let _ = std::fs::remove_file(&file);
@@ -1525,7 +1916,7 @@ mod tests {
     let script = format!(r#"echo '{{"message":"done"}}' > {}; exec sleep 30"#, result.display());
     let done = DoneWatch { file: result.clone(), quiet_for: Duration::from_millis(300), confirm: Box::new(|| true) };
     // An inactivity limit far too long to be what stops this run.
-    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20), startup: None };
+    let watch = ActivityWatch { file: result.clone(), limit: Duration::from_secs(20), startup: None, limit_wait: None };
     let started = Instant::now();
     let (_ok, killed, _) = p.run_watched("sh", &["-c".to_string(), script], None, Some(&watch), Some(&done)).unwrap();
     let _ = std::fs::remove_file(&result);

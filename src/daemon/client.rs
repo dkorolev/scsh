@@ -227,6 +227,25 @@ impl Client {
     self.post("/api/v1/proc/note", &body);
   }
 
+  /// Report a live sub-state of a RUNNING proc: `Some(phase)` while it is parked (today only
+  /// [`crate::daemon::model::PROC_PHASE_AWAITING_LIMITS`]), `None` once it is moving again.
+  ///
+  /// Deliberately separate from [`Self::proc_note`], which carries free text nothing reasons
+  /// about. The browser paints this state its own colour and sorts by it, so it has to be a
+  /// code — plus `until`, the instant the wait is expected to end, which is the one number a
+  /// person looking at a stalled-looking job actually wants.
+  pub fn proc_phase(&self, proc_index: usize, phase: Option<&str>, until: Option<u64>, note: &str) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"phase\": {}, \"until\": {}, \"note\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      phase.map(quote).unwrap_or_else(|| "null".to_string()),
+      until.map(|u| u.to_string()).unwrap_or_else(|| "null".to_string()),
+      quote(note)
+    );
+    self.post("/api/v1/proc/phase", &body);
+  }
+
   /// Tell the daemon where this proc's asciinema `.cast` lives on the host: the live
   /// run-dir file while the container runs, then the durable copy after the skill ends.
   pub fn proc_cast(&self, proc_index: usize, path: &str) {

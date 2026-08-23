@@ -1453,6 +1453,8 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           route,
           result_path: None,
           annotate_target,
+          phase: None,
+          phase_until: None,
           lines: Vec::new(),
         });
       }
@@ -1490,6 +1492,29 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
       let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
       let note = field_str(&obj, "note").unwrap_or_default();
       if let Some(p) = store.proc_mut(&session, proc_index) {
+        p.note = Some(note);
+        true
+      } else {
+        false
+      }
+    }
+    // A live sub-state of a running proc (a usage-limit wait). Kept out of `status` on purpose:
+    // the proc IS still running, and every dependency and job-outcome rule that reads `status`
+    // must keep seeing that. This only changes how it is drawn and sorted.
+    "/api/v1/proc/phase" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let phase = field_str(&obj, "phase");
+      let until = field_num(&obj, "until").map(|n| n as u64);
+      let note = field_str(&obj, "note").unwrap_or_default();
+      if let Some(p) = store.proc_mut(&session, proc_index) {
+        // The deadline is set independently of the phase, and outlives it on purpose. A run
+        // that RESUMED reports both as `null`, so no stale "resumes 08:50" survives. A run the
+        // limit killed reports a cleared phase with the reset time intact — which is exactly
+        // what the job supervisor reads to schedule the restart for when the window reopens.
+        p.phase_until = until;
+        p.phase = phase;
         p.note = Some(note);
         true
       } else {
@@ -2482,6 +2507,8 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     });
   }
 }
@@ -3513,6 +3540,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
       harness: Some("claude".into()),
       skill_name: Some("skill".into()),
       model: None,
@@ -3583,6 +3612,8 @@ mod tests {
       route: Some(route.into()),
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
       harness: Some("claude".into()),
       skill_name: Some(format!("{source}-{route}")),
       model: None,
@@ -3690,6 +3721,8 @@ mod tests {
       route: Some("opus".into()),
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
       harness: Some("claude".into()),
       skill_name: Some("old-skill".into()),
       model: None,
@@ -3847,6 +3880,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -3918,6 +3953,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -3976,6 +4013,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -4092,6 +4131,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4156,6 +4197,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4236,6 +4279,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -4345,6 +4390,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: Some(cast.to_string_lossy().into_owned()),
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4395,6 +4442,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -4602,6 +4651,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     let now = now_unix_secs();
     let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
@@ -4920,6 +4971,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -5028,6 +5081,8 @@ mod tests {
             route: None,
             result_path: None,
             annotate_target: None,
+            phase: None,
+            phase_until: None,
           }],
           last_seen_at: 50,
           client_connected: false,
@@ -5099,6 +5154,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     }
   }
 
@@ -5484,6 +5541,8 @@ mod tests {
               route: None,
               result_path: None,
               annotate_target: None,
+              phase: None,
+              phase_until: None,
             }],
             last_seen_at: 20,
             client_connected: false,
@@ -6167,6 +6226,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     let mut done = live(2, ProcStatus::Ok);
     done.elapsed = Some(7.0);

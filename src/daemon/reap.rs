@@ -169,6 +169,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
         harness: Some("claude".into()),
         skill_name: Some("add".into()),
         model: None,

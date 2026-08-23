@@ -24,7 +24,7 @@ pub fn new_session_id() -> String {
   crate::runtime::random_nonce_6()
 }
 
-pub use model::{DaemonMode, ProcKind, ProcRecord, ProcStatus};
+pub use model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, PROC_PHASE_AWAITING_LIMITS};
 #[cfg(unix)]
 pub use paths::daemon_detach_child;
 pub use paths::{

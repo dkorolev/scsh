@@ -143,6 +143,10 @@ RUN printf '%s\n' \
   'mkdir -p "$(dirname "$SCSH_RUN_LOG")" 2>/dev/null || true' \
   'dbg="$SCSH_RUN_LOG.tuidebug"' \
   'exit_file="$SCSH_RUN_LOG.exit"' \
+  '# Host->pane keystroke channel: scsh writes tmux key names (one per line) here when a' \
+  '# screen needs a keypress it cannot reach (claude asking to press enter to continue' \
+  '# after a usage-limit reset). Consumed and deleted by the watcher below.' \
+  'keys="$SCSH_RUN_LOG.keys"' \
   'log() { echo "$(date +%H:%M:%S.%N 2>/dev/null | cut -c1-12) $*" >> "$dbg" 2>/dev/null; }' \
   '' \
   'case "$result" in /*) : ;; *) result="$(pwd)/$result" ;; esac' \
@@ -170,6 +174,10 @@ RUN printf '%s\n' \
   '' \
   '{' \
   '  while tmux has-session -t scsh 2>/dev/null; do' \
+  '    if [ -f "$keys" ]; then' \
+  '      while read -r k; do [ -n "$k" ] && tmux send-keys -t scsh "$k" 2>/dev/null; done < "$keys"' \
+  '      log "watcher: forwarded host keys"; rm -f "$keys"' \
+  '    fi' \
   '    if [ -f "$result" ]; then' \
   '      log "watcher: result appeared -> quit via $quit"' \
   '      sleep 4' \
@@ -231,11 +239,19 @@ USER agent
 
 # --- Claude Code harness image (install harness last) ---
 FROM scsh-base AS scsh-claude
+# Pinned, like CURSOR_AGENT_VERSION below. An unpinned `npm install -g` would freeze whatever
+# version happened to be latest the day the image was first built: image rebuilds are keyed on
+# the Dockerfile TEXT (`runtime::image_build_fingerprint`), so nothing here changing means the
+# image never rebuilds, and a months-old claude would sit in it forever. Bumping this ARG is
+# how the claude CLI moves — the changed text flips the fingerprint and forces the rebuild.
+# 2.1.239 is the floor for the usage-limit wait: `autoContinueAtUsageLimit` (see
+# `quota::container_settings_json`) is ignored by CLIs older than that.
+ARG CLAUDE_CODE_VERSION=2.1.239
 RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*; \
-    npm install -g @anthropic-ai/claude-code; \
+    npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"; \
     chmod -R a+rX "$(npm root -g)"; \
     HOME=/tmp claude --version; \
     chown -R agent:agent /home/agent

@@ -29,6 +29,12 @@ pub mod reason {
   pub const STARTUP_STALLED: &str = "harness_startup_stalled";
   pub const HARNESS_NONZERO: &str = "harness_nonzero_exit";
   pub const HARNESS_OVERLOADED: &str = "harness_overloaded";
+  /// The account's claude.ai usage limit stopped the session and it will not come back on its
+  /// own. Not a failure of the task and not an overload: the work was fine, the quota window
+  /// ran out, and the ONLY thing that fixes it is the clock. Kept apart from
+  /// [`HARNESS_OVERLOADED`] because that reason's backoff tops out in minutes, while a limit
+  /// resets hours away — the retry for this one is scheduled for the reset instant instead.
+  pub const HARNESS_USAGE_LIMIT: &str = "harness_usage_limit";
   /// The harness lost its backend connection (its output says so) and exited non-zero —
   /// e.g. cursor's "Reconnecting to …" giving up after half an hour. Always retryable.
   pub const HARNESS_DISCONNECTED: &str = "harness_disconnected";
@@ -88,6 +94,7 @@ pub fn is_transient(reason: &str) -> bool {
       | reason::STARTUP_STALLED
       | reason::CONTAINER_RUN
       | reason::HARNESS_OVERLOADED
+      | reason::HARNESS_USAGE_LIMIT
       | reason::HARNESS_DISCONNECTED
       | reason::HARNESS_NONZERO
       | reason::CLONE

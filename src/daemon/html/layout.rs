@@ -433,6 +433,7 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-leg-failed { color: var(--red); }
   .wf-leg-stopped { color: var(--red); }
   .wf-leg-stalled { color: var(--purple); }
+  .wf-leg-awaiting_limits { color: var(--magenta); }
   .wf-leg-waiting, .wf-leg-skipped { color: var(--text-muted); }
   /* Queued (deps met, container coming up) is a cool blue — distinct from grey Waiting
      (blocked on a dependency), so the two never read as the same idle state. */
@@ -581,6 +582,10 @@ pub(crate) const PAGE_CSS: &str = r#"
   .wf-node.wf-stopped .wf-state, .wf-node.wf-stopped .wf-id { color: var(--red); }
   .wf-node.wf-stalled { --accent: var(--purple); }
   .wf-node.wf-stalled .wf-state, .wf-node.wf-stalled .wf-id { color: var(--purple); }
+  /* Awaiting limits: its own colour, and deliberately not orange (running) or purple
+     (abandoned) — it is alive, it is not working, and it has a time at which it resumes. */
+  .wf-node.wf-awaiting_limits { --accent: var(--magenta); }
+  .wf-node.wf-awaiting_limits .wf-state, .wf-node.wf-awaiting_limits .wf-id { color: var(--magenta); }
   .wf-node.wf-waiting { --accent: var(--text-muted); }
   .wf-node.wf-waiting .wf-state { color: var(--text-muted); }
   .wf-node.wf-queued { --accent: var(--cyan); }

@@ -69,10 +69,24 @@ pub const CAPTURE_STATUSLINE_SH: &str = concat!(
   "printf 'scsh'\n",
 );
 
-/// `settings.json` pointing claude's status line at the writer above (container path).
-pub fn capture_settings_json(statusline_path_in_container: &str) -> String {
+/// The `settings.json` scsh writes into every claude container's forwarded config dir.
+///
+/// Two keys, for two unrelated reasons:
+///
+/// * `statusLine` points claude's status line at the writer above, so every real run leaves
+///   behind the account's `rate_limits` for free (see [`harvest_claude_capture`]).
+/// * `autoContinueAtUsageLimit` arms claude's OWN in-session wait: when a usage limit stops the
+///   session, the TUI waits for the reset and continues the same conversation instead of
+///   presenting a dialog nobody is there to answer. This is the only way a run survives a limit
+///   with its context intact — every scsh retry is a fresh clone, container, and harness session.
+///
+///   It is not a guarantee. The feature is behind a server-side rollout gate scsh cannot
+///   inspect, claude refuses the wait when the reset is more than a day out, and it gives up
+///   after repeated hits. [`crate::limitwait`] reads the screen to find out which happened, and
+///   the reset-time retry in `main` is what covers the cases where the wait never arms.
+pub fn container_settings_json(statusline_path_in_container: &str) -> String {
   format!(
-    "{{ \"statusLine\": {{ \"type\": \"command\", \"command\": {}, \"refreshInterval\": 5 }} }}",
+    "{{ \"statusLine\": {{ \"type\": \"command\", \"command\": {}, \"refreshInterval\": 5 }}, \"autoContinueAtUsageLimit\": true }}",
     json::quote(statusline_path_in_container)
   )
 }
@@ -100,6 +114,35 @@ pub fn harvest_claude_capture(claude_config_dir: &std::path::Path) -> bool {
   // only thing that interprets it, so a future field lands without a migration.
   let doc = format!("{{ \"observed_at\": {now}, \"statusline\": {} }}", text.trim());
   std::fs::write(&path, doc).is_ok()
+}
+
+/// The soonest limit reset a RUNNING claude container has reported, as a unix epoch.
+///
+/// The status line installed by [`container_settings_json`] refreshes every few seconds, so the
+/// capture file inside a live run's forwarded config dir carries the account's current windows
+/// with exact epoch reset times — no prose to parse, no extra request, no guessing at the
+/// container's timezone. That is what tells the usage-limit wait how long it is waiting for.
+///
+/// `claude_config_dir` is the HOST path of the run's forwarded `.claude` dir. Windows that have
+/// already reset (or never carried a time) are ignored; `None` means the run has not reported a
+/// future reset, which callers must treat as "wait blind, under the cap" rather than "no limit".
+pub fn live_reset_epoch(claude_config_dir: &std::path::Path, now: u64) -> Option<u64> {
+  let text = std::fs::read_to_string(claude_config_dir.join(CAPTURE_FILE)).ok()?;
+  // Straight off the provider's own blob: `resets_at` is already a unix epoch here. The
+  // normalized [`QuotaWindow`] renders it as ISO prose for humans, which would only have to be
+  // parsed back.
+  let Ok(Value::Object(root)) = json::parse(&text) else { return None };
+  let limits = get_obj(&root, "rate_limits")?;
+  limits
+    .iter()
+    .filter_map(|(_, v)| match v {
+      Value::Object(w) => get_num(w, "resets_at"),
+      _ => None,
+    })
+    .filter(|s| s.is_finite() && *s > 0.0)
+    .map(|s| s as u64)
+    .filter(|&at| at > now)
+    .min()
 }
 
 /// The newest captured claude quota, if any: `(windows, observed_at)`.
@@ -231,6 +274,12 @@ fn trim_percent(p: f64) -> String {
 }
 
 /// `2026-07-23T18:10:00Z` → `2026-07-23 18:10` (already UTC; seconds dropped).
+/// A unix epoch as `YYYY-MM-DD HH:MM UTC`, for a status line a person reads. UTC and said so:
+/// a reset time rendered in an unstated zone is worse than no reset time at all.
+pub fn human_epoch(epoch_secs: u64) -> String {
+  format!("{} UTC", human_time(&epoch_to_iso(epoch_secs)))
+}
+
 fn human_time(iso: &str) -> String {
   let t = iso.trim_end_matches('Z');
   match t.split_once('T') {
@@ -1321,11 +1370,14 @@ mod tests {
     // Atomic publish: the host must never read a half-written capture.
     assert!(CAPTURE_STATUSLINE_SH.contains(".part"));
     assert!(CAPTURE_STATUSLINE_SH.contains(&format!("mv \"$d/{CAPTURE_FILE}.part\" \"$d/{CAPTURE_FILE}\"")));
-    let settings = capture_settings_json("/home/agent/repo/tmp/.claude-auth/.claude/scsh-quota-statusline.sh");
+    let settings = container_settings_json("/home/agent/repo/tmp/.claude-auth/.claude/scsh-quota-statusline.sh");
     let Ok(Value::Object(root)) = json::parse(&settings) else { panic!("settings must be valid JSON: {settings}") };
     let line = get_obj(&root, "statusLine").expect("statusLine");
     assert_eq!(get_str(line, "type"), Some("command"));
     assert!(get_str(line, "command").unwrap().ends_with("/scsh-quota-statusline.sh"));
+    // Arming claude's own in-session wait is the ONLY way a run survives a usage limit with
+    // its conversation intact; every scsh retry starts a fresh session.
+    assert_eq!(root.iter().find(|(k, _)| k == "autoContinueAtUsageLimit").map(|(_, v)| v), Some(&Value::Bool(true)));
   }
 
   #[test]

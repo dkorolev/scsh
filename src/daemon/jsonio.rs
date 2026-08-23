@@ -191,11 +191,16 @@ fn proc_json(p: &ProcRecord) -> String {
     Some(s) => format!("{s}"),
     None => "null".to_string(),
   };
+  let phase_until = match p.phase_until {
+    Some(s) => format!("{s}"),
+    None => "null".to_string(),
+  };
   format!(
     "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"label\": {}, \"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"diff_path\": {}, \
-\"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"lines\": [{}] }}",
+\"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
+\"phase_until\": {phase_until}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -215,6 +220,7 @@ fn proc_json(p: &ProcRecord) -> String {
     opt_str(&p.route),
     opt_str(&p.result_path),
     opt_str(&p.annotate_target),
+    opt_str(&p.phase),
     lines.join(", ")
   )
 }
@@ -344,6 +350,11 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
     route,
     result_path,
     annotate_target: field_str(obj, "annotate_target"), // absent on sessions persisted by older builds
+    // Also absent on older snapshots. A restored proc that WAS parked reads as plainly running
+    // until its next report, which is the harmless direction: the phase is live decoration, and
+    // the run either resumes and clears it or fails and replaces it.
+    phase: field_str(obj, "phase"),
+    phase_until: field_num(obj, "phase_until").map(|n| n as u64),
     lines,
   })
 }
@@ -419,6 +430,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -460,6 +473,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
       }],
       last_seen_at: 105,

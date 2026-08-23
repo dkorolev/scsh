@@ -16,6 +16,7 @@ mod harness_def;
 mod json;
 #[cfg(test)]
 mod licenses;
+mod limitwait;
 mod ptyrec;
 mod quota;
 mod runtime;
@@ -2310,6 +2311,18 @@ enum RetryDecision {
   /// The attempt stalled during its launch phase: force-restart immediately (no backoff —
   /// nothing of value was in flight), still spending one retry from the route's budget.
   Startup,
+  /// The account's usage limit stopped the attempt. Retry AT the reset instant rather than on
+  /// the exponential backoff, which tops out in minutes against a window that reopens hours
+  /// away. `resume_at` is a unix epoch; `None` means the provider never said, so the wait falls
+  /// back to a bounded default.
+  ///
+  /// The wait is deliberately exempt from the wall-clock retry budget: a task is not "half an
+  /// hour into failing" because its quota ran out, and charging it that would guarantee every
+  /// limited route gives up before it could possibly succeed. It still spends one retry from
+  /// the count and still answers to the identical-failure breaker.
+  LimitWait {
+    resume_at: Option<u64>,
+  },
   Automatic,
 }
 
@@ -2322,7 +2335,7 @@ enum RetryDecision {
 fn retry_decision(
   fail_reason: Option<&str>, restart_requested: bool, schema_retry_available: bool, policy: failure::RetryPolicy,
   retries_used: u32, budget_spent_secs: u64, consecutive_identical: u32, retry_enabled: bool, tui: bool,
-  first_attempt: bool,
+  first_attempt: bool, limit_resets_at: Option<u64>,
 ) -> RetryDecision {
   if restart_requested {
     return RetryDecision::Browser;
@@ -2345,6 +2358,12 @@ fn retry_decision(
   if consecutive_identical > policy.signature_cap {
     return RetryDecision::StopBreaker;
   }
+  // Checked BEFORE the wall-clock budget on purpose: a quota window is measured in hours and
+  // the budget in minutes, so any route that hit a limit would otherwise be refused the one
+  // retry that could ever work.
+  if reason == failure::reason::HARNESS_USAGE_LIMIT {
+    return RetryDecision::LimitWait { resume_at: limit_resets_at };
+  }
   if budget_spent_secs >= policy.budget_secs {
     return RetryDecision::Stop;
   }
@@ -2366,6 +2385,13 @@ struct RouteRetryState {
   last_signature: Option<String>,
   consecutive_identical: u32,
   retries_used: u32,
+  /// Wall clock spent parked on a provider usage limit, credited back to the retry budget.
+  ///
+  /// The budget exists to stop a route thrashing against something broken for hours. A quota
+  /// window is not that: nothing is being retried, nothing is being spent, and the route is
+  /// simply not allowed to run yet. Charging the wait would make the budget an accident of what
+  /// time of day the limit hit — and with a 30-minute default, would exhaust it every time.
+  limit_waited: Duration,
 }
 
 impl RouteRetryState {
@@ -2381,6 +2407,7 @@ impl RouteRetryState {
       last_signature: None,
       consecutive_identical: 0,
       retries_used: 0,
+      limit_waited: Duration::ZERO,
     }
   }
 
@@ -2399,7 +2426,7 @@ impl RouteRetryState {
   }
 
   fn budget_spent_secs(&self) -> u64 {
-    self.first_failure_at.map(|at| at.elapsed().as_secs()).unwrap_or(0)
+    self.first_failure_at.map(|at| at.elapsed().saturating_sub(self.limit_waited).as_secs()).unwrap_or(0)
   }
 
   fn budget_left_secs(&self) -> u64 {
@@ -2412,6 +2439,12 @@ impl RouteRetryState {
 
   fn record_immediate_retry(&mut self) {
     self.retries_used += 1;
+  }
+
+  /// Spend one retry on a usage-limit wait and credit the waiting back to the budget clock.
+  fn record_limit_wait(&mut self, waited: Duration) {
+    self.retries_used += 1;
+    self.limit_waited += waited;
   }
 
   /// The delay before the next automatic retry, advancing the backoff exponent.
@@ -2431,6 +2464,66 @@ impl RouteRetryState {
     ));
     run.fail_reason = Some(failure::reason::RETRIES_EXHAUSTED_IDENTICAL.into());
   }
+}
+
+/// How long to wait for a quota window whose reset the provider never reported.
+///
+/// Blind, so it has to be a compromise: long enough that a route does not burn its whole retry
+/// count re-hitting the same limit within the hour, short enough that a limit which has already
+/// quietly reset is not slept through. Half an hour across the default five retries covers a
+/// couple of hours, and each wake-up gets a fresh look at the real state.
+const LIMIT_RETRY_BLIND_SECS: u64 = 30 * 60;
+
+/// Slack added past a reported reset before retrying, so the fresh attempt does not race the
+/// provider's own clock and get refused on the same limit it just waited out.
+const LIMIT_RETRY_GRACE_SECS: u64 = 60;
+
+/// How long to sleep before retrying a route the account's usage limit stopped.
+///
+/// Bounded at both ends: never longer than [`LIMIT_WAIT_MAX_SECS`] (a reset time from a stale
+/// capture must not park a job for a day), and never shorter than the grace (a reset instant
+/// that has already passed means retry now, not spin).
+fn limit_retry_delay_secs(resume_at: Option<u64>, now: u64) -> u64 {
+  let Some(at) = resume_at else { return LIMIT_RETRY_BLIND_SECS };
+  (at.saturating_sub(now) + LIMIT_RETRY_GRACE_SECS).clamp(LIMIT_RETRY_GRACE_SECS, LIMIT_WAIT_MAX_SECS)
+}
+
+/// Park a retry until the account's quota window reopens, reporting the wait as the row's live
+/// phase so a job page shows "awaiting limits — resumes 08:50" rather than a task that appears
+/// to have quietly stopped. Ends exactly like [`backoff_sleep_interruptible`]: a browser Force
+/// restart cuts it short, a job stop abandons it.
+///
+/// The waiting is credited back to the route's retry budget, which measures thrashing against a
+/// broken thing — and a closed quota window is neither.
+fn limit_wait_for_reset(
+  proc: &ui::screen::Proc, retry: &mut RouteRetryState, session_id: &str, proc_index: usize, resume_at: Option<u64>,
+  client: Option<&std::sync::Arc<daemon::Client>>,
+) -> BackoffWake {
+  let delay = limit_retry_delay_secs(resume_at, daemon::now_unix_secs());
+  let attempt = retry.retries_used + 1;
+  let note = match resume_at {
+    Some(at) => format!(
+      "usage limit reached \u{2014} retrying at {} (retry {attempt} of {})",
+      quota::human_epoch(at),
+      retry.policy.max_retries
+    ),
+    None => format!(
+      "usage limit reached, no reported reset \u{2014} retrying in ~{} (retry {attempt} of {})",
+      ui::clock::format_elapsed(delay as f64),
+      retry.policy.max_retries
+    ),
+  };
+  proc.note(&note);
+  if let Some(c) = client {
+    c.proc_phase(proc_index, Some(daemon::PROC_PHASE_AWAITING_LIMITS), resume_at, &note);
+  }
+  let started = Instant::now();
+  let wake = backoff_sleep_interruptible(delay, session_id, proc_index);
+  retry.record_limit_wait(started.elapsed());
+  if let Some(c) = client {
+    c.proc_phase(proc_index, None, None, "the usage limit window reopened");
+  }
+  wake
 }
 
 /// Why a retry backoff stopped waiting.
@@ -2531,6 +2624,7 @@ fn run_workflow_step_with_retries(
       failure::retry_enabled(),
       invocation.harness.is_tui(),
       attempts == 1,
+      run.limit_resets_at,
     );
     if decision == RetryDecision::Stop || decision == RetryDecision::StopBreaker {
       // An invalid-result attempt returns with its proc row still open (run_one_skill
@@ -2553,6 +2647,7 @@ fn run_workflow_step_with_retries(
       RetryDecision::Browser => failure::reason::RESTART_REQUESTED,
       RetryDecision::Schema => failure::reason::RESULT_INVALID,
       RetryDecision::Startup => failure::reason::STARTUP_STALLED,
+      RetryDecision::LimitWait { .. } => failure::reason::HARNESS_USAGE_LIMIT,
       RetryDecision::Automatic => run.fail_reason.as_deref().unwrap_or("unknown"),
       RetryDecision::Stop | RetryDecision::StopBreaker => unreachable!("terminal decisions returned above"),
     };
@@ -2628,6 +2723,17 @@ fn run_workflow_step_with_retries(
         "force-restarting after a startup stall (retry {} of {})",
         retry.retries_used, retry.policy.max_retries
       ));
+    } else if let RetryDecision::LimitWait { resume_at } = decision {
+      match limit_wait_for_reset(&proc, &mut retry, session_id, proc_index, resume_at, daemon_client.as_ref()) {
+        BackoffWake::Restart => proc.note("retrying now (browser restart)"),
+        BackoffWake::Cancelled => {
+          proc.note("job stopped \u{2014} not retrying");
+          proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
+          run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+          return run;
+        }
+        BackoffWake::Elapsed => {}
+      }
     } else {
       proc.note(&format!("retrying after {reason}"));
     }
@@ -5175,6 +5281,7 @@ fn build_and_run(
               failure::retry_enabled(),
               skill.harness.is_tui(),
               attempts == 1,
+              run.limit_resets_at,
             );
             match decision {
               RetryDecision::Stop => return run,
@@ -5182,7 +5289,11 @@ fn build_and_run(
                 retry.mark_breaker_tripped(&mut run);
                 return run;
               }
-              RetryDecision::Browser | RetryDecision::Schema | RetryDecision::Startup | RetryDecision::Automatic => {}
+              RetryDecision::Browser
+              | RetryDecision::Schema
+              | RetryDecision::Startup
+              | RetryDecision::LimitWait { .. }
+              | RetryDecision::Automatic => {}
             }
             let reason = if restart_requested {
               failure::reason::RESTART_REQUESTED
@@ -5235,6 +5346,17 @@ fn build_and_run(
                 "force-restarting after a startup stall (retry {} of {})",
                 retry.retries_used, retry.policy.max_retries
               ));
+            } else if let RetryDecision::LimitWait { resume_at } = decision {
+              match limit_wait_for_reset(&proc, &mut retry, session_ref, proc_index, resume_at, dc.as_ref()) {
+                BackoffWake::Restart => proc.note("retrying now (browser restart)"),
+                BackoffWake::Cancelled => {
+                  proc.note("job stopped \u{2014} not retrying");
+                  proc.finish_fail(failure::reason::FORCE_STOPPED, Some("stopped from the session browser"));
+                  run.fail_reason = Some(failure::reason::FORCE_STOPPED.into());
+                  return run;
+                }
+                BackoffWake::Elapsed => {}
+              }
             }
           }
         })
@@ -5299,6 +5421,8 @@ fn build_and_run(
         route: fleet_route_name(skill).map(str::to_string),
         result_path,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       });
     }
     let _ = fleet::write_rollups(&session_id, &fake_procs);
@@ -5514,6 +5638,10 @@ struct SkillRun {
   /// The durable task result passed, but the harness or container did not finish cleanly. This
   /// remains an `ok` outcome while rendering orange so teardown trouble stays visible.
   graceful_shutdown: bool,
+  /// When this attempt died on a provider usage limit: the instant that limit resets (unix
+  /// seconds), if the provider said. The retry loops wait for it instead of spending a backoff
+  /// that could never reach it — see [`RetryDecision::LimitWait`].
+  limit_resets_at: Option<u64>,
 }
 
 impl SkillRun {
@@ -5533,6 +5661,7 @@ impl SkillRun {
       result_content: None,
       workflow_outputs: None,
       graceful_shutdown: false,
+      limit_resets_at: None,
     }
   }
   fn ok(
@@ -5562,6 +5691,12 @@ impl SkillRun {
   /// identical-failure signatures, so two attempts failing the same way are recognizable.
   fn with_fail_detail(mut self, why: &str) -> SkillRun {
     self.fail_detail = Some(why.to_string());
+    self
+  }
+  /// Carry the provider's reset instant out of a usage-limit failure, so the retry can be
+  /// scheduled for when the quota actually returns.
+  fn with_limit_reset(mut self, resets_at: Option<u64>) -> SkillRun {
+    self.limit_resets_at = resets_at;
     self
   }
   fn invalid_result(
@@ -5638,16 +5773,9 @@ fn cast_tail_text(cast: &Path) -> String {
     return String::new();
   }
   let raw = String::from_utf8_lossy(&raw);
-  let mut text = String::new();
   // Reading from mid-file, the first line is usually truncated — skip it.
-  for line in raw.lines().skip(if start > 0 { 1 } else { 0 }) {
-    let Ok(json::Value::Array(event)) = json::parse(line) else { continue };
-    if let (Some(json::Value::String(kind)), Some(json::Value::String(data))) = (event.get(1), event.get(2)) {
-      if kind == "o" {
-        text.push_str(&console::strip_ansi_codes(data));
-      }
-    }
-  }
+  let body: String = raw.lines().skip(if start > 0 { 1 } else { 0 }).collect::<Vec<_>>().join("\n");
+  let mut text = ptyrec::cast_output_text(&body);
   if text.len() > KEEP_CHARS {
     let mut cut = text.len() - KEEP_CHARS;
     while !text.is_char_boundary(cut) {
@@ -5672,6 +5800,24 @@ fn apple_container_lost_shell_response(last: Option<&str>) -> bool {
 /// inactivity windows (1800s by default, 3600s where a step widened it) this replaces as the
 /// usual way a wedged-but-finished harness gets stopped.
 const RESULT_QUIESCENCE_SECS: u64 = 30;
+
+/// Ceiling on how long one run may sit parked on a usage limit before scsh stops waiting on it.
+///
+/// Six hours is claude's own ceiling on the wait it arms, so a longer one here could only ever
+/// hold a container open past the point where the harness itself has given up. The reset instant
+/// the provider reports shortens it further whenever it is known; this is the bound for a limit
+/// whose end nobody has stated.
+const LIMIT_WAIT_MAX_SECS: u64 = 6 * 60 * 60;
+
+/// The one-line status shown on the board and in the session browser while a run is parked (or,
+/// with `phase: None`, when it stops being parked).
+fn limit_wait_detail(phase: Option<limitwait::LimitState>, resets_at: Option<u64>) -> String {
+  let Some(state) = phase else { return "resumed after the usage limit reset".to_string() };
+  match resets_at {
+    Some(at) => format!("{} \u{2014} resumes {}", state.label(), quota::human_epoch(at)),
+    None => state.label().to_string(),
+  }
+}
 
 fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
   let exit = run_dir.join(format!("{}.exit", runtime::RUN_LOG_REL));
@@ -5976,10 +6122,41 @@ fn run_one_skill(
     name.hash(&mut hasher);
     nanos ^ hasher.finish()
   };
+  // Usage limits are not stalls. When claude's own limit wait is armed it will resume this very
+  // session — the only path that keeps an interrupted task's context, since every retry below
+  // starts a fresh clone, container, and conversation — so the watchdogs above are frozen while
+  // a limit banner is on screen instead of killing a run that is about to continue.
+  // claude-only: the needles are its literal TUI prose, and no other harness parks like this.
+  let limit_wait = (skill.harness == config::Harness::Claude).then(|| ui::screen::LimitWait {
+    max: Duration::from_secs(LIMIT_WAIT_MAX_SECS),
+    keys: run_dir.join(runtime::RUN_KEYS_REL),
+    resets_at: {
+      // The run's own status line writes the account's windows — with exact epoch resets —
+      // into the forwarded config dir every few seconds while it works.
+      let claude_dir = claude_auth.as_ref().map(|p| p.join(".claude"));
+      Box::new(move || {
+        let dir = claude_dir.as_ref()?;
+        quota::live_reset_epoch(dir, daemon::now_unix_secs())
+      })
+    },
+    on_state: {
+      let spinner = &spinner;
+      let client = daemon_client.clone();
+      Box::new(move |state, resets_at| {
+        let phase = state.filter(|s| s.is_parked());
+        let detail = limit_wait_detail(phase, resets_at);
+        spinner.note(&detail);
+        if let Some(c) = &client {
+          c.proc_phase(spinner.index(), phase.map(|_| daemon::PROC_PHASE_AWAITING_LIMITS), resets_at, &detail);
+        }
+      })
+    },
+  });
   let watch = ui::screen::ActivityWatch {
     file: run_dir.join(runtime::RUN_CAST_REL),
     limit: Duration::from_secs(inactivity_secs),
     startup: Some(ui::screen::StartupStall::jittered(startup_seed)),
+    limit_wait,
   };
   // Completion watch: stop as soon as the task crosses its declared finish line, rather than
   // waiting out `inactivity_secs` for a CLI that finished its work and then failed to exit.
@@ -6036,6 +6213,9 @@ fn run_one_skill(
         }
         ui::screen::Killed::Timeout => "accepted the valid result after the wall-clock watchdog stopped the harness",
         ui::screen::Killed::Done => "stopped the harness once its result file had been written and quiet for 30s",
+        ui::screen::Killed::LimitExhausted { .. } => {
+          "accepted the valid result the harness had already written when its usage limit stopped it"
+        }
         ui::screen::Killed::No => "accepted the valid result despite the harness exiting non-zero during teardown",
       });
       Ok((true, killed, last))
@@ -6055,10 +6235,15 @@ fn run_one_skill(
   if let (Some(c), Some(durable)) = (&daemon_client, &durable_cast) {
     c.proc_cast(spinner.index(), durable);
   }
+  // The run's own status-line capture, read out before the forwarded credentials (and the
+  // capture beside them) are scrubbed. Also the last chance to learn when the account's limit
+  // resets, which the classifier below needs if the harness EXITED on a limit rather than
+  // parking on one.
+  let mut observed_reset_at = None;
   if let Some(p) = &claude_auth {
-    // Keep what this run's status line observed about the account's limits before the
-    // forwarded credentials (and the capture beside them) are scrubbed.
-    quota::harvest_claude_capture(&p.join(".claude"));
+    let dir = p.join(".claude");
+    observed_reset_at = quota::live_reset_epoch(&dir, daemon::now_unix_secs());
+    quota::harvest_claude_capture(&dir);
     let _ = std::fs::remove_dir_all(p);
   }
   if let Some(p) = &opencode_forward {
@@ -6096,6 +6281,30 @@ fn run_one_skill(
       spinner.finish_fail(failure::reason::CONTAINER_INACTIVE, Some(&detail));
       return SkillRun::failed(failure::reason::CONTAINER_INACTIVE, Some(run_dir_str), Some(log), clone_dir)
         .with_fail_detail(&why);
+    }
+    Ok((false, ui::screen::Killed::LimitExhausted { resets_at }, _)) => {
+      // The watch asks for the reset while parked; the harvest above reads the same capture one
+      // last time after the container is gone. Either may be the one that got an answer.
+      let resets_at = resets_at.or(observed_reset_at);
+      // The account's quota ran out and claude's own wait either never armed or gave up. Nothing
+      // about the task went wrong and nothing about it will go right until the window reopens,
+      // so this carries the reset instant out to the retry loop rather than a backoff.
+      schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
+      let why = match resets_at {
+        Some(at) => format!("stopped by a claude.ai usage limit; resets {}", quota::human_epoch(at)),
+        None => "stopped by a claude.ai usage limit with no reported reset time".to_string(),
+      };
+      let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      // Leave the reset instant on the row (with the live phase cleared): the job supervisor
+      // reads it to schedule this job's restart for when the window reopens, instead of
+      // spending its backoff hitting the same limit again.
+      if let Some(c) = &daemon_client {
+        c.proc_phase(spinner.index(), None, resets_at, &why);
+      }
+      spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
+      return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
+        .with_fail_detail(&why)
+        .with_limit_reset(resets_at);
     }
     Ok((false, ui::screen::Killed::StartupStalled { silent }, _)) => {
       // The launch phase stalled: nothing of value was in flight, so the retry loop above
@@ -6137,6 +6346,20 @@ fn run_one_skill(
       // "Reconnecting to …", a provider's 529 page, a login demand — lives in the recording.
       let sample = format!("{why}\n{}", cast_tail_text(&run_dir.join(runtime::RUN_CAST_REL)));
       let detail = skill_fail_detail(&why, skill.harness, Some(&run_dir_str), Some(&log));
+      // A limit that made the harness EXIT rather than park never reaches the wait above, but
+      // it is the same event and needs the same answer: retry when the window reopens, not on a
+      // backoff that tops out in minutes. Checked ahead of the overload needles, which would
+      // otherwise claim it and hand it that useless backoff.
+      let limited = limitwait::detect(&sample).is_some_and(|state| state != limitwait::LimitState::Resumed);
+      if limited {
+        if let Some(c) = &daemon_client {
+          c.proc_phase(spinner.index(), None, observed_reset_at, &why);
+        }
+        spinner.finish_fail(failure::reason::HARNESS_USAGE_LIMIT, Some(&detail));
+        return SkillRun::failed(failure::reason::HARNESS_USAGE_LIMIT, Some(run_dir_str), Some(log), clone_dir)
+          .with_fail_detail(&why)
+          .with_limit_reset(observed_reset_at);
+      }
       let reason = if failure::harness_reported_overload(&sample) {
         failure::reason::HARNESS_OVERLOADED
       } else if failure::harness_reported_disconnect(&sample) {
@@ -6806,7 +7029,7 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
     write_claude_identity(src, &json_dest);
   }
   seed_claude_tui_config(&json_dest);
-  install_claude_quota_statusline(&claude_dir);
+  install_claude_container_settings(&claude_dir);
 
   #[cfg(unix)]
   {
@@ -6820,12 +7043,16 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   Some(root)
 }
 
-/// Point the container's Claude Code status line at a writer that parks its JSON payload in
-/// the forwarded config dir. That payload carries `rate_limits` once the session's first API
-/// response lands, so every real run leaves behind the account's usage — captured for free,
-/// from work already happening, and harvested by [`quota::harvest_claude_capture`] when the
-/// run ends. Best-effort: a failure here only costs the capture, never the run.
-fn install_claude_quota_statusline(claude_dir: &Path) {
+/// Write the container's Claude Code `settings.json` (and the status-line script it names).
+///
+/// The status line parks claude's JSON payload in the forwarded config dir; that payload carries
+/// `rate_limits` once the session's first API response lands, so every real run leaves behind the
+/// account's usage — captured for free, from work already happening, and harvested by
+/// [`quota::harvest_claude_capture`] when the run ends. The settings file also arms claude's own
+/// usage-limit wait; see [`quota::container_settings_json`].
+///
+/// Best-effort: a failure here costs the capture and the wait, never the run.
+fn install_claude_container_settings(claude_dir: &Path) {
   let script = claude_dir.join("scsh-quota-statusline.sh");
   if std::fs::write(&script, quota::CAPTURE_STATUSLINE_SH).is_err() {
     return;
@@ -6837,7 +7064,7 @@ fn install_claude_quota_statusline(claude_dir: &Path) {
   }
   // The command must name the path the CONTAINER sees, not this host path.
   let in_container = format!("{}/scsh-quota-statusline.sh", runtime::claude_config_dir_in_container());
-  let _ = std::fs::write(claude_dir.join("settings.json"), quota::capture_settings_json(&in_container));
+  let _ = std::fs::write(claude_dir.join("settings.json"), quota::container_settings_json(&in_container));
 }
 
 /// Write a minimal `.claude.json` at `dest` carrying only the host's Claude **login identity**
@@ -10332,6 +10559,22 @@ mod tests {
   }
 
   #[test]
+  fn a_usage_limit_retry_is_scheduled_for_the_reset_not_a_backoff() {
+    let now = 1_800_000_000;
+    // The provider said when: wait until then, plus a little, so the fresh attempt does not
+    // race its clock and get refused on the limit it just waited out.
+    assert_eq!(limit_retry_delay_secs(Some(now + 3600), now), 3600 + LIMIT_RETRY_GRACE_SECS);
+    // Already reset (a stale capture, or a slow hand-off): retry now, do not spin.
+    assert_eq!(limit_retry_delay_secs(Some(now - 10), now), LIMIT_RETRY_GRACE_SECS);
+    // A reset time from a stale capture cannot park a job for a day.
+    assert_eq!(limit_retry_delay_secs(Some(now + 86_400), now), LIMIT_WAIT_MAX_SECS);
+    // Nothing reported: bounded blind wait, never the 60s backoff that would just re-hit it.
+    assert_eq!(limit_retry_delay_secs(None, now), LIMIT_RETRY_BLIND_SECS);
+    // A blind wait shorter than the backoff's own cap would buy nothing over just backing off.
+    const _: () = assert!(LIMIT_RETRY_BLIND_SECS > 15 * 60);
+  }
+
+  #[test]
   fn retry_decision_is_budgeted_breaker_capped_and_browser_restarts_always_win() {
     use RetryDecision::{Automatic, Browser, Schema, Startup, Stop, StopBreaker};
     let policy = failure::RetryPolicy {
@@ -10342,7 +10585,7 @@ mod tests {
       signature_cap: 5,
     };
     let decide = |reason: &'static str, retries: u32, spent: u64, identical: u32| {
-      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true)
+      retry_decision(Some(reason), false, false, policy, retries, spent, identical, true, true, true, None)
     };
 
     // A harness dying with a non-zero exit is retryable — a silent crash at container
@@ -10361,12 +10604,12 @@ mod tests {
     assert_eq!(decide(failure::reason::RESULT_INVALID, 0, 0, 1), Stop);
     // The one schema-correction retry precedes the budget logic.
     assert_eq!(
-      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true),
+      retry_decision(Some(failure::reason::RESULT_INVALID), false, true, policy, 0, 0, 1, true, true, true, None),
       Schema
     );
     // SCSH_NO_RETRY (retry_enabled=false) stops everything except explicit browser clicks.
     assert_eq!(
-      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 0, 1, false, true, true),
+      retry_decision(Some(failure::reason::CONTAINER_TIMEOUT), false, false, policy, 0, 0, 1, false, true, true, None),
       Stop
     );
     assert_eq!(
@@ -10381,6 +10624,7 @@ mod tests {
         false,
         true,
         true,
+        None,
       ),
       Browser,
       "a browser restart ignores budget, breaker, and SCSH_NO_RETRY"
@@ -10392,13 +10636,64 @@ mod tests {
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 5, 0, 1), Stop);
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 0, 6), StopBreaker);
     assert_eq!(decide(failure::reason::STARTUP_STALLED, 0, 30 * 60, 1), Stop);
+    // A usage limit is retried AT the reset, not on the backoff — and, unlike every other
+    // reason, is not refused once the wall-clock budget is spent. The budget is minutes and a
+    // quota window is hours, so charging it would guarantee the one retry that could work is
+    // never taken. The count ceiling and the breaker still bound it.
+    assert_eq!(
+      retry_decision(
+        Some(failure::reason::HARNESS_USAGE_LIMIT),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        true,
+        true,
+        true,
+        Some(1_800_000_000)
+      ),
+      RetryDecision::LimitWait { resume_at: Some(1_800_000_000) }
+    );
+    assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 0, 0, 1), RetryDecision::LimitWait { resume_at: None });
+    assert_eq!(
+      decide(failure::reason::HARNESS_USAGE_LIMIT, 0, 30 * 60, 1),
+      RetryDecision::LimitWait { resume_at: None }
+    );
+    assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 5, 0, 1), Stop, "the retry count still bounds it");
+    assert_eq!(decide(failure::reason::HARNESS_USAGE_LIMIT, 0, 0, 6), StopBreaker);
     // First-attempt auth rejection is permanent; on a later attempt it is flakiness.
     assert_eq!(
-      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 0, 1, true, true, true),
+      retry_decision(
+        Some(failure::reason::HARNESS_AUTH_REJECTED),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        true,
+        true,
+        true,
+        None
+      ),
       Stop
     );
     assert_eq!(
-      retry_decision(Some(failure::reason::HARNESS_AUTH_REJECTED), false, false, policy, 0, 0, 1, true, true, false),
+      retry_decision(
+        Some(failure::reason::HARNESS_AUTH_REJECTED),
+        false,
+        false,
+        policy,
+        0,
+        0,
+        1,
+        true,
+        true,
+        false,
+        None
+      ),
       Automatic
     );
   }

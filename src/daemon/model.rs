@@ -220,6 +220,16 @@ pub struct ProcRecord {
   /// point a still-chapterless recording at the job doing its annotation (the "chapters:
   /// summarizing…" link on the job page). `None` on every other proc kind.
   pub annotate_target: Option<String>,
+  /// A live sub-state of `running` — today only [`PROC_PHASE_AWAITING_LIMITS`]. Deliberately
+  /// NOT a [`ProcStatus`]: the proc really is still running, holding its container and its
+  /// conversation, and every dependency and job-outcome rule that reads `status` should keep
+  /// treating it that way. It just is not making progress, and saying so is the difference
+  /// between a job that looks hung and one that is visibly waiting for a quota window.
+  /// Cleared when the run starts moving again, and by [`Self::finish`]-time in any case.
+  pub phase: Option<String>,
+  /// When the current [`Self::phase`] is expected to end (unix seconds), when that is known —
+  /// the provider's own reset instant for a usage-limit wait.
+  pub phase_until: Option<u64>,
 }
 
 impl ProcRecord {
@@ -244,6 +254,11 @@ pub const DEFAULT_JOB_RETRIES: u32 = 25;
 /// job-level breaker trips — scsh's own bug or a deterministic workflow failure should
 /// not burn the full restart budget overnight.
 pub const JOB_FAIL_STREAK_CAP: u32 = 3;
+
+/// [`ProcRecord::phase`] for a run parked on a provider usage limit: still running, still
+/// holding its session, but waiting for a quota window rather than working. Mirrored in the
+/// browser as its own state so it is never mistaken for a task that quietly stopped.
+pub const PROC_PHASE_AWAITING_LIMITS: &str = "awaiting_limits";
 
 /// Supervisor state for one session. Every job is first-class: the daemon restarts a
 /// terminal failure up to the job's retries budget, and the state is inherited
@@ -743,6 +758,8 @@ mod tests {
       route: None,
       result_path: None,
       annotate_target: None,
+      phase: None,
+      phase_until: None,
     }
   }
 
@@ -847,6 +864,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -1028,6 +1047,8 @@ mod tests {
         route: None,
         result_path: None,
         annotate_target: None,
+        phase: None,
+        phase_until: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -1074,6 +1095,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
         ProcRecord {
           index: 1,
@@ -1098,6 +1121,8 @@ mod tests {
           route: None,
           result_path: None,
           annotate_target: None,
+          phase: None,
+          phase_until: None,
         },
       ],
       last_seen_at: 1,
