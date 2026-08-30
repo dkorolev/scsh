@@ -5,7 +5,7 @@ use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
 use super::proc::{cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, summary_stats_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
-use crate::daemon::model::{ProcStatus, Session, SessionLifecycle, Store};
+use crate::daemon::model::{ProcKind, ProcStatus, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
@@ -214,11 +214,6 @@ fn annotation_target_link_html(
   )
 }
 
-/// The one-line page lede shared by the live job page and the offline export: kind,
-/// profile, lifecycle, and task count — enough to tell at a glance what ran and whether
-/// it succeeded. A job started from the web UI has its planned tasks on `skills` before
-/// any proc registers, so the count is the larger of the two — never "0 tasks" on a
-/// freshly started job.
 /// The supervisor row of the session meta list. Policy alone is not job history: keep a
 /// fresh first run quiet, then surface the restart budget once supervision acts on it.
 fn supervisor_meta_html(session: &Session, now: u64) -> String {
@@ -243,18 +238,28 @@ fn supervisor_meta_html(session: &Session, now: u64) -> String {
   )
 }
 
+/// The one-line page lede shared by the live job page and the offline export: kind,
+/// profile, lifecycle, task count, and — when the run had to build images first — the
+/// build count as its own figure, so the header agrees with the job graph, which draws
+/// tasks only. A job started from the web UI has its planned tasks on `skills` before any
+/// proc registers, so the task count is the larger of the two — never "0 tasks" on a
+/// freshly started job.
 pub(crate) fn session_lede_html(session: &Session, lifecycle: SessionLifecycle) -> String {
   let kind = session.kind.as_deref().unwrap_or("profile");
   let profile = session.profile.as_deref().unwrap_or("default");
-  let n = session.procs.len().max(session.skills.len());
-  format!(
-    "{kind} <strong>{profile}</strong> · {life} · {n} task{plural}",
+  let builds = session.procs.iter().filter(|p| p.kind == ProcKind::Build).count();
+  let tasks = (session.procs.len() - builds).max(session.skills.len());
+  let mut lede = format!(
+    "{kind} <strong>{profile}</strong> · {life} · {tasks} task{plural}",
     kind = esc(kind),
     profile = esc(profile),
     life = esc(lifecycle.label()),
-    n = n,
-    plural = if n == 1 { "" } else { "s" },
-  )
+    plural = if tasks == 1 { "" } else { "s" },
+  );
+  if builds > 0 {
+    lede.push_str(&format!(" · {builds} build{}", if builds == 1 { "" } else { "s" }));
+  }
+  lede
 }
 
 /// The human "Ended" cell shared by the live meta and the offline export: the wall-clock

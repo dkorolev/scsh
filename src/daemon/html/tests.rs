@@ -1365,6 +1365,84 @@ fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
 }
 
 #[test]
+fn the_lede_counts_image_builds_separately_from_tasks() {
+  use crate::daemon::model::SkillMeta;
+  // A cold run builds the base image plus one per harness before any skill starts. Those
+  // build procs are real rows on the job page, but they are not tasks: the job graph draws
+  // skills only, and a header saying "7 tasks" over a graph of 3 is a lie. Builds get
+  // their own figure, and only when there were any.
+  let mut session = Session {
+    id: "cold1".into(),
+    started_at: 1,
+    ended_at: None,
+    profile: None,
+    kind: Some("profile".into()),
+    repo: "/tmp/repo".into(),
+    branch: "main".into(),
+    last_seen_at: 1,
+    client_connected: true,
+    run_pid: Some(42),
+    skills: vec![
+      SkillMeta { name: "explain-claude".into(), harness: "claude".into() },
+      SkillMeta { name: "explain-codex".into(), harness: "codex".into() },
+      SkillMeta { name: "explain-cursor".into(), harness: "cursor".into() },
+    ],
+    procs: vec![],
+    workflow: None,
+    parent_session: None,
+    supervisor: Default::default(),
+  };
+  let proc = |index: usize, kind: ProcKind, label: &str| ProcRecord {
+    index,
+    previous_attempt: None,
+    label: label.into(),
+    kind,
+    status: ProcStatus::Ok,
+    skill_name: None,
+    harness: None,
+    model: None,
+    started_at: Some(1),
+    note: None,
+    detail: None,
+    fail_reason: None,
+    elapsed: None,
+    lines: vec![],
+    container_name: None,
+    container_runtime: None,
+    cast_path: None,
+    diff_path: None,
+    skill_source: None,
+    route: None,
+    result_path: None,
+    annotate_target: None,
+    phase: None,
+    phase_until: None,
+  };
+  for (index, label) in ["build base", "build claude", "build codex", "build cursor"].iter().enumerate() {
+    session.procs.push(proc(index, ProcKind::Build, label));
+  }
+  let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
+  assert!(
+    lede.contains("· 3 tasks · 4 builds"),
+    "builds register first; the plan still says 3 tasks and the builds ride beside it: {lede}"
+  );
+  for (index, label) in ["claude: explain-claude", "codex: explain-codex", "cursor: explain-cursor"].iter().enumerate() {
+    session.procs.push(proc(4 + index, ProcKind::Skill, label));
+  }
+  let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
+  assert!(lede.contains("· 3 tasks · 4 builds"), "registered skill procs do not add to the build figure: {lede}");
+  assert!(!lede.contains("7 task"), "never the raw proc count: {lede}");
+  // A warm run has no build rows, and the lede does not mention builds at all.
+  session.procs.retain(|p| p.kind != ProcKind::Build);
+  let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
+  assert!(lede.ends_with("· 3 tasks"), "no build figure without builds: {lede}");
+  // One build reads in the singular.
+  session.procs.push(proc(7, ProcKind::Build, "build base"));
+  let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
+  assert!(lede.ends_with("· 3 tasks · 1 build"), "singular build: {lede}");
+}
+
+#[test]
 fn force_restart_rides_beside_force_stop_only_where_it_can_act() {
   let mut live = store_with_cast_proc(ProcStatus::Running);
   live.sessions.get_mut("castab").unwrap().last_seen_at = crate::daemon::paths::now_unix_secs();
@@ -1483,8 +1561,13 @@ fn the_job_lede_ticks_live() {
   let js = live_client_js();
   assert!(js.contains("function syncSessionLede"), "the lede has a live tick mirror");
   assert!(
-    js.contains("Math.max((session.procs || []).length, (session.skills || []).length)"),
+    js.contains("Math.max(procs.length - builds, (session.skills || []).length)"),
     "the live count also reads planned skills, mirroring session_lede_html"
+  );
+  assert!(
+    js.contains("procs.filter(p => p.kind === 'build').length")
+      && js.contains("(builds > 0 ? ' · ' + builds + (builds === 1 ? ' build' : ' builds') : '')"),
+    "the live lede counts image builds separately, mirroring session_lede_html"
   );
   assert!(js.contains("syncSessionLede(session, nowUnix);"), "renderSession keeps the lede current");
 }

@@ -2432,14 +2432,19 @@ function renderSession(session, nowUnix) {
   updateWorkflowGraph(session, nowUnix);
 }
 // Mirror of session_lede_html in session.rs — the page heading ticks with the live
-// snapshot. The task count is the larger of registered procs and planned skills, so a
-// job whose procs have not registered yet reads its plan, never "0 tasks".
+// snapshot. Image builds count as their own figure, never as tasks, so the header agrees
+// with the job graph. The task count is the larger of registered non-build procs and
+// planned skills, so a job whose procs have not registered yet reads its plan, never
+// "0 tasks".
 function syncSessionLede(session, nowUnix) {
   const lede = document.querySelector('.page-lede');
   if (!lede || !session) return;
-  const n = Math.max((session.procs || []).length, (session.skills || []).length);
+  const procs = session.procs || [];
+  const builds = procs.filter(p => p.kind === 'build').length;
+  const n = Math.max(procs.length - builds, (session.skills || []).length);
   const html = esc(session.kind || 'profile') + ' <strong>' + esc(session.profile || 'default') + '</strong> · ' +
-    esc(sessionLifecycle(session, nowUnix).label) + ' · ' + n + (n === 1 ? ' task' : ' tasks');
+    esc(sessionLifecycle(session, nowUnix).label) + ' · ' + n + (n === 1 ? ' task' : ' tasks') +
+    (builds > 0 ? ' · ' + builds + (builds === 1 ? ' build' : ' builds') : '');
   if (lede._scshLede === html) return;
   lede._scshLede = html;
   lede.innerHTML = html;
