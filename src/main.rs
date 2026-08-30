@@ -2752,49 +2752,34 @@ fn ensure_workflow_images(
     return Err((runtime::apple_dockerfile_too_large_message(df.len()), 1));
   }
   let tz = runtime::host_timezone();
-  let build_one =
-    |label: String, tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
-      // Cast mode: the recorded player is the UI (tail=false — no text-log echo). The
-      // proc's "harness" is what is actually running — `podman build`, not the harness
-      // whose image is being built (that one is already in the label).
-      let builder = format!("{} build", backend_name(&rt.name));
-      let p = ui.proc(label.clone(), false);
-      if let Some(c) = daemon_client {
-        c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
+  let build_one = |tag: &str, target: &str, fp: &str, harness: Option<config::Harness>| -> Result<(), (String, i32)> {
+    // Cast mode: the recorded player is the UI (tail=false — no text-log echo).
+    let (label, image) = build_proc_identity(&rt.name, harness);
+    let p = ui.proc(label.clone(), false);
+    if let Some(c) = daemon_client {
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
+    }
+    p.start();
+    let stem = image.unwrap_or("base");
+    match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
+      Ok(()) => {
+        p.finish_ok(None);
+        Ok(())
       }
-      p.start();
-      let stem = harness.map(|h| h.as_str()).unwrap_or("base");
-      match run_build(&p, &rt.name, tag, target, &df, uid, gid, fp, false, daemon_client.as_deref(), stem, session_id) {
-        Ok(()) => {
-          p.finish_ok(None);
-          Ok(())
-        }
-        Err(e) => {
-          p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
-          Err(e)
-        }
+      Err(e) => {
+        p.finish_fail(failure::reason::BUILD_FAILED, Some(&e.0));
+        Err(e)
       }
-    };
+    }
+  };
   let base_fp = runtime::base_image_fingerprint(&df, uid, gid, &tz);
   if !runtime::image_is_up_to_date(&rt.name, runtime::BASE_IMAGE_TAG, &base_fp) {
-    build_one(
-      format!("using {} · build base", backend_name(&rt.name)),
-      runtime::BASE_IMAGE_TAG,
-      runtime::BASE_IMAGE_TARGET,
-      &base_fp,
-      None,
-    )?;
+    build_one(runtime::BASE_IMAGE_TAG, runtime::BASE_IMAGE_TARGET, &base_fp, None)?;
   }
   for &h in harnesses {
     let spec = runtime::image_build_spec(h, &df, uid, gid, &tz);
     if !runtime::image_is_up_to_date(&rt.name, &spec.tag, &spec.fingerprint) {
-      build_one(
-        format!("using {} · build {}", backend_name(&rt.name), h.as_str()),
-        &spec.tag,
-        &spec.target,
-        &spec.fingerprint,
-        Some(h),
-      )?;
+      build_one(&spec.tag, &spec.target, &spec.fingerprint, Some(h))?;
     }
   }
   Ok(())
@@ -3679,6 +3664,17 @@ fn backend_name(runtime: &str) -> &str {
     "container" => "Apple Containers",
     other => other,
   }
+}
+
+/// What the session browser records for an image-build proc: its label, and the `harness`
+/// the daemon files it under. The job graph keys its build nodes on that field — `None` is
+/// the shared base image, `Some(h)` the harness whose image is being built — and draws the
+/// edge from every skill into the image it runs on from it. Register the builder (`podman
+/// build`, …) there instead and the builds vanish from the graph, leaving skills that are
+/// in fact waiting on an image looking "queued". The builder rides in the label only.
+fn build_proc_identity(runtime: &str, harness: Option<config::Harness>) -> (String, Option<&'static str>) {
+  let image = harness.map(config::Harness::as_str);
+  (format!("using {} · build {}", backend_name(runtime), image.unwrap_or("base")), image)
 }
 
 /// Abbreviate a path with `~` for `$HOME` (so a repo reads as `~/1`, not a long path).
@@ -5091,21 +5087,19 @@ fn build_and_run(
   // the harness images only depend on the base, so they build in parallel.
   let mut base_build = None;
   if base_needs_build {
-    let base_label = format!("using {} · build base", backend_name(&rt.name));
-    let builder = format!("{} build", backend_name(&rt.name));
+    let (base_label, image) = build_proc_identity(&rt.name, None);
     let p = ui.proc(base_label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
+      c.proc_add(p.index(), &base_label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
     }
     base_build = Some(p);
   }
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
-    let label = format!("using {} · build {}", backend_name(&rt.name), spec.harness.as_str());
-    let builder = format!("{} build", backend_name(&rt.name));
+    let (label, image) = build_proc_identity(&rt.name, Some(spec.harness));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
     }
     harness_build_procs.push(p);
   }
@@ -8198,21 +8192,19 @@ fn build_images_cmd(names: &[String], force: bool, rebuild_base: bool, session: 
 
   let mut base_build = None;
   if build_base {
-    let label = format!("using {} · build base", backend_name(&rt_name));
-    let builder = format!("{} build", backend_name(&rt_name));
+    let (label, image) = build_proc_identity(&rt_name, None);
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
     }
     base_build = Some(p);
   }
   let mut harness_build_procs: Vec<ui::screen::Proc> = Vec::with_capacity(harness_builds.len());
   for spec in &harness_builds {
-    let label = format!("using {} · build {}", backend_name(&rt_name), spec.harness.as_str());
-    let builder = format!("{} build", backend_name(&rt_name));
+    let (label, image) = build_proc_identity(&rt_name, Some(spec.harness));
     let p = ui.proc(label.clone(), false);
     if let Some(c) = &daemon_client {
-      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, Some(&builder), None, None, None, None, None);
+      c.proc_add(p.index(), &label, daemon::ProcKind::Build, None, image, None, None, None, None, None);
     }
     harness_build_procs.push(p);
   }
