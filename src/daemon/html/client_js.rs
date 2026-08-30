@@ -1438,8 +1438,11 @@ function wfLegendHtml(present) {
   ).join('');
   return items ? '<ul class="chamfer workflow-legend" aria-label="Status legend">' + items + '</ul>' : '';
 }
-function wfSummaryHtml(counts, total, first) {
-  const parts = [total + (total === 1 ? ' task' : ' tasks')];
+function wfSummaryHtml(counts, nodes, first) {
+  const builds = nodes.filter(n => n.id === 'build_base' || n.id.indexOf('build_') === 0).length;
+  const tasks = nodes.length - builds;
+  const parts = [tasks + (tasks === 1 ? ' task' : ' tasks')];
+  if (builds > 0) parts.push(builds + (builds === 1 ? ' build' : ' builds'));
   const shown = (key) => key === 'done' ? 'succeeded' : (key === 'stalled' ? 'abandoned' :
     (key === 'graceful' ? 'graceful shutdown' : (key === 'awaiting_limits' ? 'awaiting limits' : key)));
   for (const [n, label] of [[counts.done,'done'],[counts.graceful,'graceful'],[counts.running,'running'],[counts.terminating,'terminating'],[counts.waiting,'waiting'],
@@ -1762,7 +1765,7 @@ function wfBuildGraphHtml(session, nowUnix) {
   return '<div class="chamfer card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>' +
     '<div class="workflow-head"><h2 class="workflow-title">Job graph</h2>' +
     wfJobOutcomeHtml(session, nowUnix) +
-    '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
+    '<p class="workflow-summary dim">' + wfSummaryHtml(counts, nodes, wfFirstIdByState(session, nodes, nowUnix)) + '</p>' +
     '<div class="workflow-zoom" aria-label="Graph view controls">' +
     '<button type="button" class="chamfer" data-wf-zoom-out aria-label="Zoom out">−</button>' +
     '<button type="button" class="chamfer" data-wf-zoom-reset>100%</button>' +
@@ -1940,7 +1943,7 @@ function updateWorkflowGraph(session, nowUnix) {
       outcomeEl.textContent = outcome.text;
     }
     const summary = head.querySelector('.workflow-summary');
-    if (summary) summary.innerHTML = wfSummaryHtml(counts, nodes.length, wfFirstIdByState(session, nodes, nowUnix));
+    if (summary) summary.innerHTML = wfSummaryHtml(counts, nodes, wfFirstIdByState(session, nodes, nowUnix));
   }
   const visual = root.querySelector('.workflow-visual');
   if (visual) {

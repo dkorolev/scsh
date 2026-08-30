@@ -1369,8 +1369,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
   use crate::daemon::model::SkillMeta;
   // A cold run builds the base image plus one per harness before any skill starts. Those
   // build procs are real rows on the job page, but they are not tasks: the job graph draws
-  // skills only, and a header saying "7 tasks" over a graph of 3 is a lie. Builds get
-  // their own figure, and only when there were any.
+  // them as separate build nodes. Builds get their own figure, and only when there were any.
   let mut session = Session {
     id: "cold1".into(),
     started_at: 1,
@@ -1418,8 +1417,18 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     phase: None,
     phase_until: None,
   };
-  for (index, label) in ["build base", "build claude", "build codex", "build cursor"].iter().enumerate() {
-    session.procs.push(proc(index, ProcKind::Build, label));
+  for (index, (label, harness)) in [
+    ("build base", None),
+    ("build claude", Some("claude")),
+    ("build codex", Some("codex")),
+    ("build cursor", Some("cursor")),
+  ]
+  .into_iter()
+  .enumerate()
+  {
+    let mut build = proc(index, ProcKind::Build, label);
+    build.harness = harness.map(str::to_string);
+    session.procs.push(build);
   }
   let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
   assert!(
@@ -1432,6 +1441,11 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
   let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
   assert!(lede.contains("· 3 tasks · 4 builds"), "registered skill procs do not add to the build figure: {lede}");
   assert!(!lede.contains("7 task"), "never the raw proc count: {lede}");
+  let graph = super::workflow::workflow_graph_html(&session, 2);
+  assert!(
+    graph.contains(r#"class="workflow-summary dim">3 tasks · 4 builds ·"#),
+    "the graph summary uses the same split as the lede: {graph}"
+  );
   // A warm run has no build rows, and the lede does not mention builds at all.
   session.procs.retain(|p| p.kind != ProcKind::Build);
   let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));

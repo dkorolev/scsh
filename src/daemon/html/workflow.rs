@@ -83,6 +83,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
     nodes_html.push_str(&node_html(session, &meta, node, pos, now));
   }
   nodes_html.push_str(&bookend_html(&finish, false));
+  let builds = meta.nodes.iter().filter(|n| n.id == "build_base" || n.id.starts_with("build_")).count();
 
   format!(
     r#"<div class="chamfer card card--accent-left-orange workflow-card" id="workflow-graph" data-workflow-graph>
@@ -111,7 +112,7 @@ pub(crate) fn workflow_graph_html(session: &Session, now: u64) -> String {
 </div>
 </div>
 "#,
-    summary = counts.summary_html(meta.nodes.len(), &first_of),
+    summary = counts.summary_html(meta.nodes.len() - builds, builds, &first_of),
     outcome = job_outcome_html(session, lifecycle),
     legend = legend_html(&present),
     w = width,
@@ -450,10 +451,15 @@ impl StatusCounts {
     }
   }
 
-  /// e.g. `4 tasks · <a …>1 running</a> · <a …>2 queued</a>` — status buckets link to the
+  /// e.g. `4 tasks · 2 builds · <a …>1 running</a> · <a …>2 queued</a>` — status buckets link to the
   /// first node of that status in the graph (topmost / leftmost).
-  fn summary_html(&self, total: usize, first_of: &std::collections::BTreeMap<WorkflowDisplayState, String>) -> String {
-    let mut parts = vec![format!("{total} {}", if total == 1 { "task" } else { "tasks" })];
+  fn summary_html(
+    &self, tasks: usize, builds: usize, first_of: &std::collections::BTreeMap<WorkflowDisplayState, String>,
+  ) -> String {
+    let mut parts = vec![format!("{tasks} {}", if tasks == 1 { "task" } else { "tasks" })];
+    if builds > 0 {
+      parts.push(format!("{builds} {}", if builds == 1 { "build" } else { "builds" }));
+    }
     for (n, state) in [
       (self.done, WorkflowDisplayState::Done),
       (self.graceful, WorkflowDisplayState::Graceful),
