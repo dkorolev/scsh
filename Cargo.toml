@@ -1,6 +1,6 @@
 [package]
 name = "scsh"
-version = "1.43.0"
+version = "1.43.1"
 edition = "2021"
 # Match the compiler baseline used to lint, test, and release scsh. Declaring it here makes
 # older Cargo fail with the package's own actionable requirement instead of surfacing a
