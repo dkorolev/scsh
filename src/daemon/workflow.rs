@@ -1237,6 +1237,81 @@ mod tests {
   }
 
   #[test]
+  fn image_builds_registered_by_the_run_draw_as_the_nodes_skills_wait_on() {
+    // The run registers a build proc under exactly what `build_proc_identity` returns, and
+    // this graph keys its build nodes on that `harness` field. Both ends are pinned here
+    // together: a cold run once filed its builds under the builder ("Apple Containers
+    // build"), which is no graph id, so every build node was dropped and three skills that
+    // were in fact waiting on their images read "queued — dependencies finished".
+    let (base_label, base_image) = crate::build_proc_identity("container", None);
+    let (claude_label, claude_image) = crate::build_proc_identity("container", Some(crate::config::Harness::Claude));
+    assert_eq!(base_label, "using Apple Containers · build base");
+    assert_eq!(base_image, None, "the base image is the graph's `build_base`");
+    assert_eq!(claude_label, "using Apple Containers · build claude");
+    assert_eq!(claude_image, Some("claude"), "a harness image is the graph's `build_<harness>`");
+    let proc = |index: usize, kind: ProcKind, label: &str, harness: Option<&str>, skill: Option<&str>| ProcRecord {
+      index,
+      previous_attempt: None,
+      label: label.into(),
+      kind,
+      status: if kind == ProcKind::Build { ProcStatus::Running } else { ProcStatus::Waiting },
+      skill_name: skill.map(Into::into),
+      harness: harness.map(Into::into),
+      model: None,
+      started_at: None,
+      note: None,
+      detail: None,
+      fail_reason: None,
+      elapsed: None,
+      lines: vec![],
+      container_name: None,
+      container_runtime: None,
+      cast_path: None,
+      diff_path: None,
+      skill_source: None,
+      route: None,
+      result_path: None,
+      annotate_target: None,
+      phase: None,
+      phase_until: None,
+    };
+    let session = Session {
+      id: "cold1".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: None,
+      kind: Some("profile".into()),
+      repo: "/tmp/r".into(),
+      branch: "main".into(),
+      skills: vec![crate::daemon::model::SkillMeta { name: "explain-claude".into(), harness: "claude".into() }],
+      procs: vec![
+        proc(0, ProcKind::Build, &base_label, base_image, None),
+        proc(1, ProcKind::Build, &claude_label, claude_image, None),
+        proc(2, ProcKind::Skill, "claude: explain-claude", Some("claude"), Some("explain-claude")),
+      ],
+      last_seen_at: 1,
+      client_connected: true,
+      run_pid: Some(1),
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+    };
+    let meta = effective_workflow_meta(&session).expect("a cold run gets a graph");
+    let ids: Vec<&str> = meta.nodes.iter().map(|n| n.id.as_str()).collect();
+    assert_eq!(ids, vec!["build_base", "build_claude", "explain-claude"], "both builds are drawn");
+    let skill = meta.nodes.iter().find(|n| n.id == "explain-claude").unwrap();
+    assert_eq!(skill.needs, vec!["build_claude".to_string()], "the skill waits on its image, not the scheduler");
+    let now = 2;
+    assert_eq!(
+      display_state(&session, &meta, skill, now),
+      WorkflowDisplayState::Waiting,
+      "a skill whose image is still building is waiting, never queued"
+    );
+    let build = meta.nodes.iter().find(|n| n.id == "build_claude").unwrap();
+    assert_eq!(display_state(&session, &meta, build, now), WorkflowDisplayState::Running);
+  }
+
+  #[test]
   fn effective_meta_keeps_workflow_needs_and_adds_builds() {
     let mut session = Session {
       id: "arith1".into(),
