@@ -28,8 +28,8 @@ pub use model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, PROC_PHASE_AWAITIN
 #[cfg(unix)]
 pub use paths::daemon_detach_child;
 pub use paths::{
-  absolutize_repo_path, base_url, clear_session_cancel, consume_proc_restart, daemon_dir, daemon_get_body, daemon_port,
-  daemon_port_reachable, daemon_reported_started_at, daemon_reported_version, now_unix_secs, read_live_pid,
+  absolutize_repo_path, base_url, clear_session_cancel, consume_proc_restart, daemon_dir, daemon_get_body, daemon_mode,
+  daemon_pid, daemon_port, daemon_port_reachable, daemon_reported_started_at, daemon_reported_version, now_unix_secs,
   request_proc_restart, request_session_cancel, session_cancelled,
 };
 pub use server::{chapters_sidecar_path, Server};
@@ -56,7 +56,7 @@ pub fn start_persistent() -> std::io::Result<()> {
 fn ensure_daemon(mode: DaemonMode) -> std::io::Result<()> {
   for attempt in 0..ENSURE_ATTEMPTS {
     if Client::daemon_alive() {
-      if mode == DaemonMode::Persistent && paths::read_persisted_mode(daemon_port()) == Some(DaemonMode::Ephemeral) {
+      if mode == DaemonMode::Persistent && daemon_mode(daemon_port()) == Some(DaemonMode::Ephemeral) {
         let _ = stop();
         clear_stale_daemon_state();
       } else {
@@ -81,10 +81,11 @@ fn ensure_daemon(mode: DaemonMode) -> std::io::Result<()> {
 /// Drop a wedged PID file or stop a process that still holds the pid file but is not serving HTTP.
 fn clear_stale_daemon_state() {
   let port = daemon_port();
-  if read_live_pid(port).is_some() {
+  if daemon_pid(port).is_some() {
     let _ = stop();
   } else {
     let _ = std::fs::remove_file(paths::pid_file(port));
+    let _ = std::fs::remove_file(paths::mode_file(port));
   }
 }
 
@@ -92,10 +93,18 @@ fn clear_stale_daemon_state() {
 pub fn stop() -> std::io::Result<bool> {
   let port = daemon_port();
   let pid_path = paths::pid_file(port);
-  let pid = match read_live_pid(port) {
+  let mode_path = paths::mode_file(port);
+  let responding = Client::daemon_alive();
+  let pid = match daemon_pid(port) {
     Some(p) => p,
     None => {
-      let _ = std::fs::remove_file(&pid_path);
+      if responding && Client::daemon_alive() {
+        return Err(std::io::Error::other(format!(
+          "daemon responds on port {port}, but its owning process could not be identified"
+        )));
+      }
+      let _ = std::fs::remove_file(pid_path);
+      let _ = std::fs::remove_file(mode_path);
       return Ok(false);
     }
   };
@@ -105,22 +114,38 @@ pub fn stop() -> std::io::Result<bool> {
     const SIGKILL: i32 = 9;
     paths::signal_process(pid, SIGTERM);
     for _ in 0..20 {
-      if !paths::pid_alive(pid) {
+      if !paths::daemon_process_alive(pid, port) {
         break;
       }
       std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if paths::pid_alive(pid) {
+    if paths::daemon_process_alive(pid, port) {
       paths::signal_process(pid, SIGKILL);
+      for _ in 0..20 {
+        if !paths::daemon_process_alive(pid, port) {
+          break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+      }
+    }
+    if paths::daemon_process_alive(pid, port) {
+      return Err(std::io::Error::other(format!("daemon process {pid} did not exit after SIGTERM and SIGKILL")));
+    }
+    if paths::daemon_api_responds(port) {
+      return Err(std::io::Error::other(format!(
+        "daemon process {pid} exited, but port {port} still serves the daemon API"
+      )));
     }
   }
   #[cfg(not(unix))]
   {
     // Cannot signal by PID on this platform; stop only clears a stale pid file.
-    let _ = std::fs::remove_file(&pid_path);
+    let _ = std::fs::remove_file(pid_path);
+    let _ = std::fs::remove_file(mode_path);
     return Ok(false);
   }
-  let _ = std::fs::remove_file(&pid_path);
+  let _ = std::fs::remove_file(pid_path);
+  let _ = std::fs::remove_file(mode_path);
   Ok(true)
 }
 
@@ -313,6 +338,14 @@ mod tests {
     ensure_for_run().expect("ensure_for_run");
     wait_daemon_mode(port, DaemonMode::Ephemeral);
     assert_eq!(paths::read_persisted_mode(port), Some(DaemonMode::Ephemeral));
+    let reported_pid = paths::daemon_reported_pid(port).expect("live daemon reports its PID");
+    assert_eq!(
+      paths::discovered_daemon_pid(port),
+      Some(reported_pid),
+      "process-table fallback identifies an older daemon by exact port"
+    );
+    std::fs::remove_file(paths::mode_file(port)).expect("remove mode marker");
+    assert_eq!(daemon_mode(port), Some(DaemonMode::Ephemeral), "live HTTP identity replaces a purged mode marker");
     start_persistent().expect("start_persistent");
     wait_daemon_mode(port, DaemonMode::Persistent);
     assert!(Client::daemon_alive(), "persistent daemon should accept TCP on {}", port);

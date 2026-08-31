@@ -4412,7 +4412,7 @@ fn gather_daemon_status() -> DaemonStatusInfo {
   };
   DaemonStatusInfo {
     running,
-    pid: daemon::read_live_pid(port),
+    pid: daemon::daemon_pid(port),
     port,
     url: daemon::base_url(port),
     versions_match: daemon_version.as_deref() == Some(installed_version.as_str()),

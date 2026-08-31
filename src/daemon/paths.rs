@@ -165,6 +165,24 @@ pub fn daemon_reported_started_at(port: u16) -> Option<u64> {
   digits.parse().ok()
 }
 
+/// The PID reported by a live daemon. Older daemons omit this field, so lifecycle commands
+/// must retain their marker/process-table fallbacks.
+pub fn daemon_reported_pid(port: u16) -> Option<u32> {
+  let body = fetch_version_body(port)?;
+  let after = body.split("\"pid\":").nth(1)?;
+  let digits: String = after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+  digits.parse().ok()
+}
+
+/// The mode reported by a live daemon, when it is new enough to include one.
+pub fn daemon_reported_mode(port: u16) -> Option<super::model::DaemonMode> {
+  let body = fetch_version_body(port)?;
+  let after = body.split("\"mode\":").nth(1)?;
+  let start = after.find('"')? + 1;
+  let end = after[start..].find('"')? + start;
+  super::model::DaemonMode::parse(&after[start..end])
+}
+
 /// The raw JSON body of `GET /api/v1/version`, shared by the field extractors above.
 fn fetch_version_body(port: u16) -> Option<String> {
   daemon_get_body(port, "/api/v1/version")
@@ -192,6 +210,15 @@ pub fn daemon_get_body(port: u16, path: &str) -> Option<String> {
 pub fn read_persisted_mode(port: u16) -> Option<super::model::DaemonMode> {
   let text = std::fs::read_to_string(mode_file(port)).ok()?;
   super::model::DaemonMode::parse(text.trim())
+}
+
+/// Resolve a live daemon's mode without trusting the temp marker alone. The endpoint is
+/// authoritative, the marker supports an unresponsive daemon, and process discovery keeps
+/// lifecycle commands compatible with older daemons after macOS purges their temp files.
+pub fn daemon_mode(port: u16) -> Option<super::model::DaemonMode> {
+  daemon_reported_mode(port)
+    .or_else(|| read_persisted_mode(port))
+    .or_else(|| discover_daemon_process(port).map(|process| process.mode))
 }
 
 /// Write the mode marker (best-effort) so `read_persisted_mode` can report it cross-process.
@@ -227,19 +254,6 @@ pub fn pid_alive(pid: u32) -> bool {
   }
 }
 
-/// True when `pid` is a live `scsh __daemon-serve` process (cmdline probe; Unix only).
-pub fn is_scsh_daemon_pid(pid: u32) -> bool {
-  #[cfg(unix)]
-  {
-    process_args(pid).is_some_and(|args| args.contains("scsh") && args.contains("__daemon-serve"))
-  }
-  #[cfg(not(unix))]
-  {
-    let _ = pid;
-    false
-  }
-}
-
 #[cfg(unix)]
 fn process_args(pid: u32) -> Option<String> {
   let output = std::process::Command::new("ps").arg("-p").arg(pid.to_string()).arg("-o").arg("args=").output().ok()?;
@@ -249,15 +263,104 @@ fn process_args(pid: u32) -> Option<String> {
   Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DaemonProcess {
+  pid: u32,
+  mode: super::model::DaemonMode,
+  port: u16,
+}
+
+/// Parse only the exact hidden command that `spawn_daemon` starts. The executable path may
+/// contain spaces, so locate the hidden subcommand first and inspect its arguments from there.
+fn daemon_process_from_args(pid: u32, args: &str) -> Option<DaemonProcess> {
+  let tokens: Vec<&str> = args.split_whitespace().collect();
+  let serve = tokens.iter().position(|token| *token == "__daemon-serve")?;
+  if !tokens[..serve]
+    .iter()
+    .any(|token| Path::new(token).file_name().and_then(|name| name.to_str()).is_some_and(|name| name == "scsh"))
+  {
+    return None;
+  }
+  let tail = &tokens[serve + 1..];
+  let mode = tail
+    .iter()
+    .position(|token| *token == "--mode")
+    .and_then(|i| tail.get(i + 1))
+    .and_then(|value| super::model::DaemonMode::parse(value))?;
+  let port = tail
+    .iter()
+    .position(|token| *token == "--port")
+    .and_then(|i| tail.get(i + 1))
+    .and_then(|value| value.parse().ok())?;
+  Some(DaemonProcess { pid, mode, port })
+}
+
+#[cfg(unix)]
+fn discover_daemon_process(port: u16) -> Option<DaemonProcess> {
+  let output = std::process::Command::new("ps").args(["-ax", "-o", "pid=", "-o", "args="]).output().ok()?;
+  if !output.status.success() {
+    return None;
+  }
+  let mut found = None;
+  for line in String::from_utf8_lossy(&output.stdout).lines() {
+    let line = line.trim_start();
+    let Some(split) = line.find(char::is_whitespace) else { continue };
+    let Ok(pid) = line[..split].parse() else { continue };
+    let Some(process) =
+      daemon_process_from_args(pid, line[split..].trim_start()).filter(|process| process.port == port)
+    else {
+      continue;
+    };
+    if found.is_some_and(|existing: DaemonProcess| existing.pid != process.pid) {
+      return None;
+    }
+    found = Some(process);
+  }
+  found
+}
+
+#[cfg(not(unix))]
+fn discover_daemon_process(_port: u16) -> Option<DaemonProcess> {
+  None
+}
+
+pub(super) fn discovered_daemon_pid(port: u16) -> Option<u32> {
+  discover_daemon_process(port).map(|process| process.pid)
+}
+
+pub(super) fn daemon_process_alive(pid: u32, port: u16) -> bool {
+  #[cfg(unix)]
+  {
+    pid_alive(pid)
+      && process_args(pid)
+        .and_then(|args| daemon_process_from_args(pid, &args))
+        .is_some_and(|process| process.port == port)
+  }
+  #[cfg(not(unix))]
+  {
+    let _ = (pid, port);
+    false
+  }
+}
+
 /// Read the PID written by a running daemon, if the process is still alive and is our daemon.
 pub fn read_live_pid(port: u16) -> Option<u32> {
   let text = std::fs::read_to_string(pid_file(port)).ok()?;
   let pid = text.trim().parse::<u32>().ok()?;
-  if pid_alive(pid) && is_scsh_daemon_pid(pid) {
+  if daemon_process_alive(pid, port) {
     Some(pid)
   } else {
     None
   }
+}
+
+/// Resolve the daemon process from strongest to weakest evidence: its live HTTP identity,
+/// its PID marker, then one unique exact process-table match for the configured port.
+pub fn daemon_pid(port: u16) -> Option<u32> {
+  daemon_reported_pid(port)
+    .filter(|pid| daemon_process_alive(*pid, port))
+    .or_else(|| read_live_pid(port))
+    .or_else(|| discovered_daemon_pid(port))
 }
 
 /// Where browser-created PROJECTS live: `$SCSH_HOME/projects/<name>` — fresh git repos the
@@ -334,6 +437,23 @@ mod tests {
   fn session_url_format() {
     let u = session_url(7274, "abcdef");
     assert_eq!(u, "http://127.0.0.1:7274/job/abcdef");
+  }
+
+  #[test]
+  fn daemon_process_args_require_the_exact_hidden_command_and_parse_its_identity() {
+    let args = "/Users/me/.cargo/bin/scsh __daemon-serve --mode persistent --port 7274";
+    assert_eq!(
+      daemon_process_from_args(42, args),
+      Some(DaemonProcess { pid: 42, mode: super::super::model::DaemonMode::Persistent, port: 7274 })
+    );
+    let spaced = "/Applications/scsh tools/scsh __daemon-serve --port 8123 --mode ephemeral";
+    assert_eq!(
+      daemon_process_from_args(43, spaced),
+      Some(DaemonProcess { pid: 43, mode: super::super::model::DaemonMode::Ephemeral, port: 8123 })
+    );
+    assert!(daemon_process_from_args(44, "scsh daemon start --port 7274").is_none());
+    assert!(daemon_process_from_args(45, "not-scsh __daemon-serve --mode persistent --port 7274").is_none());
+    assert!(daemon_process_from_args(46, "scsh __daemon-serve --mode invalid --port 7274").is_none());
   }
 
   #[test]
