@@ -1385,8 +1385,15 @@ fn daemon_start_status_stop() {
   assert!(status.status.success(), "daemon status: {}", String::from_utf8_lossy(&status.stderr));
   let html = daemon_http_get("/", port).expect("GET /");
   assert!(html.contains("data-tab=\"jobs\""), "got: {}", html);
+  remove_daemon_markers(port);
+  let recovered = daemon_cmd(&d, &home, port, "status");
+  assert!(recovered.status.success(), "status without markers: {}", String::from_utf8_lossy(&recovered.stderr));
+  let recovered_text =
+    format!("{}{}", String::from_utf8_lossy(&recovered.stdout), String::from_utf8_lossy(&recovered.stderr));
+  assert!(recovered_text.contains("pid"), "live endpoint should recover the daemon PID: {recovered_text}");
   let stop = daemon_cmd(&d, &home, port, "stop");
-  assert!(stop.status.success(), "daemon stop: {}", String::from_utf8_lossy(&stop.stderr));
+  assert!(stop.status.success(), "daemon stop without markers: {}", String::from_utf8_lossy(&stop.stderr));
+  assert!(daemon_http_get("/", port).is_none(), "successful stop must leave no responding daemon");
 }
 
 #[test]
@@ -1397,8 +1404,12 @@ fn daemon_restart() {
   let _guard = DaemonTestGuard { dir: d.clone(), home: home.clone(), port };
   let start = daemon_cmd(&d, &home, port, "start");
   assert!(start.status.success(), "daemon start: {}", String::from_utf8_lossy(&start.stderr));
+  let before = daemon_http_pid(port).expect("daemon PID before restart");
+  remove_daemon_markers(port);
   let restart = daemon_cmd(&d, &home, port, "restart");
-  assert!(restart.status.success(), "daemon restart: {}", String::from_utf8_lossy(&restart.stderr));
+  assert!(restart.status.success(), "daemon restart without markers: {}", String::from_utf8_lossy(&restart.stderr));
+  let after = daemon_http_pid(port).expect("daemon PID after restart");
+  assert_ne!(before, after, "restart must replace the process even when its temp markers disappeared");
   let html = daemon_http_get("/", port).expect("GET / after restart");
   assert!(html.contains("data-tab=\"jobs\""), "got: {}", html);
   let stop = daemon_cmd(&d, &home, port, "stop");
@@ -1420,6 +1431,19 @@ impl Drop for DaemonTestGuard {
     // The redb store lives under `home` (inside `dir`); removing `dir` clears it.
     let _ = std::fs::remove_dir_all(&self.dir);
   }
+}
+
+fn remove_daemon_markers(port: u16) {
+  let daemon_dir = std::env::temp_dir().join("scsh-daemon");
+  let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{port}.pid")));
+  let _ = std::fs::remove_file(daemon_dir.join(format!("daemon-{port}.mode")));
+}
+
+fn daemon_http_pid(port: u16) -> Option<u32> {
+  let response = daemon_http_get("/api/v1/version", port)?;
+  let after = response.split("\"pid\":").nth(1)?;
+  let digits: String = after.trim_start().chars().take_while(|c| c.is_ascii_digit()).collect();
+  digits.parse().ok()
 }
 
 fn daemon_http_get(path: &str, port: u16) -> Option<String> {

@@ -249,8 +249,11 @@ the daemon opens the DB (redb allows one process at a time); the CLI reads the d
 from a tiny cross-process marker instead.
 
 Runtime files — the PID lock and the mode marker (`daemon-<port>.pid`, `daemon-<port>.mode`)
-and the prune queue — live under the **system temp dir** `$TMPDIR/scsh-daemon/`. Session
-history survives a `daemon restart`; the daemon's own uptime/client state starts fresh.
+and the prune queue — live under the **system temp dir** `$TMPDIR/scsh-daemon/`. The daemon
+also reports its PID and mode over HTTP; lifecycle commands use that live identity first,
+then the markers, then an exact process-table match by port for older daemons whose temp
+files were purged. Session history survives a `daemon restart`; the daemon's own
+uptime/client state starts fresh.
 
 ## Zombie-container reaper
 
@@ -290,6 +293,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   Description panel, and each `PR-DECISION-<topic>.md` — what the `gorgeous-pipeline`
   journal step recorded as settled — lifts into its own commentable panel under Decisions
 - `GET /assets/scsh-cast-player.{js,css}` — the first-party player assets
+- `GET /api/v1/version` — JSON daemon identity: display version, commit, process start time,
+  PID, and persistent/ephemeral mode
 - `GET /api/v1/sessions` — JSON session id list
 - `GET /api/v1/session/{id}` — JSON session detail
 - `GET /api/v1/session/{id}/fleet` — JSON fleet aggregation for scripts and reduce steps:

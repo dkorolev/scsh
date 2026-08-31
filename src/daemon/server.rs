@@ -1153,21 +1153,24 @@ fn route(
         .collect();
       (200, format!("{{ \"jobs\": [{}] }}", parts.join(", ")), "application/json", false)
     }
-    // The running daemon's own version — so `scsh daemon status` can report what is
-    // actually serving (which may lag the installed CLI until a restart), not just the
-    // caller's version.
+    // The running daemon's own identity — so lifecycle commands do not depend on temp
+    // markers that the OS may purge while this process remains healthy.
     "/api/v1/version" => {
       // `commit` is the bare stamp (null when unknown); `version` keeps the human line
-      // (`1.30.3 (d5e2270)`) existing callers parse. `started_at` is this daemon process's
-      // boot time (unix seconds), so `scsh daemon status` can report uptime.
+      // (`1.30.3 (d5e2270)`) existing callers parse. Additive PID/mode fields let newer
+      // lifecycle commands identify this process while remaining compatible with old clients.
       let commit = crate::version::git_stamp();
       let commit_json = if commit.is_empty() { "null".to_string() } else { quote(&commit) };
-      let started_at = lock_store(store).started_at;
+      let store = lock_store(store);
+      let started_at = store.started_at;
+      let mode = store.mode.as_str();
       (
         200,
         format!(
-          "{{ \"version\": {}, \"commit\": {commit_json}, \"started_at\": {started_at} }}",
-          quote(&crate::version::display())
+          "{{ \"version\": {}, \"commit\": {commit_json}, \"started_at\": {started_at}, \"pid\": {}, \"mode\": {} }}",
+          quote(&crate::version::display()),
+          std::process::id(),
+          quote(mode),
         ),
         "application/json",
         false,
@@ -3514,6 +3517,8 @@ mod tests {
     // The daemon's boot time rides along so `scsh daemon status` can report uptime; it is
     // the store's `started_at` (the `now` passed to Store::new).
     assert!(body.contains("\"started_at\": 50"), "endpoint omits the daemon start time: {body}");
+    assert!(body.contains(&format!("\"pid\": {}", std::process::id())), "endpoint omits the daemon PID: {body}");
+    assert!(body.contains("\"mode\": \"persistent\""), "endpoint omits the daemon mode: {body}");
     assert!(parse(&body).is_ok(), "version payload parses as JSON: {body}");
   }
 
