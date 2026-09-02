@@ -115,7 +115,7 @@ RUN set -eu; \
     groupadd -g "$gid" agent 2>/dev/null || groupadd agent 2>/dev/null || true; \
     useradd -u "$uid" -g "$gid" -m -d /home/agent -s /bin/sh agent 2>/dev/null \
       || useradd -g "$gid" -m -d /home/agent -s /bin/sh agent 2>/dev/null || true; \
-    mkdir -p /home/agent/repo/tmp; chown -R "$uid:$gid" /home/agent
+    mkdir -p /home/agent/repo/tmp /home/agent/repo/.harness/tmp; chown -R "$uid:$gid" /home/agent
 
 WORKDIR /home/agent/repo
 

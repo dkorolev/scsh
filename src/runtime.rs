@@ -2608,8 +2608,11 @@ TAG
     let df = dockerfile();
     assert!(df.contains(&format!("WORKDIR {AGENT_REPO}")), "WORKDIR must match AGENT_REPO");
     assert!(
-      df.contains(&format!("mkdir -p {AGENT_REPO}/tmp")),
-      "image must create the bind-mounted tmp/ so logs/results have a home before the mount attaches"
+      df.contains(&format!("mkdir -p {AGENT_REPO}/tmp {AGENT_REPO}/.harness/tmp")),
+      "image must create BOTH bind-mount targets (tmp/ and the alternate .harness/tmp scratch) \
+       owned by the agent user: a runtime that has to fabricate a missing mountpoint creates its \
+       parent as root, and the git-transport untar of the repo's .harness/*.yml into a root-owned \
+       .harness/ then fails with permission denied before the harness starts"
     );
     assert!(
       df.contains("mkdir -p \"$(dirname \"$SCSH_RUN_LOG\")\""),
