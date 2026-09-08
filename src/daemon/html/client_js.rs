@@ -303,7 +303,8 @@ function indexRowHtml(id, session, nowUnix, overflow) {
   const n = (session.procs || []).length;
   const duration = sessionDurationLabel(session, nowUnix, lifecycle);
   return '<tr' + (overflow ? ' class="jobs-overflow"' : '') +
-    ' data-session-id="' + esc(id) + '"><td><a class="job-id" href="/job/' + esc(id) + '">' + esc(id) + '</a></td>' +
+    ' data-session-id="' + esc(id) + '" data-job-kinds="' + esc(jobKinds(session).join(' ')) + '">' +
+    '<td><a class="job-id" href="/job/' + esc(id) + '">' + esc(id) + '</a></td>' +
     '<td class="session-status-cell">' + sessionStatusBadge(lifecycle) + '</td>' +
     '<td class="session-started-cell">' + sessionStartedCell(session, nowUnix) + '</td>' +
     '<td class="session-duration-cell">' + esc(duration) + '</td>' +
@@ -570,6 +571,72 @@ function jobsLoadMoreRowHtml(hidden) {
     '<button type="button" class="chamfer btn btn--cyan btn--sm jobs-load-more">' +
     '<span>Show ' + step + ' more' + of + '</span></button></td></tr>';
 }
+// Jobs facet filters. Mirrors JOB_KIND_FACETS / job_kinds / jobs_filter_strip in index.rs: a
+// row carries its facets in data-job-kinds, a ticked box lists that facet, quota checks start
+// unticked, and the viewer's choice lives in this browser's UI prefs (a per-viewer
+// convenience — the daemon always serves every row).
+const JOB_KINDS = ['single', 'host', 'quota'];
+const JOB_KIND_DEFAULTS = { single: true, host: true, quota: false };
+function jobTaskCount(session) {
+  const nodes = (session.workflow && session.workflow.nodes) || [];
+  const authored = nodes.filter(n => !String(n.id || '').startsWith('build_')).length;
+  if (authored > 0) return authored;
+  const names = new Set();
+  (session.procs || []).filter(p => p.kind === 'skill').forEach(p => names.add(p.skill_name || p.label || ''));
+  return Math.max(names.size, (session.skills || []).length);
+}
+function jobKinds(session) {
+  const kinds = [];
+  if (session.repo === '(quota)') kinds.push('quota');
+  if (jobTaskCount(session) === 1) kinds.push('single');
+  const skillProcs = (session.procs || []).filter(p => p.kind === 'skill');
+  if (skillProcs.length && skillProcs.every(p => p.harness === 'host')) kinds.push('host');
+  return kinds;
+}
+function jobsFilterPrefs() {
+  const saved = loadUiPrefs().jobsFilter || {};
+  const prefs = {};
+  JOB_KINDS.forEach(k => { prefs[k] = typeof saved[k] === 'boolean' ? saved[k] : JOB_KIND_DEFAULTS[k]; });
+  return prefs;
+}
+function jobListed(kinds) {
+  const prefs = jobsFilterPrefs();
+  return kinds.every(k => prefs[k] !== false);
+}
+function setJobsHiddenCount(n) {
+  const el = document.querySelector('[data-jobs-hidden]');
+  if (!el) return;
+  el.hidden = !(n > 0);
+  el.textContent = n > 0 ? '· ' + n + ' hidden' : '';
+}
+// Apply the filter to whatever rows are on the page — the server-rendered table before the
+// first live tick — so a remembered choice takes effect on first paint.
+function applyJobsFilterToDom() {
+  const body = document.getElementById('sessions-body');
+  if (!body) return;
+  let hidden = 0;
+  body.querySelectorAll('tr[data-session-id]').forEach(row => {
+    const kinds = String(row.getAttribute('data-job-kinds') || '').split(' ').filter(Boolean);
+    const listed = jobListed(kinds);
+    row.classList.toggle('jobs-filtered', !listed);
+    if (!listed) hidden++;
+  });
+  setJobsHiddenCount(hidden);
+}
+(function initJobsFilters() {
+  const boxes = document.querySelectorAll('input[data-jobs-filter]');
+  if (!boxes.length) return;
+  const prefs = jobsFilterPrefs();
+  boxes.forEach(box => { box.checked = prefs[box.getAttribute('data-jobs-filter')] !== false; });
+  applyJobsFilterToDom();
+  boxes.forEach(box => box.addEventListener('change', () => {
+    const next = jobsFilterPrefs();
+    next[box.getAttribute('data-jobs-filter')] = box.checked;
+    saveUiPrefs({ jobsFilter: next });
+    if (liveSessions) renderIndex(liveSessions, Date.now() / 1000);
+    else applyJobsFilterToDom();
+  }));
+})();
 (function initJobsLoadMore() {
   document.addEventListener('click', (e) => {
     const btn = e.target && e.target.closest ? e.target.closest('.jobs-load-more') : null;
@@ -598,12 +665,15 @@ function renderIndex(sessions, nowUnix) {
   const filter = parseIndexFilter(location.pathname);
   const wantRepo = filter && filter.repo;
   const filtered = {};
+  let filteredOut = 0;
   Object.keys(sessions).forEach(id => {
     const s = sessions[id];
     if (!s || s.parent_session) return;
     if (wantRepo && s.repo !== wantRepo) return;
+    if (!jobListed(jobKinds(s))) { filteredOut++; return; }
     filtered[id] = s;
   });
+  setJobsHiddenCount(filteredOut);
   const ids = sortSessionIds(filtered, nowUnix);
   if (!ids.length) {
     body.innerHTML = wantRepo

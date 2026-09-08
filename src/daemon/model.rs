@@ -545,6 +545,27 @@ pub fn sessions_for_index(sessions: &BTreeMap<String, Session>, now: u64) -> Vec
 }
 
 impl Session {
+  /// How many tasks the job runs, as a listing counts them: the authored workflow steps when
+  /// the job is a workflow, otherwise its distinct skill runs — a retry registers a new proc
+  /// under the same skill name, so attempts collapse into one task — and never fewer than the
+  /// tasks planned on `skills` (a browser-started job lists those before any proc registers).
+  /// Image builds are not tasks. Mirrored by `jobTaskCount` in the client JS.
+  pub fn task_count(&self) -> usize {
+    if let Some(wf) = &self.workflow {
+      let authored = wf.nodes.iter().filter(|n| !n.id.starts_with("build_")).count();
+      if authored > 0 {
+        return authored;
+      }
+    }
+    let names: std::collections::BTreeSet<&str> = self
+      .procs
+      .iter()
+      .filter(|p| p.kind == ProcKind::Skill)
+      .map(|p| p.skill_name.as_deref().filter(|n| !n.is_empty()).unwrap_or(&p.label))
+      .collect();
+    names.len().max(self.skills.len())
+  }
+
   /// True while any proc has not reached a terminal state (ok/fail).
   pub fn has_incomplete_procs(&self) -> bool {
     self.procs.iter().any(|p| p.status == ProcStatus::Running || p.status == ProcStatus::Waiting)
@@ -794,6 +815,48 @@ mod tests {
       parent_session: None,
       supervisor: Default::default(),
     }
+  }
+
+  /// Tasks as a listing counts them: workflow steps when authored (builds excluded), else
+  /// distinct skill names so a retry does not count twice, floored by the planned skills.
+  #[test]
+  fn task_count_collapses_attempts_and_prefers_authored_steps() {
+    let mut session = stored_session("s", 1, None, 1);
+    assert_eq!(session.task_count(), 0, "nothing planned, nothing run");
+    session.skills = vec![
+      SkillMeta { name: "add".into(), harness: "claude".into() },
+      SkillMeta { name: "multiply".into(), harness: "codex".into() },
+    ];
+    assert_eq!(session.task_count(), 2, "planned tasks count before any proc registers");
+    let named = |index: usize, name: &str| {
+      let mut p = test_proc(ProcStatus::Ok);
+      p.index = index;
+      p.skill_name = Some(name.into());
+      p
+    };
+    session.procs = vec![named(0, "add"), named(1, "add"), named(2, "multiply")];
+    assert_eq!(session.task_count(), 2, "a retry shares its skill name");
+    session.workflow = Some(WorkflowMeta {
+      nodes: vec![
+        crate::daemon::workflow::WorkflowNodeMeta {
+          id: "build_claude".into(),
+          proc_index: None,
+          order: 0,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        },
+        crate::daemon::workflow::WorkflowNodeMeta {
+          id: "only".into(),
+          proc_index: Some(0),
+          order: 1,
+          needs: vec![],
+          conditional: false,
+          when_summary: None,
+        },
+      ],
+    });
+    assert_eq!(session.task_count(), 1, "authored steps win; image builds are not tasks");
   }
 
   /// A laptop sleep is not a dead runner: the heartbeat gap is credited back to every

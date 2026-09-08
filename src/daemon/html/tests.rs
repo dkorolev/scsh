@@ -3872,3 +3872,62 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
   assert!(js.contains("wf-start-play"), "client start glyph class");
   assert!(js.contains("wf-finish-flag"), "client finish flag class");
 }
+
+/// The Jobs strip lists every facet ticked, and each row carries the facets it falls under —
+/// a quota check, a one-task job, an all-host-steps job — so the client can hide a facet the
+/// viewer unticked on first paint and across live re-renders.
+#[test]
+fn jobs_table_carries_filter_facets_and_the_strip() {
+  use super::index::{job_kinds, JOB_KIND_HOST, JOB_KIND_QUOTA, JOB_KIND_SINGLE};
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let base = store.sessions.remove("castab").unwrap();
+  // A quota check: one proc under the synthetic repo.
+  let mut quota = base.clone();
+  quota.id = "quotaa".into();
+  quota.repo = crate::quota::QUOTA_REPO.into();
+  assert_eq!(job_kinds(&quota), vec![JOB_KIND_QUOTA, JOB_KIND_SINGLE]);
+  // A host-only job: one host step.
+  let mut host = base.clone();
+  host.id = "hostaa".into();
+  host.procs[0].harness = Some(crate::harness_def::HOST_EXECUTOR.into());
+  host.procs[0].skill_name = Some("check".into());
+  assert_eq!(job_kinds(&host), vec![JOB_KIND_SINGLE, JOB_KIND_HOST]);
+  // A two-task agent job with a retried first task: attempts collapse, so it is neither.
+  let mut fleet = base.clone();
+  fleet.id = "fleeta".into();
+  let mut retry = fleet.procs[0].clone();
+  retry.index = 1;
+  retry.previous_attempt = Some(0);
+  let mut second = fleet.procs[0].clone();
+  second.index = 2;
+  second.skill_name = Some("multiply".into());
+  second.harness = Some("codex".into());
+  fleet.procs.extend([retry, second]);
+  assert!(job_kinds(&fleet).is_empty(), "{:?}", job_kinds(&fleet));
+  // A mixed job — one host step beside an agent step — is not host-only.
+  let mut mixed = fleet.clone();
+  mixed.id = "mixeda".into();
+  mixed.procs[2].harness = Some(crate::harness_def::HOST_EXECUTOR.into());
+  assert!(job_kinds(&mixed).is_empty(), "{:?}", job_kinds(&mixed));
+  for s in [quota, host, fleet, mixed] {
+    store.sessions.insert(s.id.clone(), s);
+  }
+  let html = super::index_page(&store);
+  // Quota checks are hidden by default: served, class-hidden, counted, and never a page slot.
+  assert!(html.contains("<tr class=\"jobs-filtered\" data-session-id=\"quotaa\" data-job-kinds=\"quota single\""), "{html}");
+  assert!(html.contains("<tr data-session-id=\"hostaa\" data-job-kinds=\"single host\""), "{html}");
+  assert!(html.contains("<tr data-session-id=\"fleeta\" data-job-kinds=\"\""), "{html}");
+  let strip_at = html.find("class=\"jobs-filters\"").expect("filter strip");
+  let strip = &html[strip_at..strip_at + html[strip_at..].find("</div>").expect("strip closes")];
+  let pos = |kind: &str| strip.find(&format!("data-jobs-filter=\"{kind}\"")).unwrap_or_else(|| panic!("{kind} box"));
+  assert!(pos(JOB_KIND_SINGLE) < pos(JOB_KIND_HOST) && pos(JOB_KIND_HOST) < pos(JOB_KIND_QUOTA), "quota is the last box: {strip}");
+  assert!(strip.contains(&format!("data-jobs-filter=\"{JOB_KIND_SINGLE}\" checked")), "{strip}");
+  assert!(strip.contains(&format!("data-jobs-filter=\"{JOB_KIND_HOST}\" checked")), "{strip}");
+  assert!(strip.contains(&format!("data-jobs-filter=\"{JOB_KIND_QUOTA}\"> quota checks")), "quota unticked: {strip}");
+  assert!(strip.contains("data-jobs-hidden>· 1 hidden"), "the default hides the one quota row: {strip}");
+  let js = live_client_js();
+  assert!(js.contains("const JOB_KINDS = ['single', 'host', 'quota']"), "client facet order mirrors the server");
+  assert!(js.contains("const JOB_KIND_DEFAULTS = { single: true, host: true, quota: false }"), "client defaults mirror the server");
+  assert!(js.contains("data-job-kinds=\"' + esc(jobKinds(session).join(' '))"), "live rows carry the facets");
+  assert!(js.contains("tr.jobs-filtered") || html.contains("tr.jobs-filtered"), "hidden rows are class-driven");
+}

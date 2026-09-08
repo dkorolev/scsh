@@ -757,6 +757,11 @@ pub(crate) const PAGE_CSS: &str = r#"
   }
   summary .note code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 0.85em; opacity: 0.85; }
   .harness-stops { display: flex; flex-wrap: wrap; gap: 0.5rem; margin: 0 0 0.75rem; }
+  /* Jobs facet filters: ticked = listed. The hidden count only appears once something is hidden. */
+  .jobs-filters { display: flex; flex-wrap: wrap; align-items: center; gap: 0.35rem 1rem; margin: -6px 0 0.75rem; font-size: 0.85rem; }
+  .jobs-filter { display: inline-flex; align-items: center; gap: 0.4rem; cursor: pointer; }
+  .jobs-filter input { accent-color: var(--cyan); margin: 0; }
+  tr.jobs-filtered { display: none; }
   /* single-letter harness chips: same letter, different hue (claude vs codex vs cursor) */
   .session-procs-cell { white-space: nowrap; }
   .session-procs-cell .chip-count { display: inline-block; min-width: 1.7rem; margin-right: 0.4rem; text-align: right; }

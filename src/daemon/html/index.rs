@@ -113,11 +113,22 @@ pub fn index_page_for(store: &Store, filter: Option<IndexFilter>, tab: IndexTab)
   let sessions = sessions_for_index(&store.sessions, now);
   let listed: Vec<&Session> =
     sessions.into_iter().filter(|s| filter_repo.as_ref().is_none_or(|want| &s.repo == want)).collect();
+  // Rows the default filter hides are still served (the viewer may have unhidden that
+  // facet, and the client applies the saved choice on load) but take no page slot.
   let mut rows = String::new();
-  for (i, session) in listed.iter().enumerate() {
-    rows.push_str(&index_session_row(session, now, i >= JOBS_PAGE_SIZE));
+  let mut shown = 0usize;
+  let mut filtered = 0usize;
+  for session in &listed {
+    let default_listed = listed_by_default(&job_kinds(session));
+    let overflow = default_listed && shown >= JOBS_PAGE_SIZE;
+    rows.push_str(&index_session_row(session, now, overflow, !default_listed));
+    if default_listed {
+      shown += 1;
+    } else {
+      filtered += 1;
+    }
   }
-  let hidden = listed.len().saturating_sub(JOBS_PAGE_SIZE);
+  let hidden = shown.saturating_sub(JOBS_PAGE_SIZE);
   if hidden > 0 {
     rows.push_str(&jobs_load_more_row(hidden));
   }
@@ -150,7 +161,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
 </nav>\n\
 <section class=\"tab-panel{jobs_p}\" id=\"tab-jobs\" role=\"tabpanel\" aria-labelledby=\"tabbtn-jobs\">\n\
 <div class=\"chamfer card card--accent-left-cyan\">\n\
-<p class=\"section-label\">Jobs</p>\n{harness_stops}\
+<p class=\"section-label\">Jobs</p>\n{filters}{harness_stops}\
 <div class=\"table-scroll\"><table>\n\
 <thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th>\
 <th>Profile</th><th>Procs</th><th>Repo</th></tr></thead>\n\
@@ -182,6 +193,7 @@ tabindex=\"{setup_i}\" class=\"tab{setup_a}\" data-tab=\"setup\">Setup</button>\
     stats_p = active(IndexTab::Stats),
     setup_p = active(IndexTab::Setup),
     rows = rows,
+    filters = jobs_filter_strip(filtered),
     harness_stops = harness_stop_strip(store, now),
     dirs = dirs_panel(store, now, filter.as_ref()),
     start = start_panel(),
@@ -621,6 +633,67 @@ fn repo_display_label(repo: &str, projects_root: &str) -> String {
 /// The tbody row carrying the "Show N more" button when the Jobs table overflows its first
 /// page. Clicking reveals the next page of `jobs-overflow` rows in place — the rows are all
 /// served, only unrevealed. Mirrored byte-for-byte by `jobsLoadMoreRowHtml` in the client JS.
+/// The Jobs-list facets a job falls under, each a checkbox in the filter strip above the table
+/// (ticked = listed; unticking one hides every job carrying that facet). A one-task job and an
+/// all-host-steps job are listed by default. A `scsh quota` check registers as a job so its
+/// per-harness answers get status rows, but a fleet review brackets itself with six of them,
+/// so quota checks are hidden by default — the last box, unticked, with the hidden count
+/// beside it. Carried on the row as `data-job-kinds`; mirrored by `JOB_KINDS` / `jobKinds` in
+/// the client JS, in the same order and with the same defaults.
+pub(crate) const JOB_KIND_QUOTA: &str = "quota";
+pub(crate) const JOB_KIND_SINGLE: &str = "single";
+pub(crate) const JOB_KIND_HOST: &str = "host";
+/// Strip order, label, and whether the facet is listed before the viewer has chosen.
+pub(crate) const JOB_KIND_FACETS: [(&str, &str, bool); 3] = [
+  (JOB_KIND_SINGLE, "single-step jobs", true),
+  (JOB_KIND_HOST, "host-only jobs", true),
+  (JOB_KIND_QUOTA, "quota checks", false),
+];
+
+/// Whether a job with these facets is listed under the default choice.
+pub(crate) fn listed_by_default(kinds: &[&str]) -> bool {
+  kinds.iter().all(|k| JOB_KIND_FACETS.iter().any(|(kind, _, shown)| kind == k && *shown))
+}
+
+pub(crate) fn job_kinds(session: &Session) -> Vec<&'static str> {
+  use crate::daemon::model::ProcKind;
+  let mut kinds = Vec::new();
+  if session.repo == crate::quota::QUOTA_REPO {
+    kinds.push(JOB_KIND_QUOTA);
+  }
+  if session.task_count() == 1 {
+    kinds.push(JOB_KIND_SINGLE);
+  }
+  let mut skill_procs = session.procs.iter().filter(|p| p.kind == ProcKind::Skill).peekable();
+  if skill_procs.peek().is_some() && skill_procs.all(|p| p.is_host_step()) {
+    kinds.push(JOB_KIND_HOST);
+  }
+  kinds
+}
+
+/// The filter strip: one checkbox per facet in [`JOB_KIND_FACETS`] order, ticked per its
+/// default, with the count of rows the default hides. The client script restores the viewer's
+/// own choice from local storage and applies it to these rows, then keeps applying it across
+/// live re-renders (`initJobsFilters` in `client_js.rs`).
+fn jobs_filter_strip(hidden: usize) -> String {
+  let mut facets = String::new();
+  for (kind, label, shown) in JOB_KIND_FACETS {
+    facets.push_str(&format!(
+      "<label class=\"jobs-filter\"><input type=\"checkbox\" data-jobs-filter=\"{kind}\"{checked}> {label}</label>\n",
+      checked = if shown { " checked" } else { "" },
+    ));
+  }
+  let count = if hidden > 0 {
+    format!("<span class=\"dim jobs-filter-hidden\" data-jobs-hidden>· {hidden} hidden</span>")
+  } else {
+    "<span class=\"dim jobs-filter-hidden\" data-jobs-hidden hidden></span>".to_string()
+  };
+  format!(
+    "<div class=\"jobs-filters\" role=\"group\" aria-label=\"Which jobs to list\">\
+<span class=\"dim\">Show</span>\n{facets}{count}</div>\n"
+  )
+}
+
 fn jobs_load_more_row(hidden: usize) -> String {
   let step = hidden.min(JOBS_PAGE_SIZE);
   let of = if hidden > step { format!(" of {hidden}") } else { String::new() };
@@ -631,7 +704,7 @@ fn jobs_load_more_row(hidden: usize) -> String {
   )
 }
 
-fn index_session_row(session: &Session, now: u64, overflow: bool) -> String {
+fn index_session_row(session: &Session, now: u64, overflow: bool, filtered: bool) -> String {
   let lifecycle = session.lifecycle_status(now);
   let id = esc(&session.id);
   let profile = esc(session.profile.as_deref().unwrap_or("default"));
@@ -651,13 +724,18 @@ fn index_session_row(session: &Session, now: u64, overflow: bool) -> String {
   );
   let duration = index_duration_label(session, now, lifecycle);
   format!(
-    "<tr{overflow} data-session-id=\"{id}\"><td><a class=\"job-id\" href=\"/job/{id}\">{id}</a></td>\
+    "<tr{classes} data-session-id=\"{id}\" data-job-kinds=\"{kinds}\"><td><a class=\"job-id\" href=\"/job/{id}\">{id}</a></td>\
 <td class=\"session-status-cell\">{status}</td>\
 <td class=\"session-started-cell\">{started}</td>\
 <td class=\"session-duration-cell\">{duration}</td>\
 <td>{profile}</td><td class=\"session-procs-cell\"><span class=\"chip-count\" data-tip=\"{n_procs} run{plural} in this job\">{n_procs}</span>{chips}</td><td class=\"dim repo-path session-repo-path\"><button type=\"button\" class=\"repo-copy\" data-copy-value=\"{repo}\" data-tip=\"{repo}\" aria-label=\"Copy full repository path\">{repo}</button></td></tr>\n",
-    overflow = if overflow { " class=\"jobs-overflow\"" } else { "" },
+    classes = match (overflow, filtered) {
+      (true, _) => " class=\"jobs-overflow\"",
+      (false, true) => " class=\"jobs-filtered\"",
+      (false, false) => "",
+    },
     id = id,
+    kinds = job_kinds(session).join(" "),
     status = status,
     started = started,
     duration = esc(&duration),
