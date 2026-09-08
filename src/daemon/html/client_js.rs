@@ -702,7 +702,7 @@ function updateProcClocks(nowUnixSec) {
   });
 }
 function startProcClock() {
-  const tick = () => updateProcClocks(Math.floor(Date.now() / 1000));
+  const tick = () => { resyncIfStale(); updateProcClocks(Math.floor(Date.now() / 1000)); };
   tick();
   setInterval(tick, 1000);
 }
@@ -2529,6 +2529,16 @@ function onWsMessage(msg) {
   onTick(msg);
 }
 let lastTickSecs = 0;
+// Wall-clock ms of the last tick. The daemon ticks twice a second, so a long silence means
+// the socket died without a close event (a laptop sleep leaves it half-open) and the
+// snapshot on hand is stale. Reconnecting fetches a full snapshot rather than letting the
+// page extrapolate a heartbeat timeout — and a "failed" job — from pre-sleep data.
+let lastTickAtMs = 0;
+const STALE_TICK_MS = 5000;
+function resyncIfStale() {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (lastTickAtMs && Date.now() - lastTickAtMs > STALE_TICK_MS) connectWs();
+}
 function onTick(msg) {
   if (msg.type !== 'tick') return;
   // Render time must be monotonic: a stale frame (reconnect backlog, a superseded socket,
@@ -2537,7 +2547,15 @@ function onTick(msg) {
   // fresh frame — the "oscillating Duration" bug. Newer snapshots fully supersede older
   // ones, so dropping stale frames loses nothing.
   if ((msg.now_secs || 0) < lastTickSecs) return;
+  const tickGapSecs = lastTickSecs ? (msg.now_secs || 0) - lastTickSecs : 0;
   lastTickSecs = msg.now_secs || lastTickSecs;
+  lastTickAtMs = Date.now();
+  // A light tick (no sessions) after a clock jump would render the old snapshot against the
+  // new clock: every attached job would read as timed out. Ask for a full snapshot instead.
+  if (!msg.sessions && liveSessions && tickGapSecs > STALE_TICK_MS / 1000) {
+    connectWs();
+    return;
+  }
   const alive = msg.alive_clients ?? msg.active_clients ?? 0;
   const nowUnix = msg.now_secs ?? (Date.now() / 1000);
   if (msg.sessions) {
@@ -2584,6 +2602,7 @@ function connectWs() {
 }
 connectWs();
 startProcClock();
+document.addEventListener('visibilitychange', () => { if (!document.hidden) resyncIfStale(); });
 (function initSessionPage() {
   const root = document.getElementById('session-procs');
   if (!root) return;

@@ -451,6 +451,19 @@ impl Store {
       && self.no_alive_since.is_some_and(|since| now.saturating_sub(since) >= EPHEMERAL_IDLE_SECS)
   }
 
+  /// Absorb a wall-clock jump the daemon slept through (laptop lid closed mid-job). The
+  /// heartbeat deadline is wall-clock, but no runner could ping while the whole machine was
+  /// asleep, so every session that was attached going in gets the gap credited to its last
+  /// heartbeat. Without this the job reads "failed" on wake until the runner's next ping —
+  /// and the supervisor may restart a perfectly healthy run in that window.
+  pub fn absorb_clock_jump(&mut self, gap_secs: u64, now: u64) {
+    for s in self.sessions.values_mut() {
+      if s.ended_at.is_none() && s.client_connected {
+        s.last_seen_at = s.last_seen_at.saturating_add(gap_secs).min(now);
+      }
+    }
+  }
+
   pub fn session_mut(&mut self, id: &str) -> Option<&mut Session> {
     self.sessions.get_mut(id)
   }
@@ -781,6 +794,29 @@ mod tests {
       parent_session: None,
       supervisor: Default::default(),
     }
+  }
+
+  /// A laptop sleep is not a dead runner: the heartbeat gap is credited back to every
+  /// attached session, and only to those — a job that already ended, or whose client had
+  /// already gone quiet before the sleep, keeps its real last heartbeat.
+  #[test]
+  fn clock_jump_is_credited_to_attached_sessions_only() {
+    let mut store = Store::new(DaemonMode::Persistent, 1, 100);
+    let mut attached = stored_session("attached", 100, None, 1000);
+    attached.client_connected = true;
+    attached.procs = vec![test_proc(ProcStatus::Running)];
+    let quiet = stored_session("quiet", 100, None, 1000);
+    let ended = stored_session("ended", 100, Some(1200), 1200);
+    for s in [attached, quiet, ended] {
+      store.sessions.insert(s.id.clone(), s);
+    }
+    let woke = 1000 + SESSION_IDLE_TIMEOUT_SECS * 3;
+    assert_eq!(store.sessions["attached"].lifecycle_status(woke), SessionLifecycle::Failed, "before crediting");
+    store.absorb_clock_jump(SESSION_IDLE_TIMEOUT_SECS * 3, woke);
+    assert_eq!(store.sessions["attached"].last_seen_at, woke);
+    assert_eq!(store.sessions["attached"].lifecycle_status(woke), SessionLifecycle::Running);
+    assert_eq!(store.sessions["quiet"].last_seen_at, 1000);
+    assert_eq!(store.sessions["ended"].last_seen_at, 1200);
   }
 
   /// The regression behind `scsh quota`'s per-harness run names: the legacy attempt

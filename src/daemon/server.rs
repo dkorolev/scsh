@@ -22,6 +22,9 @@ use crate::json::{parse, quote, Value};
 
 const PERSIST_DEBOUNCE: Duration = Duration::from_millis(500);
 const WS_TICK: Duration = Duration::from_millis(500);
+/// A wall-clock jump between two passes of the loop that can only mean the machine slept
+/// (or its clock was set forward): far past the pass cadence, short of the heartbeat timeout.
+const CLOCK_JUMP_SECS: u64 = 60;
 const PRUNE_TICK: Duration = Duration::from_secs(30);
 const MAX_PROC_LINES: usize = 5000;
 const MAX_HTTP_BODY: usize = 512 * 1024;
@@ -155,6 +158,8 @@ impl Server {
     crate::atomic_write(&pid_path, std::process::id().to_string().as_bytes())?;
 
     let mut last_ws_tick = Instant::now();
+    // Wall clock as of the previous pass: a jump far beyond the loop's cadence is a sleep.
+    let mut last_wall = now_unix_secs();
     // Per-proc incremental cast probes (parse offsets cached across ticks) — see `castprobe`.
     let mut cast_probes: std::collections::HashMap<(String, usize), CastProbe> = std::collections::HashMap::new();
     // Zombie-container reaper state: the sweep runs on its own thread (container kills
@@ -171,6 +176,15 @@ impl Server {
     let supervise_running = Arc::new(AtomicBool::new(false));
 
     loop {
+      // First thing each pass, ahead of the supervisor and the liveness reconcile below: a
+      // sleep the machine just woke from must be credited before anything reads a deadline.
+      let wall_now = now_unix_secs();
+      let wall_gap = wall_now.saturating_sub(last_wall);
+      last_wall = wall_now;
+      if wall_gap > CLOCK_JUMP_SECS {
+        lock_store(&self.store).absorb_clock_jump(wall_gap, wall_now);
+        self.ws_dirty.store(true, Ordering::Relaxed);
+      }
       // Drain the whole accept backlog every tick. A single accept per 100ms tick capped
       // the daemon at ten connections a second, so a job page's burst of fetches, or the
       // same page through an SSH tunnel, serialized at 100ms per request. Connections are
