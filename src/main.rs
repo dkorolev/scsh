@@ -3037,9 +3037,10 @@ fn run_workflow(
   let mut ran_count = 0usize;
   let mut skipped_count = 0usize;
   let mut failure: Option<String> = None;
-  // Bound concurrent container starts across the whole run: one limiter, reused each wave (waves
-  // run sequentially, so it is only ever contended within a wave). A 20-route review otherwise
-  // cold-starts every container at once and trips the startup watchdog.
+  // Bound concurrent container starts. The daemon grants machine-wide launch slots, so the
+  // bound spans every job on the box; this run's own limiter is the fallback without one. A
+  // 20-route review otherwise cold-starts every container at once and trips the startup
+  // watchdog — and two such reviews side by side would do it twice over.
   let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
   while state.len() < def.steps.len() && failure.is_none() {
     let wave_caller_tip = caller_tip.clone();
@@ -3186,7 +3187,7 @@ fn run_workflow(
           let cache_allowed = resume.is_none() || !resume_invalidated.contains(&step.id);
           let limiter = &launch_limiter;
           scope.spawn(move || {
-            let _permit = limiter.acquire();
+            let _permit = daemon::acquire_launch_permit(dc.as_deref(), limiter, p.index(), &|msg| p.note(msg));
             let run = run_workflow_step_with_retries(
               inv,
               step,
@@ -5281,7 +5282,8 @@ fn build_and_run(
   }
   let run_started = std::time::Instant::now();
   let workload = stats::workload_of_repo(root);
-  // Bound concurrent container starts the same way the workflow wave does.
+  // Bound concurrent container starts the same way the workflow wave does: daemon-wide slots
+  // first, this run's own limiter only without a daemon.
   let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let dc = daemon_client.clone();
@@ -5295,7 +5297,7 @@ fn build_and_run(
         let dc = dc.clone();
         let first_index = p.index();
         scope.spawn(move || {
-          let _permit = limiter.acquire();
+          let _permit = daemon::acquire_launch_permit(dc.as_deref(), limiter, first_index, &|msg| p.note(msg));
           let mut retry = RouteRetryState::new(skill.retry_for, skill.retry_signature_cap, session_ref, &skill.name);
           let mut proc = p;
           let mut proc_index = first_index;

@@ -77,10 +77,14 @@ pub fn is_snap_confined(path: &Path) -> bool {
 /// Container runtimes INSTALLED on this host, in preference order — what the browser's
 /// Setup tab offers. Apple `container` is suggested only on macOS (on Linux it never
 /// appears); docker and podman appear wherever installed.
-/// Default ceiling on containers started at once in one run. A wide fleet (a 20-route review)
+/// Default ceiling on agent containers running at once. A wide fleet (a 20-route review)
 /// otherwise cold-starts every container in the same instant and overwhelms the container
 /// runtime — many produce no output inside the startup watchdog and fail as `startup_stalled`.
 /// Override with `SCSH_MAX_PARALLEL_RUNS`.
+///
+/// The ceiling is enforced by the session browser daemon across EVERY job on the machine
+/// (the daemon reads the variable when it starts). A run without a daemon bounds itself
+/// with the same number through [`LaunchLimiter`].
 pub const DEFAULT_MAX_PARALLEL_RUNS: usize = 12;
 
 /// How many agent-step containers may run at once, from `SCSH_MAX_PARALLEL_RUNS` (clamped to at
@@ -93,11 +97,13 @@ pub fn max_parallel_runs() -> usize {
     .unwrap_or(DEFAULT_MAX_PARALLEL_RUNS)
 }
 
-/// A counting semaphore (std only) that bounds how many launches run concurrently. Every wave
-/// thread is spawned at once, but only [`max_parallel_runs`] hold a permit and run; the rest
-/// block in [`Self::acquire`] until one finishes, so containers cold-start in bounded batches
-/// instead of all together. Independent fan-out only — a permit is held for a step's whole run,
-/// which never deadlocks when the steps sharing a limiter do not depend on each other.
+/// A counting semaphore (std only) that bounds how many launches run concurrently within one
+/// run. It is the fallback for a run with no daemon to grant machine-wide slots (see
+/// `daemon::acquire_launch_permit`): every wave thread is spawned at once, but only
+/// [`max_parallel_runs`] hold a permit and run; the rest block in [`Self::acquire`] until one
+/// finishes, so containers cold-start in bounded batches instead of all together.
+/// Independent fan-out only — a permit is held for a step's whole run, which never deadlocks
+/// when the steps sharing a limiter do not depend on each other.
 pub struct LaunchLimiter {
   available: std::sync::Mutex<usize>,
   released: std::sync::Condvar,

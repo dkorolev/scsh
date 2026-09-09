@@ -7,9 +7,10 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use super::model::{ProcKind, ProcStatus};
+use super::model::{LaunchGrant, ProcKind, ProcStatus};
 use super::paths::daemon_port;
-use crate::json::quote;
+use crate::json::{parse, quote, Value};
+use crate::runtime::{LaunchLimiter, LaunchPermit as LocalLaunchPermit};
 
 /// Batch proc output before POSTing — ~2 flushes/sec, up to half a megabyte per payload.
 const LINE_BATCH_INTERVAL: Duration = Duration::from_millis(500);
@@ -17,6 +18,8 @@ const LINE_BATCH_MAX_BYTES: usize = 512 * 1024;
 /// Large parallel runs (e.g. code-review) can queue thousands of lines; wait long enough to drain.
 const FLUSH_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 const POSTER_JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a run refused a launch slot asks again.
+const LAUNCH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 enum PostJob {
   ProcLine { proc: usize, at: f64, line: String },
@@ -362,6 +365,31 @@ impl Client {
     self.post("/api/v1/prune/schedule", &body);
   }
 
+  /// Block until the daemon admits `proc_index` to one of the machine-wide launch slots, and
+  /// return the slot, which is handed back when dropped. `on_wait` is told, once per change,
+  /// what the run is waiting for ("waiting for a launch slot · 12 of 12 in use") so the board
+  /// never shows a silent stall. `None` when the daemon cannot answer — unreachable, or too
+  /// old to know the endpoint — so the caller falls back to bounding its own run.
+  pub fn acquire_launch_slot(&self, proc_index: usize, on_wait: &dyn Fn(&str)) -> Option<LaunchSlot> {
+    let body = format!("{{ \"session\": {}, \"proc\": {} }}", quote(&self.inner.session_id), proc_index);
+    // The proc's row must land before its slot is judged against the cap.
+    self.flush_poster();
+    let mut last_message = String::new();
+    loop {
+      let response = send_post_body(self.inner.port, "/api/v1/launch/acquire", &body)?;
+      let grant = parse_launch_grant(&response)?;
+      if grant.granted {
+        return Some(LaunchSlot { inner: Arc::clone(&self.inner), proc: proc_index });
+      }
+      let message = format!("waiting for a launch slot · {} of {} in use", grant.held, grant.cap);
+      if message != last_message {
+        on_wait(&message);
+        last_message = message;
+      }
+      thread::sleep(LAUNCH_POLL_INTERVAL);
+    }
+  }
+
   pub fn ping(&self) {
     self.post("/api/v1/ping", &format!("{{ \"session\": {} }}", quote(&self.inner.session_id)));
   }
@@ -401,6 +429,60 @@ impl Client {
 /// One synchronous POST to a daemon on `port`, outside any session (e.g. `scsh prune --now`).
 pub fn post_once(port: u16, path: &str, body: &str) -> bool {
   send_post(port, path, body)
+}
+
+/// A machine-wide launch slot granted by the daemon (see [`Client::acquire_launch_slot`]).
+/// Dropping it posts the release; a release that never arrives is harmless, because the
+/// daemon derives a slot's liveness from the proc it was granted to.
+pub struct LaunchSlot {
+  inner: Arc<ClientInner>,
+  proc: usize,
+}
+
+impl Drop for LaunchSlot {
+  fn drop(&mut self) {
+    let body = format!("{{ \"session\": {}, \"proc\": {} }}", quote(&self.inner.session_id), self.proc);
+    if let Some(tx) = lock_post_tx(&self.inner) {
+      let _ = tx.send(PostJob::Send { path: "/api/v1/launch/release".into(), body });
+    }
+  }
+}
+
+/// Permission to start one agent container: the daemon's machine-wide slot when a daemon is
+/// there to grant it, else a slot in this run's own limiter. Either way the container may
+/// start once this exists and another may take its place once it is dropped.
+pub struct LaunchPermit<'a> {
+  _daemon: Option<LaunchSlot>,
+  _local: Option<LocalLaunchPermit<'a>>,
+}
+
+/// Take a launch permit for `proc_index`, blocking until one is free. The daemon's cap spans
+/// every job on the machine, which is the bound that matters: two reviews side by side must
+/// not each cold-start a full fleet. Without a daemon (or with one too old to grant slots)
+/// the run bounds itself with `local`, exactly as before.
+pub fn acquire_launch_permit<'a>(
+  client: Option<&Client>, local: &'a LaunchLimiter, proc_index: usize, on_wait: &dyn Fn(&str),
+) -> LaunchPermit<'a> {
+  if let Some(slot) = client.and_then(|c| c.acquire_launch_slot(proc_index, on_wait)) {
+    return LaunchPermit { _daemon: Some(slot), _local: None };
+  }
+  LaunchPermit { _daemon: None, _local: Some(local.acquire()) }
+}
+
+/// The daemon's launch answer, or `None` for a body that is not one (an older daemon's 404
+/// text, say) — the caller then bounds its own run rather than trusting a guess.
+fn parse_launch_grant(body: &str) -> Option<LaunchGrant> {
+  let Value::Object(obj) = parse(body).ok()? else { return None };
+  let field = |key: &str| obj.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+  let granted = match field("granted")? {
+    Value::Bool(b) => *b,
+    _ => return None,
+  };
+  let number = |key: &str| match field(key) {
+    Some(Value::Number(n)) if *n >= 0.0 => Some(*n as usize),
+    _ => None,
+  };
+  Some(LaunchGrant { granted, held: number("held")?, cap: number("cap")? })
 }
 
 fn log_daemon_warn(msg: &str) {
@@ -529,11 +611,13 @@ fn send_lines_bulk(
 }
 
 fn send_post(port: u16, path: &str, body: &str) -> bool {
-  let Ok(mut stream) =
-    TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(500))
-  else {
-    return false;
-  };
+  send_post_body(port, path, body).is_some()
+}
+
+/// One synchronous POST; the response body when the daemon answered 200, else `None`.
+fn send_post_body(port: u16, path: &str, body: &str) -> Option<String> {
+  let mut stream =
+    TcpStream::connect_timeout(&format!("127.0.0.1:{port}").parse().unwrap(), Duration::from_millis(500)).ok()?;
   stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
   stream.set_write_timeout(Some(Duration::from_secs(2))).ok();
   let req = format!(
@@ -545,14 +629,14 @@ Connection: close\r\n\r\n\
 {body}",
     len = body.len()
   );
-  if stream.write_all(req.as_bytes()).is_err() {
-    return false;
-  }
+  stream.write_all(req.as_bytes()).ok()?;
   let mut resp = String::new();
-  if stream.read_to_string(&mut resp).is_err() {
-    return false;
+  stream.read_to_string(&mut resp).ok()?;
+  if !(resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")) {
+    return None;
   }
-  resp.starts_with("HTTP/1.1 200") || resp.starts_with("HTTP/1.0 200")
+  let (_, body) = resp.split_once("\r\n\r\n")?;
+  Some(body.to_string())
 }
 
 /// The poster thread's reusable keep-alive connection to the daemon. A running job posts
@@ -766,6 +850,16 @@ fn wait_for_daemon(timeout: Duration) -> std::io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+  #[test]
+  fn a_launch_answer_is_only_trusted_when_it_is_one() {
+    assert_eq!(
+      parse_launch_grant(r#"{"ok":true,"granted":false,"held":12,"cap":12}"#),
+      Some(LaunchGrant { granted: false, held: 12, cap: 12 })
+    );
+    assert_eq!(parse_launch_grant(r#"{"ok":true}"#), None, "an old daemon's plain ok is not a grant");
+    assert_eq!(parse_launch_grant("not found"), None);
+  }
+
   use super::*;
   use std::sync::mpsc;
 

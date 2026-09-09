@@ -1082,6 +1082,14 @@ fn route(
       harness_stop_response_notifying(&req.body, store, || ws_dirty.store(true, Ordering::Relaxed));
     return (status, body, "application/json", mutated);
   }
+  if req.method == "POST" && req.path == "/api/v1/launch/acquire" {
+    let (status, body) = launch_acquire_response(&req.body, store);
+    return (status, body, "application/json", false);
+  }
+  if req.method == "POST" && req.path == "/api/v1/launch/release" {
+    let (status, body) = launch_release_response(&req.body, store);
+    return (status, body, "application/json", false);
+  }
   if req.method == "POST" && req.path == "/api/v1/repos/pick" {
     return (200, repos_pick_response(), "application/json", false);
   }
@@ -1154,6 +1162,23 @@ fn route(
       let ids: Vec<String> = store.sessions.keys().cloned().collect();
       let parts: Vec<String> = ids.iter().map(|id| quote(id)).collect();
       (200, format!("{{ \"sessions\": [{}] }}", parts.join(", ")), "application/json", false)
+    }
+    // Machine-wide launch slots: the cap, how many are in use, and who holds them.
+    "/api/v1/launch" => {
+      let mut store = lock_store(store);
+      let held = store.launch_held();
+      let holders: Vec<String> = store
+        .launch_permits
+        .iter()
+        .map(|(session, proc)| format!("{{ \"session\": {}, \"proc\": {} }}", quote(session), proc))
+        .collect();
+      let body = format!(
+        "{{ \"cap\": {}, \"held\": {}, \"holders\": [{}] }}",
+        store.launch_cap.max(1),
+        held,
+        holders.join(", ")
+      );
+      (200, body, "application/json", false)
     }
     // The jobs currently running, so `scsh daemon restart` can list what a restart would
     // interrupt and require confirmation. Minimal shape: id + a label + start time.
@@ -2786,6 +2811,46 @@ pub(crate) fn jobs_restart_response(body: &str, store: &Arc<Mutex<Store>>) -> (u
 /// still-named container for the session, SIGTERM (then SIGKILL) the `scsh run` process when its
 /// PID is known, and mark incomplete procs failed with `force_stopped`. Idempotent on an already
 /// ended session (`{ok:true,already_ended:true}`).
+/// The `(session, proc)` a launch-slot request is about, or the 400 that rejects it.
+fn launch_request_key(body: &str) -> Result<(String, usize), (u16, String)> {
+  let obj = match parse(body).ok() {
+    Some(Value::Object(o)) => o,
+    _ => return Err((400, err_body("expected a JSON object"))),
+  };
+  let session = field_str(&obj, "session").filter(|s| !s.is_empty());
+  let proc = field_num(&obj, "proc").filter(|n| *n >= 0.0 && n.fract() == 0.0);
+  match (session, proc) {
+    (Some(session), Some(proc)) => Ok((session, proc as usize)),
+    _ => Err((400, err_body("'session' and 'proc' are required"))),
+  }
+}
+
+/// `POST /api/v1/launch/acquire` — body `{"session","proc"}`. Ask for one of the machine-wide
+/// launch slots. Never blocks: the answer says whether the proc may start now, and how many
+/// slots are in use out of how many, so a refused run can wait and say why. Slots are
+/// per-daemon, which is per-machine — the point is to bound containers across jobs, not
+/// within one.
+fn launch_acquire_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
+  let (session, proc) = match launch_request_key(body) {
+    Ok(key) => key,
+    Err(rejected) => return rejected,
+  };
+  let grant = lock_store(store).try_acquire_launch(&session, proc);
+  (200, format!("{{\"ok\":true,\"granted\":{},\"held\":{},\"cap\":{}}}", grant.granted, grant.held, grant.cap))
+}
+
+/// `POST /api/v1/launch/release` — body `{"session","proc"}`. Give a slot back. Releasing a
+/// slot that is not held is fine (a restarted daemon never granted it), and a run that dies
+/// without releasing is covered by the store's own liveness rule.
+fn launch_release_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String) {
+  let (session, proc) = match launch_request_key(body) {
+    Ok(key) => key,
+    Err(rejected) => return rejected,
+  };
+  let released = lock_store(store).release_launch(&session, proc);
+  (200, format!("{{\"ok\":true,\"released\":{released}}}"))
+}
+
 fn session_stop_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
   let obj = match parse(body) {
     Ok(Value::Object(o)) => o,
@@ -5454,6 +5519,38 @@ mod tests {
       session.lifecycle_status(now),
       crate::daemon::model::SessionLifecycle::Completed,
       "every proc succeeded, so the job reads as done rather than failed"
+    );
+  }
+
+  #[test]
+  fn launch_slots_are_granted_up_to_the_daemon_cap_and_refused_beyond_it() {
+    let mut waiting = export_test_proc(0, "claude: fix", None);
+    waiting.status = ProcStatus::Waiting;
+    waiting.elapsed = None;
+    let mut second = waiting.clone();
+    second.index = 1;
+    second.skill_name = Some("second".into());
+    let store = store_with_export_session("wide", vec![waiting, second]);
+    {
+      let mut guard = store.lock().unwrap();
+      guard.sessions.get_mut("wide").unwrap().ended_at = None;
+      guard.launch_cap = 1;
+    }
+    let (status, body) = launch_acquire_response(r#"{"session":"wide","proc":0}"#, &store);
+    assert_eq!((status, body.as_str()), (200, r#"{"ok":true,"granted":true,"held":1,"cap":1}"#));
+    let (status, body) = launch_acquire_response(r#"{"session":"wide","proc":1}"#, &store);
+    assert_eq!((status, body.as_str()), (200, r#"{"ok":true,"granted":false,"held":1,"cap":1}"#));
+    let (status, body) = launch_release_response(r#"{"session":"wide","proc":0}"#, &store);
+    assert_eq!((status, body.as_str()), (200, r#"{"ok":true,"released":true}"#));
+    let (status, body) = launch_acquire_response(r#"{"session":"wide","proc":1}"#, &store);
+    assert_eq!((status, body.as_str()), (200, r#"{"ok":true,"granted":true,"held":1,"cap":1}"#));
+    let (status, _) = launch_acquire_response(r#"{"session":"wide"}"#, &store);
+    assert_eq!(status, 400, "a request without a proc is rejected, not granted");
+    let (status, body) = launch_release_response(r#"{"session":"wide","proc":7}"#, &store);
+    assert_eq!(
+      (status, body.as_str()),
+      (200, r#"{"ok":true,"released":false}"#),
+      "releasing what is not held is harmless"
     );
   }
 

@@ -385,6 +385,23 @@ pub struct Store {
   /// its final proc mid-flight, until an unrelated job happened to trigger a push — and a
   /// daemon restart forgot the publication altogether.
   pub unannounced: BTreeSet<String>,
+  /// How many agent containers may run at once across EVERY job on this machine. Read from
+  /// `SCSH_MAX_PARALLEL_RUNS` when the daemon starts (restart the daemon to change it).
+  pub launch_cap: usize,
+  /// The launch slots handed out: one `(session, proc)` per container the daemon has admitted.
+  /// In-memory only — a restarted daemon starts with every slot free, and a release for a slot
+  /// it never granted is a no-op. See [`Self::launch_permit_is_live`] for why a holder that
+  /// vanishes without releasing cannot leak its slot.
+  pub launch_permits: BTreeSet<(String, usize)>,
+}
+
+/// The daemon's answer to a launch-slot request: whether the proc may start now, and the
+/// occupancy behind that answer so a waiting run can say what it is waiting for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LaunchGrant {
+  pub granted: bool,
+  pub held: usize,
+  pub cap: usize,
 }
 
 impl Store {
@@ -399,7 +416,66 @@ impl Store {
       sessions: BTreeMap::new(),
       open_repos: BTreeMap::new(),
       unannounced: BTreeSet::new(),
+      launch_cap: crate::runtime::max_parallel_runs(),
+      launch_permits: BTreeSet::new(),
     }
+  }
+
+  /// Whether a launch slot still counts against the cap. Its holder is a run process that
+  /// may die, be force-stopped, or lose the daemon without ever releasing; rather than chase
+  /// every one of those endings, occupancy is derived from what the store already tracks: a
+  /// slot is live while its session is unfinished and the latest attempt of its proc is still
+  /// waiting or running. A retry is a new proc row chained to the old one, and the run keeps
+  /// the slot across attempts, so the chain is followed to its newest row.
+  fn launch_permit_is_live(&self, session_id: &str, proc_index: usize) -> bool {
+    let Some(session) = self.sessions.get(session_id) else { return false };
+    if session.ended_at.is_some() {
+      return false;
+    }
+    let Some(proc) = session.procs.iter().find(|p| p.index == proc_index) else {
+      return true; // granted ahead of its row landing — a race must never over-admit
+    };
+    let mut latest = proc;
+    let mut seen = BTreeSet::from([latest.index]);
+    while let Some(next) = session.proc_next_attempt(latest) {
+      if !seen.insert(next.index) {
+        break;
+      }
+      latest = next;
+    }
+    matches!(latest.status, ProcStatus::Running | ProcStatus::Waiting)
+  }
+
+  /// How many launch slots are in use right now, after dropping the ones whose holders are
+  /// gone (see [`Self::launch_permit_is_live`]).
+  pub fn launch_held(&mut self) -> usize {
+    let stale: Vec<(String, usize)> =
+      self.launch_permits.iter().filter(|(s, p)| !self.launch_permit_is_live(s, *p)).cloned().collect();
+    for key in stale {
+      self.launch_permits.remove(&key);
+    }
+    self.launch_permits.len()
+  }
+
+  /// Admit `proc` of `session` if a slot is free. Idempotent: a holder asking again keeps its
+  /// slot, so a run that missed the first answer cannot double-count itself.
+  pub fn try_acquire_launch(&mut self, session_id: &str, proc_index: usize) -> LaunchGrant {
+    let key = (session_id.to_string(), proc_index);
+    let held = self.launch_held();
+    let cap = self.launch_cap.max(1);
+    if self.launch_permits.contains(&key) {
+      return LaunchGrant { granted: true, held, cap };
+    }
+    if held < cap {
+      self.launch_permits.insert(key);
+      return LaunchGrant { granted: true, held: held + 1, cap };
+    }
+    LaunchGrant { granted: false, held, cap }
+  }
+
+  /// Give a slot back. True when it was actually held.
+  pub fn release_launch(&mut self, session_id: &str, proc_index: usize) -> bool {
+    self.launch_permits.remove(&(session_id.to_string(), proc_index))
   }
 
   /// Record that a session changed outside any request handler; see [`Self::unannounced`].
@@ -906,6 +982,76 @@ mod tests {
   /// fallback chains same-kind SAME-NAME procs, so sibling runs must carry unique skill
   /// names (`quota-claude`, `quota-codex`, …) to render as parallel tasks — while runs
   /// that really do share a name still chain as attempts.
+  fn launch_test_store(procs: Vec<(usize, ProcStatus, Option<usize>)>) -> Store {
+    let mut store = Store::new(DaemonMode::Persistent, 7274, 100);
+    store.launch_cap = 2;
+    let mut session = Session {
+      id: "job".into(),
+      started_at: 100,
+      ended_at: None,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: String::new(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at: 100,
+      client_connected: true,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+      supervisor: SupervisorState::fresh(0),
+    };
+    for (index, status, previous) in procs {
+      let mut p = test_proc(status);
+      p.index = index;
+      p.previous_attempt = previous;
+      p.skill_name = Some(format!("skill-{}", previous.unwrap_or(index)));
+      session.procs.push(p);
+    }
+    store.sessions.insert("job".into(), session);
+    store
+  }
+
+  #[test]
+  fn launch_slots_are_capped_machine_wide_and_idempotent_per_holder() {
+    let mut store = launch_test_store(vec![(0, ProcStatus::Waiting, None), (1, ProcStatus::Waiting, None)]);
+    let mut other = launch_test_store(vec![(0, ProcStatus::Waiting, None)]).sessions.remove("job").unwrap();
+    other.id = "other".into();
+    store.sessions.insert("other".into(), other);
+
+    assert_eq!(store.try_acquire_launch("job", 0), LaunchGrant { granted: true, held: 1, cap: 2 });
+    assert_eq!(store.try_acquire_launch("other", 0), LaunchGrant { granted: true, held: 2, cap: 2 });
+    assert_eq!(store.try_acquire_launch("job", 1), LaunchGrant { granted: false, held: 2, cap: 2 }, "cap spans jobs");
+    assert_eq!(
+      store.try_acquire_launch("job", 0),
+      LaunchGrant { granted: true, held: 2, cap: 2 },
+      "asking again keeps the slot"
+    );
+    assert!(store.release_launch("other", 0));
+    assert!(!store.release_launch("other", 0), "a slot is released once");
+    assert_eq!(store.try_acquire_launch("job", 1), LaunchGrant { granted: true, held: 2, cap: 2 });
+  }
+
+  #[test]
+  fn a_launch_slot_whose_holder_is_gone_frees_itself() {
+    // A finished proc, a retry chain whose newest attempt is still running, and an ended session.
+    let mut store = launch_test_store(vec![
+      (0, ProcStatus::Ok, None),
+      (1, ProcStatus::Fail, None),
+      (2, ProcStatus::Running, Some(1)),
+    ]);
+    store.launch_cap = 3;
+    assert!(store.try_acquire_launch("job", 0).granted);
+    assert!(store.try_acquire_launch("job", 1).granted);
+    assert_eq!(store.launch_held(), 1, "the finished proc's slot is gone; the retried one lives on through its retry");
+    assert!(store.launch_permits.contains(&("job".into(), 1)));
+    store.sessions.get_mut("job").unwrap().ended_at = Some(200);
+    assert_eq!(store.launch_held(), 0, "an ended session holds nothing");
+    assert!(store.try_acquire_launch("ghost", 0).granted);
+    assert_eq!(store.launch_held(), 0, "a slot for a session the daemon never saw does not count");
+  }
+
   #[test]
   fn distinct_skill_names_are_parallel_tasks_not_attempts() {
     let named = |index: usize, name: &str| {

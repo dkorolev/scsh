@@ -325,6 +325,16 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   registers becomes a failed session with the error — never a stranded "running" one. Each
   image build is recorded as a cast by scsh's own PTY recorder (same ASCII-cinema player
   as skill runs) — no host tooling required.
+- `GET /api/v1/launch` — the machine-wide launch slots: `{"cap", "held", "holders": [{"session",
+  "proc"}]}`. The cap is `SCSH_MAX_PARALLEL_RUNS` as the daemon read it at start (default 12).
+- `POST /api/v1/launch/acquire` — body `{"session":"…","proc":N}`. Ask for a launch slot. Never
+  blocks: `{"ok":true,"granted":bool,"held":N,"cap":M}`. A refused run polls again each second
+  and notes what it is waiting for on its row. Slots span every job on the machine — the bound
+  is on the container runtime, not on one run. A slot whose holder died, was force-stopped, or
+  never released frees itself: the daemon counts a slot only while its session is unfinished and
+  the newest attempt of its proc is still waiting or running.
+- `POST /api/v1/launch/release` — body `{"session":"…","proc":N}`. Give the slot back
+  (`{"ok":true,"released":bool}`; releasing what is not held is fine).
 - `POST /api/v1/session/start`, `/register`, `/deregister`, `/ping`, `/proc/*`, `/container`
   — event ingestion (used by `scsh run`); `/proc/cast` registers a proc's recording path,
   `/proc/diff` the packed commits-diff page a step's integration produced
