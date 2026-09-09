@@ -77,6 +77,61 @@ pub fn is_snap_confined(path: &Path) -> bool {
 /// Container runtimes INSTALLED on this host, in preference order — what the browser's
 /// Setup tab offers. Apple `container` is suggested only on macOS (on Linux it never
 /// appears); docker and podman appear wherever installed.
+/// Default ceiling on containers started at once in one run. A wide fleet (a 20-route review)
+/// otherwise cold-starts every container in the same instant and overwhelms the container
+/// runtime — many produce no output inside the startup watchdog and fail as `startup_stalled`.
+/// Override with `SCSH_MAX_PARALLEL_RUNS`.
+pub const DEFAULT_MAX_PARALLEL_RUNS: usize = 12;
+
+/// How many agent-step containers may run at once, from `SCSH_MAX_PARALLEL_RUNS` (clamped to at
+/// least 1) or [`DEFAULT_MAX_PARALLEL_RUNS`].
+pub fn max_parallel_runs() -> usize {
+  std::env::var("SCSH_MAX_PARALLEL_RUNS")
+    .ok()
+    .and_then(|v| v.trim().parse::<usize>().ok())
+    .map(|n| n.max(1))
+    .unwrap_or(DEFAULT_MAX_PARALLEL_RUNS)
+}
+
+/// A counting semaphore (std only) that bounds how many launches run concurrently. Every wave
+/// thread is spawned at once, but only [`max_parallel_runs`] hold a permit and run; the rest
+/// block in [`Self::acquire`] until one finishes, so containers cold-start in bounded batches
+/// instead of all together. Independent fan-out only — a permit is held for a step's whole run,
+/// which never deadlocks when the steps sharing a limiter do not depend on each other.
+pub struct LaunchLimiter {
+  available: std::sync::Mutex<usize>,
+  released: std::sync::Condvar,
+}
+
+impl LaunchLimiter {
+  pub fn new(limit: usize) -> Self {
+    Self { available: std::sync::Mutex::new(limit.max(1)), released: std::sync::Condvar::new() }
+  }
+
+  /// Block until a permit is free, take it, and return a guard that releases it on drop.
+  pub fn acquire(&self) -> LaunchPermit<'_> {
+    let mut available = self.available.lock().unwrap_or_else(|e| e.into_inner());
+    while *available == 0 {
+      available = self.released.wait(available).unwrap_or_else(|e| e.into_inner());
+    }
+    *available -= 1;
+    LaunchPermit { limiter: self }
+  }
+}
+
+/// RAII permit from [`LaunchLimiter::acquire`]; returns its slot to the limiter when dropped.
+pub struct LaunchPermit<'a> {
+  limiter: &'a LaunchLimiter,
+}
+
+impl Drop for LaunchPermit<'_> {
+  fn drop(&mut self) {
+    let mut available = self.limiter.available.lock().unwrap_or_else(|e| e.into_inner());
+    *available += 1;
+    self.limiter.released.notify_one();
+  }
+}
+
 pub fn available_runtimes() -> Vec<&'static str> {
   let mut out = Vec::new();
   if cfg!(target_os = "macos") && which("container").is_some() {
@@ -2225,6 +2280,52 @@ pub fn base_branch(for_each_ref: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn launch_limiter_never_exceeds_its_cap_and_serves_everyone() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+    let limiter = Arc::new(LaunchLimiter::new(3));
+    let live = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let done = Arc::new(AtomicUsize::new(0));
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+      let (limiter, live, peak, done) = (limiter.clone(), live.clone(), peak.clone(), done.clone());
+      handles.push(std::thread::spawn(move || {
+        let _permit = limiter.acquire();
+        let now = live.fetch_add(1, Ordering::SeqCst) + 1;
+        peak.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        live.fetch_sub(1, Ordering::SeqCst);
+        done.fetch_add(1, Ordering::SeqCst);
+      }));
+    }
+    for h in handles {
+      h.join().unwrap();
+    }
+    assert!(peak.load(Ordering::SeqCst) <= 3, "never more than the cap run at once");
+    assert!(peak.load(Ordering::SeqCst) >= 2, "the cap is actually used in parallel");
+    assert_eq!(done.load(Ordering::SeqCst), 20, "every waiter eventually acquires a permit");
+  }
+
+  #[test]
+  fn max_parallel_runs_reads_the_env_and_floors_at_one() {
+    let key = "SCSH_MAX_PARALLEL_RUNS";
+    let saved = std::env::var(key).ok();
+    std::env::remove_var(key);
+    assert_eq!(max_parallel_runs(), DEFAULT_MAX_PARALLEL_RUNS);
+    std::env::set_var(key, "5");
+    assert_eq!(max_parallel_runs(), 5);
+    std::env::set_var(key, "0");
+    assert_eq!(max_parallel_runs(), 1, "a zero or negative cap is clamped to one");
+    std::env::set_var(key, "garbage");
+    assert_eq!(max_parallel_runs(), DEFAULT_MAX_PARALLEL_RUNS);
+    match saved {
+      Some(v) => std::env::set_var(key, v),
+      None => std::env::remove_var(key),
+    }
+  }
   use std::ffi::OsString;
   use std::sync::atomic::{AtomicUsize, Ordering};
 

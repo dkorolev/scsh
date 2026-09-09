@@ -3037,6 +3037,10 @@ fn run_workflow(
   let mut ran_count = 0usize;
   let mut skipped_count = 0usize;
   let mut failure: Option<String> = None;
+  // Bound concurrent container starts across the whole run: one limiter, reused each wave (waves
+  // run sequentially, so it is only ever contended within a wave). A 20-route review otherwise
+  // cold-starts every container at once and trips the startup watchdog.
+  let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
   while state.len() < def.steps.len() && failure.is_none() {
     let wave_caller_tip = caller_tip.clone();
     let ready: Vec<&harness_def::Step> = def
@@ -3180,7 +3184,9 @@ fn run_workflow(
           let id = inv.name.clone();
           let sid = session_id.as_str();
           let cache_allowed = resume.is_none() || !resume_invalidated.contains(&step.id);
+          let limiter = &launch_limiter;
           scope.spawn(move || {
+            let _permit = limiter.acquire();
             let run = run_workflow_step_with_retries(
               inv,
               step,
@@ -5275,10 +5281,13 @@ fn build_and_run(
   }
   let run_started = std::time::Instant::now();
   let workload = stats::workload_of_repo(root);
+  // Bound concurrent container starts the same way the workflow wave does.
+  let launch_limiter = runtime::LaunchLimiter::new(runtime::max_parallel_runs());
   let outcomes: Vec<SkillRun> = std::thread::scope(|scope| {
     let dc = daemon_client.clone();
     let ui_ref = &ui;
     let session_ref = session_id.as_str();
+    let limiter = &launch_limiter;
     let handles: Vec<_> = skills
       .iter()
       .zip(skill_procs)
@@ -5286,6 +5295,7 @@ fn build_and_run(
         let dc = dc.clone();
         let first_index = p.index();
         scope.spawn(move || {
+          let _permit = limiter.acquire();
           let mut retry = RouteRetryState::new(skill.retry_for, skill.retry_signature_cap, session_ref, &skill.name);
           let mut proc = p;
           let mut proc_index = first_index;
