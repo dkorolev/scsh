@@ -50,9 +50,11 @@ fn right_lines(patch: &str) -> BTreeSet<u64> {
 }
 
 /// Reject incomplete fleets, including successful processes with malformed/missing results.
-// The local review input is a file; GitHub readers know it as the PR description.
+// The local review input is a file; GitHub readers know it as the pull request description.
 fn github_wording(text: &str) -> String {
-  text.replace("`PR-DESCRIPTION.md`", "PR description").replace("PR-DESCRIPTION.md", "PR description")
+  text
+    .replace("`PR-DESCRIPTION.md`", "Pull Request Description")
+    .replace("PR-DESCRIPTION.md", "Pull Request Description")
 }
 
 /// The review request body: `summary` opens it (the prepare step's human-voiced paragraph, or a
@@ -104,14 +106,16 @@ fn payload(
         quote(&text)
       ));
     } else {
-      let location = if path == "PR-DESCRIPTION.md" {
-        "PR description".to_string()
+      // Each unanchored group gets a minor heading naming where it applies: the pull
+      // request description, the change as a whole, or a file and line, quoted as code.
+      let heading = if path == "PR-DESCRIPTION.md" {
+        "Pull Request Description".to_string()
       } else if path.starts_with('<') {
         "Overall change".to_string()
       } else {
-        format!("{path}:{line}")
+        format!("`{path}:{line}`")
       };
-      body.push_str(&format!("\n\n{location}\n\n{text}"));
+      body.push_str(&format!("\n\n### {heading}\n\n{text}"));
     }
   }
   body.push_str(&format!("\n\n{marker}"));
@@ -335,16 +339,29 @@ mod tests {
       let files = [parse(r#"{"filename":"a.rs","patch":"@@ -1 +1 @@\n+new"}"#).unwrap()];
       let published = payload("abc", "COMMENT", &[issue], &files, "marker", "").unwrap();
       assert!(!published.contains("PR-DESCRIPTION.md"));
-      assert!(published.contains("Clarify PR description."));
-      assert!(published.contains("Update PR description."));
+      assert!(published.contains("Clarify Pull Request Description."));
+      assert!(published.contains("Update Pull Request Description."));
       let value = parse(&published).unwrap();
       if path == "PR-DESCRIPTION.md" {
-        assert!(string(&value, "body").unwrap().contains("\n\nPR description\n\n"));
+        assert!(string(&value, "body").unwrap().contains("\n\n### Pull Request Description\n\n"));
         assert_eq!(field(&value, "comments"), Some(&Value::Array(vec![])));
       } else {
         assert!(matches!(field(&value, "comments"), Some(Value::Array(comments)) if comments.len() == 1));
       }
     }
+  }
+
+  /// Findings that cannot be anchored inline sit in the body under minor headings: a file
+  /// and line quoted as code, or the change as a whole.
+  #[test]
+  fn unanchored_findings_sit_under_minor_headings_with_files_quoted() {
+    let on_file = parse(r#"{"file":"src/lib.rs","line":40,"description":"Out of range.","suggestion":""}"#).unwrap();
+    let overall = parse(r#"{"file":"<overall>","line":0,"description":"Split the change.","suggestion":""}"#).unwrap();
+    let files = [parse(r#"{"filename":"src/lib.rs","patch":"@@ -1 +1 @@\n+new"}"#).unwrap()];
+    let published = payload("abc", "COMMENT", &[on_file, overall], &files, "marker", "").unwrap();
+    let body = string(&parse(&published).unwrap(), "body").unwrap();
+    assert!(body.contains("\n\n### `src/lib.rs:40`\n\nOut of range."), "got: {body}");
+    assert!(body.contains("\n\n### Overall change\n\nSplit the change."), "got: {body}");
   }
 
   #[test]
