@@ -1,6 +1,6 @@
 //! Pure event model for the scsh session browser daemon.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::workflow::WorkflowMeta;
 
@@ -376,6 +376,15 @@ pub struct Store {
   /// Repositories opened from the web UI, keyed by absolute path. In-memory only (rebuilt
   /// empty on restart via `..Store::new(..)`); persistence stays session-scoped in `db`.
   pub open_repos: BTreeMap<String, OpenRepo>,
+  /// Sessions changed by a thread that holds nothing but this store — the reaper ending a job
+  /// whose process exited, the GitHub publish step — and whose change the serving loop has
+  /// not yet announced. A request handler reports its mutation to the loop directly, which
+  /// pushes the session over the websocket and schedules its persistence; a background
+  /// thread has no such channel, so without this set its edit reached neither. Observed
+  /// live: a browser review whose publish step completed sat in the browser as "running",
+  /// its final proc mid-flight, until an unrelated job happened to trigger a push — and a
+  /// daemon restart forgot the publication altogether.
+  pub unannounced: BTreeSet<String>,
 }
 
 impl Store {
@@ -389,7 +398,18 @@ impl Store {
       no_alive_since: Some(now),
       sessions: BTreeMap::new(),
       open_repos: BTreeMap::new(),
+      unannounced: BTreeSet::new(),
     }
+  }
+
+  /// Record that a session changed outside any request handler; see [`Self::unannounced`].
+  pub fn mark_unannounced(&mut self, id: &str) {
+    self.unannounced.insert(id.to_string());
+  }
+
+  /// Hand the serving loop every session changed in the background since it last asked.
+  pub fn take_unannounced(&mut self) -> Vec<String> {
+    std::mem::take(&mut self.unannounced).into_iter().collect()
   }
 
   pub fn touch(&mut self, now: u64) {

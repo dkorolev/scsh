@@ -281,18 +281,17 @@ impl Server {
         // The snapshot of casts to probe is taken under the store lock; the file stats and
         // tail-parses below run with the lock released, and only when someone is listening.
         let probe_casts = self.ws_hub.client_count() > 0;
-        let (json, casts, dead_sessions) = {
+        let (json, casts, changed_sessions) = {
           let mut store = lock_store(&self.store);
-          let mut dead_sessions = settle_dead_run_pids(&mut store, now);
-          dead_sessions.extend(settle_out_of_work_sessions(&mut store, now));
-          include_sessions |= !dead_sessions.is_empty();
+          let changed_sessions = sweep_session_changes(&mut store, now);
+          include_sessions |= !changed_sessions.is_empty();
           store.reconcile(now);
           let json = if include_sessions { tick_json(&store, now) } else { tick_json_light(&store, now) };
-          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() }, dead_sessions)
+          (json, if probe_casts { cast_probe_snapshot(&store) } else { Vec::new() }, changed_sessions)
         };
-        if !dead_sessions.is_empty() {
+        if !changed_sessions.is_empty() {
           self.dirty.store(true, Ordering::Relaxed);
-          self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(dead_sessions);
+          self.dirty_sessions.lock().unwrap_or_else(|e| e.into_inner()).extend(changed_sessions);
         }
         self.ws_hub.broadcast_tick(&json);
         if probe_casts {
@@ -436,6 +435,18 @@ fn settle_loaded_incomplete_procs(session: &mut Session) {
       proc.elapsed = proc.started_at.map(|started| ended.saturating_sub(started) as f64);
     }
   }
+}
+
+/// Every session the serving loop must announce this tick: the ones the sweeps just ended,
+/// plus the ones a background thread changed on its own (see `Store::unannounced`). The
+/// caller pushes each over the websocket and marks it for persistence — the two things a
+/// request handler gets for free by returning `mutated`, and a thread with only the store
+/// cannot do for itself.
+fn sweep_session_changes(store: &mut Store, now: u64) -> Vec<String> {
+  let mut changed = settle_dead_run_pids(store, now);
+  changed.extend(settle_out_of_work_sessions(store, now));
+  changed.extend(store.take_unannounced());
+  changed
 }
 
 /// End sessions whose owning process disappeared without deregistering. The exact child
@@ -2615,6 +2626,7 @@ fn publish_browser_review(
       phase: None,
       phase_until: None,
     });
+    guard.mark_unannounced(id);
     (snapshot, index)
   };
   super::github::write_browser_receipt(root, pr, id, "publishing");
@@ -2639,6 +2651,7 @@ fn publish_browser_review(
         }
       }
     }
+    guard.mark_unannounced(id);
   }
 }
 
@@ -2697,6 +2710,9 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       phase_until: None,
     });
   }
+  // This thread holds only the store: announce the change, or the browser and the persister
+  // never hear that the job is over.
+  store.mark_unannounced(session_id);
 }
 
 /// The tail of a failed run's stderr as a human detail (with an exit-code fallback if it was silent).
@@ -5529,6 +5545,21 @@ mod tests {
     );
   }
 
+  /// A thread holding only the store cannot flag the websocket or the persister; the tick
+  /// sweep must pick its change up from the store, once, alongside the sessions it ended.
+  #[test]
+  fn the_tick_sweep_announces_background_changes_once() {
+    let mut done = export_test_proc(0, "claude: fix", None);
+    done.started_at = Some(50);
+    done.elapsed = Some(10.0);
+    let store = store_with_export_session("quiet", vec![done]);
+    let mut guard = store.lock().unwrap();
+    guard.mark_unannounced("quiet");
+    guard.mark_unannounced("quiet"); // marked twice, announced once
+    assert_eq!(sweep_session_changes(&mut guard, 100), vec!["quiet"]);
+    assert!(sweep_session_changes(&mut guard, 100).is_empty(), "announced changes are not repeated");
+  }
+
   /// A job between steps still owns its session: nothing may end it while a proc is live.
   #[test]
   fn a_job_with_a_live_proc_is_never_declared_out_of_work() {
@@ -6174,6 +6205,9 @@ mod tests {
     // A zero-exit stub without route results must never authorize a GitHub write.
     assert!(final_receipt.contains(r#""state":"publication_failed""#), "got: {final_receipt}");
     assert_eq!(store.lock().unwrap().sessions[session].procs.last().unwrap().status, ProcStatus::Fail);
+    // The publish step ran on the reaper thread: the serving loop must learn of its outcome
+    // from the store itself, or the browser keeps the job "running" and a restart forgets it.
+    assert!(store.lock().unwrap().take_unannounced().contains(&session.to_string()));
     assert!(dir.join("tmp/quota-after-codex.json").is_file());
     std::fs::remove_file(&stub).ok();
     std::fs::remove_dir_all(&home).ok();
@@ -6676,7 +6710,8 @@ mod tests {
       },
     );
     reconcile_finished_job(&store, "died", Some(101), "thread panicked");
-    let guard = store.lock().unwrap();
+    let mut guard = store.lock().unwrap();
+    assert_eq!(guard.take_unannounced(), vec!["died"], "the reaper's verdict reaches the browser and the store");
     let s = guard.sessions.get("died").unwrap();
     assert!(s.ended_at.is_some());
     assert!(!s.has_incomplete_procs(), "nothing may be left mid-flight once the run is gone");
