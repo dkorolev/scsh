@@ -1455,7 +1455,7 @@ function wfNodeTip(session, node, state, unmetIds, nowUnix) {
   else if (state === 'graceful') lines.push('Graceful shutdown — valid result survived a teardown issue');
   else if (state === 'failed') lines.push('Failed');
   else if (state === 'stopped') lines.push('Stopped from the session browser');
-  else if (state === 'skipped') lines.push('Skipped');
+  else if (state === 'skipped') lines.push((p && p.detail) ? p.detail : 'Skipped');
   else if (state === 'stalled') lines.push('Abandoned — job stopped updating');
   // The reset time is the whole point of the state — without it the tip only repeats that
   // nothing is happening. Rendered in the VIEWER's timezone (the server-side tip in

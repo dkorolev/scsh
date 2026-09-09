@@ -793,7 +793,13 @@ fn node_tip(
     WorkflowDisplayState::Graceful => lines.push("Graceful shutdown — valid result survived a teardown issue".into()),
     WorkflowDisplayState::Failed => lines.push("Failed".into()),
     WorkflowDisplayState::ForceStopped => lines.push("Stopped from the session browser".into()),
-    WorkflowDisplayState::Skipped => lines.push("Skipped".into()),
+    WorkflowDisplayState::Skipped => {
+      // The plan step's reason lives on the skipped proc's detail ("skipped — when: plan.grok
+      // = run, but plan.grok is `expired`"), so a reader sees WHY a harness sat out, not just
+      // that it did.
+      let reason = node_proc_for_tip(session, node).and_then(|p| p.detail.clone()).filter(|d| !d.is_empty());
+      lines.push(reason.unwrap_or_else(|| "Skipped".into()));
+    }
     WorkflowDisplayState::Stalled => lines.push("Abandoned — job stopped updating".into()),
     WorkflowDisplayState::AwaitingLimits => lines.push(awaiting_limits_line(session, node)),
   }

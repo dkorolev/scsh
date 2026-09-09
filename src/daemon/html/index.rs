@@ -368,12 +368,13 @@ fn start_panel() -> &'static str {
   r##"<div class="chamfer card card--accent-left-green">
 <p class="section-label">Run</p>
 <p class="dim"><strong><code>gh-gorgeous-review</code></strong> reviews a GitHub pull request
-with the machine-wide fleet and publishes one GitHub review when every route succeeds.
-Starting this job authorizes publication: inline comments plus a summary, with approval
-only when the review meets the approval bar. scsh creates the same durable local replica used by the agent
-skill, records quota around the review, uses the PR's actual base branch, and opens the live
-job; after one-time <code>gh auth login</code> and global skill installation, kickoff is
-browser-only.</p>
+with every harness this machine has configured — claude, codex, cursor, grok, opencode — and
+publishes one GitHub review. A <code>plan</code> step benches any harness that is not logged in
+or is low on quota, and the job needs at least two runnable harnesses; the graph shows which
+ran and why the rest sat out. Starting this job authorizes publication: inline comments plus a
+summary, with approval only when the grades meet the bar. scsh creates the same durable local
+replica used by the agent skill, uses the PR's actual base branch, and opens the live job;
+after one-time <code>gh auth login</code>, kickoff is browser-only — no skill install needed.</p>
 <div class="start-controls">
 <div class="chamfer input-wrap">
 <input class="input" type="url" id="github-pr-url" placeholder="https://github.com/owner/repo/pull/123" autocomplete="off" spellcheck="false">

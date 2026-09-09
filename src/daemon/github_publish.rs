@@ -5,7 +5,6 @@ use std::path::Path;
 use std::process::Command;
 
 use super::github::PullRequest;
-use super::model::{ProcStatus, Session};
 use crate::json::{parse, quote, Value};
 
 fn field<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
@@ -51,51 +50,18 @@ fn right_lines(patch: &str) -> BTreeSet<u64> {
 }
 
 /// Reject incomplete fleets, including successful processes with malformed/missing results.
-fn findings(root: &Path, session: &Session) -> Result<(Vec<Value>, bool), String> {
-  if session.skills.is_empty() {
-    return Err("no expected review routes were recorded".into());
-  }
-  let mut issues = Vec::new();
-  let mut excellent = 0;
-  let mut good = 0;
-  for skill in &session.skills {
-    let proc = session
-      .procs
-      .iter()
-      .rev()
-      .find(|p| p.skill_name.as_deref() == Some(&skill.name))
-      .ok_or_else(|| format!("missing route {}", skill.name))?;
-    if !matches!(proc.status, ProcStatus::Ok | ProcStatus::Graceful) {
-      return Err(format!("route {} did not succeed", skill.name));
-    }
-    let path = root.join(format!("{}.json", skill.name));
-    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
-    let value = parse(&text)?;
-    let result = field(&value, "result").ok_or("missing review result")?;
-    // Shared scores: 5 = excellent, 4 = good; lower valid grades cannot approve.
-    match crate::fleet::grade_score(&string(result, "grade")?) {
-      Some(5) => excellent += 1,
-      Some(4) => good += 1,
-      Some(_) => {}
-      _ => return Err(format!("route {} has an invalid grade", skill.name)),
-    }
-    let Some(Value::Array(found)) = field(&value, "issues") else {
-      return Err(format!("route {} omitted its issues", skill.name));
-    };
-    if field(result, "issues_found") != Some(&Value::Number(found.len() as f64)) {
-      return Err(format!("route {} has an inconsistent issue count", skill.name));
-    }
-    issues.extend(found.clone());
-  }
-  Ok((issues, excellent + good == session.skills.len() && excellent >= good))
-}
-
 // The local review input is a file; GitHub readers know it as the PR description.
 fn github_wording(text: &str) -> String {
   text.replace("`PR-DESCRIPTION.md`", "PR description").replace("PR-DESCRIPTION.md", "PR description")
 }
 
-fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &str) -> Result<String, String> {
+/// The review request body: `summary` opens it (the prepare step's human-voiced paragraph, or a
+/// plain line when it gave none), anchored findings become inline comments, the rest join the
+/// summary with their location, and the head marker closes it so a re-run recognizes its own
+/// review.
+fn payload(
+  head: &str, event: &str, issues: &[Value], files: &[Value], marker: &str, summary: &str,
+) -> Result<String, String> {
   let mut anchors = BTreeMap::new();
   for file in files {
     if let (Ok(path), Ok(patch)) = (string(file, "filename"), string(file, "patch")) {
@@ -118,7 +84,9 @@ fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &
     let body = if suggestion.is_empty() { description } else { format!("{description}\n\nSuggestion: {suggestion}") };
     grouped.entry((path, line)).or_default().insert(body);
   }
-  let mut body = if issues.is_empty() {
+  let mut body = if !summary.trim().is_empty() {
+    github_wording(summary.trim())
+  } else if issues.is_empty() {
     "Looks good to me. I did not find any issues to raise.".to_string()
   } else {
     "Thanks for the change. Here are the observations and suggestions from the review.".to_string()
@@ -158,19 +126,31 @@ fn payload(head: &str, event: &str, issues: &[Value], files: &[Value], marker: &
 
 /// One review per authenticated user and reviewed revision. A network error is not retried:
 /// a later attempt checks GitHub first, covering a successful POST whose response was lost.
-pub fn publish(root: &Path, pr: &PullRequest, session: &Session) -> Result<String, String> {
-  publish_with(root, &crate::runtime::session_results_dir(&session.id), pr, session, gh)
+/// What the in-container `prepare_review` step handed over: the findings to anchor, the
+/// human-voiced opening of the review, and whether the fleet's grades cleared the approval
+/// bar — plus the revisions it reviewed, so publication can refuse a PR that moved since.
+pub struct PreparedReview {
+  pub head: String,
+  pub base: String,
+  pub approval_bar: bool,
+  pub findings: Vec<Value>,
+  pub summary: String,
+}
+
+/// Publish one prepared review through the real `gh`.
+pub fn publish(
+  root: &Path, pr: &PullRequest, session_id: &str, prepared: &PreparedReview,
+) -> Result<(String, String), String> {
+  publish_with(root, pr, session_id, prepared, gh)
 }
 
 fn publish_with(
-  root: &Path, results: &Path, pr: &PullRequest, session: &Session,
+  root: &Path, pr: &PullRequest, session_id: &str, prepared: &PreparedReview,
   mut gh: impl FnMut(&[&str]) -> Result<Value, String>,
-) -> Result<String, String> {
-  let (issues, approval_bar) = findings(results, session)?;
-  let receipt =
-    parse(&std::fs::read_to_string(root.join("tmp/gh-gorgeous-review-browser.json")).map_err(|e| e.to_string())?)?;
-  let head = string(&receipt, "reviewed_head")?;
-  let base = string(&receipt, "base_head")?;
+) -> Result<(String, String), String> {
+  let (issues, approval_bar) = (&prepared.findings, prepared.approval_bar);
+  let head = prepared.head.clone();
+  let base = prepared.base.clone();
   let metadata = gh(&["pr", "view", &pr.url, "--json", "headRefOid,baseRefOid,state,isDraft,author"])?;
   if string(&metadata, "headRefOid")? != head || string(&metadata, "baseRefOid")? != base {
     return Err("the PR head or base changed since review; start a fresh review before publishing".into());
@@ -191,7 +171,7 @@ fn publish_with(
           if state != "PENDING" && string(&review, "body")?.contains(&marker) {
             std::fs::write(root.join("tmp/gh-review-published.json"), crate::json::write_pretty(&review))
               .map_err(|e| e.to_string())?;
-            return string(&review, "html_url");
+            return Ok((string(&review, "html_url")?, state));
           }
           approved = state == "APPROVED";
         }
@@ -199,7 +179,7 @@ fn publish_with(
     }
   }
   let author = field(&metadata, "author").and_then(|a| string(a, "login").ok()).ok_or("missing PR author")?;
-  let event = if approval_bar
+  let mut event = if approval_bar
     && !approved
     && author != login
     && string(&metadata, "state")? == "OPEN"
@@ -219,7 +199,7 @@ fn publish_with(
     .filter_map(|p| if let Value::Array(rows) = p { Some(rows) } else { None })
     .flatten()
     .collect::<Vec<_>>();
-  let body = payload(&head, event, &issues, &files, &marker)?;
+  let body = payload(&head, event, issues, &files, &marker, &prepared.summary)?;
   let path = root.join("tmp/gh-review-payload.json");
   std::fs::write(&path, &body).map_err(|e| e.to_string())?;
   // Recheck immediately before the external write; commit_id keeps anchors tied to this head.
@@ -227,7 +207,7 @@ fn publish_with(
   if string(&current, "headRefOid")? != head || string(&current, "baseRefOid")? != base {
     return Err("PR changed before publication".into());
   }
-  if super::paths::session_cancelled(&session.id) {
+  if super::paths::session_cancelled(session_id) {
     return Err("publication cancelled".into());
   }
   let response = match gh(&["api", &endpoint, "--input", &path.to_string_lossy()]) {
@@ -238,11 +218,13 @@ fn publish_with(
       let current = gh(&["pr", "view", &pr.url, "--json", "headRefOid,baseRefOid"])?;
       if string(&current, "headRefOid")? != head
         || string(&current, "baseRefOid")? != base
-        || super::paths::session_cancelled(&session.id)
+        || super::paths::session_cancelled(session_id)
       {
         return Err("PR changed or publication was cancelled before retry".into());
       }
-      std::fs::write(&path, payload(&head, "COMMENT", &issues, &[], &marker)?).map_err(|e| e.to_string())?;
+      std::fs::write(&path, payload(&head, "COMMENT", issues, &[], &marker, &prepared.summary)?)
+        .map_err(|e| e.to_string())?;
+      event = "COMMENT";
       gh(&["api", &endpoint, "--input", &path.to_string_lossy()])?
     }
     Err(error) => return Err(error),
@@ -250,27 +232,15 @@ fn publish_with(
   let url = string(&response, "html_url")?;
   std::fs::write(root.join("tmp/gh-review-published.json"), crate::json::write_pretty(&response))
     .map_err(|e| e.to_string())?;
-  Ok(url)
+  Ok((url, event.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
 
-  #[test]
-  fn publication_checks_results_revisions_and_duplicates_before_posting() {
-    let root = std::env::temp_dir().join(format!("review-publish-{}", crate::runtime::random_nonce_6()));
-    std::fs::create_dir_all(root.join("tmp")).unwrap();
-    std::fs::write(root.join("tmp/gh-gorgeous-review-browser.json"), r#"{"reviewed_head":"head","base_head":"base"}"#)
-      .unwrap();
-    let mut session = super::super::jsonio::parse_session_json(
-      r#"{
-      "id":"test-publication", "skills":[{"name":"reviewer","source":"reviewer"}],
-      "procs":[{"index":0,"status":"ok","skill_name":"reviewer","lines":[]}]
-    }"#,
-    )
-    .unwrap();
-    let pr = PullRequest {
+  fn pull_request() -> PullRequest {
+    PullRequest {
       reference: super::super::github::PullRequestRef { owner: "o".into(), repo: "r".into(), number: 1 },
       title: "Change".into(),
       body: String::new(),
@@ -278,35 +248,28 @@ mod tests {
       base_oid: "a".repeat(40),
       head_oid: "b".repeat(40),
       url: "https://github.com/o/r/pull/1".into(),
-    };
-    for scenario in [
-      "publish",
-      "duplicate",
-      "stale",
-      "failed",
-      "missing",
-      "self",
-      "draft",
-      "good",
-      "average",
-      "poor",
-      "bad",
-      "invalid",
-    ] {
-      let grade = match scenario {
-        "good" | "average" | "poor" | "bad" => scenario,
-        "invalid" => "ok",
-        _ => "excellent",
+    }
+  }
+
+  /// Publication re-checks the PR before every external write: a moved head or base refuses,
+  /// an existing review for this head is returned instead of duplicated, and the approval the
+  /// prepare step asked for is downgraded to a comment on the author's own PR, on a draft, and
+  /// when the grades did not clear the bar. A validation rejection retries once as a comment.
+  #[test]
+  fn publication_checks_revisions_duplicates_and_the_approval_bar_before_posting() {
+    let root = std::env::temp_dir().join(format!("review-publish-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(root.join("tmp")).unwrap();
+    let pr = pull_request();
+    for scenario in ["publish", "duplicate", "stale", "self", "draft", "below-bar", "rejected"] {
+      let prepared = PreparedReview {
+        head: "head".into(),
+        base: "base".into(),
+        approval_bar: scenario != "below-bar",
+        findings: vec![],
+        summary: "Thanks — a clean change.".into(),
       };
-      std::fs::write(
-        root.join("reviewer.json"),
-        format!(r#"{{"result":{{"grade":"{grade}","issues_found":0}},"issues":[]}}"#),
-      )
-      .unwrap();
-      session.procs[0].status = if scenario == "failed" { ProcStatus::Fail } else { ProcStatus::Ok };
       let mut posted = 0;
-      let missing = root.join("missing");
-      let result = publish_with(&root, if scenario == "missing" { &missing } else { &root }, &pr, &session, |args| {
+      let result = publish_with(&root, &pr, "test-publication", &prepared, |args| {
         let value = if args[0] == "pr" {
           format!(
             r#"{{"headRefOid":"{}","baseRefOid":"base","state":"OPEN","isDraft":{},"author":{{"login":"{}"}}}}"#,
@@ -319,14 +282,17 @@ mod tests {
         } else if args.contains(&"--input") {
           posted += 1;
           let body = parse(&std::fs::read_to_string(args[args.len() - 1]).unwrap()).unwrap();
+          let event = string(&body, "event").unwrap();
+          if scenario == "rejected" && posted == 1 {
+            assert_eq!(event, "APPROVE");
+            return Err("HTTP 422: Unprocessable Entity".into());
+          }
           assert_eq!(
-            string(&body, "event").unwrap(),
-            if matches!(scenario, "self" | "draft" | "good" | "average" | "poor" | "bad") {
-              "COMMENT"
-            } else {
-              "APPROVE"
-            }
+            event,
+            if matches!(scenario, "self" | "draft" | "below-bar" | "rejected") { "COMMENT" } else { "APPROVE" },
+            "{scenario}"
           );
+          assert!(string(&body, "body").unwrap().starts_with("Thanks — a clean change."), "{scenario}");
           r#"{"html_url":"https://github.com/o/r/pull/1#review"}"#.into()
         } else if args[1].ends_with("/reviews") && scenario == "duplicate" {
           r#"[[{"user":{"login":"me"},"state":"APPROVED","body":"<!-- review-head:head -->","html_url":"https://github.com/o/r/pull/1#review"}]]"#.into()
@@ -335,14 +301,19 @@ mod tests {
         };
         parse(&value)
       });
-      assert_eq!(
-        result.is_ok(),
-        !matches!(scenario, "stale" | "failed" | "missing" | "invalid"),
-        "{scenario}: {result:?}"
-      );
+      match scenario {
+        "stale" => assert!(result.is_err(), "{scenario}: {result:?}"),
+        "duplicate" => assert_eq!(result.as_ref().map(|(_, e)| e.as_str()), Ok("APPROVED"), "{scenario}: {result:?}"),
+        "publish" => assert_eq!(result.as_ref().map(|(_, e)| e.as_str()), Ok("APPROVE"), "{scenario}: {result:?}"),
+        _ => assert_eq!(result.as_ref().map(|(_, e)| e.as_str()), Ok("COMMENT"), "{scenario}: {result:?}"),
+      }
       assert_eq!(
         posted,
-        usize::from(matches!(scenario, "publish" | "self" | "draft" | "good" | "average" | "poor" | "bad")),
+        match scenario {
+          "stale" | "duplicate" => 0,
+          "rejected" => 2,
+          _ => 1,
+        },
         "{scenario}"
       );
     }
@@ -362,7 +333,7 @@ mod tests {
       ))
       .unwrap();
       let files = [parse(r#"{"filename":"a.rs","patch":"@@ -1 +1 @@\n+new"}"#).unwrap()];
-      let published = payload("abc", "COMMENT", &[issue], &files, "marker").unwrap();
+      let published = payload("abc", "COMMENT", &[issue], &files, "marker", "").unwrap();
       assert!(!published.contains("PR-DESCRIPTION.md"));
       assert!(published.contains("Clarify PR description."));
       assert!(published.contains("Update PR description."));
@@ -379,7 +350,7 @@ mod tests {
   #[test]
   fn comments_outside_the_diff_become_summary_notes() {
     let issue = parse(r#"{"file":"a.rs","line":9,"description":"Check this","suggestion":"Try that"}"#).unwrap();
-    let value = parse(&payload("abc", "COMMENT", &[issue], &[], "marker").unwrap()).unwrap();
+    let value = parse(&payload("abc", "COMMENT", &[issue], &[], "marker", "").unwrap()).unwrap();
     assert_eq!(field(&value, "comments"), Some(&Value::Array(vec![])));
     assert!(string(&value, "body").unwrap().contains("a.rs:9"));
   }

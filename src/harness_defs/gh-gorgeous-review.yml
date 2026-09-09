@@ -1,0 +1,711 @@
+# The multi-harness GitHub PR review. Built into scsh, so a two-harness machine can run it
+# with nothing installed. One job, one graph:
+#
+#   plan (host) -> 20 gated reviewer steps -> prepare_<harness> (agent) -> publish (host) -> quota_after (host)
+#
+# `plan` decides which harnesses review: it needs the harness logged in AND enough quota
+# left (a long window — weekly/monthly/billing — under 10% left benches it, a 5-hour window
+# under 25% left benches it). Fewer than two runnable harnesses fails the plan, and the job,
+# up front. Each of the five reviewer skills runs on every harness the plan cleared; a
+# benched harness shows every one of its reviewer nodes skipped, with the plan reason on the
+# node. `prepare_<harness>` runs on the first runnable harness the plan chose as publisher,
+# reads the reviewer grades and comments, and writes the review payload (one human-voiced
+# summary plus per-file findings) with no GitHub write of its own. `publish`, a host step,
+# is the only step that touches GitHub: it posts that one review (COMMENT, or APPROVE when
+# the grades clear the bar and the PR qualifies) using the operator's gh credentials.
+#
+# The reviewer steps run the canonical dkorolev/code-review-skills reviewers, embedded in
+# scsh's bundle byte-for-byte; scsh appends only the grade/comments workflow adapter the
+# shared reviewer contract already supports. Nothing is pushed and the PR itself is never
+# edited — the sole outward effect is the one published review.
+description: "Review a GitHub PR with every configured harness (needs two), then publish one GitHub review."
+params:
+  PR_URL:
+    type: string
+    required: true
+    description: "The GitHub pull-request URL under review (the replica this job runs in was built from it)."
+steps:
+  plan:
+    run: |
+      "$SCSH_BIN" gh-review plan
+    timeout: 300s
+    output:
+      claude:
+        type: enum
+        choices: run, no_credentials, expired, low_quota
+      claude_note:
+        type: string
+      codex:
+        type: enum
+        choices: run, no_credentials, expired, low_quota
+      codex_note:
+        type: string
+      cursor:
+        type: enum
+        choices: run, no_credentials, expired, low_quota
+      cursor_note:
+        type: string
+      grok:
+        type: enum
+        choices: run, no_credentials, expired, low_quota
+      grok_note:
+        type: string
+      publisher:
+        type: string
+      runnable:
+        type: int
+      ran:
+        type: string
+      summary:
+        type: string
+      quota:
+        type: object
+  review_conventions_claude:
+    needs: plan
+    when:
+      plan.claude: run
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    skill: conventions-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_conventions_codex:
+    needs: plan
+    when:
+      plan.codex: run
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    skill: conventions-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_conventions_cursor:
+    needs: plan
+    when:
+      plan.cursor: run
+    agent:
+      harness: cursor
+      model: auto
+    skill: conventions-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_conventions_grok:
+    needs: plan
+    when:
+      plan.grok: run
+    agent:
+      harness: grok
+      model: grok-4.5
+    skill: conventions-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_justification_claude:
+    needs: plan
+    when:
+      plan.claude: run
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    skill: justification-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_justification_codex:
+    needs: plan
+    when:
+      plan.codex: run
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    skill: justification-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_justification_cursor:
+    needs: plan
+    when:
+      plan.cursor: run
+    agent:
+      harness: cursor
+      model: auto
+    skill: justification-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_justification_grok:
+    needs: plan
+    when:
+      plan.grok: run
+    agent:
+      harness: grok
+      model: grok-4.5
+    skill: justification-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_reviewability_claude:
+    needs: plan
+    when:
+      plan.claude: run
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    skill: reviewability-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_reviewability_codex:
+    needs: plan
+    when:
+      plan.codex: run
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    skill: reviewability-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_reviewability_cursor:
+    needs: plan
+    when:
+      plan.cursor: run
+    agent:
+      harness: cursor
+      model: auto
+    skill: reviewability-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_reviewability_grok:
+    needs: plan
+    when:
+      plan.grok: run
+    agent:
+      harness: grok
+      model: grok-4.5
+    skill: reviewability-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_sanity_claude:
+    needs: plan
+    when:
+      plan.claude: run
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    skill: sanity-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_sanity_codex:
+    needs: plan
+    when:
+      plan.codex: run
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    skill: sanity-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_sanity_cursor:
+    needs: plan
+    when:
+      plan.cursor: run
+    agent:
+      harness: cursor
+      model: auto
+    skill: sanity-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_sanity_grok:
+    needs: plan
+    when:
+      plan.grok: run
+    agent:
+      harness: grok
+      model: grok-4.5
+    skill: sanity-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_testing_claude:
+    needs: plan
+    when:
+      plan.claude: run
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    skill: testing-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_testing_codex:
+    needs: plan
+    when:
+      plan.codex: run
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    skill: testing-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_testing_cursor:
+    needs: plan
+    when:
+      plan.cursor: run
+    agent:
+      harness: cursor
+      model: auto
+    skill: testing-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  review_testing_grok:
+    needs: plan
+    when:
+      plan.grok: run
+    agent:
+      harness: grok
+      model: grok-4.5
+    skill: testing-reviewer
+    output:
+      grade:
+        type: enum
+        choices: excellent, good, average, poor
+      comments:
+        type: string_list
+  prepare_claude:
+    needs: plan, review_conventions_claude?, review_conventions_codex?, review_conventions_cursor?, review_conventions_grok?, review_justification_claude?, review_justification_codex?, review_justification_cursor?, review_justification_grok?, review_reviewability_claude?, review_reviewability_codex?, review_reviewability_cursor?, review_reviewability_grok?, review_sanity_claude?, review_sanity_codex?, review_sanity_cursor?, review_sanity_grok?, review_testing_claude?, review_testing_codex?, review_testing_cursor?, review_testing_grok?
+    when:
+      plan.publisher: claude
+    agent:
+      harness: claude
+      model: claude-opus-4-8
+    inputs:
+      PR_URL: params.PR_URL
+      CONVENTIONS_CLAUDE_GRADE: review_conventions_claude.grade
+      CONVENTIONS_CLAUDE_COMMENTS: review_conventions_claude.comments
+      CONVENTIONS_CODEX_GRADE: review_conventions_codex.grade
+      CONVENTIONS_CODEX_COMMENTS: review_conventions_codex.comments
+      CONVENTIONS_CURSOR_GRADE: review_conventions_cursor.grade
+      CONVENTIONS_CURSOR_COMMENTS: review_conventions_cursor.comments
+      CONVENTIONS_GROK_GRADE: review_conventions_grok.grade
+      CONVENTIONS_GROK_COMMENTS: review_conventions_grok.comments
+      JUSTIFICATION_CLAUDE_GRADE: review_justification_claude.grade
+      JUSTIFICATION_CLAUDE_COMMENTS: review_justification_claude.comments
+      JUSTIFICATION_CODEX_GRADE: review_justification_codex.grade
+      JUSTIFICATION_CODEX_COMMENTS: review_justification_codex.comments
+      JUSTIFICATION_CURSOR_GRADE: review_justification_cursor.grade
+      JUSTIFICATION_CURSOR_COMMENTS: review_justification_cursor.comments
+      JUSTIFICATION_GROK_GRADE: review_justification_grok.grade
+      JUSTIFICATION_GROK_COMMENTS: review_justification_grok.comments
+      REVIEWABILITY_CLAUDE_GRADE: review_reviewability_claude.grade
+      REVIEWABILITY_CLAUDE_COMMENTS: review_reviewability_claude.comments
+      REVIEWABILITY_CODEX_GRADE: review_reviewability_codex.grade
+      REVIEWABILITY_CODEX_COMMENTS: review_reviewability_codex.comments
+      REVIEWABILITY_CURSOR_GRADE: review_reviewability_cursor.grade
+      REVIEWABILITY_CURSOR_COMMENTS: review_reviewability_cursor.comments
+      REVIEWABILITY_GROK_GRADE: review_reviewability_grok.grade
+      REVIEWABILITY_GROK_COMMENTS: review_reviewability_grok.comments
+      SANITY_CLAUDE_GRADE: review_sanity_claude.grade
+      SANITY_CLAUDE_COMMENTS: review_sanity_claude.comments
+      SANITY_CODEX_GRADE: review_sanity_codex.grade
+      SANITY_CODEX_COMMENTS: review_sanity_codex.comments
+      SANITY_CURSOR_GRADE: review_sanity_cursor.grade
+      SANITY_CURSOR_COMMENTS: review_sanity_cursor.comments
+      SANITY_GROK_GRADE: review_sanity_grok.grade
+      SANITY_GROK_COMMENTS: review_sanity_grok.comments
+      TESTING_CLAUDE_GRADE: review_testing_claude.grade
+      TESTING_CLAUDE_COMMENTS: review_testing_claude.comments
+      TESTING_CODEX_GRADE: review_testing_codex.grade
+      TESTING_CODEX_COMMENTS: review_testing_codex.comments
+      TESTING_CURSOR_GRADE: review_testing_cursor.grade
+      TESTING_CURSOR_COMMENTS: review_testing_cursor.comments
+      TESTING_GROK_GRADE: review_testing_grok.grade
+      TESTING_GROK_COMMENTS: review_testing_grok.comments
+    prompt: |
+      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
+            any command, do not touch git, and do not call GitHub — only read the inputs and write
+            the result.
+
+            Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
+            grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
+            input is a JSON array of finding strings from that reviewer; each string leads with a
+            bracketed severity and names the commit, file, line, description, and suggestion.
+
+            Compose the review:
+            - `findings`: a JSON object `{"items": [...]}`. Turn every reviewer comment into one
+              item `{"file": "<path>", "line": <int>, "description": "<what>", "suggestion":
+              "<how, or empty>"}`. Read the file and line out of the comment string. Use line 0 when
+              a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
+              that different reviewers raise about the same file and line into one item, keeping
+              every distinct observation. Order items by file, then line. Emit `{"items": []}` when
+              there are no findings.
+            - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
+              and overall read a careful human reviewer would write. No AI, agent, model, or tooling
+              attribution of any kind. Do not restate every finding here; the items carry those.
+            - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
+              or good AND there are at least as many excellent as good grades; otherwise `false`.
+              (Whether the PR actually qualifies for an approval is decided later at publication.)
+    output:
+      findings:
+        type: object
+      summary:
+        type: string
+      approval_bar:
+        type: bool
+  prepare_codex:
+    needs: plan, review_conventions_claude?, review_conventions_codex?, review_conventions_cursor?, review_conventions_grok?, review_justification_claude?, review_justification_codex?, review_justification_cursor?, review_justification_grok?, review_reviewability_claude?, review_reviewability_codex?, review_reviewability_cursor?, review_reviewability_grok?, review_sanity_claude?, review_sanity_codex?, review_sanity_cursor?, review_sanity_grok?, review_testing_claude?, review_testing_codex?, review_testing_cursor?, review_testing_grok?
+    when:
+      plan.publisher: codex
+    agent:
+      harness: codex
+      model: gpt-5.6-terra
+      effort: high
+    inputs:
+      PR_URL: params.PR_URL
+      CONVENTIONS_CLAUDE_GRADE: review_conventions_claude.grade
+      CONVENTIONS_CLAUDE_COMMENTS: review_conventions_claude.comments
+      CONVENTIONS_CODEX_GRADE: review_conventions_codex.grade
+      CONVENTIONS_CODEX_COMMENTS: review_conventions_codex.comments
+      CONVENTIONS_CURSOR_GRADE: review_conventions_cursor.grade
+      CONVENTIONS_CURSOR_COMMENTS: review_conventions_cursor.comments
+      CONVENTIONS_GROK_GRADE: review_conventions_grok.grade
+      CONVENTIONS_GROK_COMMENTS: review_conventions_grok.comments
+      JUSTIFICATION_CLAUDE_GRADE: review_justification_claude.grade
+      JUSTIFICATION_CLAUDE_COMMENTS: review_justification_claude.comments
+      JUSTIFICATION_CODEX_GRADE: review_justification_codex.grade
+      JUSTIFICATION_CODEX_COMMENTS: review_justification_codex.comments
+      JUSTIFICATION_CURSOR_GRADE: review_justification_cursor.grade
+      JUSTIFICATION_CURSOR_COMMENTS: review_justification_cursor.comments
+      JUSTIFICATION_GROK_GRADE: review_justification_grok.grade
+      JUSTIFICATION_GROK_COMMENTS: review_justification_grok.comments
+      REVIEWABILITY_CLAUDE_GRADE: review_reviewability_claude.grade
+      REVIEWABILITY_CLAUDE_COMMENTS: review_reviewability_claude.comments
+      REVIEWABILITY_CODEX_GRADE: review_reviewability_codex.grade
+      REVIEWABILITY_CODEX_COMMENTS: review_reviewability_codex.comments
+      REVIEWABILITY_CURSOR_GRADE: review_reviewability_cursor.grade
+      REVIEWABILITY_CURSOR_COMMENTS: review_reviewability_cursor.comments
+      REVIEWABILITY_GROK_GRADE: review_reviewability_grok.grade
+      REVIEWABILITY_GROK_COMMENTS: review_reviewability_grok.comments
+      SANITY_CLAUDE_GRADE: review_sanity_claude.grade
+      SANITY_CLAUDE_COMMENTS: review_sanity_claude.comments
+      SANITY_CODEX_GRADE: review_sanity_codex.grade
+      SANITY_CODEX_COMMENTS: review_sanity_codex.comments
+      SANITY_CURSOR_GRADE: review_sanity_cursor.grade
+      SANITY_CURSOR_COMMENTS: review_sanity_cursor.comments
+      SANITY_GROK_GRADE: review_sanity_grok.grade
+      SANITY_GROK_COMMENTS: review_sanity_grok.comments
+      TESTING_CLAUDE_GRADE: review_testing_claude.grade
+      TESTING_CLAUDE_COMMENTS: review_testing_claude.comments
+      TESTING_CODEX_GRADE: review_testing_codex.grade
+      TESTING_CODEX_COMMENTS: review_testing_codex.comments
+      TESTING_CURSOR_GRADE: review_testing_cursor.grade
+      TESTING_CURSOR_COMMENTS: review_testing_cursor.comments
+      TESTING_GROK_GRADE: review_testing_grok.grade
+      TESTING_GROK_COMMENTS: review_testing_grok.comments
+    prompt: |
+      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
+            any command, do not touch git, and do not call GitHub — only read the inputs and write
+            the result.
+
+            Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
+            grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
+            input is a JSON array of finding strings from that reviewer; each string leads with a
+            bracketed severity and names the commit, file, line, description, and suggestion.
+
+            Compose the review:
+            - `findings`: a JSON object `{"items": [...]}`. Turn every reviewer comment into one
+              item `{"file": "<path>", "line": <int>, "description": "<what>", "suggestion":
+              "<how, or empty>"}`. Read the file and line out of the comment string. Use line 0 when
+              a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
+              that different reviewers raise about the same file and line into one item, keeping
+              every distinct observation. Order items by file, then line. Emit `{"items": []}` when
+              there are no findings.
+            - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
+              and overall read a careful human reviewer would write. No AI, agent, model, or tooling
+              attribution of any kind. Do not restate every finding here; the items carry those.
+            - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
+              or good AND there are at least as many excellent as good grades; otherwise `false`.
+              (Whether the PR actually qualifies for an approval is decided later at publication.)
+    output:
+      findings:
+        type: object
+      summary:
+        type: string
+      approval_bar:
+        type: bool
+  prepare_cursor:
+    needs: plan, review_conventions_claude?, review_conventions_codex?, review_conventions_cursor?, review_conventions_grok?, review_justification_claude?, review_justification_codex?, review_justification_cursor?, review_justification_grok?, review_reviewability_claude?, review_reviewability_codex?, review_reviewability_cursor?, review_reviewability_grok?, review_sanity_claude?, review_sanity_codex?, review_sanity_cursor?, review_sanity_grok?, review_testing_claude?, review_testing_codex?, review_testing_cursor?, review_testing_grok?
+    when:
+      plan.publisher: cursor
+    agent:
+      harness: cursor
+      model: auto
+    inputs:
+      PR_URL: params.PR_URL
+      CONVENTIONS_CLAUDE_GRADE: review_conventions_claude.grade
+      CONVENTIONS_CLAUDE_COMMENTS: review_conventions_claude.comments
+      CONVENTIONS_CODEX_GRADE: review_conventions_codex.grade
+      CONVENTIONS_CODEX_COMMENTS: review_conventions_codex.comments
+      CONVENTIONS_CURSOR_GRADE: review_conventions_cursor.grade
+      CONVENTIONS_CURSOR_COMMENTS: review_conventions_cursor.comments
+      CONVENTIONS_GROK_GRADE: review_conventions_grok.grade
+      CONVENTIONS_GROK_COMMENTS: review_conventions_grok.comments
+      JUSTIFICATION_CLAUDE_GRADE: review_justification_claude.grade
+      JUSTIFICATION_CLAUDE_COMMENTS: review_justification_claude.comments
+      JUSTIFICATION_CODEX_GRADE: review_justification_codex.grade
+      JUSTIFICATION_CODEX_COMMENTS: review_justification_codex.comments
+      JUSTIFICATION_CURSOR_GRADE: review_justification_cursor.grade
+      JUSTIFICATION_CURSOR_COMMENTS: review_justification_cursor.comments
+      JUSTIFICATION_GROK_GRADE: review_justification_grok.grade
+      JUSTIFICATION_GROK_COMMENTS: review_justification_grok.comments
+      REVIEWABILITY_CLAUDE_GRADE: review_reviewability_claude.grade
+      REVIEWABILITY_CLAUDE_COMMENTS: review_reviewability_claude.comments
+      REVIEWABILITY_CODEX_GRADE: review_reviewability_codex.grade
+      REVIEWABILITY_CODEX_COMMENTS: review_reviewability_codex.comments
+      REVIEWABILITY_CURSOR_GRADE: review_reviewability_cursor.grade
+      REVIEWABILITY_CURSOR_COMMENTS: review_reviewability_cursor.comments
+      REVIEWABILITY_GROK_GRADE: review_reviewability_grok.grade
+      REVIEWABILITY_GROK_COMMENTS: review_reviewability_grok.comments
+      SANITY_CLAUDE_GRADE: review_sanity_claude.grade
+      SANITY_CLAUDE_COMMENTS: review_sanity_claude.comments
+      SANITY_CODEX_GRADE: review_sanity_codex.grade
+      SANITY_CODEX_COMMENTS: review_sanity_codex.comments
+      SANITY_CURSOR_GRADE: review_sanity_cursor.grade
+      SANITY_CURSOR_COMMENTS: review_sanity_cursor.comments
+      SANITY_GROK_GRADE: review_sanity_grok.grade
+      SANITY_GROK_COMMENTS: review_sanity_grok.comments
+      TESTING_CLAUDE_GRADE: review_testing_claude.grade
+      TESTING_CLAUDE_COMMENTS: review_testing_claude.comments
+      TESTING_CODEX_GRADE: review_testing_codex.grade
+      TESTING_CODEX_COMMENTS: review_testing_codex.comments
+      TESTING_CURSOR_GRADE: review_testing_cursor.grade
+      TESTING_CURSOR_COMMENTS: review_testing_cursor.comments
+      TESTING_GROK_GRADE: review_testing_grok.grade
+      TESTING_GROK_COMMENTS: review_testing_grok.comments
+    prompt: |
+      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
+            any command, do not touch git, and do not call GitHub — only read the inputs and write
+            the result.
+
+            Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
+            grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
+            input is a JSON array of finding strings from that reviewer; each string leads with a
+            bracketed severity and names the commit, file, line, description, and suggestion.
+
+            Compose the review:
+            - `findings`: a JSON object `{"items": [...]}`. Turn every reviewer comment into one
+              item `{"file": "<path>", "line": <int>, "description": "<what>", "suggestion":
+              "<how, or empty>"}`. Read the file and line out of the comment string. Use line 0 when
+              a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
+              that different reviewers raise about the same file and line into one item, keeping
+              every distinct observation. Order items by file, then line. Emit `{"items": []}` when
+              there are no findings.
+            - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
+              and overall read a careful human reviewer would write. No AI, agent, model, or tooling
+              attribution of any kind. Do not restate every finding here; the items carry those.
+            - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
+              or good AND there are at least as many excellent as good grades; otherwise `false`.
+              (Whether the PR actually qualifies for an approval is decided later at publication.)
+    output:
+      findings:
+        type: object
+      summary:
+        type: string
+      approval_bar:
+        type: bool
+  prepare_grok:
+    needs: plan, review_conventions_claude?, review_conventions_codex?, review_conventions_cursor?, review_conventions_grok?, review_justification_claude?, review_justification_codex?, review_justification_cursor?, review_justification_grok?, review_reviewability_claude?, review_reviewability_codex?, review_reviewability_cursor?, review_reviewability_grok?, review_sanity_claude?, review_sanity_codex?, review_sanity_cursor?, review_sanity_grok?, review_testing_claude?, review_testing_codex?, review_testing_cursor?, review_testing_grok?
+    when:
+      plan.publisher: grok
+    agent:
+      harness: grok
+      model: grok-4.5
+    inputs:
+      PR_URL: params.PR_URL
+      CONVENTIONS_CLAUDE_GRADE: review_conventions_claude.grade
+      CONVENTIONS_CLAUDE_COMMENTS: review_conventions_claude.comments
+      CONVENTIONS_CODEX_GRADE: review_conventions_codex.grade
+      CONVENTIONS_CODEX_COMMENTS: review_conventions_codex.comments
+      CONVENTIONS_CURSOR_GRADE: review_conventions_cursor.grade
+      CONVENTIONS_CURSOR_COMMENTS: review_conventions_cursor.comments
+      CONVENTIONS_GROK_GRADE: review_conventions_grok.grade
+      CONVENTIONS_GROK_COMMENTS: review_conventions_grok.comments
+      JUSTIFICATION_CLAUDE_GRADE: review_justification_claude.grade
+      JUSTIFICATION_CLAUDE_COMMENTS: review_justification_claude.comments
+      JUSTIFICATION_CODEX_GRADE: review_justification_codex.grade
+      JUSTIFICATION_CODEX_COMMENTS: review_justification_codex.comments
+      JUSTIFICATION_CURSOR_GRADE: review_justification_cursor.grade
+      JUSTIFICATION_CURSOR_COMMENTS: review_justification_cursor.comments
+      JUSTIFICATION_GROK_GRADE: review_justification_grok.grade
+      JUSTIFICATION_GROK_COMMENTS: review_justification_grok.comments
+      REVIEWABILITY_CLAUDE_GRADE: review_reviewability_claude.grade
+      REVIEWABILITY_CLAUDE_COMMENTS: review_reviewability_claude.comments
+      REVIEWABILITY_CODEX_GRADE: review_reviewability_codex.grade
+      REVIEWABILITY_CODEX_COMMENTS: review_reviewability_codex.comments
+      REVIEWABILITY_CURSOR_GRADE: review_reviewability_cursor.grade
+      REVIEWABILITY_CURSOR_COMMENTS: review_reviewability_cursor.comments
+      REVIEWABILITY_GROK_GRADE: review_reviewability_grok.grade
+      REVIEWABILITY_GROK_COMMENTS: review_reviewability_grok.comments
+      SANITY_CLAUDE_GRADE: review_sanity_claude.grade
+      SANITY_CLAUDE_COMMENTS: review_sanity_claude.comments
+      SANITY_CODEX_GRADE: review_sanity_codex.grade
+      SANITY_CODEX_COMMENTS: review_sanity_codex.comments
+      SANITY_CURSOR_GRADE: review_sanity_cursor.grade
+      SANITY_CURSOR_COMMENTS: review_sanity_cursor.comments
+      SANITY_GROK_GRADE: review_sanity_grok.grade
+      SANITY_GROK_COMMENTS: review_sanity_grok.comments
+      TESTING_CLAUDE_GRADE: review_testing_claude.grade
+      TESTING_CLAUDE_COMMENTS: review_testing_claude.comments
+      TESTING_CODEX_GRADE: review_testing_codex.grade
+      TESTING_CODEX_COMMENTS: review_testing_codex.comments
+      TESTING_CURSOR_GRADE: review_testing_cursor.grade
+      TESTING_CURSOR_COMMENTS: review_testing_cursor.comments
+      TESTING_GROK_GRADE: review_testing_grok.grade
+      TESTING_GROK_COMMENTS: review_testing_grok.comments
+    prompt: |
+      You are preparing ONE GitHub pull-request review from the fleet's findings. Do not run
+            any command, do not touch git, and do not call GitHub — only read the inputs and write
+            the result.
+
+            Each `*_GRADE` input is a reviewer's grade (excellent, good, average, or poor); an empty
+            grade means that reviewer did not run and must be ignored. Each matching `*_COMMENTS`
+            input is a JSON array of finding strings from that reviewer; each string leads with a
+            bracketed severity and names the commit, file, line, description, and suggestion.
+
+            Compose the review:
+            - `findings`: a JSON object `{"items": [...]}`. Turn every reviewer comment into one
+              item `{"file": "<path>", "line": <int>, "description": "<what>", "suggestion":
+              "<how, or empty>"}`. Read the file and line out of the comment string. Use line 0 when
+              a finding is commit- or PR-level rather than tied to a line. Merge duplicate findings
+              that different reviewers raise about the same file and line into one item, keeping
+              every distinct observation. Order items by file, then line. Emit `{"items": []}` when
+              there are no findings.
+            - `summary`: a short, gracious, human-voiced paragraph opening the review — the greeting
+              and overall read a careful human reviewer would write. No AI, agent, model, or tooling
+              attribution of any kind. Do not restate every finding here; the items carry those.
+            - `approval_bar`: the boolean `true` only when every reviewer that ran graded excellent
+              or good AND there are at least as many excellent as good grades; otherwise `false`.
+              (Whether the PR actually qualifies for an approval is decided later at publication.)
+    output:
+      findings:
+        type: object
+      summary:
+        type: string
+      approval_bar:
+        type: bool
+  publish:
+    needs: plan, prepare_claude?, prepare_codex?, prepare_cursor?, prepare_grok?
+    inputs:
+      PR_URL: params.PR_URL
+      FINDINGS_CLAUDE: prepare_claude.findings
+      SUMMARY_CLAUDE: prepare_claude.summary
+      BAR_CLAUDE: prepare_claude.approval_bar
+      FINDINGS_CODEX: prepare_codex.findings
+      SUMMARY_CODEX: prepare_codex.summary
+      BAR_CODEX: prepare_codex.approval_bar
+      FINDINGS_CURSOR: prepare_cursor.findings
+      SUMMARY_CURSOR: prepare_cursor.summary
+      BAR_CURSOR: prepare_cursor.approval_bar
+      FINDINGS_GROK: prepare_grok.findings
+      SUMMARY_GROK: prepare_grok.summary
+      BAR_GROK: prepare_grok.approval_bar
+      PLAN_RAN: plan.ran
+    run: |
+      # Exactly one prepare_<harness> ran; forward its output to the publisher.
+      for h in CLAUDE CODEX CURSOR GROK; do
+        eval "f=\$FINDINGS_$h; s=\$SUMMARY_$h; b=\$BAR_$h"
+        if [ -n "$f" ]; then FINDINGS="$f"; SUMMARY="$s"; APPROVAL_BAR="$b"; break; fi
+      done
+      export FINDINGS SUMMARY APPROVAL_BAR
+      RAN="$PLAN_RAN" "$SCSH_BIN" gh-review publish
+    timeout: 600s
+    output:
+      review_url:
+        type: string
+      event:
+        type: string
+      published:
+        type: bool
+  quota_after:
+    needs: publish, plan
+    inputs:
+      RAN: plan.ran
+    run: |
+      "$SCSH_BIN" gh-review quota-after
+    timeout: 300s
+    output:
+      deltas:
+        type: string

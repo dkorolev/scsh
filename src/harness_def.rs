@@ -22,7 +22,7 @@ pub const HARNESS_HOME_ENV: &str = "SCSH_HARNESS_HOME";
 /// The built-in definitions, embedded at build time (mirrors `config::demo_yaml`), so
 /// `doctor`/`add`/`research`/`demo-pr`/`smoke-pr-*` (flat) and the workflow demos are always
 /// available regardless of the repo. `(name, yaml)`.
-pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
+pub fn builtin_defs() -> [(&'static str, &'static str); 20] {
   [
     ("doctor", include_str!("harness_defs/doctor.yml")),
     ("add", include_str!("harness_defs/add.yml")),
@@ -38,6 +38,7 @@ pub fn builtin_defs() -> [(&'static str, &'static str); 19] {
     ("demo-loop-do-while", include_str!("harness_defs/demo-loop-do-while.yml")),
     ("demo-loop-break", include_str!("harness_defs/demo-loop-break.yml")),
     ("gorgeous-pipeline", include_str!("harness_defs/gorgeous-pipeline.yml")),
+    ("gh-gorgeous-review", include_str!("harness_defs/gh-gorgeous-review.yml")),
     ("big-beautiful-build", include_str!("harness_defs/big-beautiful-build.yml")),
     ("smoke-pr-claude", include_str!("harness_defs/smoke-pr-claude.yml")),
     ("smoke-pr-codex", include_str!("harness_defs/smoke-pr-codex.yml")),
@@ -419,6 +420,12 @@ pub struct Step {
   pub when: Option<When>,
   /// Steps that must finish (or be skipped) before this one — the DAG edges.
   pub needs: Vec<String>,
+  /// The subset of `needs` written with a `?` suffix (`needs: plan, review_grok?`): a
+  /// dependency this step waits for but does not require. A required dependency that was
+  /// skipped skips this step too; an optional one that was skipped leaves this step runnable,
+  /// with every input bound to that step resolving to the empty string. This is how a fan-in
+  /// step (a summary over whichever routes a plan enabled) survives gated-off routes.
+  pub optional_needs: Vec<String>,
   /// Extra files the step must write NEXT TO its `$SCSH_RESULT` (plain filenames, no
   /// directories) — copied back into the caller repo's session dir exactly like the result,
   /// and required once declared. For deliverables that are files, not JSON fields (e.g. a
@@ -692,7 +699,6 @@ fn format_ref(r: &Ref) -> String {
   }
 }
 
-#[allow(dead_code)] // kept for tests / future UI that wants a human gate phrase offline
 fn format_cond(c: &Cond) -> String {
   let lhs = format_ref(&c.reference);
   match c.op {
@@ -1018,7 +1024,7 @@ fn validate_steps(
         None
       }
     };
-    let needs = parse_needs(fm.get("needs").copied());
+    let (needs, optional_needs) = split_optional_needs(parse_needs(fm.get("needs").copied()));
     let artifacts = parse_needs(fm.get("artifacts").copied());
     for a in &artifacts {
       // Artifacts land beside the step's result inside the session scratch dir; a plain
@@ -1157,6 +1163,7 @@ fn validate_steps(
         outputs,
         when,
         needs,
+        optional_needs,
         artifacts,
         commits,
         commit_identity,
@@ -1457,6 +1464,43 @@ fn validate_step_cond_block(id: &str, key_name: &str, node: Option<&Node>, error
 
 /// Parse a comma/space-separated scalar list (brackets optional): `needs: a, b` or `[a, b]`.
 /// Shared by `needs:` and `artifacts:`.
+/// Split a parsed `needs` list into every edge and the optional subset: an entry written
+/// `step?` is an optional edge (see [`Step::optional_needs`]), returned without its marker in
+/// both lists so the DAG sees one plain step id.
+fn split_optional_needs(raw: Vec<String>) -> (Vec<String>, Vec<String>) {
+  let mut needs = Vec::new();
+  let mut optional = Vec::new();
+  for entry in raw {
+    match entry.strip_suffix('?') {
+      Some(id) => {
+        needs.push(id.to_string());
+        optional.push(id.to_string());
+      }
+      None => needs.push(entry),
+    }
+  }
+  (needs, optional)
+}
+
+/// Why a `when:` gate is false, with the values that decided it — for the skipped step's
+/// note, so a reader sees "plan.grok = run, but plan.grok is `expired`" instead of "gate is
+/// false" and has to go look up what the gate compared.
+pub fn when_failure_note(when: &When, value_of: &impl Fn(&Ref) -> Option<String>) -> String {
+  let failed: Vec<String> = when
+    .iter()
+    .filter(|c| !c.eval(value_of))
+    .map(|c| {
+      let actual = value_of(&c.reference);
+      let lhs = format_ref(&c.reference);
+      match actual {
+        Some(v) if !v.is_empty() => format!("{}, but {lhs} is `{v}`", format_cond(c)),
+        _ => format!("{}, but {lhs} is empty", format_cond(c)),
+      }
+    })
+    .collect();
+  failed.join("; ")
+}
+
 fn parse_needs(node: Option<&Node>) -> Vec<String> {
   let Some(Node::Scalar(s)) = node else { return Vec::new() };
   s.trim()
@@ -1798,6 +1842,36 @@ fn opt_scalar(fm: &BTreeMap<&str, &Node>, param: &str, field: &str, errors: &mut
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  /// `needs: a, b?` orders after both but requires only `a`; the marker never reaches the DAG.
+  #[test]
+  fn optional_needs_are_split_off_their_marker() {
+    let (needs, optional) = split_optional_needs(vec!["plan".into(), "review_grok?".into(), "review_claude?".into()]);
+    assert_eq!(needs, vec!["plan", "review_grok", "review_claude"]);
+    assert_eq!(optional, vec!["review_grok", "review_claude"]);
+    let src = "description: x\nsteps:\n  plan:\n    run: true\n  fan_in:\n    needs: plan?\n    run: true\n";
+    let def = validate("x", src, DefSource::Repo).expect("parses");
+    let fan_in = def.steps.iter().find(|s| s.id == "fan_in").unwrap();
+    assert_eq!(fan_in.needs, vec!["plan"]);
+    assert_eq!(fan_in.optional_needs, vec!["plan"]);
+    let bad = "description: x\nsteps:\n  fan_in:\n    needs: ghost?\n    run: true\n";
+    let errors = validate("x", bad, DefSource::Repo).expect_err("an optional edge still names a real step");
+    assert!(errors.iter().any(|e| e.contains("needs 'ghost', which is not a defined step")), "{errors:?}");
+  }
+
+  /// The skip note names the gate and the value that failed it.
+  #[test]
+  fn when_failure_note_shows_the_deciding_value() {
+    let when = vec![Cond {
+      reference: Ref::StepField { step: "plan".into(), field: "grok".into() },
+      op: CondOp::Eq,
+      values: vec!["run".into()],
+    }];
+    let note = when_failure_note(&when, &|_| Some("expired".into()));
+    assert_eq!(note, "plan.grok = run, but plan.grok is `expired`");
+    let empty = when_failure_note(&when, &|_| None);
+    assert_eq!(empty, "plan.grok = run, but plan.grok is empty");
+  }
 
   #[test]
   fn builtin_arith_runs_three_steps_on_three_harnesses() {

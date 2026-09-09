@@ -1691,3 +1691,72 @@ fn override_yml_check_profile_uses_external_config() {
   assert_ne!(bare.code, 0, "got: {}", bare.out);
   assert!(bare.out.contains(".scsh.yml not found"), "got: {}", bare.out);
 }
+
+/// A host-only workflow where a plan step gates a route off: with `needs: plan, gated?` the
+/// fan-in step still runs and sees the gated step's output as empty, while the required form
+/// falls with its dependency. Also pins the skip note (the gate with the value that decided
+/// it) and the host-step environment (`SCSH_SESSION`, `SCSH_BIN`).
+#[test]
+fn run_def_optional_needs_survive_a_gated_off_dependency() {
+  fn def(needs: &str) -> String {
+    format!(
+      r#"description: "Optional-needs check."
+steps:
+  plan:
+    run: |
+      printf '{{"go":"no"}}' > "$SCSH_RESULT"
+    output:
+      go:
+        type: enum
+        choices: yes, no
+  gated:
+    needs: plan
+    when:
+      plan.go: yes
+    run: |
+      printf '{{"value":"ran"}}' > "$SCSH_RESULT"
+    output:
+      value:
+        type: string
+  summary:
+    needs: {needs}
+    inputs:
+      FROM_GATED: gated.value
+    run: |
+      printf '{{"seen":"[%s]","session":"%s","bin_ok":"%s"}}' "$FROM_GATED" "$SCSH_SESSION" "$([ -x "$SCSH_BIN" ] && echo yes || echo no)" > "$SCSH_RESULT"
+    output:
+      seen:
+        type: string
+      session:
+        type: string
+      bin_ok:
+        type: string
+"#
+    )
+  }
+  for (needs, ran, skipped, seen) in [("plan, gated?", 2, 1, Some("seen: [] · session: ")), ("plan, gated", 1, 2, None)]
+  {
+    let d = unique_dir("optneeds");
+    git_init(&d);
+    std::fs::create_dir_all(d.join(".harness")).unwrap();
+    std::fs::write(d.join(".harness/optneeds.yml"), def(needs)).unwrap();
+    std::fs::write(d.join(".gitignore"), "/tmp\n").unwrap();
+    git(&d, &["add", "-A"]);
+    git(&d, &["commit", "-qm", "init"]);
+    let r = scsh_env(&d, &["run", "--def", "optneeds"], &[("NO_COLOR", "1")]);
+    assert_eq!(r.code, 0, "needs `{needs}`: {}", r.out);
+    assert!(r.out.contains("skipped — when: plan.go = yes, but plan.go is `no`"), "needs `{needs}`: {}", r.out);
+    assert!(
+      r.out.contains(&format!("{ran} step{} ran, {skipped} skipped", if ran == 1 { "" } else { "s" })),
+      "needs `{needs}`: {}",
+      r.out
+    );
+    match seen {
+      Some(needle) => {
+        assert!(r.out.contains(needle), "the optional edge leaves the input empty; got: {}", r.out);
+        assert!(r.out.contains("bin_ok: yes"), "SCSH_BIN points at a runnable scsh; got: {}", r.out);
+      }
+      None => assert!(r.out.contains("skipped — needs 'gated', which was skipped"), "got: {}", r.out),
+    }
+  }
+}

@@ -6,8 +6,8 @@
 mod castprobe;
 mod client;
 mod db;
-mod github;
-mod github_publish;
+pub mod github;
+pub mod github_publish;
 mod html;
 mod jsonio;
 mod model;

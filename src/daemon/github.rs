@@ -37,7 +37,6 @@ pub struct PullRequest {
 #[derive(Clone, Debug)]
 pub struct BrowserReview {
   pub pull_request: PullRequest,
-  pub harnesses: Vec<String>,
 }
 
 pub fn parse_pull_request(input: &str) -> Result<PullRequestRef, String> {
@@ -182,19 +181,6 @@ pub fn prepare_pull_request(gh: &Path, home: &Path, pr: &PullRequest) -> Result<
   Ok(dir)
 }
 
-/// Best-effort subscription snapshot for the harnesses the selected fleet actually uses.
-pub fn snapshot_quotas(scsh: &Path, root: &Path, harnesses: &[String], phase: &str) {
-  let _ = std::fs::create_dir_all(root.join("tmp"));
-  for harness in harnesses {
-    let Ok(output) = Command::new(scsh).args(["quota", harness, "--json"]).current_dir(root).output() else {
-      continue;
-    };
-    if output.status.success() {
-      let _ = std::fs::write(root.join(format!("tmp/quota-{phase}-{harness}.json")), output.stdout);
-    }
-  }
-}
-
 /// Receipt through which a later `$gh-gorgeous-review` invocation recognizes browser work and
 /// resumes at report/publication rather than launching the expensive fleet a second time.
 pub fn write_browser_receipt(root: &Path, pr: &PullRequest, session: &str, state: &str) {
@@ -209,6 +195,7 @@ pub fn write_browser_receipt(root: &Path, pr: &PullRequest, session: &str, state
     quote(&pr.base_ref),
     quote(base_head.trim()),
   );
+  let _ = std::fs::create_dir_all(root.join("tmp"));
   let _ = std::fs::write(root.join("tmp/gh-gorgeous-review-browser.json"), body);
 }
 
@@ -396,13 +383,6 @@ mod tests {
     assert!(receipt.contains(r#""operation":"gh-gorgeous-review""#));
     assert!(receipt.contains(r#""session":"abcxyz""#));
     assert!(receipt.contains(&format!(r#""reviewed_head":"{}""#, head.trim())));
-
-    let quota = fixture.join("scsh-quota");
-    std::fs::write(&quota, "#!/bin/sh\nprintf '{\"harness\":\"%s\"}\\n' \"$2\"\n").unwrap();
-    std::fs::set_permissions(&quota, std::fs::Permissions::from_mode(0o700)).unwrap();
-    snapshot_quotas(&quota, &checkout, &["claude".into(), "codex".into()], "before");
-    assert!(checkout.join("tmp/quota-before-claude.json").is_file());
-    assert!(checkout.join("tmp/quota-before-codex.json").is_file());
 
     git(&source, &["checkout", "-q", "main"]).unwrap();
     git(&source, &["checkout", "-qb", "rewritten-feature"]).unwrap();

@@ -2356,33 +2356,17 @@ fn gh_gorgeous_review_start_response(body: &str, store: &Arc<Mutex<Store>>) -> (
     Ok(root) => root,
     Err(e) => return (400, err_body(&e), false),
   };
-  let manifest = super::paths::scsh_home_dir().join(".scsh.yml");
-  let params = Vec::new();
-  let routes = profile_routes_in_manifest(&manifest, "code-gorgeous-review");
-  if routes.is_empty() {
-    return (
-      400,
-      err_body("the global code-gorgeous-review profile is missing; run 'scsh installskills --global https://github.com/dkorolev/code-review-skills' once"),
-      false,
-    );
-  }
-  let harnesses: Vec<String> = routes
-    .iter()
-    .map(|route| route.harness.as_str().to_string())
-    .collect::<std::collections::BTreeSet<_>>()
-    .into_iter()
-    .collect();
   start_job_in_repo(
     &root.to_string_lossy(),
+    Some("gh-gorgeous-review".into()),
     None,
-    Some("code-gorgeous-review".into()),
-    params,
+    vec![("PR_URL".into(), pr.url.clone())],
     None,
     Some("main".into()),
     crate::daemon::model::DEFAULT_JOB_RETRIES,
-    Some(manifest),
+    None,
     Some("gh-gorgeous-review"),
-    Some(super::github::BrowserReview { pull_request: pr, harnesses }),
+    Some(super::github::BrowserReview { pull_request: pr }),
     store,
   )
 }
@@ -2517,10 +2501,6 @@ fn start_job_in_repo(
   cmd.stdin(std::process::Stdio::null());
   cmd.stdout(std::process::Stdio::null());
   cmd.stderr(std::process::Stdio::piped()); // captured, so a failure before registration is not silent
-  if let Some(review) = &browser_review {
-    super::github::snapshot_quotas(&exe, &root, &review.harnesses, "before");
-  }
-  let post_run_exe = exe.clone();
   match cmd.spawn() {
     Ok(mut child) => {
       let run_pid = Some(child.id());
@@ -2541,11 +2521,11 @@ fn start_job_in_repo(
         }
         let code = child.wait().ok().and_then(|s| s.code());
         if let Some(review) = browser_review {
-          super::github::snapshot_quotas(&post_run_exe, &review_root, &review.harnesses, "after");
-          let state = if code == Some(0) { "reviewed" } else { "failed" };
-          super::github::write_browser_receipt(&review_root, &review.pull_request, &sid, state);
-          if code == Some(0) {
-            publish_browser_review(&store_reap, &sid, &review_root, &review.pull_request);
+          // The workflow's own publish host step already wrote the terminal receipt (published /
+          // publication_failed) and — because it runs as a normal daemon-tracked proc — it
+          // persists across restarts. Here we only backstop a job that died before publishing.
+          if code != Some(0) {
+            super::github::write_browser_receipt(&review_root, &review.pull_request, &sid, "failed");
           }
         }
         reconcile_finished_job(&store_reap, &sid, code, &tail);
@@ -2587,74 +2567,6 @@ fn start_job_in_repo(
 }
 
 /// Publication is visible as the final job step, including API failures and the review URL.
-fn publish_browser_review(
-  store: &Arc<Mutex<Store>>, id: &str, root: &std::path::Path, pr: &super::github::PullRequest,
-) {
-  let now = now_unix_secs();
-  let (snapshot, index) = {
-    let mut guard = lock_store(store);
-    let Some(session) = guard.session_mut(id) else { return };
-    let snapshot = session.clone();
-    let index = session.procs.iter().map(|p| p.index).max().unwrap_or(0) + 1;
-    session.ended_at = None;
-    session.run_pid = None;
-    session.client_connected = true;
-    session.last_seen_at = now;
-    session.procs.push(ProcRecord {
-      index,
-      previous_attempt: None,
-      label: "Publish GitHub review".into(),
-      kind: ProcKind::Skill,
-      status: ProcStatus::Running,
-      skill_name: None,
-      harness: None,
-      model: None,
-      started_at: Some(now),
-      note: None,
-      detail: None,
-      fail_reason: None,
-      elapsed: None,
-      lines: Vec::new(),
-      container_name: None,
-      container_runtime: None,
-      cast_path: None,
-      diff_path: None,
-      skill_source: None,
-      route: None,
-      result_path: None,
-      annotate_target: None,
-      phase: None,
-      phase_until: None,
-    });
-    guard.mark_unannounced(id);
-    (snapshot, index)
-  };
-  super::github::write_browser_receipt(root, pr, id, "publishing");
-  let result = super::github_publish::publish(root, pr, &snapshot);
-  let state = if result.is_ok() { "published" } else { "publication_failed" };
-  super::github::write_browser_receipt(root, pr, id, state);
-  let mut guard = lock_store(store);
-  if let Some(session) = guard.session_mut(id) {
-    session.ended_at = Some(now_unix_secs());
-    session.client_connected = false;
-    if let Some(proc) = session.procs.iter_mut().find(|p| p.index == index) {
-      proc.elapsed = Some(now_unix_secs().saturating_sub(now) as f64);
-      match result {
-        Ok(url) => {
-          proc.status = ProcStatus::Ok;
-          proc.detail = Some(url);
-        }
-        Err(error) => {
-          proc.status = ProcStatus::Fail;
-          proc.fail_reason = Some("publication_failed".into());
-          proc.detail = Some(error);
-        }
-      }
-    }
-    guard.mark_unannounced(id);
-  }
-}
-
 /// When a spawned job's process exits, reconcile its session so no job is ever left hidden: a run
 /// that deregistered normally already has an end time and is left alone; one that died without
 /// finishing is ended, and — if it never produced a single proc (a refusal/crash before it
@@ -6149,13 +6061,15 @@ mod tests {
   }
 
   #[test]
-  fn browser_review_keeps_its_skill_identity_and_writes_resume_artifacts() {
-    let home = global_home_with_profile("browser-review");
+  fn browser_review_labels_the_job_and_backstops_a_failed_run() {
+    // The browser kickoff starts the built-in `gh-gorgeous-review` workflow definition. The
+    // daemon writes the initial `running` receipt; the workflow's own publish host step writes
+    // the terminal one. Here the spawned run exits non-zero before publishing, so the reaper
+    // backstop marks the receipt `failed` and the job is labeled as a GitHub review.
     let dir = clean_repo("browser-review");
     let nonce = crate::runtime::random_nonce_6();
     let stub = std::env::temp_dir().join(format!("scsh-browser-review-{nonce}.sh"));
-    std::fs::write(&stub, "#!/bin/sh\nif [ \"$1\" = quota ]; then printf '{\"ok\":true}\\n'; exit 0; fi\nsleep 1\n")
-      .unwrap();
+    std::fs::write(&stub, "#!/bin/sh\nexit 3\n").unwrap();
     assert!(std::process::Command::new("chmod").arg("+x").arg(&stub).status().unwrap().success());
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     let pr = crate::daemon::github::PullRequest {
@@ -6167,32 +6081,28 @@ mod tests {
       head_oid: "b".repeat(40),
       url: "https://github.com/owner/repo/pull/7".into(),
     };
-    let (result, final_receipt) = with_scsh_home(&home, || {
-      std::env::set_var("SCSH_BIN", &stub);
-      let result = start_job_in_repo(
-        &dir.to_string_lossy(),
-        None,
-        Some("hello-fleet".into()),
-        vec![("PR_URL".into(), pr.url.clone())],
-        None,
-        Some("main".into()),
-        0,
-        Some(home.join(".scsh.yml")),
-        Some("gh-gorgeous-review"),
-        Some(crate::daemon::github::BrowserReview { pull_request: pr, harnesses: vec!["codex".into()] }),
-        &store,
-      );
-      let receipt = dir.join("tmp/gh-gorgeous-review-browser.json");
-      for _ in 0..30 {
-        if std::fs::read_to_string(&receipt).unwrap_or_default().contains(r#""state":"publication_failed""#) {
-          break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+    std::env::set_var("SCSH_BIN", &stub);
+    let result = start_job_in_repo(
+      &dir.to_string_lossy(),
+      Some("gh-gorgeous-review".into()),
+      None,
+      vec![("PR_URL".into(), pr.url.clone())],
+      None,
+      Some("main".into()),
+      0,
+      None,
+      Some("gh-gorgeous-review"),
+      Some(crate::daemon::github::BrowserReview { pull_request: pr }),
+      &store,
+    );
+    let receipt = dir.join("tmp/gh-gorgeous-review-browser.json");
+    for _ in 0..30 {
+      if std::fs::read_to_string(&receipt).unwrap_or_default().contains(r#""state":"failed""#) {
+        break;
       }
-      let final_receipt = std::fs::read_to_string(&receipt).unwrap();
-      std::env::remove_var("SCSH_BIN");
-      (result, final_receipt)
-    });
+      std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    std::env::remove_var("SCSH_BIN");
     assert_eq!(result.0, 200, "got: {}", result.1);
     let session = result.1.split("\"session\":\"").nth(1).and_then(|s| s.split('"').next()).unwrap();
     {
@@ -6200,17 +6110,15 @@ mod tests {
       let job = guard.sessions.get(session).unwrap();
       assert_eq!(job.profile.as_deref(), Some("gh-gorgeous-review"));
       assert_eq!(job.kind.as_deref(), Some("github-review"));
+      assert!(job.workflow.is_some(), "a github review is a workflow, so its graph renders");
     }
-    assert!(dir.join("tmp/quota-before-codex.json").is_file());
-    // A zero-exit stub without route results must never authorize a GitHub write.
-    assert!(final_receipt.contains(r#""state":"publication_failed""#), "got: {final_receipt}");
-    assert_eq!(store.lock().unwrap().sessions[session].procs.last().unwrap().status, ProcStatus::Fail);
-    // The publish step ran on the reaper thread: the serving loop must learn of its outcome
-    // from the store itself, or the browser keeps the job "running" and a restart forgets it.
-    assert!(store.lock().unwrap().take_unannounced().contains(&session.to_string()));
-    assert!(dir.join("tmp/quota-after-codex.json").is_file());
+    let final_receipt = std::fs::read_to_string(&receipt).unwrap();
+    assert!(final_receipt.contains(r#""operation":"gh-gorgeous-review""#), "got: {final_receipt}");
+    assert!(
+      final_receipt.contains(r#""state":"failed""#),
+      "the reaper backstops a pre-publish failure: {final_receipt}"
+    );
     std::fs::remove_file(&stub).ok();
-    std::fs::remove_dir_all(&home).ok();
     std::fs::remove_dir_all(&dir).ok();
   }
 

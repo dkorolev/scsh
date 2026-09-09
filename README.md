@@ -200,7 +200,7 @@ See [`DAEMON.md`](DAEMON.md) for the session browser API and demo script.
 **Harness definitions & starting a job from the browser.** Besides `.scsh.yml` skills, `scsh`
 runs **harness definitions** — parameterized jobs in `.harness/<name>.yml` (in the repo or
 `~/.harness/`) plus built-ins (`doctor`, `add`, `research`, and the `fruits`, `fruits-host-sort`,
-`code-review`, `arith`, `commit-summary`, and `greet` workflows — `fruits` fans out into two agent
+`code-review`, `arith`, `commit-summary`, `greet`, and `gh-gorgeous-review` workflows — `fruits` fans out into two agent
 sorters, while `fruits-host-sort` makes both sorters typed commands on the host; both feed a final
 agent that commits `README.md`, `FRUITS.md`, and `VEGGIES.md`; `greet` is the multi-step fake-PR demo:
 scaffold a broken `greet()`,

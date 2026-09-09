@@ -12,6 +12,7 @@ mod export;
 mod failure;
 mod fleet;
 mod gc;
+mod gh_review;
 mod harness_def;
 mod json;
 #[cfg(test)]
@@ -108,6 +109,11 @@ fn run(args: &[String]) -> i32 {
     Mode::Failures => failures_cmd(&cli.failures),
     Mode::Stats => stats_cmd(&cli.failures, profile),
     Mode::Quota { harness } => quota_cmd(harness, cli.json, cli.failures.session.clone()),
+    Mode::GhReview { action } => match action {
+      GhReviewAction::Plan => gh_review::plan_cmd(),
+      GhReviewAction::Publish => gh_review::publish_cmd(),
+      GhReviewAction::QuotaAfter => gh_review::quota_after_cmd(),
+    },
     Mode::Prune => prune_cmd(cli.prune_now),
     Mode::Gc => gc_cmd(&cli.gc),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
@@ -677,6 +683,11 @@ enum Mode {
   Quota {
     harness: Option<config::Harness>,
   },
+  /// `gh-review plan|publish|quota-after`: the host steps of the built-in `gh-gorgeous-review`
+  /// workflow (see `gh_review.rs`); each writes its verdict to `$SCSH_RESULT`.
+  GhReview {
+    action: GhReviewAction,
+  },
   /// Show the run-dir prune queue; `--now` forces a janitor pass.
   Prune,
   /// Reclaim old `$SCSH_HOME/sessions/` dirs (dry-run by default; `--apply` to delete).
@@ -694,6 +705,13 @@ enum Mode {
   Demo {
     name: Option<String>,
   },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GhReviewAction {
+  Plan,
+  Publish,
+  QuotaAfter,
 }
 
 #[derive(Clone)]
@@ -774,6 +792,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "failures" => "failures",
     "stats" => "stats",
     "quota" | "usage" => "quota",
+    "gh-review" => "gh-review",
     "prune" => "prune",
     "gc" => "gc",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
@@ -1092,6 +1111,19 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         saw_gc_flag = true;
         gc.legacy = true;
         None
+      }
+      "gh-review" => {
+        i += 1;
+        let sub = args.get(i).ok_or("gh-review needs a subcommand: plan, publish, or quota-after")?;
+        let action = match sub.as_str() {
+          "plan" => GhReviewAction::Plan,
+          "publish" => GhReviewAction::Publish,
+          "quota-after" => GhReviewAction::QuotaAfter,
+          other => {
+            return Err(format!("unknown gh-review subcommand '{other}' (expected plan, publish, or quota-after)"))
+          }
+        };
+        Some(Mode::GhReview { action })
       }
       "daemon" => {
         i += 1;
@@ -2152,6 +2184,13 @@ fn run_host_step(
   let _ = std::fs::remove_file(&result_path);
   let mut env = inputs;
   env.push(("SCSH_STEP".to_string(), step.id.clone()));
+  // The job this step belongs to, and the scsh that is running it — so a host command can
+  // call back into scsh (`$SCSH_BIN gh-review plan`) without guessing at PATH, and report
+  // into the right session.
+  env.push(("SCSH_SESSION".to_string(), sink.session_id.to_string()));
+  if let Ok(exe) = std::env::current_exe() {
+    env.push(("SCSH_BIN".to_string(), exe.to_string_lossy().into_owned()));
+  }
   // A self-reporting command writes here. The synthesized form OVERWRITES this path afterwards
   // with scsh's own verdict, so a check-form command that writes it is writing to /dev/null with
   // extra steps — `help def` says so. Absolute, unlike an agent step's container-relative one.
@@ -3012,12 +3051,17 @@ fn run_workflow(
     // Partition this wave into steps to skip (gate false, or a needed step was skipped) and to run.
     let mut to_run: Vec<&harness_def::Step> = Vec::new();
     for s in ready {
-      let skipped_need = s.needs.iter().find(|n| state.get(*n).is_some_and(|st| st.skipped));
+      // An optional edge (`needs: x?`) orders the step after `x` but does not fall with it.
+      let skipped_need =
+        s.needs.iter().filter(|n| !s.optional_needs.contains(n)).find(|n| state.get(*n).is_some_and(|st| st.skipped));
       let when_ok = s.when.as_ref().is_none_or(|w| harness_def::when_holds(w, &|r| resolve_ref(r, def, &state)));
       if skipped_need.is_some() || !when_ok {
         let why = match skipped_need {
           Some(n) => format!("skipped — needs '{n}', which was skipped"),
-          None => "skipped — its when: gate is false".to_string(),
+          None => format!(
+            "skipped — when: {}",
+            harness_def::when_failure_note(s.when.as_ref().expect("gate false"), &|r| resolve_ref(r, def, &state))
+          ),
         };
         if let Some(p) = step_procs.remove(&s.id) {
           p.finish_skipped(&why);
@@ -9834,6 +9878,16 @@ fn print_help_command(name: &str) {
         ("--last N", "Limit to the last N runs."),
       ],
     ),
+    "gh-review" => (
+      "the host-side steps of the built-in gh-gorgeous-review workflow",
+      "scsh gh-review plan|publish|quota-after",
+      &[
+        ("plan", "Which harnesses review: credentials first, then quota (a long window under 10% left or a 5-hour window under 25% benches the harness). Fails when fewer than two can run."),
+        ("publish", "Post the review the in-container prepare_review step wrote (FINDINGS, SUMMARY, APPROVAL_BAR inputs) through gh, after the head-unchanged and duplicate checks."),
+        ("quota-after", "Closing quota snapshot for the harnesses that ran, as deltas against the plan's."),
+        ("(host steps)", "Each reads its inputs from the environment the workflow binds and writes its verdict to $SCSH_RESULT; run by scsh, not by hand."),
+      ],
+    ),
     "quota" => (
       "live subscription usage per harness",
       "scsh quota [harness] [--json] [--session <id>]",
@@ -9951,6 +10005,10 @@ fn print_help_overview() {
   help_row("failures", "Browse the failure log (--session, --skill, --reason, --last, --stats).");
   help_row("stats", "Durations & workload per skill/route (--skill, --profile, --harness, --model, --raw).");
   help_row("quota", "Live subscription usage per harness ([harness], --json; read-only, no model calls).");
+  help_row(
+    "gh-review",
+    "Host steps of the gh-gorgeous-review workflow (plan, publish, quota-after); not for hand use.",
+  );
   help_row("prune [--now]", "Show the run-dir cleanup queue; --now forces a pass.");
   help_row("gc [--apply]", "Reclaim old $SCSH_HOME/sessions/ dirs (dry-run default; --days/--keep/--legacy).");
   help_row("annotate-cast <cast…>", "Summarize + chapter recordings via Codex / Luna (--json).");
@@ -10362,7 +10420,8 @@ fn print_help_defs() {
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
         n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`) | string_list | object
-      needs: a, b          DAG edges — steps whose completion this step waits for
+      needs: a, b, c?      DAG edges — steps whose completion this step waits for; `c?` is
+                           optional: if c is skipped this step still runs, its c.* inputs empty
       when:                gate — run only if every condition holds (else the step is skipped)
         a.kind: code       scalar = equality; or one operator: eq/ne/lt/lte/gt/gte/in
       artifacts: out.txt   extra files written next to $SCSH_RESULT, copied to the session dir
@@ -12501,6 +12560,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       commit_identity: harness_def::CommitIdentity::Notes,
       when: None,
       needs: vec!["add".into()],
+      optional_needs: Vec::new(),
       artifacts: vec!["summary.txt".into()],
       commits: false,
       repeat: None,
@@ -12541,6 +12601,7 @@ Subject: [PATCH] add: 2 + 3 = 5
       commit_identity: harness_def::CommitIdentity::Notes,
       when: None,
       needs: Vec::new(),
+      optional_needs: Vec::new(),
       artifacts: Vec::new(),
       commits: true,
       repeat: None,

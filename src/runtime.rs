@@ -491,13 +491,31 @@ pub fn skill_prompt_clause(harness: Harness, skill_source: &str, global: bool) -
 }
 
 /// How the agent is told what to do: either "run this skill file" or the free-form prompt itself.
+/// Strip a leading YAML frontmatter block (`---\n … \n---\n`) from a skill body, returning the
+/// instructions that follow. Used only where a prompt must not begin with `--` (opencode's
+/// `--prompt`); returns the input unchanged when there is no frontmatter.
+fn strip_yaml_frontmatter(body: &str) -> &str {
+  let Some(rest) = body.strip_prefix("---\n") else { return body };
+  match rest.split_once("\n---\n") {
+    Some((_, after)) => after.trim_start(),
+    None => body,
+  }
+}
+
 fn agent_task_prompt(harness: Harness, skill_source: &str, delivery: &crate::config::SkillDelivery) -> String {
   const GIT_GUARD: &str =
     "Do not git fetch, pull, push, or clone — scsh preloaded a full local clone; use only refs already present.";
   const RESULT: &str = "Write the required result file to the path in the SCSH_RESULT environment variable.";
   match delivery {
     crate::config::SkillDelivery::DirectPrompt(body) => {
-      format!("{}\n\n{RESULT} {GIT_GUARD}", body.trim_end())
+      // opencode seeds the TUI with `--prompt <value>`, and opencode's arg parser prints its
+      // help and exits when that value BEGINS with `--` — which a bundled skill body does, since
+      // it opens with a `---` YAML frontmatter block. The frontmatter is skill metadata (name,
+      // description), not instructions, so drop it for opencode; the other harnesses receive the
+      // body unchanged. Without this every opencode reviewer fails with an empty result.
+      let body = body.trim_end();
+      let body = if harness == Harness::Opencode { strip_yaml_frontmatter(body) } else { body };
+      format!("{body}\n\n{RESULT} {GIT_GUARD}")
     }
     crate::config::SkillDelivery::Repo => {
       let clause = skill_prompt_clause(harness, skill_source, false);
@@ -2752,6 +2770,38 @@ TAG
     assert!(!cmd.contains("Run the skill defined"), "no skill clause: {cmd}");
     assert!(!cmd.contains(".skills/probe_credentials"), "no synthetic skill path: {cmd}");
     assert!(!cmd.contains("Follow its instructions exactly"), "direct prompt is the instructions: {cmd}");
+  }
+
+  #[test]
+  fn opencode_prompt_never_begins_with_dashes_frontmatter() {
+    use crate::config::{SkillDelivery, Terminal};
+    let body =
+      "---\nname: conventions-reviewer\ndescription: \"x\"\n---\n\n# Conventions Reviewer\n\nEnforce the rules.";
+    let cmd = harness_command(
+      Harness::Opencode,
+      Some("opencode/big-pickle"),
+      None,
+      "conventions-reviewer",
+      "tmp/out.json",
+      Terminal { cols: 200, rows: 50 },
+      &SkillDelivery::DirectPrompt(body.into()),
+    );
+    // The prompt reaches opencode via `--prompt <shell-quoted>`; the quoted value must open with
+    // the instructions, not the `---` frontmatter that makes opencode print help and exit.
+    assert!(cmd.contains("# Conventions Reviewer"), "the instructions survive: {cmd}");
+    assert!(!cmd.contains("---"), "no `---` frontmatter reaches opencode's --prompt: {cmd}");
+    assert!(!cmd.contains("name: conventions-reviewer"), "the metadata is dropped: {cmd}");
+    // The frontmatter strip is opencode-only: claude keeps the full body.
+    let claude = harness_command(
+      Harness::Claude,
+      Some("claude-opus-4-8"),
+      None,
+      "conventions-reviewer",
+      "tmp/out.json",
+      Terminal { cols: 200, rows: 50 },
+      &SkillDelivery::DirectPrompt(body.into()),
+    );
+    assert!(claude.contains("---"), "claude receives the body unchanged: {claude}");
   }
 
   #[test]
