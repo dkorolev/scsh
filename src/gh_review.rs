@@ -218,17 +218,27 @@ pub fn plan_cmd() -> i32 {
     println!("{} {}: {}", if p.runs() { "✓" } else { "⊘" }, p.harness.as_str(), p.note);
   }
   let publisher = choose_publisher(&plans);
-  if let Err(e) = write_result(&result, &plan_result_json(&plans, publisher, &quotas)) {
-    eprintln!("{e}");
-    return 1;
-  }
   let ran = runnable(&plans);
-  if ran.len() < MIN_HARNESSES {
-    eprintln!(
+  let too_few = (ran.len() < MIN_HARNESSES).then(|| {
+    format!(
       "gh-gorgeous-review needs at least {MIN_HARNESSES} runnable harnesses and this host has {}: {}",
       ran.len(),
       plan_summary(&plans)
-    );
+    )
+  });
+  let mut body = plan_result_json(&plans, publisher, &quotas);
+  // The job page: the fleet decision as the log, and a fleet too small as the error.
+  let mut page = vec![format!("\"log_markdown\": {}", quote(&plan_log_markdown(&plans, publisher)))];
+  if let Some(why) = &too_few {
+    page.push(format!("\"errors_markdown\": {}", quote(why)));
+  }
+  body.insert_str(body.len() - 2, &format!(", {} ", page.join(", ")));
+  if let Err(e) = write_result(&result, &body) {
+    eprintln!("{e}");
+    return 1;
+  }
+  if let Some(why) = too_few {
+    eprintln!("{why}");
     return 1;
   }
   println!(
@@ -299,11 +309,105 @@ fn publish_inner() -> Result<(String, String), String> {
   let state = if outcome.is_ok() { "published" } else { "publication_failed" };
   crate::daemon::github::write_browser_receipt(&root, &pr, &session, state);
   let (review_url, event) = outcome?;
+  let results_markdown = publish_results_markdown(
+    &event,
+    &review_url,
+    prepared.findings.len(),
+    prepared.approval_bar,
+    &reviewer_grades(&crate::runtime::session_results_dir(&session)),
+  );
   write_result(
     &result,
-    &format!("{{ \"review_url\": {}, \"event\": {}, \"published\": true }}", quote(&review_url), quote(&event)),
+    &format!(
+      "{{ \"review_url\": {}, \"event\": {}, \"published\": true, \"results_markdown\": {} }}",
+      quote(&review_url),
+      quote(&event),
+      quote(&results_markdown)
+    ),
   )?;
   Ok((review_url, event))
+}
+
+/// One reviewer step's grade, read back from the job's durable results: the files are named
+/// after the steps (`review_<skill>_<harness>.json`), so the name says who graded what.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReviewerGrade {
+  pub skill: String,
+  pub harness: String,
+  pub grade: String,
+}
+
+/// Every reviewer grade the job persisted so far, in file order — the totals the published
+/// review is summarized by. A results dir that does not exist yields no grades, not an error.
+pub fn reviewer_grades(results_dir: &Path) -> Vec<ReviewerGrade> {
+  let Ok(entries) = std::fs::read_dir(results_dir) else { return Vec::new() };
+  let mut names: Vec<String> = entries
+    .filter_map(|e| e.ok())
+    .filter_map(|e| e.file_name().into_string().ok())
+    .filter(|name| name.starts_with("review_") && name.ends_with(".json"))
+    .collect();
+  names.sort();
+  names
+    .into_iter()
+    .filter_map(|name| {
+      let stem = name.trim_end_matches(".json").trim_start_matches("review_");
+      let (skill, harness) = stem.rsplit_once('_')?;
+      let text = std::fs::read_to_string(results_dir.join(&name)).ok()?;
+      let Value::Object(fields) = json::parse(&text).ok()? else { return None };
+      let grade = fields.iter().find(|(k, _)| k == "grade").and_then(|(_, v)| match v {
+        Value::String(s) => Some(s.clone()),
+        _ => None,
+      })?;
+      Some(ReviewerGrade { skill: skill.replace('-', " "), harness: harness.to_string(), grade })
+    })
+    .collect()
+}
+
+/// The publish step's word on the job page: what was posted and where, and the fleet's
+/// grades per reviewer with their mean — the totals a reader wants without opening rows.
+pub fn publish_results_markdown(
+  event: &str, review_url: &str, findings: usize, approval_bar: bool, grades: &[ReviewerGrade],
+) -> String {
+  let mut md = String::new();
+  md.push_str("## Review published\n\n");
+  md.push_str(&format!("- **{event}** — [open the review]({review_url})\n"));
+  md.push_str(&format!(
+    "- {findings} finding{} · approval bar {}\n",
+    if findings == 1 { "" } else { "s" },
+    if approval_bar { "cleared" } else { "not cleared" }
+  ));
+  if grades.is_empty() {
+    return md;
+  }
+  let scores: Vec<u8> = grades.iter().filter_map(|g| crate::fleet::grade_score(&g.grade)).collect();
+  let mean = if scores.is_empty() {
+    String::new()
+  } else {
+    format!(
+      " (mean {:.1} of 5 over {})",
+      scores.iter().map(|s| f64::from(*s)).sum::<f64>() / scores.len() as f64,
+      scores.len()
+    )
+  };
+  md.push_str(&format!("\n## Grades{mean}\n\n"));
+  let mut skills: Vec<&str> = grades.iter().map(|g| g.skill.as_str()).collect();
+  skills.dedup();
+  for skill in skills {
+    let per: Vec<String> =
+      grades.iter().filter(|g| g.skill == skill).map(|g| format!("{} {}", g.harness, g.grade)).collect();
+    md.push_str(&format!("- **{skill}**: {}\n", per.join(" · ")));
+  }
+  md
+}
+
+/// The plan step's word on the job page: the fleet decision, one line per harness.
+pub fn plan_log_markdown(plans: &[HarnessPlan], publisher: Option<Harness>) -> String {
+  let mut md = String::from("## Fleet plan\n\n");
+  for p in plans {
+    md.push_str(&format!("- {} **{}** — {}\n", if p.runs() { "✓" } else { "⊘" }, p.harness.as_str(), p.note));
+  }
+  md.push_str(&format!("\nPublisher: **{}**\n", publisher.map(|h| h.as_str()).unwrap_or("none")));
+  md
 }
 
 /// `scsh gh-review quota-after` — the closing snapshot for the harnesses that ran (`RAN`, a
@@ -320,6 +424,7 @@ pub fn quota_after_cmd() -> i32 {
   };
   let ran = std::env::var("RAN").unwrap_or_default();
   let mut lines = Vec::new();
+  let mut reports = Vec::new();
   for name in ran.split(',').map(str::trim).filter(|s| !s.is_empty()) {
     let Some(h) = Harness::parse(name) else { continue };
     if !quota::SUPPORTED.contains(&h) {
@@ -328,56 +433,248 @@ pub fn quota_after_cmd() -> i32 {
     }
     let after = quota::fetch(h);
     write_snapshot("after", &after);
-    lines.push(quota_delta_line(h, &after));
+    let report = quota_report(h, &after);
+    lines.push(quota_delta_line(&report));
+    reports.push(report);
   }
   for line in &lines {
     println!("{line}");
   }
-  if let Err(e) = write_result(&result, &format!("{{ \"deltas\": {} }}", quote(&lines.join("\n")))) {
+  let body = format!(
+    "{{ \"deltas\": {}, \"results_markdown\": {} }}",
+    quote(&lines.join("\n")),
+    quote(&quota_results_markdown(&reports))
+  );
+  if let Err(e) = write_result(&result, &body) {
     eprintln!("{e}");
     return 1;
   }
   0
 }
 
-/// `claude: 5h session 3% → 9% (+6) · weekly 57% → 58% (+1)`, from the before-snapshot on disk.
-fn quota_delta_line(h: Harness, after: &HarnessQuota) -> String {
-  let name = h.as_str();
-  if after.status != "ok" {
-    return format!("{name}: {}", after.summary);
+/// One quota window before and after the review: what the review cost, and how many more
+/// like it the window has room for.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowDelta {
+  pub label: String,
+  pub before: Option<f64>,
+  pub after: f64,
+  pub resets_at: Option<String>,
+}
+
+impl WindowDelta {
+  pub fn delta(&self) -> Option<f64> {
+    self.before.map(|b| self.after - b)
   }
+
+  /// How many more reviews this window can take at the rate this one used, rounded down;
+  /// `None` when the review cost nothing measurable (or nothing was measured), since a
+  /// projection from zero is a guess dressed as a number.
+  pub fn reviews_left(&self) -> Option<u64> {
+    let delta = self.delta()?;
+    if delta <= 0.0 || !delta.is_finite() {
+      return None;
+    }
+    Some(((100.0 - self.after).max(0.0) / delta).floor() as u64)
+  }
+}
+
+/// One harness's quota reading after the review, with its windows measured against the
+/// plan's before-snapshot. A harness whose provider would not answer carries its summary
+/// and no windows.
+#[derive(Debug, Clone, PartialEq)]
+pub struct QuotaReport {
+  pub harness: String,
+  pub plan: Option<String>,
+  pub ok: bool,
+  pub summary: String,
+  pub windows: Vec<WindowDelta>,
+}
+
+fn quota_report(h: Harness, after: &HarnessQuota) -> QuotaReport {
   let before = std::fs::read_to_string(snapshot_path("before", h)).ok().and_then(|t| json::parse(&t).ok());
-  let before_pct = |id: &str| -> Option<f64> {
-    let Value::Object(top) = before.as_ref()? else { return None };
-    let Value::Array(harnesses) = top.iter().find(|(k, _)| k == "harnesses").map(|(_, v)| v)? else { return None };
-    let Value::Object(first) = harnesses.first()? else { return None };
-    let Value::Array(windows) = first.iter().find(|(k, _)| k == "windows").map(|(_, v)| v)? else { return None };
-    windows.iter().find_map(|w| {
-      let Value::Object(fields) = w else { return None };
-      let matches = fields.iter().any(|(k, v)| k == "id" && matches!(v, Value::String(s) if s == id));
-      if !matches {
-        return None;
-      }
-      fields
-        .iter()
-        .find(|(k, _)| k == "used_percent")
-        .and_then(|(_, v)| if let Value::Number(n) = v { Some(*n) } else { None })
-    })
+  let windows = if after.status == "ok" {
+    after
+      .windows
+      .iter()
+      .map(|w| WindowDelta {
+        label: w.label.clone(),
+        before: snapshot_used_percent(before.as_ref(), &w.id),
+        after: w.used_percent,
+        resets_at: w.resets_at.clone(),
+      })
+      .collect()
+  } else {
+    Vec::new()
   };
-  let parts: Vec<String> = after
+  QuotaReport {
+    harness: h.as_str().to_string(),
+    plan: after.plan.clone(),
+    ok: after.status == "ok",
+    summary: after.summary.clone(),
+    windows,
+  }
+}
+
+/// `claude: 5h session 3% → 9% (+6) · weekly 57% → 58% (+1)` — the `deltas` output line.
+pub fn quota_delta_line(report: &QuotaReport) -> String {
+  let name = &report.harness;
+  if !report.ok {
+    return format!("{name}: {}", report.summary);
+  }
+  let parts: Vec<String> = report
     .windows
     .iter()
-    .map(|w| match before_pct(&w.id) {
-      Some(b) => format!("{} {b:.0}% → {:.0}% ({:+.0})", w.label, w.used_percent, w.used_percent - b),
-      None => format!("{} {:.0}%", w.label, w.used_percent),
+    .map(|w| match w.before {
+      Some(b) => format!("{} {b:.0}% → {:.0}% ({:+.0})", w.label, w.after, w.after - b),
+      None => format!("{} {:.0}%", w.label, w.after),
     })
     .collect();
   format!("{name}: {}", parts.join(" · "))
 }
 
+/// The quota step's word on the job page: per harness, each window before → after with the
+/// review's cost, when it resets, and how many more such reviews it has room for.
+pub fn quota_results_markdown(reports: &[QuotaReport]) -> String {
+  let mut md = String::from("## Quota after this review\n\n");
+  if reports.is_empty() {
+    md.push_str("No harness with a quota endpoint ran.\n");
+    return md;
+  }
+  for r in reports {
+    let plan = r.plan.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
+    if !r.ok {
+      md.push_str(&format!("- **{}**{plan}: {}\n", r.harness, r.summary));
+      continue;
+    }
+    md.push_str(&format!("- **{}**{plan}\n", r.harness));
+    for w in &r.windows {
+      let cost = match w.delta() {
+        Some(d) => format!("{:.0}% → {:.0}% ({})", w.before.unwrap_or(w.after), w.after, signed_percent(d)),
+        None => format!("{:.0}% used", w.after),
+      };
+      let resets = w.resets_at.as_deref().map(|t| format!(", resets {t}")).unwrap_or_default();
+      let room = match w.reviews_left() {
+        Some(n) => format!(" — room for about {n} more review{} at this rate", if n == 1 { "" } else { "s" }),
+        None if w.delta().is_some() => " — this review cost nothing measurable here".to_string(),
+        None => String::new(),
+      };
+      md.push_str(&format!("  - {}: {cost}{resets}{room}\n", w.label));
+    }
+  }
+  md
+}
+
+/// `+3`, `-1`, or `+0.2` — a delta under one point keeps a decimal, so a window that
+/// projects room for more reviews never reads as having cost "+0".
+fn signed_percent(d: f64) -> String {
+  if d != 0.0 && d.abs() < 1.0 {
+    format!("{d:+.1}")
+  } else {
+    format!("{d:+.0}")
+  }
+}
+
+/// A window's `used_percent` from a `scsh quota --json` snapshot, by window id.
+fn snapshot_used_percent(snapshot: Option<&Value>, id: &str) -> Option<f64> {
+  let Value::Object(top) = snapshot? else { return None };
+  let Value::Array(harnesses) = top.iter().find(|(k, _)| k == "harnesses").map(|(_, v)| v)? else { return None };
+  let Value::Object(first) = harnesses.first()? else { return None };
+  let Value::Array(windows) = first.iter().find(|(k, _)| k == "windows").map(|(_, v)| v)? else { return None };
+  windows.iter().find_map(|w| {
+    let Value::Object(fields) = w else { return None };
+    let matches = fields.iter().any(|(k, v)| k == "id" && matches!(v, Value::String(s) if s == id));
+    if !matches {
+      return None;
+    }
+    fields
+      .iter()
+      .find(|(k, _)| k == "used_percent")
+      .and_then(|(_, v)| if let Value::Number(n) = v { Some(*n) } else { None })
+  })
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn a_quota_window_projects_the_reviews_it_has_room_for() {
+    let w =
+      WindowDelta { label: "5h session".into(), before: Some(3.0), after: 9.0, resets_at: Some("18:00 UTC".into()) };
+    assert_eq!(w.delta(), Some(6.0));
+    assert_eq!(w.reviews_left(), Some(15), "91% left at 6% a review");
+    let flat = WindowDelta { label: "weekly".into(), before: Some(57.0), after: 57.0, resets_at: None };
+    assert_eq!(flat.reviews_left(), None, "a review that cost nothing projects nothing");
+    let slight = WindowDelta { label: "pool".into(), before: Some(70.5), after: 70.7, resets_at: None };
+    assert_eq!(slight.reviews_left(), Some(146));
+    let md = quota_results_markdown(&[QuotaReport {
+      harness: "cursor".into(),
+      plan: None,
+      ok: true,
+      summary: String::new(),
+      windows: vec![slight],
+    }]);
+    assert!(md.contains("  - pool: 70% → 71% (+0.2) — room for about 146 more reviews at this rate\n"), "got: {md}");
+    let unknown = WindowDelta { label: "weekly".into(), before: None, after: 58.0, resets_at: None };
+    assert_eq!(unknown.reviews_left(), None);
+    let md = quota_results_markdown(&[QuotaReport {
+      harness: "claude".into(),
+      plan: Some("max".into()),
+      ok: true,
+      summary: String::new(),
+      windows: vec![w, flat],
+    }]);
+    assert!(md.contains("- **claude** (max)\n"), "got: {md}");
+    assert!(
+      md.contains("  - 5h session: 3% → 9% (+6), resets 18:00 UTC — room for about 15 more reviews at this rate\n"),
+      "got: {md}"
+    );
+    assert!(md.contains("  - weekly: 57% → 57% (+0) — this review cost nothing measurable here\n"), "got: {md}");
+    let down = quota_results_markdown(&[QuotaReport {
+      harness: "codex".into(),
+      plan: None,
+      ok: false,
+      summary: "codex: the endpoint throttles bursts".into(),
+      windows: Vec::new(),
+    }]);
+    assert!(down.contains("- **codex**: codex: the endpoint throttles bursts\n"), "got: {down}");
+    assert!(quota_results_markdown(&[]).contains("No harness with a quota endpoint ran."));
+  }
+
+  #[test]
+  fn the_published_review_is_summarized_with_every_reviewer_grade_and_their_mean() {
+    let dir = std::env::temp_dir().join(format!("scsh-gh-grades-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("review_sanity-reviewer_claude.json"), r#"{ "grade": "excellent", "comments": [] }"#)
+      .unwrap();
+    std::fs::write(dir.join("review_sanity-reviewer_codex.json"), r#"{ "grade": "good", "comments": ["x"] }"#).unwrap();
+    std::fs::write(dir.join("review_testing-reviewer_claude.json"), r#"{ "grade": "poor", "comments": [] }"#).unwrap();
+    std::fs::write(dir.join("plan.json"), r#"{ "grade": "excellent" }"#).unwrap(); // not a reviewer
+    std::fs::write(dir.join("review_broken_cursor.json"), "not json").unwrap();
+    let grades = reviewer_grades(&dir);
+    assert_eq!(
+      grades,
+      vec![
+        ReviewerGrade { skill: "sanity reviewer".into(), harness: "claude".into(), grade: "excellent".into() },
+        ReviewerGrade { skill: "sanity reviewer".into(), harness: "codex".into(), grade: "good".into() },
+        ReviewerGrade { skill: "testing reviewer".into(), harness: "claude".into(), grade: "poor".into() },
+      ]
+    );
+    let md =
+      publish_results_markdown("COMMENT", "https://github.com/o/r/pull/7#pullrequestreview-1", 2, false, &grades);
+    assert!(md.starts_with("## Review published\n\n- **COMMENT** — [open the review](https://github.com/o/r/pull/7#pullrequestreview-1)\n- 2 findings · approval bar not cleared\n"), "got: {md}");
+    assert!(md.contains("## Grades (mean 3.7 of 5 over 3)\n"), "got: {md}");
+    assert!(md.contains("- **sanity reviewer**: claude excellent · codex good\n"), "got: {md}");
+    assert!(md.contains("- **testing reviewer**: claude poor\n"), "got: {md}");
+    assert!(reviewer_grades(&dir.join("missing")).is_empty());
+    std::fs::remove_dir_all(&dir).ok();
+    let bare = publish_results_markdown("APPROVE", "u", 1, true, &[]);
+    assert_eq!(
+      bare,
+      "## Review published\n\n- **APPROVE** — [open the review](u)\n- 1 finding · approval bar cleared\n"
+    );
+  }
   use crate::quota::QuotaWindow;
 
   fn quota(harness: Harness, status: &'static str, windows: Vec<(&str, f64)>) -> HarnessQuota {
