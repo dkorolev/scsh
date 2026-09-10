@@ -3,7 +3,7 @@ use super::client_js::live_client_js;
 use super::escape::esc;
 use super::session::session_page;
 use super::session_export::session_export_page;
-use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, Session, Store};
+use crate::daemon::model::{DaemonMode, ProcKind, ProcRecord, ProcStatus, ReportSection, Session, Store};
 
 /// A one-proc store for the cast player page tests: the proc has a registered cast and
 /// the given status.
@@ -52,9 +52,54 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   store
+}
+
+/// The job page carries every section's card in a fixed order — errors, results, the job
+/// graph, the log, the procs — hidden while a section is empty, and renders what a task wrote
+/// as markdown, attributing each block only when more than one task contributed.
+#[test]
+fn job_page_puts_errors_and_results_above_the_graph_and_the_log_below_it() {
+  let mut store = store_with_cast_proc(ProcStatus::Ok);
+  let html = session_page(&store, "castab").expect("page");
+  let at = |needle: &str| html.find(needle).unwrap_or_else(|| panic!("missing {needle}"));
+  assert!(html.contains(r#"id="job-errors" data-job-report="errors" hidden>"#), "empty errors card is hidden");
+  assert!(html.contains(r#"id="job-results" data-job-report="results" hidden>"#));
+  assert!(html.contains(r#"id="job-log" data-job-report="log" hidden>"#));
+  assert!(at(r#"id="job-errors""#) < at(r#"id="job-results""#) && at(r#"id="job-results""#) < at(r#"id="job-log""#));
+  assert!(at(r#"id="job-log""#) < at(r#"id="session-procs""#));
+
+  let session = store.sessions.get_mut("castab").unwrap();
+  let entry = |section: ReportSection, source: &str, markdown: &str| crate::daemon::model::ReportEntry {
+    section,
+    proc: Some(0),
+    source: source.into(),
+    markdown: markdown.into(),
+  };
+  session.push_report(entry(ReportSection::Results, "claude: add", "## Sum\n\n- **5**"));
+  session.push_report(entry(ReportSection::Log, "claude: add", "ran `add`"));
+  session.push_report(entry(ReportSection::Log, "host", "<script>alert(1)</script>"));
+  session.push_report(entry(ReportSection::Results, "claude: add", "| Behavior | Coverage |\n|---|:-:|\n| cap | unit ✓ |"));
+  let html = session_page(&store, "castab").expect("page");
+  assert!(html.contains(r#"id="job-results" data-job-report="results">"#), "a filled card is shown");
+  assert!(html.contains(r#"id="job-errors" data-job-report="errors" hidden>"#), "an empty one stays hidden");
+  assert!(html.contains("<h2>Sum</h2>") && html.contains("<li><strong>5</strong></li>"), "markdown rendered: {html}");
+  assert!(!html.contains(r#"<p class="report-source dim">claude: add</p><h2>Sum"#), "a lone author needs no caption");
+  assert!(html.contains(r#"<p class="report-source dim">host</p><p>&lt;script&gt;alert(1)&lt;/script&gt;</p>"#), "two authors are captioned, and escaped: {html}");
+  assert!(html.contains(r#"class="report-body" data-sig="2:"#), "the log's fingerprint counts its two blocks");
+  assert!(
+    html.contains(r#"<table><thead><tr><th>Behavior</th><th style="text-align:center">Coverage</th></tr></thead><tbody><tr><td>cap</td><td style="text-align:center">unit ✓</td></tr></tbody></table>"#),
+    "a pipe table renders as a table: {html}"
+  );
+  // The offline export shows the same sections in the same places.
+  let session = store.sessions.get("castab").unwrap();
+  let export = session_export_page(session, &[], 2);
+  let at = |needle: &str| export.find(needle).unwrap_or_else(|| panic!("export missing {needle}"));
+  assert!(at(r#"id="job-results""#) < at(r#"id="job-log""#) && at(r#"id="job-log""#) < at(r#"<div class="procs">"#));
+  assert!(export.contains("<h2>Sum</h2>"));
 }
 
 fn session_procs_html(html: &str) -> &str {
@@ -539,6 +584,7 @@ fn a_retried_route_is_visibly_a_retry() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "retryv").expect("session renders");
@@ -1163,6 +1209,7 @@ fn session_proc_html_has_no_stray_backslashes() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -1249,6 +1296,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "difjob").expect("session page");
@@ -1284,6 +1332,7 @@ fn ended_session_hides_force_stop_button() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "done01").expect("session page");
@@ -1326,6 +1375,7 @@ fn offline_export_carries_lede_and_full_meta() {
     workflow: None,
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let html = session_export_page(&session, &[], 100);
   assert!(html.contains(r#"class="page-lede""#), "export carries the live page's lede: {html}");
@@ -1373,6 +1423,7 @@ fn a_fresh_job_lede_counts_planned_tasks_not_zero() {
     workflow: None,
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let lede = super::session::session_lede_html(&session, session.lifecycle_status(2));
   assert!(lede.contains("workflow <strong>arith</strong>"), "kind and profile lead the lede: {lede}");
@@ -1407,6 +1458,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     workflow: None,
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let proc = |index: usize, kind: ProcKind, label: &str| ProcRecord {
     index,
@@ -1658,6 +1710,7 @@ fn offline_export_embeds_commits_diff_when_present() {
     workflow: None,
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let hostile = r#"<html><body></script><p>diff</p></body></html>"#;
   let exports = [CastExport::Note { text: "no recording".into(), diff_html: Some(hostile.into()) }];
@@ -1667,7 +1720,7 @@ fn offline_export_embeds_commits_diff_when_present() {
   assert!(html.contains("srcdoc="), "diff rides in an iframe srcdoc");
   assert!(
     html.contains(r#"sandbox="allow-scripts allow-same-origin""#),
-    "packdiff 0.6.2 needs scripts + same-origin for WASM/localStorage: {html}"
+    "packdiff 0.9.1 needs scripts + same-origin for WASM/localStorage: {html}"
   );
   assert!(html.contains("<\\/"), "hostile </ is broken for srcdoc like CASTS");
   assert!(!html.contains("</script><p>diff"), "raw </script> must not appear unescaped");
@@ -1724,6 +1777,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
     workflow: None,
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let note = "no recording — skipped/failed before output";
   let exports = [CastExport::Note { text: note.into(), diff_html: None }];
@@ -1830,6 +1884,7 @@ fn offline_export_includes_workflow_graph() {
     }),
     parent_session: None,
     supervisor: Default::default(),
+    report: Vec::new(),
   };
   let exports = [
     CastExport::Note { text: "no recording".into(), diff_html: None },
@@ -1990,6 +2045,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "fleet1").expect("session page");
@@ -2097,6 +2153,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "verd1").expect("session page");
@@ -2219,6 +2276,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "fleet2").expect("fleet page");
@@ -2429,6 +2487,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "castab").expect("session page");
@@ -2520,6 +2579,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "test").expect("session page");
@@ -2582,6 +2642,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   store
@@ -3223,6 +3284,7 @@ fn workflow_graph_renders_builtin_shapes() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   store.sessions.get_mut("arith1").unwrap().procs[2].elapsed = Some(198.0);
@@ -3366,6 +3428,7 @@ fn workflow_graph_renders_builtin_shapes() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let fruits = session_page(&store, "fruit1").expect("fruits");
@@ -3440,6 +3503,7 @@ fn workflow_graph_renders_builtin_shapes() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let review = session_page(&store, "rev001").expect("review");
@@ -3512,6 +3576,7 @@ fn workflow_graph_renders_builtin_shapes() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let waiting = session_page(&store, "wait1").expect("waiting");
@@ -3569,6 +3634,7 @@ fn workflow_graph_renders_builtin_shapes() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let stopped = session_page(&store, "stop1").expect("stopped page");
@@ -3761,6 +3827,7 @@ fn workflow_loop_island_advertises_future_iterations() {
       workflow: workflow_meta_from_def(&def),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     }
   };
 
@@ -3837,6 +3904,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     },
   );
   let html = session_page(&store, "solo1").expect("page");

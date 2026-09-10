@@ -1884,7 +1884,9 @@ function ensureWorkflowGraphMounted(session, nowUnix) {
   }
   const html = wfBuildGraphHtml(session, nowUnix);
   if (!html) return null;
-  const procs = document.getElementById('session-procs');
+  // The graph sits between the results card and the log card; anchor on the log card so a
+  // remount never lands below it.
+  const procs = document.getElementById('job-log') || document.getElementById('session-procs');
   if (procs) procs.insertAdjacentHTML('beforebegin', html);
   else {
     const main = document.querySelector('.page-shell') || document.body;
@@ -2499,7 +2501,40 @@ function renderSession(session, nowUnix) {
   initCasts(root);
   syncSessionLede(session, nowUnix);
   syncFleetSections(session, nowUnix);
+  syncJobReport(session);
   updateWorkflowGraph(session, nowUnix);
+}
+// Mirror of report.rs — the errors / results / log cards fill in place as the job's tasks
+// contribute. Each entry arrives rendered (`html`), so the page needs no renderer; a card is
+// replaced only when its fingerprint moves, so a reader selecting its text is not disturbed.
+function syncJobReport(session) {
+  const entries = (session && session.report) || [];
+  ['errors', 'results', 'log'].forEach(section => {
+    const card = document.getElementById('job-' + section);
+    if (!card) return;
+    const mine = entries.filter(e => e.section === section);
+    const body = card.querySelector('.report-body');
+    if (!mine.length) {
+      card.hidden = true;
+      if (body) { body.innerHTML = ''; body.dataset.sig = '0:0'; }
+      return;
+    }
+    const sig = mine.length + ':' + mine.reduce((n, e) => n + (e.markdown || '').length, 0);
+    if (body && body.dataset.sig !== sig) {
+      body.innerHTML = reportEntriesHtml(mine);
+      body.dataset.sig = sig;
+    }
+    card.hidden = false;
+  });
+}
+function reportEntriesHtml(entries) {
+  const sources = new Set(entries.map(e => e.source || ''));
+  const attributed = sources.size > 1;
+  return entries.map(e => {
+    const proc = (e.proc === null || e.proc === undefined) ? '' : ' data-proc="' + esc(String(e.proc)) + '"';
+    const caption = (attributed && e.source) ? '<p class="report-source dim">' + esc(e.source) + '</p>' : '';
+    return '<section class="report-entry"' + proc + '>' + caption + (e.html || '') + '</section>';
+  }).join('');
 }
 // Mirror of session_lede_html in session.rs — the page heading ticks with the live
 // snapshot. Image builds count as their own figure, never as tasks, so the header agrees

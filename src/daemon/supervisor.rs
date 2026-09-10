@@ -297,6 +297,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: SupervisorState::fresh(DEFAULT_JOB_RETRIES),
+      report: Vec::new(),
     }
   }
 

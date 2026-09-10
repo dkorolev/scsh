@@ -15,7 +15,7 @@
 //! Force stop — simply is not there (and `LIVE_ONLY_CSS` is not inlined). Packed
 //! commits-diff pages (when present) ride as sandboxed
 //! `srcdoc` iframes (`allow-scripts allow-same-origin` so packdiff's in-page WASM comment
-//! engine and localStorage work — packdiff 0.6.2 document-first review) so the snapshot
+//! engine and localStorage work — packdiff 0.9.1 document-first review) so the snapshot
 //! stays a single file.
 
 use super::escape::esc;
@@ -25,7 +25,7 @@ use super::layout::{FAVICON_LINK, PAGE_CSS};
 use super::proc::{proc_elapsed_phrase, proc_meta_html};
 use super::session::{session_ended_text, session_lede_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
-use crate::daemon::model::{ProcRecord, Session};
+use crate::daemon::model::{ProcRecord, ReportSection, Session};
 use crate::daemon::paths::now_unix_secs;
 use crate::json::quote;
 
@@ -70,6 +70,9 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
   // are server-rendered markup styled by the shared stylesheet, so the export embeds them
   // as-is — the static state at export time, no live-update wiring.
   let workflow = workflow_graph_html(session, now);
+  let errors = super::report::report_section_html(session, ReportSection::Errors);
+  let results = super::report::report_section_html(session, ReportSection::Results);
+  let log = super::report::report_section_html(session, ReportSection::Log);
   let mut fleet_sections = fleet_sections_by_anchor(session);
   let mut sections = String::new();
   let mut data_entries: Vec<String> = Vec::new();
@@ -116,7 +119,7 @@ pub(crate) fn session_export_page(session: &Session, exports: &[CastExport], now
 </dl>
 </div>
 <p class="snapshot-note">Offline snapshot — everything below plays without a network.</p>
-{workflow}<div class="procs">
+{errors}{results}{workflow}{log}<div class="procs">
 {sections}</div>
 </main>
 <script>{player_js}</script>
@@ -147,6 +150,9 @@ document.querySelectorAll('details.proc').forEach((det) => det.addEventListener(
     player_css = super::PLAYER_CSS,
     player_js = super::PLAYER_JS,
     extra_css = EXPORT_EXTRA_CSS,
+    errors = errors,
+    results = results,
+    log = log,
     lede = lede,
     ended = esc(&ended),
     duration = esc(&duration),

@@ -294,8 +294,8 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
 - `GET /diff/{session}/{proc}` — the packdiff-packed review page for the commits that step
   brought into the caller's branch (one self-contained HTML file: the diff, commits, and
   in-browser comments). Renders inline in a tab; `?dl=1` for a download attachment. Exists
-  only for commit-enabled steps whose commits were integrated while `packdiff` (0.6.2
-  required; `cargo install packdiff --version 0.6.2 --locked`) was on the
+  only for commit-enabled steps whose commits were integrated while `packdiff` (0.9.1
+  required; `cargo install packdiff --version 0.9.1 --locked`) was on the
   PATH of the `scsh run` host; 404 otherwise. Commits authored as the scsh bot are the
   change's notes rather than code under review: `PR-DESCRIPTION.md` lifts into the page's
   Description panel, and each `PR-DECISION-<topic>.md` — what the `gorgeous-pipeline`
@@ -325,6 +325,11 @@ claimed sweep resets a container's count. Disable with `SCSH_REAP_CONTAINERS=0`.
   registers becomes a failed session with the error — never a stranded "running" one. Each
   image build is recorded as a cast by scsh's own PTY recorder (same ASCII-cinema player
   as skill runs) — no host tooling required.
+- `POST /api/v1/session/report` — body `{"session":"…","section":"errors"|"results"|"log",
+  "markdown":"…","source":"<task label>","proc":N}`. Append one task's markdown to a job-page
+  section (never merged; 64 KiB per contribution, 200 contributions per job). The session
+  snapshot carries them as `report: [{section, proc, source, markdown, html}]`, `html` being
+  the rendered form the page mounts live.
 - `GET /api/v1/launch` — the machine-wide launch slots: `{"cap", "held", "holders": [{"session",
   "proc"}]}`. The cap is `SCSH_MAX_PARALLEL_RUNS` as the daemon read it at start (default 12).
 - `POST /api/v1/launch/acquire` — body `{"session":"…","proc":N}`. Ask for a launch slot. Never
@@ -517,6 +522,18 @@ steps:
 Every `inputs:`/`when:` reference must resolve to a declared param or an upstream step's declared
 output field, and any referenced step must be in `needs:` — checked when the definition is
 parsed, so a workflow that could branch on a value no step produces is rejected up front.
+
+**Job-page sections.** Above the job graph the page shows **Errors** (red) and **Results**
+(green); below it, **Log** (cyan) — each only when a task contributed, each contribution under
+the task's name once more than one task wrote. Tasks contribute markdown through their result
+JSON (`results_markdown`, `log_markdown`, `errors_markdown`, or plain `error`) or, for host
+steps, by appending to `$SCSH_RESULTS_MD` / `$SCSH_LOG_MD` / `$SCSH_ERRORS_MD`; scsh posts it
+to `/api/v1/session/report`. Markdown is rendered with packdiff's safety-first subset
+(`src/daemon/html/markdown.rs`): headings, fenced code, flat lists, quotes, rules, inline
+code/bold/italic/links — every input character escaped, `javascript:` links inert.
+`gh-gorgeous-review` uses all three: the plan step logs the fleet decision, the publish step
+reports the event, the review link, and every reviewer's grade with their mean, and the
+quota step reports each window before → after with how many more reviews it has room for.
 
 **Job-page dependency graph.** Workflow sessions carry an optional `workflow` object on the
 session snapshot (`nodes: [{ id, proc_index, order, needs, conditional, when_summary }]`). The job page

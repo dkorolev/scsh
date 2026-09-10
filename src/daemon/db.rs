@@ -219,6 +219,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     }
   }
 

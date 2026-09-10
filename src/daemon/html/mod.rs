@@ -9,11 +9,18 @@ mod fleet;
 mod format;
 mod index;
 mod layout;
+mod markdown;
 mod proc;
+mod report;
 mod session;
 mod session_export;
 mod stats;
 mod workflow;
+
+/// Render a task's markdown contribution for the job page (packdiff's safety-first subset).
+pub(crate) fn markdown_to_html(text: &str) -> String {
+  markdown::to_html(text)
+}
 
 pub use cast::{cast_player_page, cast_player_page_for, PLAYER_CSS, PLAYER_JS};
 pub use index::{index_page, index_page_for, index_page_with_filter, parse_index_filter, IndexTab};

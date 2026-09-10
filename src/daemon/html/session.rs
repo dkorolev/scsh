@@ -5,7 +5,7 @@ use super::fleet::fleet_sections_by_anchor;
 use super::layout::wrap_page;
 use super::proc::{cast_embed_html, proc_elapsed_phrase, proc_has_cast, proc_meta_html, summary_stats_html};
 use super::workflow::{proc_task_anchor_html, proc_task_attrs, workflow_graph_html};
-use crate::daemon::model::{ProcKind, ProcStatus, Session, SessionLifecycle, Store};
+use crate::daemon::model::{ProcKind, ProcStatus, ReportSection, Session, SessionLifecycle, Store};
 use crate::daemon::paths::now_unix_secs;
 
 pub fn session_page(store: &Store, session_id: &str) -> Option<String> {
@@ -144,6 +144,10 @@ pub fn session_page_for(session: &Session, port: u16) -> String {
     String::new()
   };
   let workflow = workflow_graph_html(session, now);
+  // What the tasks said about the job: errors, then results, above the graph; the log below.
+  let errors = super::report::report_section_html(session, ReportSection::Errors);
+  let results = super::report::report_section_html(session, ReportSection::Results);
+  let log = super::report::report_section_html(session, ReportSection::Log);
   let lede = session_lede_html(session, lifecycle);
   let chapters_pending = chapters_pending_html(pending);
   let job_diff_btn = if session.procs.iter().any(|proc| proc.diff_path.is_some()) {
@@ -157,7 +161,10 @@ pub fn session_page_for(session: &Session, port: u16) -> String {
   let body = format!(
     "<div class=\"chamfer card card--accent-left-purple\"><div class=\"session-actions\">{job_diff_btn}{export_btn}{stop_btn}</div>\
 {session_meta}\n{chapters_pending}</div>\n\
-{workflow}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
+{errors}{results}{workflow}{log}<div class=\"procs\" id=\"session-procs\">\n{procs}</div>",
+    errors = errors,
+    results = results,
+    log = log,
     export_btn = export_btn,
     job_diff_btn = job_diff_btn,
     stop_btn = stop_btn,

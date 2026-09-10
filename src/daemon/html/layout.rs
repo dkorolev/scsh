@@ -105,21 +105,44 @@ pub(crate) const PAGE_CSS: &str = r#"
   /* accent edge: the outer layer paints an accent stripe wide enough to wrap
      the chamfered corners, and the surface is inset further on that side */
   .card--accent-left-cyan { --accent: var(--cyan); }
+  .card--accent-left-red { --accent: var(--red); }
   .card--accent-left-purple { --accent: var(--purple); }
   .card--accent-left-green { --accent: var(--green); }
   .card--accent-left-orange { --accent: var(--orange); }
   .card--accent-left-magenta { --accent: var(--magenta); }
   .card--accent-top-magenta { --accent: var(--magenta); }
   .card--accent-left-cyan, .card--accent-left-purple, .card--accent-left-green,
-  .card--accent-left-orange, .card--accent-left-magenta {
+  .card--accent-left-orange, .card--accent-left-magenta, .card--accent-left-red {
     background: linear-gradient(90deg,
       var(--accent) 0 calc(var(--cut) + var(--accent-w)),
       var(--border) 0);
   }
   .card--accent-left-cyan::before, .card--accent-left-purple::before, .card--accent-left-green::before,
-  .card--accent-left-orange::before, .card--accent-left-magenta::before {
+  .card--accent-left-orange::before, .card--accent-left-magenta::before, .card--accent-left-red::before {
     inset: var(--bw) var(--bw) var(--bw) var(--accent-w);
   }
+  /* ── job report sections (errors / results above the graph, log below) ── */
+  .job-report { margin: 1rem 0; }
+  .job-report .report-title { margin: 0 0 0.5rem; font-size: 0.95rem; font-weight: 600; }
+  .report-body { font-size: 0.9rem; line-height: 1.5; }
+  .report-entry + .report-entry { margin-top: 0.9rem; padding-top: 0.9rem; border-top: 1px solid var(--border); }
+  .report-source { margin: 0 0 0.35rem; font-size: 0.78rem; }
+  .report-body h1, .report-body h2, .report-body h3, .report-body h4 { margin: 0.6rem 0 0.35rem; line-height: 1.25; }
+  .report-body h1 { font-size: 1.05rem; }
+  .report-body h2 { font-size: 1rem; }
+  .report-body h3, .report-body h4 { font-size: 0.92rem; }
+  .report-body p { margin: 0.35rem 0; }
+  .report-body ul, .report-body ol { margin: 0.35rem 0 0.35rem 1.4rem; padding: 0; }
+  .report-body li { margin: 0.15rem 0; }
+  .report-body pre { margin: 0.5rem 0; padding: 0.6rem 0.8rem; overflow-x: auto; background: var(--bg); border: 1px solid var(--border); font-size: 0.82rem; }
+  .report-body code { font-size: 0.86em; }
+  .report-body blockquote { margin: 0.5rem 0; padding: 0.1rem 0.8rem; border-left: 3px solid var(--border); color: var(--dim); }
+  .report-body hr { border: 0; border-top: 1px solid var(--border); margin: 0.7rem 0; }
+  .report-body a { color: var(--cyan); }
+  .report-body table { border-collapse: collapse; margin: 0.5rem 0; font-size: 0.86rem; max-width: 100%; }
+  .report-body th, .report-body td { border: 1px solid var(--border); padding: 0.25rem 0.55rem; vertical-align: top; text-align: left; }
+  .report-body th { font-weight: 600; }
+  .report-body .report-entry { overflow-x: auto; }
   .card--accent-top-magenta {
     background: linear-gradient(180deg,
       var(--accent) 0 calc(var(--cut) + var(--accent-w)),

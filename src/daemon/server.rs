@@ -13,7 +13,8 @@ use super::db::StoreDb;
 use super::html;
 use super::jsonio::{field_bool, field_num, field_str, tick_json, tick_json_light};
 use super::model::{
-  DaemonMode, OpenRepo, OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SessionLifecycle, SkillMeta, Store,
+  DaemonMode, OpenRepo, OutputLine, ProcKind, ProcRecord, ProcStatus, ReportEntry, ReportSection, Session,
+  SessionLifecycle, SkillMeta, Store,
 };
 use super::paths::{now_unix_secs, pid_file};
 use super::prune::{schedule_from_api, schedule_orphans_from_session, PruneQueue};
@@ -1384,6 +1385,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         supervisor: crate::daemon::model::SupervisorState::fresh(
           retries.unwrap_or(crate::daemon::model::DEFAULT_JOB_RETRIES),
         ),
+        report: Vec::new(),
       };
       store.insert_session(id, session);
       true
@@ -1560,6 +1562,21 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         true
       } else {
         false
+      }
+    }
+    // A task's markdown for one of the job page's sections — appended under the task's
+    // name, never merged, so a job reads as its tasks wrote it. Body:
+    // {"session","section":"errors"|"results"|"log","markdown","source","proc"?}.
+    "/api/v1/session/report" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let Some(section) = field_str(&obj, "section").and_then(|s| ReportSection::parse(&s)) else { return false };
+      let markdown = field_str(&obj, "markdown").unwrap_or_default();
+      let source = field_str(&obj, "source").unwrap_or_default();
+      let proc = field_num(&obj, "proc").map(|n| n as usize);
+      match store.session_mut(&session) {
+        Some(s) => s.push_report(ReportEntry { section, proc, source, markdown }),
+        None => false,
       }
     }
     // A live sub-state of a running proc (a usage-limit wait). Kept out of `status` on purpose:
@@ -1891,6 +1908,7 @@ fn images_build_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String,
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -1968,6 +1986,7 @@ fn setup_quota_response(store: &Arc<Mutex<Store>>) -> (u16, String, bool) {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -2324,6 +2343,7 @@ fn setup_tests_response(body: &str, store: &Arc<Mutex<Store>>) -> (u16, String, 
           workflow,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -2583,6 +2603,7 @@ fn start_job_in_repo(
           workflow,
           parent_session: None,
           supervisor: crate::daemon::model::SupervisorState::fresh(retries),
+          report: Vec::new(),
         },
       );
       (200, format!("{{\"ok\":true,\"session\":{}}}", quote(&session_id)), true)
@@ -3826,6 +3847,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, now)));
     {
@@ -3906,6 +3928,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let prune = Arc::new(Mutex::new(PruneQueue::default()));
@@ -3964,6 +3987,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     archived.procs.push(ProcRecord {
       index: 0,
@@ -4150,6 +4174,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4157,6 +4182,42 @@ mod tests {
     assert!(handle_api_post("/api/v1/proc/line", body, &store, &prune));
     let last = store.lock().unwrap().sessions.get("xyzabc").unwrap().last_seen_at;
     assert!(last > 50);
+
+    // A task's word for the job page is appended under its name; junk is refused, not stored.
+    let report =
+      r###"{"session":"xyzabc","section":"results","proc":0,"source":"claude: add","markdown":"## Sum\n\n5"}"###;
+    assert!(handle_api_post("/api/v1/session/report", report, &store, &prune));
+    let again = r#"{"session":"xyzabc","section":"log","source":"host","markdown":"ran"}"#;
+    assert!(handle_api_post("/api/v1/session/report", again, &store, &prune));
+    assert!(!handle_api_post(
+      "/api/v1/session/report",
+      r#"{"session":"xyzabc","section":"warnings","markdown":"x"}"#,
+      &store,
+      &prune
+    ));
+    assert!(!handle_api_post(
+      "/api/v1/session/report",
+      r#"{"session":"xyzabc","section":"log","markdown":"  "}"#,
+      &store,
+      &prune
+    ));
+    assert!(!handle_api_post(
+      "/api/v1/session/report",
+      r#"{"session":"nobody","section":"log","markdown":"x"}"#,
+      &store,
+      &prune
+    ));
+    {
+      let guard = store.lock().unwrap();
+      let s = guard.sessions.get("xyzabc").unwrap();
+      assert_eq!(s.report.len(), 2);
+      assert_eq!(s.report[0].section, ReportSection::Results);
+      assert_eq!(s.report[0].proc, Some(0));
+      assert_eq!(s.report[0].source, "claude: add");
+      assert_eq!(s.report[0].markdown, "## Sum\n\n5");
+      assert_eq!(s.report[1].section, ReportSection::Log);
+      assert_eq!(s.report[1].proc, None);
+    }
 
     let start = r#"{"session":"xyzabc","proc":0,"action":"start","name":"scsh-run","runtime":"container"}"#;
     assert!(handle_api_post("/api/v1/container", start, &store, &prune));
@@ -4223,6 +4284,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4283,6 +4345,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4340,6 +4403,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       };
       let mut s = store.lock().unwrap();
       s.insert_session("live01".into(), restored("live01", None));
@@ -4401,6 +4465,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4468,6 +4533,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4563,6 +4629,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4660,6 +4727,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4726,6 +4794,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -4932,6 +5001,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     {
       let mut s = store.lock().unwrap();
@@ -5026,6 +5096,7 @@ mod tests {
           next_retry_at: Some(1000),
           ..crate::daemon::model::SupervisorState::fresh(crate::daemon::model::DEFAULT_JOB_RETRIES)
         },
+        report: Vec::new(),
       },
     );
     let (status, body, mutated) = session_stop_response(r#"{"session":"endedd"}"#, &store);
@@ -5144,6 +5215,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -5261,6 +5333,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -5371,6 +5444,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -5460,6 +5534,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     store
@@ -5621,6 +5696,7 @@ mod tests {
         workflow: None,
         parent_session: Some("srcjob".into()),
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let (status, body) = chapters_response("/cast/srcjob/0/chapters", &store, None);
@@ -5804,6 +5880,7 @@ mod tests {
             workflow: None,
             parent_session: None,
             supervisor: Default::default(),
+            report: Vec::new(),
           },
         );
       }
@@ -5879,6 +5956,7 @@ mod tests {
             workflow: None,
             parent_session: None,
             supervisor: Default::default(),
+            report: Vec::new(),
           },
         );
       }
@@ -6427,6 +6505,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let (status, out, _) = jobs_restart_response(r#"{"session":"flatjb","mode":"resume"}"#, &store);
@@ -6474,6 +6553,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let (status, out, _) = with_scsh_home(&home, || {
@@ -6524,6 +6604,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let (status, out, _) = jobs_restart_response(r#"{"session":"buildx"}"#, &store);
@@ -6551,6 +6632,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let (status, out, _) = with_scsh_home(&home, || jobs_restart_response(r#"{"session":"clires"}"#, &store));
@@ -6646,6 +6728,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     reconcile_finished_job(&store, "orphan", Some(1), "✗ /tmp is not gitignored in this repository");
@@ -6712,6 +6795,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     reconcile_finished_job(&store, "died", Some(101), "thread panicked");
@@ -6753,6 +6837,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     reconcile_finished_job(&store, "done", Some(0), "");
@@ -6782,6 +6867,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let out = repos_json(&store, 51);

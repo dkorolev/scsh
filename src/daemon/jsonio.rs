@@ -1,6 +1,8 @@
 //! JSON read/write for daemon state — std-only, no serde.
 
-use super::model::{OutputLine, ProcKind, ProcRecord, ProcStatus, Session, SkillMeta, Store};
+use super::model::{
+  OutputLine, ProcKind, ProcRecord, ProcStatus, ReportEntry, ReportSection, Session, SkillMeta, Store,
+};
 use crate::json::{parse, quote, Value};
 
 fn sessions_json(map: &std::collections::BTreeMap<String, Session>, now: u64) -> String {
@@ -147,10 +149,18 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>
     let state = s.lifecycle_status(now);
     format!(", \"lifecycle\": {}, \"lifecycle_label\": {}", quote(state.css_class()), quote(state.label()))
   });
+  // The live view carries each contribution rendered, so the page can mount it as it lands
+  // without a renderer of its own; the store keeps only the markdown.
+  let report = if s.report.is_empty() {
+    String::new()
+  } else {
+    let entries: Vec<String> = s.report.iter().map(|e| report_entry_json(e, effective_workflow)).collect();
+    format!(", \"report\": [{}]", entries.join(", "))
+  };
   format!(
     "{{ \"id\": {}, \"started_at\": {}, \"ended_at\": {ended_at}, \"profile\": {}, \"kind\": {}, \"repo\": {}, \
 \"branch\": {}, \"skills\": [{}], \"procs\": [{}], \"last_seen_at\": {}, \"client_connected\": {}, \
-\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session}{supervisor}{lifecycle} }}",
+\"run_pid\": {run_pid}{workflow}{workflow_loops}{parent_session}{supervisor}{report}{lifecycle} }}",
     quote(&s.id),
     s.started_at,
     profile,
@@ -162,6 +172,21 @@ fn session_json(s: &Session, effective_workflow: bool, lifecycle_at: Option<u64>
     s.last_seen_at,
     if s.client_connected { "true" } else { "false" },
     lifecycle = lifecycle.unwrap_or_default(),
+  )
+}
+
+fn report_entry_json(e: &ReportEntry, with_html: bool) -> String {
+  let proc = e.proc.map_or_else(|| "null".to_string(), |p| p.to_string());
+  let html = if with_html {
+    format!(", \"html\": {}", quote(&super::html::markdown_to_html(&e.markdown)))
+  } else {
+    String::new()
+  };
+  format!(
+    "{{ \"section\": {}, \"proc\": {proc}, \"source\": {}, \"markdown\": {}{html} }}",
+    quote(e.section.as_str()),
+    quote(&e.source),
+    quote(&e.markdown),
   )
 }
 
@@ -252,6 +277,10 @@ fn parse_session(v: &Value) -> Result<Session, String> {
   let workflow = super::workflow::parse_workflow_value(field_value(obj, "workflow").ok());
   let parent_session = field_str(obj, "parent_session");
   let supervisor = parse_supervisor(field_value(obj, "supervisor").ok());
+  let report = match field_value(obj, "report") {
+    Ok(Value::Array(arr)) => arr.iter().filter_map(parse_report_entry).collect(),
+    _ => Vec::new(),
+  };
   Ok(Session {
     id,
     started_at,
@@ -268,7 +297,19 @@ fn parse_session(v: &Value) -> Result<Session, String> {
     workflow,
     parent_session,
     supervisor,
+    report,
   })
+}
+
+/// One report entry; `None` for a malformed one (an unknown section, no text), which is
+/// dropped rather than failing the whole session.
+fn parse_report_entry(v: &Value) -> Option<ReportEntry> {
+  let obj = as_object(v).ok()?;
+  let section = ReportSection::parse(&field_str(obj, "section")?)?;
+  let markdown = field_str(obj, "markdown")?;
+  let proc = field_num(obj, "proc").map(|n| n as usize);
+  let source = field_str(obj, "source").unwrap_or_default();
+  Some(ReportEntry { section, proc, source, markdown })
 }
 
 /// Supervisor state, absent on records persisted before it existed (⇒ attended default).
@@ -404,6 +445,48 @@ pub(crate) fn field_bool(obj: &[(String, Value)], key: &str) -> Option<bool> {
 mod tests {
   use super::*;
   use crate::daemon::model::{DaemonMode, ProcKind, ProcStatus, EPHEMERAL_COUNTDOWN_AFTER_SECS};
+  use crate::daemon::model::{ReportEntry, ReportSection};
+
+  #[test]
+  fn report_entries_persist_as_markdown_and_reach_the_page_rendered() {
+    let mut session = Session {
+      id: "rep".into(),
+      started_at: 1,
+      ended_at: None,
+      profile: None,
+      kind: None,
+      repo: "/r".into(),
+      branch: String::new(),
+      skills: Vec::new(),
+      procs: Vec::new(),
+      last_seen_at: 1,
+      client_connected: false,
+      run_pid: None,
+      workflow: None,
+      parent_session: None,
+      supervisor: Default::default(),
+      report: Vec::new(),
+    };
+    session.push_report(ReportEntry {
+      section: ReportSection::Results,
+      proc: Some(3),
+      source: "publish".into(),
+      markdown: "## Done\n\n<b>not html</b>".into(),
+    });
+    let stored = session_json_store(&session);
+    assert!(stored.contains(r###""report": [{ "section": "results", "proc": 3, "source": "publish", "markdown": "## Done\n\n<b>not html</b>" }]"###), "got: {stored}");
+    assert!(!stored.contains("\"html\""), "the store keeps markdown only");
+    let back = parse_session_json(&stored).unwrap();
+    assert_eq!(back.report, session.report);
+    let live = session_json_api(&session);
+    assert!(
+      live.contains(r#""html": "<h2>Done</h2><p>&lt;b&gt;not html&lt;/b&gt;</p>""#),
+      "rendered and escaped: {live}"
+    );
+    // A record from before the sections existed, and a junk entry, both load cleanly.
+    let legacy = parse_session_json(r#"{ "id": "old", "started_at": 1, "procs": [], "report": [{ "section": "warnings", "markdown": "x" }, { "section": "log" }] }"#).unwrap();
+    assert!(legacy.report.is_empty());
+  }
 
   #[test]
   fn proc_json_serializes_non_finite_as_null() {
@@ -483,6 +566,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     // The per-session JSON the store DB reads/writes must roundtrip every field.
     let s = parse_session_json(&session_json_store(&session)).unwrap();
@@ -555,6 +639,7 @@ mod tests {
       }),
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let parsed = parse_session_json(&session_json_store(&session)).unwrap();
     assert_eq!(parsed.workflow.as_ref().unwrap().nodes.len(), 2);
@@ -618,6 +703,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     let light = tick_json_light(&store, 105);

@@ -347,7 +347,69 @@ pub struct Session {
   pub parent_session: Option<String>,
   /// Unattended-supervisor state; [`SupervisorState::default`] for attended jobs.
   pub supervisor: SupervisorState,
+  /// What the job's tasks chose to say about the job as a whole — markdown for the page's
+  /// errors, results, and log sections, in the order it arrived. Empty on sessions persisted
+  /// before the sections existed.
+  pub report: Vec<ReportEntry>,
 }
+
+/// The job-page section a task's markdown lands in. Errors sit above results, results
+/// above the job graph, the log below it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReportSection {
+  Errors,
+  Results,
+  Log,
+}
+
+impl ReportSection {
+  pub fn as_str(self) -> &'static str {
+    match self {
+      ReportSection::Errors => "errors",
+      ReportSection::Results => "results",
+      ReportSection::Log => "log",
+    }
+  }
+
+  pub fn parse(s: &str) -> Option<Self> {
+    match s {
+      "errors" => Some(ReportSection::Errors),
+      "results" => Some(ReportSection::Results),
+      "log" => Some(ReportSection::Log),
+      _ => None,
+    }
+  }
+
+  /// The heading the page shows for the section.
+  pub fn title(self) -> &'static str {
+    match self {
+      ReportSection::Errors => "Errors",
+      ReportSection::Results => "Results",
+      ReportSection::Log => "Log",
+    }
+  }
+}
+
+/// One task's markdown contribution to a job-page section. Contributions are appended, never
+/// merged: a job's tasks amend the sections one after another, each under its own name.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ReportEntry {
+  pub section: ReportSection,
+  /// The proc that contributed, when one did (a host step, a container task); `None` for
+  /// text the run itself wrote.
+  pub proc: Option<usize>,
+  /// Who wrote it — the task's label as the proc list shows it.
+  pub source: String,
+  pub markdown: String,
+}
+
+/// The most markdown one contribution may carry. Anything past it is cut with a note; a
+/// result file is not the place for a transcript, and the page has to stay light.
+pub const MAX_REPORT_ENTRY_BYTES: usize = 64 * 1024;
+
+/// How many contributions a job keeps. A wide fleet writing three sections a round stays
+/// well under this; a runaway loop is what the bound is for.
+pub const MAX_REPORT_ENTRIES: usize = 200;
 
 /// A repository opened from the daemon UI, ready to start jobs in. Kept in memory only (a
 /// convenience list for the browser; the jobs themselves are [`Session`]s keyed on `repo`).
@@ -813,6 +875,30 @@ impl Session {
     (ordinal.max(1), total.max(1))
   }
 
+  /// Append one contribution, bounded (see [`MAX_REPORT_ENTRY_BYTES`], [`MAX_REPORT_ENTRIES`]).
+  /// Blank text is dropped: a task that has nothing to say adds no empty block. True when
+  /// the entry was kept.
+  pub fn push_report(&mut self, mut entry: ReportEntry) -> bool {
+    if entry.markdown.trim().is_empty() || self.report.len() >= MAX_REPORT_ENTRIES {
+      return false;
+    }
+    if entry.markdown.len() > MAX_REPORT_ENTRY_BYTES {
+      let mut cut = MAX_REPORT_ENTRY_BYTES;
+      while !entry.markdown.is_char_boundary(cut) {
+        cut -= 1;
+      }
+      entry.markdown.truncate(cut);
+      entry.markdown.push_str("\n\n*(cut here by scsh: one contribution may carry at most 64 KiB)*\n");
+    }
+    self.report.push(entry);
+    true
+  }
+
+  /// The contributions to one section, in arrival order.
+  pub fn report_for(&self, section: ReportSection) -> Vec<&ReportEntry> {
+    self.report.iter().filter(|e| e.section == section).collect()
+  }
+
   pub fn lifecycle_status(&self, now: u64) -> SessionLifecycle {
     if self.ended_at.is_some() {
       if self.has_incomplete_procs() {
@@ -910,6 +996,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     }
   }
 
@@ -1001,6 +1088,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: SupervisorState::fresh(0),
+      report: Vec::new(),
     };
     for (index, status, previous) in procs {
       let mut p = test_proc(status);
@@ -1011,6 +1099,31 @@ mod tests {
     }
     store.sessions.insert("job".into(), session);
     store
+  }
+
+  #[test]
+  fn a_job_keeps_its_tasks_words_in_order_and_within_bounds() {
+    let mut session = launch_test_store(vec![]).sessions.remove("job").unwrap();
+    let entry = |section: ReportSection, text: &str| ReportEntry {
+      section,
+      proc: Some(1),
+      source: "host".into(),
+      markdown: text.into(),
+    };
+    assert!(session.push_report(entry(ReportSection::Log, "first")));
+    assert!(!session.push_report(entry(ReportSection::Log, " \n ")), "blank text adds no block");
+    assert!(session.push_report(entry(ReportSection::Results, "second")));
+    let huge = "é".repeat(MAX_REPORT_ENTRY_BYTES); // two bytes each: the cut must land on a char boundary
+    assert!(session.push_report(entry(ReportSection::Errors, &huge)));
+    let kept = &session.report[2].markdown;
+    assert!(kept.len() < MAX_REPORT_ENTRY_BYTES + 100 && kept.ends_with("64 KiB)*\n"), "cut and noted");
+    assert!(kept.starts_with("éé"));
+    assert_eq!(session.report_for(ReportSection::Log).len(), 1);
+    assert_eq!(session.report_for(ReportSection::Results)[0].markdown, "second");
+    for _ in 0..MAX_REPORT_ENTRIES {
+      session.push_report(entry(ReportSection::Log, "more"));
+    }
+    assert_eq!(session.report.len(), MAX_REPORT_ENTRIES, "a runaway loop stops adding blocks");
   }
 
   #[test]
@@ -1138,6 +1251,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     assert_eq!(session.duration_secs(200), Some(100));
@@ -1177,6 +1291,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     assert_eq!(session.lifecycle_status(200), SessionLifecycle::Completed);
     // If the retry ALSO failed, the newest attempt is a real failure: job failed.
@@ -1219,6 +1334,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
 
     assert_eq!(session.proc_attempt(&session.procs[0]), (1, 3));
@@ -1245,6 +1361,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS), SessionLifecycle::Running);
     assert_eq!(session.lifecycle_status(100 + SESSION_START_TIMEOUT_SECS + 1), SessionLifecycle::Failed);
@@ -1269,6 +1386,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let mut proc = test_proc(ProcStatus::Running);
     proc.started_at = Some(110);
@@ -1321,6 +1439,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     assert_eq!(session.lifecycle_status(50), SessionLifecycle::Cancelled);
   }
@@ -1396,6 +1515,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     assert!(session.has_incomplete_procs());
     assert_eq!(session.lifecycle_status(2), SessionLifecycle::Running);
@@ -1419,6 +1539,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let mut running_proc = test_proc(ProcStatus::Running);
     running_proc.started_at = Some(10);
@@ -1439,6 +1560,7 @@ mod tests {
       workflow: None,
       parent_session: None,
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let mut sessions = BTreeMap::new();
     sessions.insert(done.id.clone(), done);
@@ -1476,6 +1598,7 @@ mod tests {
           workflow: None,
           parent_session: None,
           supervisor: Default::default(),
+          report: Vec::new(),
         },
       );
     }
@@ -1502,6 +1625,7 @@ mod tests {
       workflow: None,
       parent_session: parent.map(str::to_string),
       supervisor: Default::default(),
+      report: Vec::new(),
     };
     let mut store = Store::new(DaemonMode::Persistent, DEFAULT_PORT, 0);
     // The oldest session in the store is a real job; a much NEWER annotation of another
@@ -1583,6 +1707,7 @@ mod tests {
         workflow: None,
         parent_session: None,
         supervisor: Default::default(),
+        report: Vec::new(),
       },
     );
     assert_eq!(store.alive_clients(now + SESSION_START_TIMEOUT_SECS), 1);

@@ -143,7 +143,10 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 - **`result`** *(required)* — a **repo-relative** path the skill must create (keep it
   under the gitignored `tmp/`). A missing result fails the skill. When it appears,
   `scsh` parses it as JSON and prints the message — a `result`/`message` field, or a
-  lone single field — on the skill's line (not just the path).
+  lone single field — on the skill's line (not just the path). Optional `results_markdown`,
+  `log_markdown`, and `errors_markdown` strings (plain `error` counts too) are shown on the
+  job page — results above the job graph, the log below it, errors above everything — under
+  the skill's name; `scsh advertise` has the contract.
 - **`profile`** *(optional)* — groups a skill under a named profile. `scsh run` (no
   `--profile`) runs the reserved **`default`** profile: the skills with no `profile:`.
   `scsh run --profile <name>` runs **only** that profile's skills; pass a
@@ -189,6 +192,7 @@ scsh installskills [url]   Install skills — bundled, or a git repo's (merges i
                            --global installs machine-wide under ~/.scsh instead (no repo needed).
 scsh updateskills  [url]   Reinstall skills, overwriting files — bundled or a git repo's (--global too).
 scsh help                  Show help (includes the schema).
+scsh advertise             Print the agent-facing contract (= scsh help agent) — hand this to an agent.
 scsh version               Show the version (with the build's git short hash, +`-dirty`).
 scsh daemon start|stop|restart|status
                            Session browser on http://127.0.0.1:7274 (override with SCSH_DAEMON_PORT).
@@ -542,7 +546,9 @@ The one place they are all listed. Host-side knobs, all optional:
 Host credentials `scsh` reads (never stored, forwarded per-run): `CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`, `GH_TOKEN`, `GITHUB_TOKEN` — plus each CLI's own login files.
 
 Inside every container, scsh sets the skill contract: `SCSH=1`, `SCSH_RESULT` (the result
-file path), and `SCSH_RUN_LOG` (the teed harness log).
+file path), and `SCSH_RUN_LOG` (the teed harness log). A workflow host step additionally gets
+`SCSH_RESULTS_MD`, `SCSH_LOG_MD`, and `SCSH_ERRORS_MD` — files to append markdown to for the
+job page's results, log, and errors sections.
 
 ## Learn more
 

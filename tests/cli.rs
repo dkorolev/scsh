@@ -182,6 +182,13 @@ fn help_topics_are_separate_pages() {
     "got: {}",
     agent.out
   );
+  // `scsh advertise` is that page as a command — the one to hand to an agent — and
+  // `scsh help advertise` lands on it too.
+  for args in [vec!["advertise"], vec!["help", "advertise"]] {
+    let advertised = scsh(&d, &args);
+    assert_eq!(advertised.code, 0, "{args:?}: {}", advertised.out);
+    assert_eq!(advertised.out, agent.out, "{args:?} must print exactly `scsh help agent`");
+  }
   // The overview points at all topics but does not carry their detail.
   let overview = scsh(&d, &["help"]);
   assert!(

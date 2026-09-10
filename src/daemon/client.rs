@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
-use super::model::{LaunchGrant, ProcKind, ProcStatus};
+use super::model::{LaunchGrant, ProcKind, ProcStatus, ReportSection};
 use super::paths::daemon_port;
 use crate::json::{parse, quote, Value};
 use crate::runtime::{LaunchLimiter, LaunchPermit as LocalLaunchPermit};
@@ -218,6 +218,21 @@ impl Client {
   pub fn proc_start(&self, proc_index: usize) {
     let body = format!("{{ \"session\": {}, \"proc\": {} }}", quote(&self.inner.session_id), proc_index);
     self.post("/api/v1/proc/start", &body);
+  }
+
+  /// Append a task's markdown to one of the job page's sections (errors, results, log),
+  /// under `source` — the task's label. Rides the ordered poster queue, so it lands before
+  /// the task's own finish.
+  pub fn session_report(&self, section: ReportSection, proc_index: Option<usize>, source: &str, markdown: &str) {
+    let proc = proc_index.map_or_else(|| "null".to_string(), |p| p.to_string());
+    let body = format!(
+      "{{ \"session\": {}, \"section\": {}, \"proc\": {proc}, \"source\": {}, \"markdown\": {} }}",
+      quote(&self.inner.session_id),
+      quote(section.as_str()),
+      quote(source),
+      quote(markdown)
+    );
+    self.post("/api/v1/session/report", &body);
   }
 
   pub fn proc_note(&self, proc_index: usize, note: &str) {

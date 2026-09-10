@@ -643,6 +643,12 @@ impl Step {
       );
     }
     s.push_str("\nDo not write anything else to that file.\n");
+    s.push_str(
+      "\nOne exception: the object may also carry `results_markdown`, `log_markdown`, and/or `errors_markdown` \
+(markdown strings). They are shown on the job's page — results above the job graph, the log below it, \
+errors above everything — and are never passed to other steps. Use them for totals, a short debug log, \
+or an error worth a human's eye; leave them out when there is nothing to say.\n",
+    );
     if !self.artifacts.is_empty() {
       s.push_str("\n## Required files\n\nAlso write, in the SAME directory as the `$SCSH_RESULT` file:\n");
       for a in &self.artifacts {

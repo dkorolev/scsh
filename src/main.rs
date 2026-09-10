@@ -20,6 +20,7 @@ mod licenses;
 mod limitwait;
 mod ptyrec;
 mod quota;
+mod report;
 mod runtime;
 mod sha1;
 mod sha256;
@@ -913,6 +914,9 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   let mut i = 0;
   while i < args.len() {
     let m = match args[i].as_str() {
+      // `scsh advertise` is the one command to hand an agent: it prints `scsh help agent`,
+      // the contract for driving scsh from another agent or harness.
+      "advertise" => Some(Mode::Help(HelpTopic::Agent)),
       "help" | "-h" | "--help" => {
         // An optional next token selects a deep-dive topic; otherwise the overview.
         let topic = match args.get(i + 1).map(|s| s.as_str()) {
@@ -933,7 +937,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
             i += 1;
             HelpTopic::Cache
           }
-          Some("agent") | Some("agents") | Some("agent-first") => {
+          Some("agent") | Some("agents") | Some("agent-first") | Some("advertise") => {
             i += 1;
             HelpTopic::Agent
           }
@@ -1916,14 +1920,18 @@ fn extract_step_outputs(
 ) -> Result<std::collections::HashMap<String, String>, String> {
   let obj = parse_result_object(content)?;
   let mut out = std::collections::HashMap::new();
-  let expected = contract.outputs.len() + usize::from(contract.require_do_while_repeat);
+  // The job-page keys (`results_markdown` and friends) are every task's to write and are
+  // never forwarded, so they neither count as outputs nor as undeclared fields.
+  let page_keys = obj.keys().filter(|name| report::is_result_key(name)).count();
+  let expected = contract.outputs.len() + usize::from(contract.require_do_while_repeat) + page_keys;
   if obj.len() != expected {
     let mut extras: Vec<&str> = obj
       .keys()
       .map(String::as_str)
       .filter(|name| {
         !(contract.outputs.iter().any(|field| field.name == *name)
-          || contract.require_do_while_repeat && *name == "SCSH_DO_WHILE_REPEAT")
+          || contract.require_do_while_repeat && *name == "SCSH_DO_WHILE_REPEAT"
+          || report::is_result_key(name))
       })
       .collect();
     extras.sort_unstable();
@@ -2195,6 +2203,12 @@ fn run_host_step(
   // with scsh's own verdict, so a check-form command that writes it is writing to /dev/null with
   // extra steps — `help def` says so. Absolute, unlike an agent step's container-relative one.
   env.push(("SCSH_RESULT".to_string(), result_path.to_string_lossy().into_owned()));
+  // The job page's sections, as files a shell command can append to: `>> "$SCSH_RESULTS_MD"`.
+  // Emptied first, so an earlier attempt's text is never read back as this one's.
+  report::clear_host_files(&result_path);
+  for (var, _, path) in report::host_files(&result_path) {
+    env.push((var.to_string(), path.to_string_lossy().into_owned()));
+  }
   let place = ui::screen::ExecPlace { cwd: root, env: &env };
   let args = vec!["-c".to_string(), host.command.clone()];
   let output_limit = ui::screen::OutputLimit { lines: HOST_OUTPUT_LINES_REQUESTED, bytes: HOST_OUTPUT_MAX_BYTES };
@@ -2224,6 +2238,10 @@ fn run_host_step(
     code == Some(0),
   );
 
+  // Whatever the command appended for the job page goes up now, whichever form it takes and
+  // however it exited — a failing command's errors section is the one worth reading.
+  report::publish(sink.client, p.index(), &step.id, &report::contributions_in_host_files(&result_path));
+
   // Self-reporting form: the result file is how this command speaks, so a non-zero exit means it
   // never got to — that is a failed step, not a verdict. Then validate exactly as an agent's
   // result is validated, so a script and an agent are interchangeable at a step boundary.
@@ -2247,6 +2265,7 @@ fn run_host_step(
         return SkillRun::failed(failure::reason::RESULT_MISSING, None, None, None).with_fail_detail(&detail);
       }
     };
+    report::publish(sink.client, p.index(), &step.id, &report::contributions_in_result(&content));
     return match extract_step_outputs(&content, contract) {
       Ok(outputs) => {
         if let Some(dest) = fleet::persist_skill_result(sink.session_id, run_id, &result_path) {
@@ -6059,6 +6078,14 @@ fn run_one_skill(
       let valid = result_contract.is_none() || workflow_outputs.is_some();
       if valid && restore_cached_result(root, &skill.result, &entry.result).is_ok() {
         let provenance = cache_hit_provenance(entry.cached_at, entry.elapsed);
+        // A replayed result says on the job page what its original said — the sections
+        // belong to this job, not to the run that first earned the result.
+        report::publish(
+          daemon_client.as_deref(),
+          spinner.index(),
+          &skill.name,
+          &report::contributions_in_result(&entry.result),
+        );
         let message = json::message(&entry.result)
           .or_else(|| result_contract.zip(workflow_outputs.as_ref()).and_then(|(c, o)| workflow_outputs_glimpse(c, o)));
         let line = match message {
@@ -6633,6 +6660,12 @@ fn run_one_skill(
       let message = json::message(&content)
         .or_else(|| result_contract.zip(workflow_outputs.as_ref()).and_then(|(c, o)| workflow_outputs_glimpse(c, o)));
       let headline = message.as_deref().map(first_line).unwrap_or(skill.result.as_str());
+      report::publish(
+        daemon_client.as_deref(),
+        spinner.index(),
+        &skill.name,
+        &report::contributions_in_result(&content),
+      );
       // Register the durable result before publishing the terminal proc transition. A browser
       // that observes green must already be able to read the exact result that earned it.
       if let Some(path) = fleet::persist_skill_result(session_id, &skill.name, Path::new(&dest)) {
@@ -7626,7 +7659,7 @@ fn integrate_commits(
 /// no readable range, or a pack failure skips with a hint — never a run failure.
 ///
 /// Invokes packdiff in machine mode (`--json`): stdout is a single `{ "Packed": … }` or
-/// error document (packdiff 0.6.2). Progress stays on stderr and is discarded.
+/// error document (packdiff 0.9.1). Progress stays on stderr and is discarded.
 fn pack_step_diff(
   root: &Path, session_id: &str, skill: &ResolvedInvocation, outcome: &SkillRun, range: Option<(String, String)>,
   daemon_client: Option<&daemon::Client>,
@@ -7670,7 +7703,7 @@ fn pack_step_diff(
     }
     Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
       hint(
-        "packdiff not found — `cargo install packdiff --version 0.6.2 --locked` to browse each step's commits from the job page",
+        "packdiff not found — `cargo install packdiff --version 0.9.1 --locked` to browse each step's commits from the job page",
       );
     }
     Err(e) => hint(&format!("{}: packdiff failed to start — {e}", skill.name)),
@@ -9762,6 +9795,17 @@ fn print_help_agent() {
   help_cont("always under the repo's gitignored tmp/.");
   help_row("5. RE-RUN", "Same commit + same env = instant cached result; re-running is free.");
   println!();
+  println!("{}", h_head("Say something about the job (the job page's sections)"));
+  println!("{}", h_dim("  Any task may add markdown to the job page, under its own name. Three sections:"));
+  help_row("results", "above the job graph \u{2014} totals, a verdict, links (only when non-empty).");
+  help_row("log", "below the graph \u{2014} short debug output worth keeping next to the job.");
+  help_row("errors", "above everything \u{2014} what went wrong, for a human's eye.");
+  println!("{}", h_dim("  From a result file: add `results_markdown`, `log_markdown`, `errors_markdown`"));
+  println!("{}", h_dim("  (strings; plain `error` also lands in errors) to the JSON \u{2014} even in a workflow"));
+  println!("{}", h_dim("  step's typed result; they are never forwarded to other steps. From a host step's"));
+  println!("{}", h_dim("  shell: append to the files in $SCSH_RESULTS_MD, $SCSH_LOG_MD, $SCSH_ERRORS_MD."));
+  println!("{}", h_dim("  Markdown is packdiff's subset: headings, lists, code, quotes, links, bold/italic."));
+  println!();
   println!("{}", h_head("Bring your own work to any repo"));
   println!("{}", h_dim("  scsh run --override-dot-scsh-yml <bundle>/.scsh.yml"));
   help_cont("Run an external bundle's skills (config + sibling .skills/) against ANY clean");
@@ -10030,6 +10074,7 @@ fn print_help_overview() {
   println!();
   println!("{}", h_head("More help:"));
   help_row("scsh help agent", "Driving scsh from another agent or harness? Start here.");
+  help_row("scsh advertise", "The same page, as a command \u{2014} the one to hand to an agent.");
   help_row("scsh help <command>", "Focused help for any command above (e.g. `scsh help stats`).");
   help_row("scsh help run", "How to run skills: profiles, preflight, exit codes, env vars.");
   help_row("scsh help .scsh.yml", "The project config file: every field + env syntax.");
@@ -10302,7 +10347,9 @@ fn print_help_internals() {
   agent's home, not as it, so harness scratch stays out of the tree.
 
   scsh injects SCSH_RESULT=<result path> into every container so one skill folder can
-  serve multiple invocations with different result files.
+  serve multiple invocations with different result files. A result may also carry
+  `results_markdown`, `log_markdown`, `errors_markdown` (strings) — shown on the job page's
+  sections under the skill's name, never part of the cache key's meaning for other steps.
 
   Repo sync — push IN, pull OUT (never GitHub from inside the container):
   Host push IN: git clone + bind-mount (docker/podman/Linux), or git push to transport.git +
@@ -10432,6 +10479,8 @@ fn print_help_defs() {
       inputs:              env vars for the step:  NAME: params.X  or  NAME: stepid.field
       output:              typed result fields the step must write to $SCSH_RESULT (JSON)
         n: {{ type: int }}   types: string | int | bool | enum (with `choices: a, b, c`) | string_list | object
+                           (+ optional `results_markdown` / `log_markdown` / `errors_markdown`
+                           strings for the job page, undeclared and never forwarded)
       needs: a, b, c?      DAG edges — steps whose completion this step waits for; `c?` is
                            optional: if c is skipped this step still runs, its c.* inputs empty
       when:                gate — run only if every condition holds (else the step is skipped)
@@ -10491,6 +10540,11 @@ fn print_help_defs() {
      command speaks, so exiting without one means it never spoke. Such a step may carry
      `break: true` (declaring boolean SCSH_LOOP_BREAK) or end a `do-while` (declaring
      SCSH_DO_WHILE_REPEAT) — a loop can be steered by a script instead of a model.
+
+  Either form may speak to the job page: append markdown to the files in $SCSH_RESULTS_MD,
+  $SCSH_LOG_MD, or $SCSH_ERRORS_MD (results sit above the job graph, the log below it, errors
+  above everything), or put `results_markdown` / `log_markdown` / `errors_markdown` strings
+  in the result JSON. Text lands under the step's name and is never forwarded.
 
   Host steps run after their wave's containers and one at a time (they share the caller's one
   checkout), and are never cached or restored on resume — a stale verdict is about a tree that
@@ -10774,6 +10828,21 @@ mod tests {
     assert_eq!(valid.get("grade").map(String::as_str), Some("good"));
     assert_eq!(valid.get("comments").map(String::as_str), Some(r#"["one","two"]"#));
     assert_eq!(valid.get("SCSH_DO_WHILE_REPEAT").map(String::as_str), Some("false"));
+
+    // The job-page keys ride along undeclared and are never forwarded as outputs.
+    let with_page = extract_step_outputs(
+      r###"{"grade":"good","comments":[],"SCSH_DO_WHILE_REPEAT":false,"results_markdown":"## ok","error":"none"}"###,
+      contract,
+    )
+    .unwrap();
+    assert_eq!(with_page.len(), 3, "got: {with_page:?}");
+    assert!(!with_page.contains_key("results_markdown"));
+    let undeclared = extract_step_outputs(
+      r#"{"grade":"good","comments":[],"SCSH_DO_WHILE_REPEAT":false,"results_markdown":"x","extra":1}"#,
+      contract,
+    )
+    .unwrap_err();
+    assert!(undeclared.contains("undeclared field: extra"), "got: {undeclared}");
 
     let missing = extract_step_outputs(r#"{"grade":"good","comments":[]}"#, contract).unwrap_err();
     assert!(missing.contains("SCSH_DO_WHILE_REPEAT") && missing.contains("missing"));
