@@ -15,13 +15,54 @@ pub enum Value {
 
 /// Parse a complete JSON document, or return a short reason on malformed input.
 pub fn parse(text: &str) -> Result<Value, String> {
-  let mut p = Parser { b: text.as_bytes(), i: 0 };
+  parse_with(text, Escapes::Strict)
+}
+
+/// How the parser reads a backslash escape inside a string literal.
+#[derive(Clone, Copy, PartialEq)]
+enum Escapes {
+  /// RFC 8259: the eight named escapes and `\uXXXX`, nothing else.
+  Strict,
+  /// Additionally, an escape RFC 8259 does not define stands for the escaped character
+  /// itself — the ECMAScript and JSON5 rule, so `\_` reads as `_`.
+  Lenient,
+}
+
+fn parse_with(text: &str, escapes: Escapes) -> Result<Value, String> {
+  let mut p = Parser { b: text.as_bytes(), i: 0, escapes };
   let v = p.value()?;
   p.ws();
   if p.i != p.b.len() {
     return Err("trailing characters after the JSON value".into());
   }
   Ok(v)
+}
+
+/// A document that strict [`parse`] rejected and the lenient pass read anyway.
+pub struct Repair {
+  /// What the lenient pass read, so a caller that only needs the shape reparses nothing.
+  pub value: Value,
+  /// The canonical, strictly-parseable text to store in place of the original.
+  pub text: String,
+  /// The strict-parse error the lenient pass tolerated, for the run log.
+  pub tolerated: String,
+}
+
+/// Re-read an agent-authored document that strict [`parse`] may have rejected, tolerating
+/// escapes RFC 8259 does not define: `Some` only when strict parsing failed AND the lenient
+/// pass succeeded, carrying the canonical text to store instead. `None` both when the text is
+/// already strict JSON and when it is broken beyond this one leniency — in both cases the
+/// caller keeps the original text, and strict validation downstream reports the real error.
+///
+/// Agents hand-write their result files and occasionally escape a character JSON does not
+/// escape (`\_`, `\$`, a `\u` without four hex digits). Repairing that is safe because the
+/// lenient pass differs from the strict one only INSIDE a string literal, and only by dropping
+/// a backslash strict JSON refuses outright: both passes read `\"` and `\\` identically, so
+/// every string ends at the same byte and no document can be reshaped into a different one.
+pub fn repair(text: &str) -> Option<Repair> {
+  let tolerated = parse(text).err()?;
+  let value = parse_with(text, Escapes::Lenient).ok()?;
+  Some(Repair { text: write_pretty(&value), value, tolerated })
 }
 
 /// The best human-readable message from a skill's result file: scsh parses the file
@@ -154,6 +195,7 @@ pub fn write_pretty(v: &Value) -> String {
 struct Parser<'a> {
   b: &'a [u8],
   i: usize,
+  escapes: Escapes,
 }
 
 impl Parser<'_> {
@@ -260,12 +302,20 @@ impl Parser<'_> {
             Some(b'r') => s.push('\r'),
             Some(b'b') => s.push('\u{8}'),
             Some(b'f') => s.push('\u{c}'),
-            Some(b'u') => {
-              let hex = self.b.get(self.i + 1..self.i + 5).ok_or("truncated \\u escape")?;
-              let cp = u32::from_str_radix(std::str::from_utf8(hex).map_err(|_| "bad \\u escape")?, 16)
-                .map_err(|_| "bad \\u escape")?;
-              s.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
-              self.i += 4;
+            Some(b'u') => match self.hex4() {
+              Ok(cp) => {
+                s.push(char::from_u32(cp).unwrap_or('\u{fffd}'));
+                self.i += 4;
+              }
+              // A `\u` missing its four hex digits is just an escaped letter when lenient.
+              Err(_) if self.escapes == Escapes::Lenient => s.push('u'),
+              Err(e) => return Err(e.into()),
+            },
+            Some(&c) if self.escapes == Escapes::Lenient => {
+              // An escape RFC 8259 does not define stands for the escaped character itself.
+              let len = utf8_len(c);
+              s.push_str(self.utf8_chunk(len)?);
+              self.i += len - 1; // the shared step below consumes this character's last byte
             }
             _ => return Err("bad escape in string".into()),
           }
@@ -273,13 +323,24 @@ impl Parser<'_> {
         }
         _ => {
           let len = utf8_len(c);
-          let chunk = self.b.get(self.i..self.i + len).ok_or("invalid UTF-8 in string")?;
-          s.push_str(std::str::from_utf8(chunk).map_err(|_| "invalid UTF-8 in string")?);
+          s.push_str(self.utf8_chunk(len)?);
           self.i += len;
         }
       }
     }
     Err("unterminated string".into())
+  }
+
+  /// The `len`-byte UTF-8 character at the cursor, without moving it.
+  fn utf8_chunk(&self, len: usize) -> Result<&str, String> {
+    let chunk = self.b.get(self.i..self.i + len).ok_or("invalid UTF-8 in string")?;
+    std::str::from_utf8(chunk).map_err(|_| "invalid UTF-8 in string".to_string())
+  }
+
+  /// The code point of the `\uXXXX` escape whose `u` is at the cursor, without moving it.
+  fn hex4(&self) -> Result<u32, &'static str> {
+    let hex = self.b.get(self.i + 1..self.i + 5).ok_or("truncated \\u escape")?;
+    u32::from_str_radix(std::str::from_utf8(hex).map_err(|_| "bad \\u escape")?, 16).map_err(|_| "bad \\u escape")
   }
 
   fn number(&mut self) -> Result<Value, String> {
@@ -342,6 +403,51 @@ mod tests {
     assert!(parse(r#""unterminated"#).is_err());
     assert!(parse("nul").is_err());
     assert!(parse(r#"{"a":1} junk"#).is_err());
+  }
+
+  #[test]
+  fn repair_reads_escapes_json_does_not_define() {
+    // The reported failure: an agent escaped an underscore in its result text.
+    let repaired = repair(r#"{"result": "renamed \_internal to _internal"}"#).expect("repairable");
+    assert_eq!(
+      repaired.value,
+      Value::Object(vec![("result".into(), Value::String("renamed _internal to _internal".into()))])
+    );
+    assert_eq!(repaired.tolerated, "bad escape in string");
+    // The stored text is canonical strict JSON, so every reader downstream agrees.
+    assert_eq!(parse(&repaired.text).unwrap(), repaired.value);
+    assert!(repair(&repaired.text).is_none(), "the repaired text needs no second repair");
+    // Other undefined escapes, including a `\u` without four hex digits and a multi-byte
+    // character, stand for the escaped character itself.
+    let text = r#"{"a": "100\$", "b": "\unicode", "c": "\é", "d": "a\*b"}"#;
+    assert_eq!(
+      repair(text).expect("repairable").value,
+      Value::Object(vec![
+        ("a".into(), Value::String("100$".into())),
+        ("b".into(), Value::String("unicode".into())),
+        ("c".into(), Value::String("é".into())),
+        ("d".into(), Value::String("a*b".into())),
+      ])
+    );
+  }
+
+  #[test]
+  fn repair_leaves_valid_json_alone_and_gives_up_on_real_damage() {
+    // Already strict: nothing to repair, so the caller keeps its own text byte for byte.
+    assert!(repair(r#"{"result": "ok\n\t\"quoted\" ✓"}"#).is_none());
+    // Structural damage is not an escape problem, and the lenient pass must not paper over it.
+    assert!(repair(r#"{"result": "x""#).is_none()); // unterminated
+    assert!(repair(r#"{"result": }"#).is_none()); // no value
+    assert!(repair(r#"{"a": 1,}"#).is_none()); // trailing comma stays a hard error
+    assert!(repair("{'a': 1}").is_none()); // single quotes stay a hard error
+    assert!(repair(r#"{"a": 1} junk"#).is_none()); // trailing junk
+                                                   // Escapes strict JSON already defines keep their meaning — a repair never reshapes a
+                                                   // document, because `\"` and `\\` read identically in both passes.
+    let quoted = r#"{"a": "he said \"hi\", then \\ left\_"}"#;
+    assert_eq!(
+      repair(quoted).expect("repairable").value,
+      Value::Object(vec![("a".into(), Value::String("he said \"hi\", then \\ left_".into()))])
+    );
   }
 
   #[test]

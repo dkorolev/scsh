@@ -2379,7 +2379,7 @@ fn run_host_step(
       require_do_while_repeat: step.do_while.is_some()
         && !step.outputs.iter().any(|output| output.name == "SCSH_DO_WHILE_REPEAT"),
     };
-    let content = match std::fs::read_to_string(&result_path) {
+    let content = match read_collected_result(&result_path, p) {
       Ok(content) => content,
       Err(e) => {
         let detail = format!("`{}` wrote no result at $SCSH_RESULT ({e})", host.command);
@@ -6118,15 +6118,46 @@ fn inner_harness_result_is_good(run_dir: &Path, result_rel: &str, commits: bool)
 /// wedged without ever exiting. The commit half matters for the live use: a step that writes its
 /// result and then spends minutes committing must not be stopped in between.
 fn harness_produced_its_deliverables(run_dir: &Path, result_rel: &str, commits: bool) -> bool {
-  let result_good = std::fs::read_to_string(run_dir.join(result_rel))
-    .ok()
-    .and_then(|body| json::parse(&body).ok())
-    .is_some_and(|value| matches!(value, json::Value::Object(_)));
+  let result_good = std::fs::read_to_string(run_dir.join(result_rel)).is_ok_and(|body| result_is_a_json_object(&body));
   if !result_good || !commits {
     return result_good;
   }
   git_capture(&run_dir.join(runtime::PULL_BARE), &["for-each-ref", "--format=%(refname)", "refs/heads"])
     .is_some_and(|refs| !refs.trim().is_empty())
+}
+
+/// Read a finished task's result file the way every reader downstream must see it.
+///
+/// Agents and host commands hand-write this file, and one that escapes a character JSON does
+/// not escape (`\_`, a `\u` without four hex digits) is repaired in place here rather than
+/// costing the whole task a correction re-run — or, for a host step, failing it outright.
+/// Repairing only ever drops a backslash strict JSON refuses anyway, so no document can be
+/// reshaped into a different one; [`json::repair`] carries that argument in full.
+///
+/// The file itself is rewritten as canonical strict JSON, so the result cache, the job page,
+/// `export-job`, and a later `--resume-from` all read the same valid document this run acted
+/// on. The repair is logged on the task's row: tolerating it silently would hide a contract
+/// the next attempt of the same task should stop relying on.
+fn read_collected_result(path: &Path, proc: &ui::screen::Proc) -> std::io::Result<String> {
+  let content = std::fs::read_to_string(path)?;
+  let Some(repair) = json::repair(&content) else { return Ok(content) };
+  // The durable file and the value scsh acts on must never diverge: when the rewrite fails,
+  // keep the original text so strict validation downstream reports the real parse error.
+  if std::fs::write(path, &repair.text).is_err() {
+    return Ok(content);
+  }
+  proc.emit(&format!("repaired the result JSON in place — tolerated: {}", repair.tolerated));
+  Ok(repair.text)
+}
+
+/// Whether a result file holds a JSON object, judged exactly as the durable boundary below
+/// judges it: a document strict JSON rejects but [`json::repair`] reads still counts, so a
+/// liveness check and the boundary that follows it never disagree about the same file.
+fn result_is_a_json_object(body: &str) -> bool {
+  match json::parse(body) {
+    Ok(value) => matches!(value, json::Value::Object(_)),
+    Err(_) => json::repair(body).is_some_and(|repair| matches!(repair.value, json::Value::Object(_))),
+  }
 }
 
 /// Whether an interrupted or non-cleanly-exited harness crossed its durable result boundary first.
@@ -6736,7 +6767,7 @@ fn run_one_skill(
       // not just the file (its `result`/`message`/sole field — see json::message),
       // falling back for workflow steps to a glimpse of their declared scalar outputs,
       // and only then to the result path; a multi-line message shows its first line.
-      let content = match std::fs::read_to_string(&dest) {
+      let content = match read_collected_result(Path::new(&dest), &spinner) {
         Ok(content) => content,
         Err(error) => {
           schedule_run_dir_prune_backup(daemon_client.as_ref(), &run_dir_str, &name, &rt.name, false);
@@ -10678,7 +10709,10 @@ fn print_help_defs() {
   container/runtime trouble, provider overload/disconnects, and non-zero harness exits (a
   harness dying at startup is infrastructure). Retries back off exponentially with jitter;
   a route failing the SAME way 5 times in a row trips a circuit breaker instead of burning
-  tokens until dawn. An invalid result gets one schema-correction retry. Tune per skill,
+  tokens until dawn. A result whose only fault is an escape JSON does not define (`\_`, a
+  `\u` without four hex digits) is repaired in place — the stored file is rewritten as strict
+  JSON and the row logs it — so a hand-written string costs no re-run. Anything else invalid
+  gets one schema-correction retry. Tune per skill,
   route, or def step with retry_for: (90s/45m/8h) and retry_signature_cap:, or run-wide
   with SCSH_RETRY_FOR / SCSH_RETRY_SIGNATURE_CAP; SCSH_NO_RETRY=1 disables everything.
   Beyond one run, every job is presumed worth finishing: on terminal failure the daemon
@@ -10877,6 +10911,19 @@ mod tests {
     std::fs::write(dir.join(format!("{}.exit", runtime::RUN_LOG_REL)), "1\n").unwrap();
     assert!(!inner_harness_result_is_good(&dir, "tmp/scsh/job/result.json", false));
     let _ = std::fs::remove_dir_all(dir);
+  }
+
+  #[test]
+  fn liveness_counts_a_repairable_result_exactly_as_the_boundary_does() {
+    // Strict JSON object: produced, as always.
+    assert!(result_is_a_json_object(r#"{"result":"ok"}"#));
+    // An escape JSON does not define is repaired at the boundary, so the liveness check that
+    // runs before it must not call the same file missing and stop a task that has landed.
+    assert!(result_is_a_json_object(r#"{"result":"renamed \_internal"}"#));
+    // What the boundary cannot repair stays unproduced, and so does a non-object document.
+    assert!(!result_is_a_json_object(r#"{"result":"half written"#));
+    assert!(!result_is_a_json_object("[1, 2]"));
+    assert!(!result_is_a_json_object(""));
   }
 
   #[test]
@@ -12682,6 +12729,52 @@ Subject: [PATCH] add: 2 + 3 = 5
     let mistyped = host_step_def("printf '{\"story_id\":1,\"SCSH_LOOP_BREAK\":false}' > \"$SCSH_RESULT\"", schema);
     let p = ui.proc("host: gate", false);
     let run = run_host_step(&mistyped.steps[0], "mistyped", &dir, Vec::new(), &p, &sink);
+    assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
+  }
+
+  /// What the durable result boundary now tolerates, end to end: a task writes a result whose
+  /// ONLY fault is a backslash escape JSON does not define, and it lands as a normal pass with
+  /// its declared fields — no correction re-run, and the stored file left as strict JSON.
+  #[test]
+  fn a_result_escaping_what_json_does_not_escape_is_repaired_instead_of_re_run() {
+    let _guard = runtime::test_env_lock();
+    let dir = mt_dir("host-step-repair");
+    let _home = ScshHome::under(&dir);
+
+    let schema = "    output:\n      story_id:\n        type: string\n      note:\n        type: string\n";
+    let ui = ui::screen::LiveUi::new(false, None);
+    let sink = ResultSink { session_id: "host-step-repair", session_dir_rel: "tmp/scsh/sess", client: None };
+
+    // `\_` and `\$` are escapes JSON does not define, so strict parsing rejects the whole
+    // document. This is precisely the class now allowed: each stands for the character it
+    // escapes, exactly as ECMAScript and JSON5 read it.
+    let repairable = host_step_def(
+      r#"printf '%s' '{"story_id":"US-029-01","note":"renamed \_internal, cost \$5"}' > "$SCSH_RESULT""#,
+      schema,
+    );
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&repairable.steps[0], "repaired", &dir, Vec::new(), &p, &sink);
+    let out = run.workflow_outputs.expect("a repaired result still publishes its declared fields");
+    assert!(run.ok, "the task passes on its first attempt: {:?}", run.fail_detail);
+    assert_eq!(out["story_id"], "US-029-01");
+    assert_eq!(out["note"], "renamed _internal, cost $5", "the escape stands for its own character");
+
+    // The durable file is rewritten, so the cache, the job page, and `export-job` read the
+    // same valid document the run acted on — never the malformed bytes the task wrote.
+    let stored = std::fs::read_to_string(dir.join("tmp/scsh/sess/repaired.json")).unwrap();
+    assert_eq!(
+      json::parse(&stored).expect("the stored result is strict JSON now"),
+      json::Value::Object(vec![
+        ("story_id".into(), json::Value::String("US-029-01".into())),
+        ("note".into(), json::Value::String("renamed _internal, cost $5".into())),
+      ])
+    );
+
+    // And what stays rejected: damage that is not an escape problem still fails the step, so
+    // this leniency can never turn a half-written document into an invented verdict.
+    let broken = host_step_def(r#"printf '%s' '{"story_id":"US-029-01","note":}' > "$SCSH_RESULT""#, schema);
+    let p = ui.proc("host: gate", false);
+    let run = run_host_step(&broken.steps[0], "broken", &dir, Vec::new(), &p, &sink);
     assert_eq!(run.fail_reason.as_deref(), Some(failure::reason::RESULT_INVALID));
   }
 
