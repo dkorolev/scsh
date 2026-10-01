@@ -12798,6 +12798,7 @@ steps:
   fn forward_opencode_copies_auth_and_config_into_the_run_clone() {
     // A fake host opencode home + config, then confirm forward_opencode copies them under the
     // run clone's tmp/ (riding the repo mount), not as separate bind mounts.
+    let _guard = runtime::test_env_lock();
     let base = std::env::temp_dir().join(format!("scsh-oc-fwd-{}-{}", std::process::id(), now_secs()));
     let host = base.join("host");
     std::fs::create_dir_all(host.join(".local/share/opencode")).unwrap();

@@ -3987,6 +3987,7 @@ TAG
 
   #[test]
   fn opencode_expired_provider_flags_only_expired_oauth() {
+    let _env = test_env_lock();
     // A fake opencode data home with an EXPIRED openai OAuth login, a valid claude OAuth login,
     // and a never-expiring nebius API key.
     let base = std::env::temp_dir().join(format!("scsh-oc-exp-{}", std::process::id()));
@@ -4163,6 +4164,7 @@ TAG
 
   #[test]
   fn claude_container_auth_accepts_oauth_token_env() {
+    let _env = test_env_lock();
     let key = CLAUDE_OAUTH_TOKEN_ENV;
     let prev = std::env::var_os(key);
     std::env::set_var(key, "test-token");
