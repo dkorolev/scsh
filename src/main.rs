@@ -15,6 +15,7 @@ mod fleet;
 mod gc;
 mod gh_review;
 mod harness_def;
+mod image_gc;
 mod json;
 #[cfg(test)]
 mod licenses;
@@ -119,6 +120,7 @@ fn run(args: &[String]) -> i32 {
     },
     Mode::Prune => prune_cmd(cli.prune_now),
     Mode::Gc => gc_cmd(&cli.gc),
+    Mode::GcImages => gc_images_cmd(cli.gc.apply, cli.json),
     Mode::AnnotateCasts => annotate_casts_cmd(&cli.annotate_paths, cli.json),
     Mode::ExportCasts => export_casts_cmd(&cli.export_paths, cli.output.as_deref(), cli.json),
     Mode::ExportJob => export_job_cmd(cli.export_job.as_deref(), cli.output.as_deref(), cli.export_nowait, cli.json),
@@ -778,6 +780,8 @@ enum Mode {
   Prune,
   /// Reclaim old `$SCSH_HOME/sessions/` dirs (dry-run by default; `--apply` to delete).
   Gc,
+  /// Reclaim only unused images proved to belong to scsh.
+  GcImages,
   /// Summarize + chapter cast recordings with Codex (`annotate-cast <cast>…`).
   AnnotateCasts,
   /// Render cast recordings into self-contained offline HTML player pages
@@ -859,6 +863,7 @@ const COMMAND_NAMES: &[&str] = &[
   "quota",
   "prune",
   "gc",
+  "gc-images",
   "annotate-cast",
   "export-cast",
   "export-job",
@@ -885,6 +890,7 @@ fn help_command_alias(token: &str) -> Option<&'static str> {
     "gh-review" => "gh-review",
     "prune" => "prune",
     "gc" => "gc",
+    "gc-images" => "gc-images",
     "annotate-cast" | "annotate-casts" | "annotate" => "annotate-cast",
     "export-cast" | "export-casts" | "export" => "export-cast",
     "export-job" | "export-jobs" => "export-job",
@@ -1189,6 +1195,7 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
       // `gc [--dry-run] | --apply [--days N] [--keep N] [--legacy]`: reclaim old session dirs
       // under $SCSH_HOME/sessions/ (dry-run by default; --apply required to delete).
       "gc" => Some(Mode::Gc),
+      "gc-images" => Some(Mode::GcImages),
       "--apply" => {
         saw_gc_flag = true;
         saw_gc_apply = true;
@@ -1483,10 +1490,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
         | Mode::AnnotateCasts
         | Mode::ExportCasts
         | Mode::ExportJob
+        | Mode::GcImages
     )
   {
     return Err(
-      "--json only applies to 'list', 'probe', 'quota', 'daemon', 'annotate-cast', 'export-cast', and 'export-job'"
+      "--json only applies to 'list', 'probe', 'quota', 'daemon', 'annotate-cast', 'export-cast', 'export-job', and 'gc-images'"
         .into(),
     );
   }
@@ -1513,8 +1521,11 @@ fn parse_cli(args: &[String]) -> Result<Cli, String> {
   if prune_now && !matches!(mode, Mode::Prune) {
     return Err("--now only applies to 'prune' (e.g. `scsh prune --now`)".into());
   }
-  if saw_gc_flag && !matches!(mode, Mode::Gc) {
-    return Err("--apply/--dry-run/--days/--keep/--legacy only apply to 'gc'".into());
+  if saw_gc_flag && !matches!(mode, Mode::Gc | Mode::GcImages) {
+    return Err("--apply/--dry-run apply to 'gc' or 'gc-images'; --days/--keep/--legacy apply only to 'gc'".into());
+  }
+  if matches!(mode, Mode::GcImages) && args.iter().any(|a| matches!(a.as_str(), "--days" | "--keep" | "--legacy")) {
+    return Err("--days/--keep/--legacy only apply to session gc".into());
   }
   if saw_gc_apply && saw_gc_dry_run {
     return Err("pass either --apply or --dry-run, not both".into());
@@ -5335,6 +5346,62 @@ fn prune_cmd(now_flag: bool) -> i32 {
   0
 }
 
+/// Resource GC has its own machine-readable output and never overloads session retention.
+fn gc_images_cmd(apply: bool, json_flag: bool) -> i32 {
+  use std::io::IsTerminal;
+  let as_json = json_flag || !std::io::stdout().is_terminal();
+  let result = (|| {
+    let rt =
+      runtime::detect_runtime().ok_or("no container runtime found; install Docker, Podman, or Apple container")?;
+    let images = image_gc::plan(&rt.name)?;
+    let (removed, warnings) = if apply { image_gc::apply(&rt.name, &images) } else { (0, Vec::new()) };
+    Ok::<_, String>((rt.name, images, removed, warnings))
+  })();
+  let (name, images, removed, warnings) = match result {
+    Ok(result) => result,
+    Err(error) => {
+      let message = format!("{error}; check the runtime connection and retry scsh gc-images");
+      if as_json {
+        println!(
+          "{}",
+          json::write_pretty(&json::Value::Object(vec![(
+            "Error".into(),
+            json::Value::Object(vec![("message".into(), json::Value::String(message)),])
+          )]))
+        );
+      } else {
+        fail(&message);
+      }
+      return 1;
+    }
+  };
+  for warning in &warnings {
+    eprintln!("image cleanup: {warning}");
+  }
+  if as_json {
+    use json::Value::{Array, Bool, Number, Object, String as Text};
+    let body = Object(vec![
+      ("runtime".into(), Text(name)),
+      ("applied".into(), Bool(apply)),
+      ("candidates".into(), Array(images.iter().map(|i| Text(i.id.clone())).collect())),
+      ("removed".into(), Number(removed as f64)),
+      ("warnings".into(), Array(warnings.iter().cloned().map(Text).collect())),
+    ]);
+    println!("{}", json::write_pretty(&Object(vec![("ImageCleanup".into(), body)])));
+  } else {
+    for image in &images {
+      println!("  {}", image.id);
+    }
+    if apply {
+      ok(&format!("removed {removed} of {} candidate image(s)", images.len()));
+    } else {
+      ok(&format!("{} unused scsh image(s) (dry-run)", images.len()));
+      hint("delete with: scsh gc-images --apply");
+    }
+  }
+  i32::from(!warnings.is_empty())
+}
+
 /// `scsh gc`: report (default) or delete old `$SCSH_HOME/sessions/` dirs past `--keep` and
 /// `--days`. Never touches `projects/`, `stats.jsonl`, or redb files.
 fn gc_cmd(opts: &gc::GcOpts) -> i32 {
@@ -8931,6 +8998,7 @@ fn run_build(
     return Err((runtime::apple_dockerfile_too_large_message(dockerfile.len()), 1));
   }
 
+  let old = image_gc::before_build(runtime_name, tag).map_err(|e| (format!("cannot safely replace {tag}: {e}"), 1))?;
   run_build_tui(
     build,
     runtime_name,
@@ -8945,7 +9013,12 @@ fn run_build(
     daemon_client,
     cast_stem,
     session_id,
-  )
+  )?;
+  if let Err(e) = image_gc::after_build(runtime_name, tag, fingerprint, old.as_ref()) {
+    build.note(&format!("image cleanup deferred: {e}; retry with scsh gc-images --apply"));
+    hint(&format!("image cleanup deferred: {e}; retry with scsh gc-images --apply"));
+  }
+  Ok(())
 }
 
 fn image_build_failure(
@@ -10789,6 +10862,16 @@ fn print_help_command(name: &str) {
       "scsh prune [--now]",
       &[("--now", "Force a janitor pass now instead of just showing the queue.")],
     ),
+    "gc-images" => (
+      "reclaim unused scsh-owned images",
+      "scsh gc-images [--dry-run | --apply] [--json]",
+      &[
+        ("(default)", "Dry-run: list unused images with scsh ownership labels."),
+        ("--apply", "Delete only listed eligible images, rechecking references before deletion."),
+        ("--dry-run", "List candidates without deleting anything."),
+        ("--json", "Emit structured results (automatic when stdout is not a terminal)."),
+      ],
+    ),
     "gc" => (
       "reclaim old session artifact dirs",
       "scsh gc [--dry-run] | scsh gc --apply [--days N] [--keep N] [--legacy]",
@@ -10892,6 +10975,7 @@ fn print_help_overview() {
   help_row("run [profile…]", "Build the image; run skills in parallel.");
   help_cont("See `scsh help run` for profiles, preflight, and exit codes.");
   help_row("list (ls)", "List skills by profile (--verbose, --json).");
+  help_row("gc-images [--apply]", "Preview or delete unused scsh-owned images; preserves tagged and in-use images.");
   help_row("build-images [harness…]", "Build the base + harness images outside a run (--force, --rebuild-base).");
   help_row("check-profile <name>", "Exit 0 when the profile exists and has skills.");
   help_row("probe [profile…]", "Exit 0 when at least one harness·model route is runnable on this host.");
@@ -12784,6 +12868,25 @@ steps:
     assert!(cli(&["gc", "--apply", "--dry-run"]).is_err());
     assert!(cli(&["run", "--apply"]).is_err(), "gc flags don't apply to run");
     assert!(cli(&["gc", "--days", "x"]).is_err());
+  }
+
+  #[test]
+  fn gc_images_defaults_to_preview_and_rejects_session_retention_flags() {
+    let cli = |a: &[&str]| parse_cli(&a.iter().map(|s| s.to_string()).collect::<Vec<_>>());
+    let preview = cli(&["gc-images", "--json"]).unwrap();
+    assert!(matches!(preview.mode, Mode::GcImages));
+    assert!(preview.json);
+    assert!(!preview.gc.apply);
+    assert!(cli(&["gc-images", "--apply"]).unwrap().gc.apply);
+    assert!(!cli(&["gc-images", "--dry-run"]).unwrap().gc.apply);
+    for args in [
+      vec!["gc-images", "--days", "30"],
+      vec!["gc-images", "--keep", "50"],
+      vec!["gc-images", "--legacy"],
+      vec!["gc-images", "--apply", "--dry-run"],
+    ] {
+      assert!(cli(&args).is_err());
+    }
   }
 
   #[test]

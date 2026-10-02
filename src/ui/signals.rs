@@ -209,12 +209,13 @@ pub fn terminate_children() {
 }
 
 /// Remove argv for a named container. Apple Container uses `delete`; Docker and Podman use
-/// `rm -f`. Kept pure so the cleanup policy is unit-testable without a running engine.
+/// `rm -f -v`: also remove anonymous volumes attached to this run, never named volumes or
+/// bind mounts. Kept pure so the cleanup policy is unit-testable without a running engine.
 fn remove_container_args(runtime: &str, name: &str) -> Vec<String> {
   if runtime == "container" {
     vec!["delete".into(), name.into()]
   } else {
-    vec!["rm".into(), "-f".into(), name.into()]
+    vec!["rm".into(), "-f".into(), "-v".into(), name.into()]
   }
 }
 
@@ -375,7 +376,7 @@ mod tests {
   #[test]
   fn removal_is_explicit_for_every_runtime() {
     assert_eq!(remove_container_args("container", "scsh-run"), ["delete", "scsh-run"]);
-    assert_eq!(remove_container_args("docker", "scsh-run"), ["rm", "-f", "scsh-run"]);
-    assert_eq!(remove_container_args("podman", "scsh-run"), ["rm", "-f", "scsh-run"]);
+    assert_eq!(remove_container_args("docker", "scsh-run"), ["rm", "-f", "-v", "scsh-run"]);
+    assert_eq!(remove_container_args("podman", "scsh-run"), ["rm", "-f", "-v", "scsh-run"]);
   }
 }

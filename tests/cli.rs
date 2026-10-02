@@ -4,6 +4,9 @@
 //! the preflight checks for. They never pull an image or build a container:
 //! every case stops at `list` (or an earlier guard), so no network is touched.
 
+#[path = "cli/image_gc.rs"]
+mod image_gc;
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicUsize, Ordering};

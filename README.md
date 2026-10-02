@@ -448,6 +448,22 @@ prefers Podman over a snap Docker automatically).
 
 ---
 
+## Cleaning up container images
+
+When a build replaces a `scsh-*:latest` image, `scsh` captures the old image ID and removes it after confirming the new image's build fingerprint. Failed builds and skipped builds do not delete images. Cleanup errors are reported without discarding a successful build; retry deferred cleanup with `scsh gc-images --apply`.
+
+```sh
+scsh gc-images                  # Preview unused images owned by scsh
+scsh gc-images --apply          # Recheck and remove eligible images
+SCSH_RUNTIME=docker scsh gc-images --json
+```
+
+Ownership requires both `scsh.generated=true` and a valid `scsh.build.fingerprint` label. A name beginning with `scsh-` is insufficient. Current tags, other tags or digest references, and images referenced by any running or stopped container are protected. Inspections that fail or return incomplete data prevent deletion. Docker and Podman images are deleted by full ID, without force and without pruning their untagged parents. No system-wide image, volume, or builder prune is run.
+
+Apple's CLI cannot address an image by its old ID once its reference is lost, so `scsh` retains it as `scsh-retired:<full-id>` before retagging. This reference also makes cleanup retryable after a crash or an in-use image. Only an owned image with no remaining ordinary references is eligible for deletion. Apple's image deletion command may itself garbage-collect unreachable runtime blobs and snapshots; `scsh` never edits Apple's storage directories. Historical snapshots whose image metadata is already lost cannot be safely attributed to `scsh` and are not enumerated as cleanup candidates. Shared builder cache and the buildkit VM remain managed by the runtime.
+
+Runs use host bind mounts and ephemeral tmpfs, not persistent named volumes. Explicit Docker/Podman container teardown also removes anonymous volumes attached to that run; named volumes and host bind mounts are preserved. `scsh gc` remains session-artifact cleanup, and `scsh prune` remains run-directory cleanup.
+
 ## Watching a run (the live board)
 
 On a terminal, `scsh run` shows an **interactive live board**: the image build and every skill
