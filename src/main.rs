@@ -6540,16 +6540,19 @@ fn harness_came_up_logged_out(harness: config::Harness, sample: &str) -> bool {
 
 /// The row's detail for a refused Claude login, naming the fix for the credential that was refused.
 fn auth_rejected_why(token_refused: bool) -> String {
-  if token_refused {
+  let why = if token_refused {
     "claude in the container is not logged in: the CLAUDE_CODE_OAUTH_TOKEN scsh forwarded was refused \
 — create a new one with `claude setup-token`; scsh retries only once the token changes"
-      .to_string()
   } else {
     "claude in the container is not logged in: the forwarded login was refused (expired, or its refresh \
 token already used by another run) — refresh the login on the host by running `claude`, or give scsh \
 CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`); scsh retries only once the host login changes"
-      .to_string()
-  }
+  };
+  format!(
+    "{why}. For browser jobs, after exporting or changing CLAUDE_CODE_OAUTH_TOKEN, run \
+`scsh daemon restart` from that same shell and rerun the job: an already-running daemon \
+keeps its original environment"
+  )
 }
 
 /// Add an uncertain screen diagnosis only after the run has already failed.
@@ -11873,6 +11876,17 @@ mod tests {
     assert!(!harness_came_up_logged_out(config::Harness::Claude, &limited));
     assert!(auth_rejected_why(false).contains("refresh the login on the host"));
     assert!(auth_rejected_why(true).contains("claude setup-token"));
+  }
+
+  #[test]
+  fn a_refused_claude_login_explains_how_browser_jobs_pick_up_an_env_token() {
+    for token_refused in [false, true] {
+      let why = auth_rejected_why(token_refused);
+      assert!(why.contains("CLAUDE_CODE_OAUTH_TOKEN"));
+      assert!(why.contains("scsh daemon restart"));
+      assert!(why.contains("from that same shell"));
+      assert!(why.contains("rerun the job"));
+    }
   }
 
   #[test]

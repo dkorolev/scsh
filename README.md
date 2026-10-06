@@ -308,6 +308,10 @@ credentials over again is refused the same way, so the route is retried only whe
 host would forward has changed since the refused attempt, judged by a SHA-256 of the forwarded
 token and credentials, never the secret itself.
 
+For browser-started jobs, export `CLAUDE_CODE_OAUTH_TOKEN` before starting the `scsh` daemon. If the daemon was already running when you exported or changed it, run `scsh daemon restart` from that same shell after active jobs finish, then rerun the failed job. The daemon retains its startup environment; `scsh daemon start` reuses it without refreshing credentials. Verify that Setup says **Found via CLAUDE_CODE_OAUTH_TOKEN**, rather than **Found via keychain**.
+
+For macOS with credentials supplied by zsh, follow the [recommended login setup](HUMAN-CONFIG.md#recommended-macos-setup-zsh-credentials-at-login): a LaunchAgent starts the daemon through `/bin/zsh -lic`, loading your existing exports automatically after reboot and login. The guide includes the launcher command, a LaunchAgent example, verification, and exactly when a manual restart is needed.
+
 The Claude image pins Claude Code `2.1.287` with Node.js 22 and supports `claude-opus-5-5`. The updated Dockerfile changes the build fingerprint, so existing images rebuild automatically on the next use.
 
 An account's usage limit is handled apart from that machinery, because it is not a failure

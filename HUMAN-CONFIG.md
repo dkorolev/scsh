@@ -25,6 +25,8 @@ login leaves behind, and precisely what `scsh` looks for.
 - **Log in:** run `claude` once and complete the OAuth login in the browser. For a
   long-lived headless token instead, run `claude setup-token` and export the result as
   `CLAUDE_CODE_OAUTH_TOKEN`.
+- **Browser jobs:** the `scsh` daemon inherits environment variables when it starts. After exporting or changing `CLAUDE_CODE_OAUTH_TOKEN`, run `scsh daemon restart` from that same shell, then rerun the failed job. `scsh daemon start` reuses an already-running persistent daemon and does not refresh its environment. The Setup tab should report **Found via CLAUDE_CODE_OAUTH_TOKEN**; **Found via keychain** means that daemon has no non-empty token variable, even if Claude works in your terminal. A restart refuses while jobs are running; let them finish first.
+- **Automatic startup with zsh credentials:** use the [recommended macOS setup](#recommended-macos-setup-zsh-credentials-at-login) below.
 - **Artifact produced:** on macOS, a login-keychain item named **`Claude Code-credentials`**
   whose value is the *full JSON* credentials blob (the `claudeAiOauth` object:
   `accessToken` + `refreshToken` + `expiresAt` + `scopes`). On Linux, the same JSON at
@@ -36,6 +38,76 @@ login leaves behind, and precisely what `scsh` looks for.
      contains `claudeAiOauth`, i.e. the full JSON blob. A partial credential (an access
      token without `expiresAt`/`scopes`) is treated as **logged-out** by the interactive
      TUI, which is why `scsh` forwards the entire blob and rejects anything less.
+
+### Recommended macOS setup: zsh credentials at login
+
+When your existing zsh setup exports `CLAUDE_CODE_OAUTH_TOKEN`, directly or through another script, start the `scsh` daemon through a login, interactive zsh. Keep the token in that existing setup; the launcher and LaunchAgent contain commands and paths only. This starts the browser daemon after you log into macOS following a reboot. No terminal command is needed on each login.
+
+**One-time setup:**
+
+1. Confirm that zsh loads the token without inheriting it from your current terminal. This prints no token; exit 0 means it was loaded. Startup files and any credential helper they invoke must finish without terminal input.
+
+   ```sh
+   env -u CLAUDE_CODE_OAUTH_TOKEN /bin/zsh -lic 'test -n "$CLAUDE_CODE_OAUTH_TOKEN"' </dev/null
+   ```
+
+2. Find the installed binary with `command -v scsh`. If you already have a login launcher, keep its runtime startup steps and change its final daemon-start command to the following, replacing the binary path:
+
+   ```sh
+   exec /bin/zsh -lic 'exec /absolute/path/to/scsh daemon start'
+   ```
+
+   Both `-l` and `-i` matter: together they load `.zprofile` and `.zshrc`, along with `.zshenv` and `.zlogin`. These files also load any scripts your normal zsh setup sources. See [zsh startup files](https://zsh.sourceforge.io/Doc/Release/Files.html#Startup_002fShutdown-Files).
+
+3. If you do not already have a LaunchAgent, create `~/Library/LaunchAgents` and save the following as `~/Library/LaunchAgents/com.scsh.daemon.plist`. Replace the binary path and both `/Users/YOU` log paths with your actual absolute paths. This example starts the browser daemon; configure your container runtime to start at login as well if you want model tests and jobs ready immediately.
+
+   ```xml
+   <?xml version="1.0" encoding="UTF-8"?>
+   <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+   <plist version="1.0">
+   <dict>
+     <key>Label</key>
+     <string>com.scsh.daemon</string>
+     <key>ProgramArguments</key>
+     <array>
+       <string>/bin/zsh</string>
+       <string>-lic</string>
+       <string>exec '/absolute/path/to/scsh' daemon start</string>
+     </array>
+     <key>RunAtLoad</key>
+     <true/>
+     <key>KeepAlive</key>
+     <false/>
+     <key>StandardOutPath</key>
+     <string>/Users/YOU/Library/Logs/scsh-startup.log</string>
+     <key>StandardErrorPath</key>
+     <string>/Users/YOU/Library/Logs/scsh-startup.err.log</string>
+   </dict>
+   </plist>
+   ```
+
+   Register this new LaunchAgent once from your logged-in account:
+
+   ```sh
+   mkdir -p "$HOME/Library/Logs"
+   plutil -lint "$HOME/Library/LaunchAgents/com.scsh.daemon.plist"
+   launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.scsh.daemon.plist"
+   ```
+
+   Use your existing LaunchAgent when you have one; do not install a second launcher for the same daemon. `RunAtLoad` runs the command at login. `KeepAlive` is false because `scsh daemon start` starts a detached daemon and then exits; this recipe provides login startup, not crash supervision. See [Apple's LaunchAgent documentation](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html).
+
+4. If a daemon is already running, wait for its jobs to finish, then run `/bin/zsh -lic 'scsh daemon restart'` once to load the current zsh environment. Starting an already-running daemon does not replace its environment.
+
+**What to run and when:**
+
+| Situation | Action |
+| --- | --- |
+| Reboot, then log into macOS | Nothing: the LaunchAgent loads your zsh environment and starts the daemon. |
+| The token supplied by your zsh setup changes while the daemon is running | Wait for active jobs to finish, then run `/bin/zsh -lic 'scsh daemon restart'`. |
+| Confirm the daemon received the token | Open `http://127.0.0.1:7274/setup` (or your configured port); Claude must say **Found via CLAUDE_CODE_OAUTH_TOKEN**. |
+| Confirm the token actually works | In Setup, run one Claude model test and check that it succeeds. Presence alone does not establish token validity. |
+
+If Setup says **Found via keychain** or **Missing**, the running daemon did not receive a non-empty token. Check the zsh probe above, the launcher's stdout/stderr logs, and whether an older daemon needs restarting. A token found successfully can still be expired or revoked; a failed model test supplies the authentication diagnosis.
 
 ## codex — Codex CLI
 
