@@ -4799,6 +4799,10 @@ fn daemon_start_cmd(json: bool) -> i32 {
         println!("{}", daemon_action_json("start", true, &format!("\"url\": {}", json::quote(&url))));
       } else {
         ok(&format!("session browser daemon listening on {url}"));
+        // A daemon that was already up keeps its own environment.
+        if let Some(stale) = daemon_stale_credentials(daemon::daemon_port()) {
+          print_stale_daemon_credentials(&stale);
+        }
       }
       0
     }
@@ -4911,6 +4915,7 @@ fn daemon_status_cmd(json: bool) -> i32 {
       None => ok(&format!("session browser daemon responding on {}", info.url)),
     }
     print_daemon_version_lines(port, &running, &info.installed_version);
+    print_stale_daemon_credentials(info.stale_credentials.as_deref().unwrap_or_default());
     0
   } else if let Some(pid) = info.pid {
     fail(&format!("session browser daemon pid {pid} exists but is not responding on {}", info.url));
@@ -4964,6 +4969,9 @@ struct DaemonStatusInfo {
   versions_match: bool,
   /// Seconds the daemon has been up, or `None` if down / too old to report a boot time.
   uptime_secs: Option<u64>,
+  /// The login env vars this shell holds that the daemon's jobs would not get as they are
+  /// here, or `None` if it is down or too old to report its credentials.
+  stale_credentials: Option<Vec<&'static str>>,
 }
 
 fn gather_daemon_status() -> DaemonStatusInfo {
@@ -4976,6 +4984,7 @@ fn gather_daemon_status() -> DaemonStatusInfo {
   } else {
     None
   };
+  let stale_credentials = if running { daemon_stale_credentials(port) } else { None };
   DaemonStatusInfo {
     running,
     pid: daemon::daemon_pid(port),
@@ -4985,12 +4994,31 @@ fn gather_daemon_status() -> DaemonStatusInfo {
     installed_version,
     daemon_version,
     uptime_secs,
+    stale_credentials,
   }
+}
+
+/// [`runtime::stale_daemon_credentials`] against the daemon on `port`, or `None` when it does
+/// not report its credentials.
+fn daemon_stale_credentials(port: u16) -> Option<Vec<&'static str>> {
+  let daemon = daemon::daemon_reported_credentials(port)?;
+  Some(runtime::stale_daemon_credentials(&runtime::credential_fingerprints(), &daemon))
+}
+
+/// Warn when this shell holds login env vars the daemon's jobs would not get: the daemon
+/// keeps the environment it started with, so browser jobs run on the old values.
+fn print_stale_daemon_credentials(stale: &[&str]) {
+  if stale.is_empty() {
+    return;
+  }
+  let names = stale.join(", ");
+  warn(&format!("the daemon lacks this shell's {names} — its browser jobs run with another value, or none"));
+  hint("after active jobs finish, restart it from this shell: scsh daemon restart");
 }
 
 fn daemon_status_json(i: &DaemonStatusInfo) -> String {
   format!(
-    "{{ \"running\": {}, \"pid\": {}, \"port\": {}, \"url\": {}, \"installed_version\": {}, \"daemon_version\": {}, \"versions_match\": {}, \"uptime_secs\": {} }}",
+    "{{ \"running\": {}, \"pid\": {}, \"port\": {}, \"url\": {}, \"installed_version\": {}, \"daemon_version\": {}, \"versions_match\": {}, \"uptime_secs\": {}, \"stale_credentials\": {} }}",
     i.running,
     i.pid.map(|p| p.to_string()).unwrap_or_else(|| "null".into()),
     i.port,
@@ -4999,6 +5027,10 @@ fn daemon_status_json(i: &DaemonStatusInfo) -> String {
     i.daemon_version.as_deref().map(json::quote).unwrap_or_else(|| "null".into()),
     i.versions_match,
     i.uptime_secs.map(|s| s.to_string()).unwrap_or_else(|| "null".into()),
+    i.stale_credentials
+      .as_ref()
+      .map(|keys| format!("[{}]", keys.iter().map(|k| json::quote(k)).collect::<Vec<_>>().join(", ")))
+      .unwrap_or_else(|| "null".into()),
   )
 }
 
@@ -11128,7 +11160,7 @@ fn print_help_command(name: &str) {
         ("stop", "Stop the running daemon."),
         ("restart", "Stop then start (persistent). Lists running jobs and confirms before interrupting them."),
         ("restart --despite-jobs <ids>", "Restart despite the named running jobs (the comma-separated ids it printed)."),
-        ("status", "Whether it's listening, where, plus versions and uptime."),
+        ("status", "Whether it's listening, where, versions, uptime, and any login env var it lacks."),
         ("version", "Installed CLI vs running daemon version, match, and uptime; exit 0 iff they match."),
         ("--json", "Machine-readable output for any daemon subcommand (status/version fields, action results)."),
         ("SCSH_DAEMON_PORT", "Listen port (default 7274)."),
@@ -13167,6 +13199,7 @@ steps:
       daemon_version: Some("1.41.15 (bbbbbbb)".into()),
       versions_match: false,
       uptime_secs: Some(9960),
+      stale_credentials: Some(vec!["CLAUDE_CODE_OAUTH_TOKEN"]),
     };
     let out = daemon_status_json(&up);
     let Ok(json::Value::Object(o)) = json::parse(&out) else { panic!("daemon status must be valid JSON: {out}") };
@@ -13175,6 +13208,10 @@ steps:
     assert!(matches!(s("pid"), Some(json::Value::Number(n)) if *n == 4242.0));
     assert!(matches!(s("versions_match"), Some(json::Value::Bool(false))));
     assert!(matches!(s("uptime_secs"), Some(json::Value::Number(n)) if *n == 9960.0));
+    assert!(
+      matches!(s("stale_credentials"), Some(json::Value::Array(a)) if matches!(a.as_slice(), [json::Value::String(k)] if k == "CLAUDE_CODE_OAUTH_TOKEN")),
+      "{out}"
+    );
     // A down daemon nulls the fields it can't know, and still parses.
     let down = DaemonStatusInfo {
       running: false,
@@ -13185,12 +13222,14 @@ steps:
       daemon_version: None,
       versions_match: false,
       uptime_secs: None,
+      stale_credentials: None,
     };
     let out = daemon_status_json(&down);
     assert!(
       out.contains("\"pid\": null")
         && out.contains("\"daemon_version\": null")
-        && out.contains("\"uptime_secs\": null"),
+        && out.contains("\"uptime_secs\": null")
+        && out.contains("\"stale_credentials\": null"),
       "{out}"
     );
     assert!(json::parse(&out).is_ok(), "{out}");

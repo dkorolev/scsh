@@ -174,6 +174,27 @@ pub fn daemon_reported_pid(port: u16) -> Option<u32> {
   digits.parse().ok()
 }
 
+/// The credential fingerprints a live daemon reports (see `runtime::credential_fingerprints`),
+/// or `None` when it is unreachable or too old to report them.
+pub fn daemon_reported_credentials(port: u16) -> Option<Vec<(String, String)>> {
+  credentials_in_version_body(&fetch_version_body(port)?)
+}
+
+/// The `credentials` object of a `/api/v1/version` body as `(variable, fingerprint)` pairs.
+/// Its keys are env var names and its values hex digits, so no string in it holds a quote,
+/// comma, or brace, and a plain split reads it.
+pub fn credentials_in_version_body(body: &str) -> Option<Vec<(String, String)>> {
+  let after = body.split("\"credentials\":").nth(1)?;
+  let object = after.trim_start().strip_prefix('{')?;
+  let object = &object[..object.find('}')?];
+  let mut pairs = Vec::new();
+  for entry in object.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+    let (key, value) = entry.split_once(':')?;
+    pairs.push((key.trim().trim_matches('"').to_string(), value.trim().trim_matches('"').to_string()));
+  }
+  Some(pairs)
+}
+
 /// The mode reported by a live daemon, when it is new enough to include one.
 pub fn daemon_reported_mode(port: u16) -> Option<super::model::DaemonMode> {
   let body = fetch_version_body(port)?;
@@ -450,6 +471,21 @@ mod libc {
 #[cfg(test)]
 mod tests {
   use super::*;
+
+  #[test]
+  fn credentials_in_version_body_reads_the_fingerprints() {
+    let body = r#"{ "version": "1.49.28 (abc)", "pid": 7, "mode": "persistent", "credentials": { "CLAUDE_CODE_OAUTH_TOKEN": "0123456789ab", "OPENAI_API_KEY": "ba9876543210" } }"#;
+    assert_eq!(
+      credentials_in_version_body(body),
+      Some(vec![
+        ("CLAUDE_CODE_OAUTH_TOKEN".to_string(), "0123456789ab".to_string()),
+        ("OPENAI_API_KEY".to_string(), "ba9876543210".to_string()),
+      ])
+    );
+    assert_eq!(credentials_in_version_body(r#"{ "version": "x", "credentials": {  } }"#), Some(Vec::new()));
+    // A daemon too old to report them says nothing either way.
+    assert_eq!(credentials_in_version_body(r#"{ "version": "1.49.27 (abc)", "pid": 7 }"#), None);
+  }
 
   #[test]
   fn pid_file_names_include_port() {

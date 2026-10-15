@@ -1345,7 +1345,13 @@ fn route(
       // `commit` is the bare stamp (null when unknown); `version` keeps the human line
       // (`1.30.3 (d5e2270)`) existing callers parse. Additive PID/mode fields let newer
       // lifecycle commands identify this process while remaining compatible with old clients.
+      // `credentials` fingerprints the login env vars this daemon hands its jobs, never the
+      // values, so `scsh daemon status` can tell when a shell holds newer ones.
       let commit = crate::version::git_stamp();
+      let credentials: Vec<String> = crate::runtime::credential_fingerprints()
+        .iter()
+        .map(|(key, fingerprint)| format!("{}: {}", quote(key), quote(fingerprint)))
+        .collect();
       let commit_json = if commit.is_empty() { "null".to_string() } else { quote(&commit) };
       let store = lock_store(store);
       let started_at = store.started_at;
@@ -1353,10 +1359,11 @@ fn route(
       (
         200,
         format!(
-          "{{ \"version\": {}, \"commit\": {commit_json}, \"started_at\": {started_at}, \"pid\": {}, \"mode\": {} }}",
+          "{{ \"version\": {}, \"commit\": {commit_json}, \"started_at\": {started_at}, \"pid\": {}, \"mode\": {}, \"credentials\": {{ {} }} }}",
           quote(&crate::version::display()),
           std::process::id(),
           quote(mode),
+          credentials.join(", "),
         ),
         "application/json",
         false,
@@ -3987,6 +3994,12 @@ mod tests {
     assert!(body.contains("\"started_at\": 50"), "endpoint omits the daemon start time: {body}");
     assert!(body.contains(&format!("\"pid\": {}", std::process::id())), "endpoint omits the daemon PID: {body}");
     assert!(body.contains("\"mode\": \"persistent\""), "endpoint omits the daemon mode: {body}");
+    assert!(body.contains("\"credentials\": {"), "endpoint omits the credential fingerprints: {body}");
+    assert_eq!(
+      crate::daemon::paths::credentials_in_version_body(&body),
+      Some(crate::runtime::credential_fingerprints().iter().map(|(k, f)| (k.to_string(), f.clone())).collect()),
+      "{body}"
+    );
     assert!(parse(&body).is_ok(), "version payload parses as JSON: {body}");
   }
 

@@ -438,6 +438,38 @@ pub const CURSOR_AUTH_FORWARD_REL: &str = "tmp/.config/cursor";
 /// Host env var for API-key Cursor auth (Cursor Dashboard → API Keys; works headless).
 pub const CURSOR_API_KEY_ENV: &str = "CURSOR_API_KEY";
 
+/// The host env vars that carry a harness login into containers. A daemon keeps the values
+/// it started with, so browser jobs miss a token exported or changed after that.
+pub const CREDENTIAL_ENVS: [&str; 5] =
+  [CLAUDE_OAUTH_TOKEN_ENV, OPENAI_API_KEY_ENV, XAI_API_KEY_ENV, CURSOR_API_KEY_ENV, CLINE_API_KEY_ENV];
+
+/// A short fingerprint of a credential value, for telling two values apart without showing
+/// either: 12 hex digits of a SHA-256 over an scsh-specific prefix and the value.
+pub fn credential_fingerprint(value: &str) -> String {
+  let mut material = b"scsh credential fingerprint\0".to_vec();
+  material.extend_from_slice(value.as_bytes());
+  crate::sha256::sha256_hex(&material)[..12].to_string()
+}
+
+/// The fingerprint of each [`CREDENTIAL_ENVS`] variable set in this process's environment.
+pub fn credential_fingerprints() -> Vec<(&'static str, String)> {
+  CREDENTIAL_ENVS
+    .iter()
+    .filter_map(|&key| std::env::var(key).ok().filter(|v| !v.is_empty()).map(|v| (key, credential_fingerprint(&v))))
+    .collect()
+}
+
+/// The credential variables this shell sets that a daemon reporting `daemon` would not hand
+/// to its jobs as they are here: missing there, or set to another value. A variable only the
+/// daemon holds is not listed, since restarting from this shell would drop it.
+pub fn stale_daemon_credentials(shell: &[(&'static str, String)], daemon: &[(String, String)]) -> Vec<&'static str> {
+  shell
+    .iter()
+    .filter(|(key, fingerprint)| !daemon.iter().any(|(k, f)| k == key && f == fingerprint))
+    .map(|(key, _)| *key)
+    .collect()
+}
+
 /// In-container env var for Cursor CLI config (cli-config.json, mcp.json).
 pub const CURSOR_CONFIG_DIR_ENV: &str = "CURSOR_CONFIG_DIR";
 
@@ -4688,6 +4720,34 @@ TAG
   fn pick_claude_login_reads_the_keychain_only_without_a_file_login() {
     let untouched = || -> Option<String> { panic!("keychain read") };
     assert!(pick_claude_login(Some(CLAUDE_LOGIN_BLOB.to_string()), untouched).is_ok());
+  }
+
+  #[test]
+  fn credential_fingerprints_tell_values_apart_without_showing_them() {
+    let a = credential_fingerprint("sk-ant-oat01-first");
+    assert_eq!(a.len(), 12);
+    assert!(a.chars().all(|c| c.is_ascii_hexdigit()), "{a}");
+    assert_eq!(a, credential_fingerprint("sk-ant-oat01-first"));
+    assert_ne!(a, credential_fingerprint("sk-ant-oat01-second"));
+    // Salted: not the plain SHA-256 of the value.
+    assert!(!crate::sha256::sha256_hex(b"sk-ant-oat01-first").starts_with(&a));
+  }
+
+  #[test]
+  fn stale_daemon_credentials_lists_what_this_shell_would_change() {
+    let shell = vec![(CLAUDE_OAUTH_TOKEN_ENV, "aaa".to_string()), (OPENAI_API_KEY_ENV, "bbb".to_string())];
+    let daemon = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+      pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    };
+    assert!(stale_daemon_credentials(&shell, &daemon(&[(CLAUDE_OAUTH_TOKEN_ENV, "aaa"), (OPENAI_API_KEY_ENV, "bbb")]))
+      .is_empty());
+    assert_eq!(
+      stale_daemon_credentials(&shell, &daemon(&[(CLAUDE_OAUTH_TOKEN_ENV, "old"), (OPENAI_API_KEY_ENV, "bbb")])),
+      vec![CLAUDE_OAUTH_TOKEN_ENV]
+    );
+    assert_eq!(stale_daemon_credentials(&shell, &daemon(&[(CLAUDE_OAUTH_TOKEN_ENV, "aaa")])), vec![OPENAI_API_KEY_ENV]);
+    // Only the daemon holds it: restarting from this shell would drop it, so it is not listed.
+    assert!(stale_daemon_credentials(&[], &daemon(&[(CLAUDE_OAUTH_TOKEN_ENV, "aaa")])).is_empty());
   }
 
   #[test]
