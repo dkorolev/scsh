@@ -5656,8 +5656,13 @@ fn build_and_run(
     ok("opencode creds found (auth.json and opencode config forwarded into the run clone)");
   }
   if needs_claude && runtime::claude_container_auth_ready() {
-    let via =
-      if runtime::claude_oauth_token().is_some() { "CLAUDE_CODE_OAUTH_TOKEN" } else { "~/.claude/.credentials.json" };
+    let via = if runtime::claude_oauth_token().is_some() {
+      "CLAUDE_CODE_OAUTH_TOKEN"
+    } else if runtime::claude_credentials_file_on_host().is_some() {
+      "~/.claude/.credentials.json"
+    } else {
+      "macOS keychain"
+    };
     ok(&format!("claude credentials found ({via} forwarded into claude skills)"));
   }
   if needs_codex && codex_auth_enabled() && runtime::codex_container_auth_ready() {
@@ -8374,7 +8379,8 @@ fn forward_github_auth(run_dir: &Path) -> Option<PathBuf> {
 /// others — deliberately NOT bulk-copying the host's real `~/.claude`, which holds history,
 /// caches and unreadable junk and would fail partway):
 ///  - `.credentials.json` — host file if present, else the full macOS keychain blob, else a
-///    minimal file from the env token. The interactive TUI treats an incomplete credentials
+///    minimal file from the env token. A file or blob whose tokens a logged-out host blanked is
+///    skipped, so it can never shadow the env token. The interactive TUI treats an incomplete credentials
 ///    file (token only, no expiry/scopes/refresh) as logged out, so the complete blob matters.
 ///  - `.claude.json` — a MINIMAL state json: just the login identity (`oauthAccount`/`userID`)
 ///    lifted from the host's config so the TUI skips the login picker, plus the onboarding /
@@ -8384,11 +8390,10 @@ fn forward_github_auth(run_dir: &Path) -> Option<PathBuf> {
 fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let home = std::env::var_os("HOME").map(PathBuf::from);
   let token = runtime::claude_oauth_token();
-  let keychain_creds = runtime::claude_keychain_credentials_json();
+  let host_creds = runtime::claude_credentials_blob_on_host();
   let host_json = home.as_ref().map(|h| h.join(".claude.json")).filter(|p| p.is_file());
-  let host_creds = home.as_ref().map(|h| h.join(".claude").join(".credentials.json")).filter(|p| p.is_file());
 
-  if token.is_none() && keychain_creds.is_none() && host_creds.is_none() && host_json.is_none() {
+  if token.is_none() && host_creds.is_none() && host_json.is_none() {
     return None;
   }
 
@@ -8399,9 +8404,7 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
   let json_dest = claude_dir.join(".claude.json");
 
   // Credentials, in order of completeness: host file > full keychain blob > env token.
-  if let Some(src) = &host_creds {
-    let _ = std::fs::copy(src, &creds_dest);
-  } else if let Some(blob) = &keychain_creds {
+  if let Some(blob) = &host_creds {
     let _ = std::fs::write(&creds_dest, blob);
   } else if let Some(t) = &token {
     let _ = write_claude_credentials_file(&claude_dir, t);
@@ -8433,11 +8436,7 @@ fn forward_claude_auth(run_dir: &Path) -> Option<PathBuf> {
 /// nothing to forward. A refused login is worth retrying only once this has changed.
 fn claude_auth_fingerprint() -> Option<String> {
   let token = runtime::claude_oauth_token();
-  let home = std::env::var_os("HOME").map(PathBuf::from);
-  let blob = home
-    .map(|h| h.join(".claude").join(".credentials.json"))
-    .and_then(|p| std::fs::read(p).ok())
-    .or_else(|| runtime::claude_keychain_credentials_json().map(String::into_bytes));
+  let blob = runtime::claude_credentials_blob_on_host().map(String::into_bytes);
   if token.is_none() && blob.is_none() {
     return None;
   }
@@ -11649,8 +11648,8 @@ fn print_help_internals() {
   then bind-mount from there (needed for custom providers such as Nebius GLM;
   opt out: SCSH_NO_OPENCODE_AUTH=1).
   Claude skills use host CLAUDE_CODE_OAUTH_TOKEN (from `claude setup-token`) and/or
-  ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container
-  (opt out: SCSH_NO_CLAUDE_AUTH=1).
+  ~/.claude/.credentials.json, copied into the run dir and bind-mounted into the container;
+  a logged-out login whose tokens are blank is never forwarded (opt out: SCSH_NO_CLAUDE_AUTH=1).
   Codex skills copy the host ~/.codex/auth.json and config.toml (from `codex login`) into the
   run clone's gitignored tmp/.codex — the image's CODEX_HOME — and forward OPENAI_API_KEY when
   set; the credentials are scrubbed from the run dir after the container exits
@@ -12106,6 +12105,37 @@ mod tests {
     let ok = r#"{"type":"result","subtype":"success","is_error":false,"num_turns":2,"result":"Done."}"#;
     let sample = transcript::parse(config::Harness::ClaudeHeadless, ok).failure_text();
     assert!(!harness_came_up_logged_out(config::Harness::ClaudeHeadless, &sample));
+  }
+
+  #[test]
+  fn a_logged_out_credentials_file_never_shadows_the_env_token() {
+    let _env = runtime::test_env_lock();
+    let base = std::env::temp_dir().join(format!("scsh-logged-out-claude-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    let home = base.join("home");
+    std::fs::create_dir_all(home.join(".claude")).unwrap();
+    std::fs::write(
+      home.join(".claude").join(".credentials.json"),
+      r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0}}"#,
+    )
+    .unwrap();
+    let prev_home = std::env::var_os("HOME");
+    let prev_token = std::env::var_os(runtime::CLAUDE_OAUTH_TOKEN_ENV);
+    std::env::set_var("HOME", &home);
+    std::env::set_var(runtime::CLAUDE_OAUTH_TOKEN_ENV, "sk-ant-oat01-test");
+    let root = forward_claude_auth(&base.join("run")).expect("auth forwarded");
+    let forwarded = std::fs::read_to_string(root.join(".claude").join(".credentials.json")).unwrap();
+    match prev_home {
+      Some(v) => std::env::set_var("HOME", v),
+      None => std::env::remove_var("HOME"),
+    }
+    match prev_token {
+      Some(v) => std::env::set_var(runtime::CLAUDE_OAUTH_TOKEN_ENV, v),
+      None => std::env::remove_var(runtime::CLAUDE_OAUTH_TOKEN_ENV),
+    }
+    let _ = std::fs::remove_dir_all(&base);
+    // The token's own file, or a real keychain login on a logged-in Mac, never the blanked one.
+    assert!(runtime::claude_credentials_have_login(&forwarded), "forwarded a logged-out login: {forwarded}");
   }
 
   #[test]

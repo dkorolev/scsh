@@ -492,8 +492,30 @@ pub fn cursor_keychain_refresh_token() -> Option<String> {
 /// literal JSON of `.credentials.json` (accessToken + refreshToken + expiresAt + scopes).
 /// The interactive TUI treats a credentials file without expiry/scopes as logged-out, so
 /// forwarding this full blob (not just an access token) is what makes the TUI skip login.
+/// `None` when the item holds no tokens: see [`claude_credentials_have_login`].
 pub fn claude_keychain_credentials_json() -> Option<String> {
+  claude_keychain_item().filter(|blob| claude_credentials_have_login(blob))
+}
+
+/// The keychain item as stored, whether or not it still holds a login.
+fn claude_keychain_item() -> Option<String> {
   keychain_secret("Claude Code-credentials").filter(|s| s.contains("claudeAiOauth"))
+}
+
+/// Whether Claude Code's credentials JSON still holds a login: a non-empty `accessToken` or
+/// `refreshToken` under `claudeAiOauth`. A logged-out host can keep the item with both tokens
+/// blanked and `expiresAt` 0; a container handed that blob comes up "Login expired", even when
+/// `CLAUDE_CODE_OAUTH_TOKEN` is forwarded beside it.
+pub fn claude_credentials_have_login(blob: &str) -> bool {
+  let Ok(crate::json::Value::Object(root)) = crate::json::parse(blob) else {
+    return false;
+  };
+  let Some(oauth) = get_json_obj(&root, "claudeAiOauth") else {
+    return false;
+  };
+  ["accessToken", "refreshToken"].iter().any(|key| {
+    matches!(oauth.iter().find(|(k, _)| k == key).map(|(_, v)| v), Some(crate::json::Value::String(t)) if !t.is_empty())
+  })
 }
 
 /// Whether the host has credentials cursor containers can use.
@@ -1879,18 +1901,56 @@ pub fn claude_oauth_token() -> Option<String> {
   std::env::var(CLAUDE_OAUTH_TOKEN_ENV).ok().filter(|s| !s.is_empty())
 }
 
-fn claude_credentials_file_on_host() -> Option<PathBuf> {
+fn claude_credentials_path_on_host() -> Option<PathBuf> {
   let home = std::env::var_os("HOME")?;
   let path = PathBuf::from(home).join(".claude").join(".credentials.json");
   path.is_file().then_some(path)
 }
 
+/// `~/.claude/.credentials.json`, when it still holds a login.
+pub fn claude_credentials_file_on_host() -> Option<PathBuf> {
+  claude_credentials_path_on_host()
+    .filter(|path| std::fs::read_to_string(path).map(|blob| claude_credentials_have_login(&blob)).unwrap_or(false))
+}
+
+/// The credentials JSON scsh forwards into Claude containers: the host file, else the macOS
+/// keychain item. `None` when neither holds a login.
+pub fn claude_credentials_blob_on_host() -> Option<String> {
+  claude_host_login().ok()
+}
+
+/// Where the host keeps a Claude login with its tokens blanked — what `claude` leaves behind
+/// once it is logged out — when no usable login sits beside it.
+pub fn claude_logged_out_login_on_host() -> Option<&'static str> {
+  claude_host_login().err().flatten()
+}
+
+fn claude_host_login() -> Result<String, Option<&'static str>> {
+  let file = claude_credentials_path_on_host().map(|path| std::fs::read_to_string(path).unwrap_or_default());
+  pick_claude_login(file, claude_keychain_item)
+}
+
+/// The first of the credentials file and the keychain item that holds a login, or else where a
+/// logged-out one sits (`None` when the host has neither). The keychain is read only when the
+/// file holds no login.
+fn pick_claude_login(
+  file: Option<String>, keychain: impl FnOnce() -> Option<String>,
+) -> Result<String, Option<&'static str>> {
+  if let Some(blob) = file.as_ref().filter(|blob| claude_credentials_have_login(blob)) {
+    return Ok(blob.clone());
+  }
+  match keychain() {
+    Some(blob) if claude_credentials_have_login(&blob) => Ok(blob),
+    _ if file.is_some() => Err(Some("~/.claude/.credentials.json")),
+    Some(_) => Err(Some("the macOS keychain")),
+    None => Err(None),
+  }
+}
+
 /// Whether the host has credentials containers can use: `CLAUDE_CODE_OAUTH_TOKEN`,
 /// `~/.claude/.credentials.json`, or the macOS login keychain.
 pub fn claude_container_auth_ready() -> bool {
-  claude_oauth_token().is_some()
-    || claude_credentials_file_on_host().is_some()
-    || claude_keychain_credentials_json().is_some()
+  claude_oauth_token().is_some() || claude_credentials_blob_on_host().is_some()
 }
 
 /// The `SCSH_NO_<HARNESS>_AUTH` variable that withholds `harness`'s host login from containers.
@@ -1980,6 +2040,12 @@ pub fn harness_login_preflight(harness: Harness) -> LoginPreflight {
         LoginPreflight { status: "found", label: found_via_file_label(&path), hint: String::new() }
       } else if claude_keychain_credentials_json().is_some() {
         LoginPreflight { status: "found", label: "Found via keychain".into(), hint: String::new() }
+      } else if let Some(place) = claude_logged_out_login_on_host() {
+        LoginPreflight {
+          status: "expired",
+          label: format!("Logged out (no tokens in {place})"),
+          hint: "Log in with `claude`, or run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN".into(),
+        }
       } else {
         LoginPreflight {
           status: "missing",
@@ -2085,6 +2151,11 @@ fn check_harness_login(harness: Harness) -> Result<(), String> {
     Harness::Claude | Harness::ClaudeHeadless => {
       if claude_container_auth_ready() {
         Ok(())
+      } else if let Some(place) = claude_logged_out_login_on_host() {
+        Err(format!(
+          "claude harness unavailable (the host claude login expired or was logged out: {place} holds it with \
+           no tokens — log in with `claude`, or run `claude setup-token` and export CLAUDE_CODE_OAUTH_TOKEN)"
+        ))
       } else {
         Err(
           "claude harness unavailable (no CLAUDE_CODE_OAUTH_TOKEN, no ~/.claude/.credentials.json, and no macOS \
@@ -4581,6 +4652,42 @@ TAG
     }];
     let probe = OpencodeModelProbe::for_selected(&skills);
     assert!(probe.check_model("openai/anything").is_ok());
+  }
+
+  /// The keychain item a logged-out `claude` leaves behind: both tokens blanked, expiry 0.
+  const CLAUDE_LOGGED_OUT_BLOB: &str = r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"","expiresAt":0,"scopes":["user:inference"],"subscriptionType":"max"}}"#;
+  const CLAUDE_LOGIN_BLOB: &str =
+    r#"{"claudeAiOauth":{"accessToken":"sk-ant-oat01-x","refreshToken":"sk-ant-ort01-y","expiresAt":1}}"#;
+
+  #[test]
+  fn claude_credentials_have_login_needs_a_token() {
+    assert!(claude_credentials_have_login(CLAUDE_LOGIN_BLOB));
+    assert!(claude_credentials_have_login(r#"{"claudeAiOauth":{"accessToken":"","refreshToken":"r"}}"#));
+    assert!(claude_credentials_have_login(r#"{"claudeAiOauth":{"accessToken":"a"}}"#));
+    assert!(!claude_credentials_have_login(CLAUDE_LOGGED_OUT_BLOB));
+    assert!(!claude_credentials_have_login(r#"{"claudeAiOauth":{}}"#));
+    assert!(!claude_credentials_have_login(r#"{"mcpOAuth":{"accessToken":"a"}}"#));
+    assert!(!claude_credentials_have_login("not json"));
+  }
+
+  #[test]
+  fn pick_claude_login_skips_a_logged_out_login() {
+    let login = || Some(CLAUDE_LOGIN_BLOB.to_string());
+    let logged_out = || Some(CLAUDE_LOGGED_OUT_BLOB.to_string());
+    let file = |blob: &str| Some(blob.to_string());
+    assert_eq!(pick_claude_login(file(CLAUDE_LOGIN_BLOB), logged_out), Ok(CLAUDE_LOGIN_BLOB.to_string()));
+    assert_eq!(pick_claude_login(file(CLAUDE_LOGGED_OUT_BLOB), login), Ok(CLAUDE_LOGIN_BLOB.to_string()));
+    assert_eq!(pick_claude_login(None, login), Ok(CLAUDE_LOGIN_BLOB.to_string()));
+    assert_eq!(pick_claude_login(None, logged_out), Err(Some("the macOS keychain")));
+    assert_eq!(pick_claude_login(file(CLAUDE_LOGGED_OUT_BLOB), logged_out), Err(Some("~/.claude/.credentials.json")));
+    assert_eq!(pick_claude_login(file(CLAUDE_LOGGED_OUT_BLOB), || None), Err(Some("~/.claude/.credentials.json")));
+    assert_eq!(pick_claude_login(None, || None), Err(None));
+  }
+
+  #[test]
+  fn pick_claude_login_reads_the_keychain_only_without_a_file_login() {
+    let untouched = || -> Option<String> { panic!("keychain read") };
+    assert!(pick_claude_login(Some(CLAUDE_LOGIN_BLOB.to_string()), untouched).is_ok());
   }
 
   #[test]

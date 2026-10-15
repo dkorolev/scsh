@@ -749,7 +749,7 @@ fn claude_token_and_plan() -> Result<(String, Option<String>), Box<HarnessQuota>
   if let Some(token) = crate::runtime::claude_oauth_token() {
     return Ok((token, None));
   }
-  let blob = claude_credentials_blob().ok_or_else(|| {
+  let blob = crate::runtime::claude_credentials_blob_on_host().ok_or_else(|| {
     Box::new(HarnessQuota::down(
       h,
       "missing",
@@ -761,19 +761,6 @@ fn claude_token_and_plan() -> Result<(String, Option<String>), Box<HarnessQuota>
     Ok(pair) => Ok(pair),
     Err(e) => Err(Box::new(HarnessQuota::down(h, "error", &e, ""))),
   }
-}
-
-/// The raw credentials JSON: `~/.claude/.credentials.json` or the macOS keychain item.
-fn claude_credentials_blob() -> Option<String> {
-  if let Some(home) = std::env::var_os("HOME") {
-    let path = std::path::PathBuf::from(home).join(".claude").join(".credentials.json");
-    if let Ok(text) = std::fs::read_to_string(&path) {
-      if text.contains("claudeAiOauth") {
-        return Some(text);
-      }
-    }
-  }
-  crate::runtime::claude_keychain_credentials_json()
 }
 
 /// Pull `accessToken` + `subscriptionType` out of Claude Code's credentials JSON.
