@@ -35,6 +35,31 @@ except Exception:
 print("{}")
 "#;
 
+/// opencode plugin installed into the container's config home (`plugins/`, never the skill
+/// repo). It appends opencode's own accounting events to `$SCSH_RUN_LOG.opencode-events.jsonl`:
+/// assistant messages (whose final update carries the token counters), finished tool calls,
+/// and session busy/idle status. Everything else is dropped to keep the stream small.
+pub const OPENCODE_PLUGIN_JS: &str = r#"import { appendFileSync } from "node:fs";
+
+export const ScshUsage = async () => ({
+  event: async ({ event }) => {
+    try {
+      const p = event.properties || {};
+      let line = null;
+      if (event.type === "message.updated" && p.info && p.info.role === "assistant") line = event;
+      else if (event.type === "session.status") line = event;
+      else if (event.type === "message.part.updated" && p.part && p.part.type === "tool" && p.part.state &&
+        (p.part.state.status === "completed" || p.part.state.status === "error")) {
+        // The tool's own input and output are not accounting; keep the call's identity only.
+        const { id, sessionID, messageID, tool } = p.part;
+        line = { type: event.type, properties: { part: { id, sessionID, messageID, tool, type: "tool" } } };
+      }
+      if (line) appendFileSync(process.env.SCSH_RUN_LOG + ".opencode-events.jsonl", JSON.stringify(line) + "\n");
+    } catch {} // Accounting must never interrupt the agent loop.
+  },
+});
+"#;
+
 /// `hooks.json` that points Cursor's interactive TUI at [`CURSOR_HOOK_PY`].
 pub fn hooks_json(script_in_container: &str) -> String {
   let cmd = json::quote(script_in_container);
@@ -71,6 +96,7 @@ pub enum Harness {
   Cursor,
   Grok,
   Cline,
+  Opencode,
 }
 
 impl Harness {
@@ -81,6 +107,7 @@ impl Harness {
       Harness::Cursor => "cursor",
       Harness::Grok => "grok",
       Harness::Cline => "cline",
+      Harness::Opencode => "opencode",
     }
   }
 
@@ -91,6 +118,7 @@ impl Harness {
       Harness::Cursor => "cursor_hooks",
       Harness::Grok => "grok_session_jsonl",
       Harness::Cline => "cline_session_json",
+      Harness::Opencode => "opencode_plugin_events",
     }
   }
 }
@@ -152,6 +180,7 @@ impl Summary {
       "cursor" => Harness::Cursor,
       "grok" => Harness::Grok,
       "cline" => Harness::Cline,
+      "opencode" => Harness::Opencode,
       _ => return None,
     };
     if string(payload, "source") != Some(harness.source()) {
@@ -589,6 +618,106 @@ pub(crate) fn grok_primary_session(events: &str) -> Result<Option<String>, ()> {
     }
   }
   Ok(primary)
+}
+
+/// Summarize the opencode plugin stream ([`OPENCODE_PLUGIN_JS`]). Each assistant message is
+/// one model call; its last `message.updated` carries final counters once `time.completed` is
+/// set. opencode's `input` already excludes cache reads; reasoning is billed as output. The
+/// summary is complete only when every message has completed and every session is idle again.
+pub fn opencode_events_summary(stream: &str) -> Summary {
+  let mut messages: BTreeMap<String, Value> = BTreeMap::new();
+  let mut sessions: BTreeMap<String, bool> = BTreeMap::new();
+  let mut tools = BTreeSet::new();
+  let mut parsed = true;
+  for line in stream.lines().filter(|line| !line.trim().is_empty()) {
+    let Ok(event) = json::parse(line) else {
+      parsed = false;
+      continue;
+    };
+    let Some(properties) = field(&event, "properties") else { continue };
+    match string(&event, "type") {
+      Some("message.updated") => {
+        if let Some(info) = field(properties, "info") {
+          if let Some(id) = string(info, "id") {
+            messages.insert(id.to_string(), info.clone());
+          }
+        }
+      }
+      Some("message.part.updated") => {
+        if let Some(id) = field(properties, "part").and_then(|part| string(part, "id")) {
+          tools.insert(id.to_string());
+        }
+      }
+      Some("session.status") => {
+        if let (Some(session), Some(status)) =
+          (string(properties, "sessionID"), field(properties, "status").and_then(|s| string(s, "type")))
+        {
+          sessions.insert(session.to_string(), status == "idle");
+        }
+      }
+      _ => {}
+    }
+  }
+  if messages.is_empty() {
+    return unavailable(Harness::Opencode);
+  }
+  let mut tokens = Tokens { input: 0, output: 0, cache_read: 0, cache_write: Some(0) };
+  let mut complete = parsed && sessions.values().all(|idle| *idle);
+  for info in messages.values() {
+    let done = field(info, "time").and_then(|time| field(time, "completed")).is_some_and(|v| !matches!(v, Value::Null));
+    let counted = field(info, "tokens").and_then(|t| {
+      let cache = field(t, "cache")?;
+      Some((
+        count(t, "input")?,
+        count(t, "output")? + count(t, "reasoning")?,
+        count(cache, "read")?,
+        count(cache, "write")?,
+      ))
+    });
+    match counted {
+      Some((input, output, read, write)) => {
+        tokens.input += input;
+        tokens.output += output;
+        tokens.cache_read += read;
+        tokens.cache_write = tokens.cache_write.map(|w| w + write);
+      }
+      None => complete = false,
+    }
+    complete &= done;
+  }
+  Summary {
+    harness: Harness::Opencode,
+    complete,
+    tokens: Some(tokens),
+    llm_round_trips: Some(messages.len() as u64),
+    tool_calls: Some(tools.len() as u64),
+  }
+}
+
+/// Each completed opencode request as the provider bills it: `(prompt, completion)` tokens,
+/// where the prompt includes cache reads and writes and the completion includes reasoning.
+pub fn opencode_request_tokens(stream: &str) -> Vec<(u64, u64)> {
+  let mut messages: BTreeMap<String, (u64, u64)> = BTreeMap::new();
+  for event in stream.lines().filter_map(|line| json::parse(line).ok()) {
+    if string(&event, "type") != Some("message.updated") {
+      continue;
+    }
+    let Some(info) = field(&event, "properties").and_then(|p| field(p, "info")) else { continue };
+    if field(info, "time").and_then(|t| field(t, "completed")).is_none_or(|v| matches!(v, Value::Null)) {
+      continue;
+    }
+    let pair = field(info, "tokens").and_then(|t| {
+      let cache = field(t, "cache")?;
+      Some((
+        count(t, "input")? + count(cache, "read")? + count(cache, "write")?,
+        count(t, "output")? + count(t, "reasoning")?,
+      ))
+    });
+    if let (Some(id), Some(pair)) = (string(info, "id"), pair) {
+      messages.insert(id.to_string(), pair);
+    }
+  }
+  messages.into_values().collect()
 }
 
 /// Grok 1.0.34's `_x.ai/session/update` records contain per-prompt bills, not
@@ -1388,6 +1517,43 @@ mod tests {
       crate::config::Harness::Codex,
       &format!("{codex}{{\"payload\":{{\"type\":\"task_started\"}}}}")
     ));
+  }
+
+  #[test]
+  fn opencode_plugin_events_sum_completed_messages_and_wait_for_idle() {
+    // Real stream (opencode 1.18, cline-pass/glm-5.3): a tool-calling step, then the answer.
+    let msg = |id: &str, done: bool, input: u64, output: u64, reasoning: u64, read: u64, finish: &str| {
+      let completed = if done { r#","completed":2"# } else { "" };
+      format!(
+        r#"{{"type":"message.updated","properties":{{"info":{{"id":"{id}","sessionID":"ses_a","role":"assistant","time":{{"created":1{completed}}},"tokens":{{"input":{input},"output":{output},"reasoning":{reasoning},"cache":{{"write":0,"read":{read}}}}},"finish":{finish}}}}}}}"#
+      )
+    };
+    let status = |s: &str| {
+      format!(r#"{{"type":"session.status","properties":{{"sessionID":"ses_a","status":{{"type":"{s}"}}}}}}"#)
+    };
+    let tool = r#"{"type":"message.part.updated","properties":{"part":{"id":"prt_1","sessionID":"ses_a","messageID":"msg_1","tool":"write","type":"tool"}}}"#;
+    let lines = [
+      status("busy"),
+      msg("msg_1", false, 0, 0, 0, 0, "null"),
+      tool.to_string(),
+      msg("msg_1", true, 12043, 76, 22, 85, r#""tool-calls""#),
+      msg("msg_2", false, 0, 0, 0, 0, "null"),
+      msg("msg_2", true, 108, 3, 0, 12127, r#""stop""#),
+      status("busy"),
+    ];
+    let busy = lines.join("\n");
+    let open = opencode_events_summary(&busy);
+    assert!(!open.complete, "a busy session is still generating");
+    let done = opencode_events_summary(&format!("{busy}\n{}", status("idle")));
+    assert!(done.complete);
+    assert_eq!(done.harness, Harness::Opencode);
+    assert_eq!(done.tokens, Some(Tokens { input: 12151, output: 101, cache_read: 12212, cache_write: Some(0) }));
+    assert_eq!((done.llm_round_trips, done.tool_calls), (Some(2), Some(1)));
+    let unfinished = format!("{}\n{}\n{}", status("busy"), msg("msg_1", false, 0, 0, 0, 0, "null"), status("idle"));
+    assert!(!opencode_events_summary(&unfinished).complete, "a message without time.completed is not final");
+    assert_eq!(opencode_events_summary("").tokens, None);
+    let parsed = Summary::from_json(&done.to_json()).unwrap();
+    assert_eq!(parsed, done);
   }
 
   #[test]

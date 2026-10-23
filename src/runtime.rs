@@ -797,6 +797,25 @@ pub(crate) fn cline_inner_command(headless: bool, model: Option<&str>, effort: O
   )
 }
 
+/// Whether an opencode model id (`<provider>/<model>`) names a Cline Pass model, e.g.
+/// `cline/cline-pass/glm-5.3` from a host provider pointed at `api.cline.bot`. The provider id
+/// is the user's choice; Cline Pass model names always start with `cline-pass/`.
+pub fn opencode_model_uses_cline_pass(model: Option<&str>) -> bool {
+  model.and_then(|m| m.split_once('/')).is_some_and(|(_, name)| name.starts_with("cline-pass/"))
+}
+
+/// The API key the host's opencode login stores for one provider (`auth.json`, `type: api`).
+pub fn opencode_provider_api_key(provider: &str) -> Option<String> {
+  let auth = opencode_auth_in(std::env::var_os("XDG_DATA_HOME").as_deref(), std::env::var_os("HOME").as_deref())?;
+  let crate::json::Value::Object(root) = crate::json::parse(&std::fs::read_to_string(auth).ok()?).ok()? else {
+    return None;
+  };
+  match get_json_obj(&root, provider)?.iter().find(|(k, _)| k == "key").map(|(_, v)| v) {
+    Some(crate::json::Value::String(key)) if !key.is_empty() => Some(key.clone()),
+    _ => None,
+  }
+}
+
 /// Shell that writes the plan and usage-limit documents for one side of a Cline run.
 /// The API key stays in the environment; curl reads it from a config on stdin.
 fn cline_quota_snapshot_shell(when: &str) -> String {
@@ -856,6 +875,17 @@ pub fn harness_command_with_options(
       }
       tui.push_str(" --prompt ");
       tui.push_str(&shell_quote(&prompt));
+      // A Cline Pass model gets the same before/after quota snapshots as the Cline harness.
+      let tui = if opencode_model_uses_cline_pass(model) {
+        let body = format!(
+          "{}\n{tui}\nrc=$?\n{}\nexit $rc\n",
+          cline_quota_snapshot_shell("before"),
+          cline_quota_snapshot_shell("after")
+        );
+        format!("sh -c {}", shell_quote(&body))
+      } else {
+        tui
+      };
       // opencode --prompt only PRE-FILLS the input box; send Enter once the TUI is up to submit.
       wrap_tui_shell(harness, skill_source, model, &tui, TuiQuit::SlashExit, TuiSubmit::Enter, result, term)
     }
@@ -3066,7 +3096,7 @@ mod tests {
     assert!(df.contains("FROM scsh-base AS scsh-opencode"));
     assert!(df.contains("FROM scsh-base AS scsh-claude"));
     assert!(df.contains("FROM scsh-base AS scsh-codex"));
-    assert!(df.contains("npm install -g opencode-ai"));
+    assert!(df.contains("npm install -g \"opencode-ai@${OPENCODE_VERSION}\""));
     assert!(df.contains("npm install -g \"@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}\""));
     assert!(df.contains("npm install -g @openai/codex"));
     assert!(!df.contains("CMD ["));
@@ -3188,6 +3218,15 @@ TAG
     assert!(df.contains("npm install -g @xai-official/grok"));
     assert!(df.contains("ENV GROK_HOME=/home/agent/repo/tmp/.grok"));
     assert!(df.contains("grok --version"));
+  }
+
+  #[test]
+  fn dockerfile_opencode_stage_is_pinned() {
+    // The usage plugin depends on opencode's event shapes; a silent upgrade could break accounting.
+    let df = dockerfile();
+    assert!(df.contains("ARG OPENCODE_VERSION=1.19.3"));
+    let stage = df.split("FROM scsh-base AS scsh-opencode").nth(1).unwrap().split("\nFROM ").next().unwrap();
+    assert!(stage.contains("npm install -g \"opencode-ai@${OPENCODE_VERSION}\""), "{stage}");
   }
 
   #[test]

@@ -251,13 +251,14 @@ fn proc_json(p: &ProcRecord) -> String {
   };
   let suspected_cause = p.suspected_cause.map(|cause| quote(cause.as_str())).unwrap_or_else(|| "null".into());
   let usage = p.usage.as_ref().map(crate::usage::Summary::compact_json).unwrap_or_else(|| "null".into());
+  let quota = p.quota.as_ref().map(crate::quota::RunQuota::compact_json).unwrap_or_else(|| "null".into());
   let order = order_json(&p.order);
   format!(
     "{{ \"index\": {}, \"previous_attempt\": {previous_attempt}, \"order\": {order}, \"label\": {},\"kind\": {}, \"status\": {}, \"skill_name\": {}, \
 \"harness\": {}, \"model\": {}, \"started_at\": {started_at}, \"note\": {}, \"detail\": {}, \"fail_reason\": {}, \"suspected_cause\": {suspected_cause}, \
 \"elapsed\": {}, \"container_name\": {}, \"container_runtime\": {}, \"cast_path\": {}, \"transcript_path\": {transcript}, \"diff_path\": {}, \
 \"skill_source\": {}, \"route\": {}, \"result_path\": {}, \"annotate_target\": {}, \"phase\": {}, \
-\"phase_until\": {phase_until}, \"recovery\": {recovery}, \"usage\": {}, \"lines\": [{}] }}",
+\"phase_until\": {phase_until}, \"recovery\": {recovery}, \"usage\": {}, \"quota\": {quota}, \"lines\": [{}] }}",
     p.index,
     quote(&p.label),
     quote(p.kind.as_str()),
@@ -443,6 +444,10 @@ fn parse_proc(v: &Value) -> Result<ProcRecord, String> {
         Some(crate::usage::Summary::from_json(&crate::json::write(value)).ok_or("invalid TokenUsage on proc")?)
       }
     },
+    quota: match field_value(obj, "quota").ok() {
+      None | Some(Value::Null) => None, // absent on sessions persisted by older builds
+      Some(value) => Some(crate::quota::RunQuota::from_value(value).ok_or("invalid quota on proc")?),
+    },
     lines,
   })
 }
@@ -611,6 +616,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let json = proc_json(&proc);
     assert!(!json.contains("NaN"));
@@ -660,6 +666,7 @@ mod tests {
         recovery: None,
         lines: vec![OutputLine { at: 0.1, text: "step 1".into() }],
         usage: None,
+        quota: None,
       }],
       last_seen_at: 105,
       client_connected: false,

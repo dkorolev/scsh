@@ -71,7 +71,9 @@ impl StoreDb {
     let txn = self.db.begin_read().ok()?;
     let table = txn.open_table(SESSIONS).ok()?;
     let row = table.get(id).ok()??;
-    jsonio::parse_session_json(&String::from_utf8_lossy(row.value())).ok()
+    let mut session = jsonio::parse_session_json(&String::from_utf8_lossy(row.value())).ok()?;
+    backfill_run_quota(&mut session);
+    Some(session)
   }
 
   /// One-transaction sync: write each `(id, json)` in `dirty`. Rows are never deleted here —
@@ -137,7 +139,31 @@ impl StoreDb {
     }
     let mut out: BTreeMap<String, Session> = running.into_iter().collect();
     out.extend(newest.into_iter().map(|((_, id), s)| (id, s)));
+    for session in out.values_mut() {
+      backfill_run_quota(session);
+    }
     out
+  }
+}
+
+/// Runs recorded before the job page showed Cline Pass quota still have its snapshots in the
+/// job's logs (`<stem>.cline-quota-{before,after}.*.json`); read them into the run. There is
+/// no spend: the per-request match needs the run dir, which is long gone.
+fn backfill_run_quota(session: &mut Session) {
+  for proc in session.procs.iter_mut().filter(|p| p.quota.is_none()) {
+    let cline = matches!(proc.harness.as_deref(), Some("cline" | "cline-headless"))
+      || (proc.harness.as_deref() == Some("opencode")
+        && crate::runtime::opencode_model_uses_cline_pass(proc.model.as_deref()));
+    if !cline {
+      continue;
+    }
+    let stem =
+      [(proc.cast_path.as_deref(), ".cast"), (proc.transcript_path.as_deref(), ".events.jsonl")].into_iter().find_map(
+        |(path, suffix)| std::path::Path::new(path?).file_name()?.to_str()?.strip_suffix(suffix).map(str::to_string),
+      );
+    if let Some(stem) = stem {
+      proc.quota = crate::quota::RunQuota::from_cline_run(&crate::runtime::session_logs_dir(&session.id).join(stem));
+    }
   }
 }
 
@@ -217,6 +243,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       }],
       last_seen_at: 1,
       client_connected: false,
@@ -226,6 +253,40 @@ mod tests {
       supervisor: Default::default(),
       report: Vec::new(),
     }
+  }
+
+  #[test]
+  fn finished_cline_runs_regain_their_quota_from_the_job_logs() {
+    let _env = crate::runtime::test_env_lock();
+    let home = std::env::temp_dir().join(format!("scsh-backfill-{}", crate::runtime::random_nonce_6()));
+    let prev = std::env::var_os("SCSH_HOME");
+    std::env::set_var("SCSH_HOME", &home);
+    let logs = crate::runtime::session_logs_dir("oldjob");
+    std::fs::create_dir_all(&logs).unwrap();
+    let plan = r#"{"data":{"plan":{"entitlements":{"cline_pass":{"inferenceCapThreshold":{
+      "last5HoursUsageCostUSDPerUser":1000000000,"last7daysUsageCostUSDPerUser":2500000000,
+      "last30daysUsageCostUSDPerUser":5000000000}}}}}}"#;
+    let limits = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":11},{"type":"weekly","percentUsed":4},{"type":"monthly","percentUsed":2}]}}"#;
+    for when in ["before", "after"] {
+      std::fs::write(logs.join(format!("probe-run.cline-quota-{when}.limits.json")), limits).unwrap();
+      std::fs::write(logs.join(format!("probe-run.cline-quota-{when}.plan.json")), plan).unwrap();
+    }
+    let mut job = session("oldjob");
+    job.procs[0].harness = Some("cline".into());
+    job.procs[0].cast_path = Some(home.join("sessions/oldjob/casts/probe-run.cast").to_string_lossy().into_owned());
+    let mut other = job.procs[0].clone();
+    other.harness = Some("claude".into());
+    job.procs.push(other);
+    backfill_run_quota(&mut job);
+    match prev {
+      Some(v) => std::env::set_var("SCSH_HOME", v),
+      None => std::env::remove_var("SCSH_HOME"),
+    }
+    let _ = std::fs::remove_dir_all(&home);
+    let quota = job.procs[0].quota.as_ref().expect("a cline run regains its snapshots");
+    assert_eq!(quota.after.as_ref().map(Vec::len), Some(3));
+    assert_eq!(quota.spend, None, "the per-request match needs the long-gone run dir");
+    assert_eq!(job.procs[1].quota, None, "other harnesses have no Cline Pass quota");
   }
 
   /// A fresh temp DB file path (no shared global state, so tests run in parallel).

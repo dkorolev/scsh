@@ -154,11 +154,11 @@ At run time, each `invocations:` route expands to an invocation named `{skill}-{
 
 Claude routes accept `prompt_contract: standard|compact|verbatim` while retaining the interactive TUI and asciinema recording. `effort` is forwarded to Claude. Use `scsh inspect-prompt --def <name>` to inspect the exact prompt without a model call; use `scsh inspect-claude-usage <directory>` to reconcile direct-Claude transcripts with the same accounting parser. See [Claude prompts and controlled comparisons](CLAUDE-PROMPTS.md).
 
-  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (up to 600 seconds for every harness; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode currently has no native accounting adapter and requires that opt-out.
+  Native token counters are required by default for every harness. After the result appears and the turn has gone quiet, ordinary watchdogs yield to a dedicated accounting wait (up to 600 seconds for every harness; override with `SCSH_USAGE_ACCOUNTING_TIMEOUT`); only then does `scsh` request a graceful exit, never automatic Ctrl-C. A still-running generation does not start that wait. Missing counters fail with `usage_accounting_timeout` or `usage_accounting_unavailable`. Set `SCSH_NO_USAGE=1` to explicitly skip this requirement and wait. Grok records native per-turn usage, including folded subagent spend. OpenCode reports through a usage plugin scsh installs into the container's config home.
 
   The terminal launcher writes its pane command to a private temporary script and passes only the script path to tmux. Long prompts therefore avoid tmux's command-message limit. The script is removed after recording, and tmux/recorder failures propagate through log capture instead of appearing as missing usage counters.
 
-  Startup watchdogs check native model-usage records and completed tool calls before killing a quiet agent. Once those confirm work has started, the short startup timeout is permanently disabled for that attempt; the configured `inactivity_timeout` still applies. This also works with `SCSH_NO_USAGE=1`: proving that work started does not require complete token accounting. Without native evidence (including OpenCode, which has no adapter), the existing startup watchdog remains in effect.
+  Startup watchdogs check native model-usage records and completed tool calls before killing a quiet agent. Once those confirm work has started, the short startup timeout is permanently disabled for that attempt; the configured `inactivity_timeout` still applies. This also works with `SCSH_NO_USAGE=1`: proving that work started does not require complete token accounting. Without native evidence, the existing startup watchdog remains in effect.
 
   The session browser shows the runner's next recovery action and deadline beside each
   attempt: startup checks, inactivity stops, quota waits, result/accounting waits,
@@ -638,8 +638,9 @@ across runs — the first `scsh run` (or any change to the Dockerfile) rebuilds 
 - **Formatting:** `rustfmt.toml` pins the house style — run `cargo fmt` before committing.
 - **`Cargo.lock` is committed** on purpose: `scsh` is a binary, so the lockfile pins exact
   dependency versions for reproducible builds.
-- **The image installs the latest `opencode` via `npm`** (`npm install -g opencode-ai`) —
-  more reliable than the upstream curl installer, and easy to pin.
+- **The image installs a pinned `opencode` via `npm`** (`OPENCODE_VERSION` in `src/Dockerfile`) —
+  more reliable than the upstream curl installer. Run accounting reads opencode's plugin
+  events, so bumping that ARG is how opencode moves.
 - **The root `.scsh.yml` is bundle authoring input, not an application configuration.** `scsh` embeds it as the manifest for the no-URL `scsh installskills` bundle and also uses it to exercise the bundled reviewer and harness-smoke profiles in this repository. `scsh init-demo-project` writes the separate `src/demo.scsh.yml` manifest into a new demo repository; URL-based `installskills` merges the selected source repository's manifest into its target.
 
 ## Environment variables
@@ -662,7 +663,7 @@ The one place they are all listed. Host-side knobs, all optional:
 | `SCSH_NO_CACHE` | off | `1` runs every skill fresh instead of replaying a cached result (same as `scsh run --no-cache`); fresh results still refresh the cache. |
 | `SCSH_NO_RETRY` | off | `1` disables the single automatic retry of transient failures. |
 | `SCSH_QUIET` | off | `1` runs harnesses at their default log level (output is still teed to the run log). |
-| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host login files into containers. Its environment key (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`) is still forwarded, so the harness stays available only while that key is set; Cline's opt-out withholds `CLINE_API_KEY` too, and opencode has no key. |
+| `SCSH_NO_CLAUDE_AUTH` / `SCSH_NO_OPENCODE_AUTH` / `SCSH_NO_CODEX_AUTH` / `SCSH_NO_GROK_AUTH` / `SCSH_NO_CURSOR_AUTH` / `SCSH_NO_CLINE_AUTH` | off | `1` skips forwarding that harness's host login files into containers. Its environment key (`CLAUDE_CODE_OAUTH_TOKEN`, `OPENAI_API_KEY`, `XAI_API_KEY`, `CURSOR_API_KEY`) is still forwarded, so the harness stays available only while that key is set; Cline's opt-out withholds `CLINE_API_KEY` too. opencode has no key of its own; on a `cline-pass/` model it gets `CLINE_API_KEY` for the quota snapshots, which its opt-out withholds. |
 | `SCSH_NO_GH_AUTH` | off | `1` skips forwarding `GH_TOKEN`/`GITHUB_TOKEN` and the host GitHub CLI `hosts.yml` into containers. |
 | `SCSH_ANNOTATE_MODEL` | `gpt-5.6-luna` | Model `scsh annotate-cast` drives via Codex. |
 | `SCSH_STATS_FILE` | `~/.scsh/stats.jsonl` | Where run statistics are journaled. |

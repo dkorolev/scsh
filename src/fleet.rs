@@ -767,6 +767,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let procs = vec![
       // Registered out of order, to prove the trajectory is sorted by cycle.
@@ -844,6 +845,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       },
       ProcRecord {
         index: 1,
@@ -875,6 +877,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       },
     ];
     let written = write_rollups(session, &procs);

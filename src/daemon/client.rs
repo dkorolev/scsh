@@ -357,6 +357,16 @@ impl Client {
     self.post("/api/v1/proc/usage", &body);
   }
 
+  pub fn proc_quota(&self, proc_index: usize, quota: &crate::quota::RunQuota) {
+    let body = format!(
+      "{{ \"session\": {}, \"proc\": {}, \"quota\": {} }}",
+      quote(&self.inner.session_id),
+      proc_index,
+      quota.compact_json()
+    );
+    self.post("/api/v1/proc/quota", &body);
+  }
+
   pub fn proc_finish(
     &self, proc_index: usize, status: ProcStatus, fail_reason: Option<&str>, detail: Option<&str>, elapsed: f64,
   ) {

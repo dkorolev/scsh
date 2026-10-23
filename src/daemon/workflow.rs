@@ -968,6 +968,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       }],
       last_seen_at: 60, // running-idle timeout elapses at 60 + 30 minutes
       client_connected: true,
@@ -1033,6 +1034,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1064,6 +1066,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 50,
@@ -1143,6 +1146,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1174,6 +1178,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 2,
@@ -1205,6 +1210,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 3,
@@ -1236,6 +1242,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 4,
@@ -1267,6 +1274,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 1,
@@ -1333,6 +1341,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let session = Session {
       id: "cold1".into(),
@@ -1413,6 +1422,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1444,6 +1454,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 2,
@@ -1475,6 +1486,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 3,
@@ -1506,6 +1518,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 1,
@@ -1571,6 +1584,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1602,6 +1616,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 2,
@@ -1633,6 +1648,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 1,
@@ -1721,6 +1737,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1752,6 +1769,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 2,
@@ -1783,6 +1801,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 1,

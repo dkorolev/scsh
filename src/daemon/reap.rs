@@ -182,6 +182,7 @@ mod tests {
         elapsed: None,
         lines: vec![],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,

@@ -880,6 +880,21 @@ function procUsageHtml(p) {
   if (!parts.length) parts.push('No measured cost');
   return '<div class="proc-usage dim" title="' + esc(details.join(' · ')) + '"><strong>cost</strong> ' + esc(parts.join(' · ')) + '</div>';
 }
+function procQuotaHtml(p) {
+  if (procIsLive(p.status) || !p.quota) return '';
+  const side = windows => {
+    if (!windows) return 'unavailable';
+    if (!windows.length) return 'no active limit windows reported';
+    const pct = n => Number.isInteger(Number(n)) ? String(Number(n)) : Number(n).toFixed(1);
+    return windows.map(w => w.label + ' ' + pct(w.used_percent) + '%').join(' · ');
+  };
+  const s = p.quota.spend;
+  const spend = s ? '$' + (Number(s.cost_micro) / 1e8).toFixed(4) + ' over ' + s.requests + ' request' +
+    (Number(s.requests) === 1 ? '' : 's') + (s.percent_of_5h == null ? '' : ' · ' + Number(s.percent_of_5h).toFixed(2) + '% of the 5h window') : '';
+  return '<div class="proc-quota dim"><span><strong>quota before</strong> ' + esc(side(p.quota.before)) +
+    '</span><span><strong>quota after</strong> ' + esc(side(p.quota.after)) + '</span>' +
+    (spend ? '<span><strong>quota used</strong> ' + esc(spend) + '</span>' : '') + '</div>';
+}
 function procIsLive(status) {
   return status === 'running' || status === 'waiting';
 }
@@ -1065,8 +1080,16 @@ function updateProcFields(det, p, nowUnix) {
   const usageHtml = procUsageHtml(p);
   if (usageHtml) {
     if (usageBlock) usageBlock.outerHTML = usageHtml;
+    else if (det.querySelector('.proc-quota')) det.querySelector('.proc-quota').insertAdjacentHTML('beforebegin', usageHtml);
     else det.insertAdjacentHTML('beforeend', usageHtml);
   } else if (usageBlock) usageBlock.remove();
+  const quotaBlock = det.querySelector('.proc-quota');
+  const quotaHtml = procQuotaHtml(p);
+  if (quotaHtml) {
+    if (quotaBlock) quotaBlock.outerHTML = quotaHtml;
+    else if (det.querySelector('.proc-usage')) det.querySelector('.proc-usage').insertAdjacentHTML('afterend', quotaHtml);
+    else det.insertAdjacentHTML('beforeend', quotaHtml);
+  } else if (quotaBlock) quotaBlock.remove();
   const metaBlock = det.querySelector('.proc-meta');
   const metaHtml = procMetaHtml(p);
   if (metaHtml) {
@@ -1498,7 +1521,7 @@ function procHtml(p, isOpen, nowUnix) {
     ' <span class="meta" data-proc-elapsed="' + esc(String(p.index)) + '">' + esc(elapsedText) + '</span>' + retryLinkHtml(session, p) + originalAttemptLinkHtml(session, p) + ' ' +
     '<span class="note dim">' + procNoteHtml(p) + '</span></summary>';
   return summaryOpen + procMetaHtml(p) + '<div class="detail">' + esc(p.detail || '') + '</div>' +
-    container + body + procUsageHtml(p) + '</details>';
+    container + body + procUsageHtml(p) + procQuotaHtml(p) + '</details>';
 }
 function workflowStepIdForProc(p) {
   const session = SESSION_ID && liveSessions ? liveSessions[SESSION_ID] : null;

@@ -44,6 +44,7 @@ pub fn log_sources() -> Vec<(String, &'static str)> {
     (".exit", "exit"),
     (".tuidebug", "tuidebug"),
     (".cursor-hooks.jsonl", "cursor-hooks.jsonl"),
+    (".opencode-events.jsonl", "opencode-events.jsonl"),
     (".usage-error", "usage-error"),
     (".usage-final", "usage-final"),
     (".invocation.json", "invocation.json"),

@@ -195,6 +195,226 @@ pub struct QuotaWindow {
   pub resets_at: Option<String>,
 }
 
+/// One run's quota, read just before its harness started and again once it exited. A side is
+/// `None` when its snapshot is missing or unreadable, e.g. a run stopped before it began.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunQuota {
+  pub before: Option<Vec<QuotaWindow>>,
+  pub after: Option<Vec<QuotaWindow>>,
+  /// The run's own requests, from the account's usage records ([`cline_run_spend`]).
+  pub spend: Option<RunSpend>,
+}
+
+/// What one run's requests cost against Cline Pass. Window percentages are whole numbers, so a
+/// short run reads the same before and after; these records are exact.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RunSpend {
+  /// Sum of `costUsd`, in the API's micro-units ([`CLINE_CAP_MICRO_PER_USD`] per dollar).
+  pub cost_micro: u64,
+  pub requests: u64,
+  /// The same cost as a share of the five-hour window's dollar cap.
+  pub percent_of_5h: Option<f64>,
+}
+
+/// How a run's requests are told apart from others on the same account.
+pub enum SpendMatch {
+  /// The Cline CLI tags every request with its session id (the session's directory name).
+  ClineSessions(std::collections::BTreeSet<String>),
+  /// Other clients share one key-wide id, so each request is matched by its exact
+  /// `(promptTokens, completionTokens)` pair, at most once per pair the run itself recorded.
+  TokenPairs(Vec<(u64, u64)>),
+}
+
+impl SpendMatch {
+  fn expected(&self) -> usize {
+    match self {
+      SpendMatch::ClineSessions(_) => 0,
+      SpendMatch::TokenPairs(pairs) => pairs.len(),
+    }
+  }
+}
+
+/// Sum the usage records this run made since `since` (unix seconds), newest page first.
+/// Records can lag the response by a few seconds, so a short count is retried briefly.
+/// `expected` is how many requests the run itself counted; `None` when nothing matched.
+pub fn cline_run_spend(run_log: &std::path::Path, since: u64, matcher: SpendMatch, expected: u64) -> Option<RunSpend> {
+  let key = crate::runtime::cline_api_key()
+    .or_else(|| std::env::var(crate::runtime::CLINE_API_KEY_ENV).ok())
+    .filter(|k| !k.is_empty())?;
+  let headers = [format!("Authorization: Bearer {key}"), "Accept: application/json".to_string()];
+  let me = curl("https://api.cline.bot/api/v1/users/me", &headers, None).ok().filter(|r| r.status == 200)?;
+  let me = object(&me.body).ok()?;
+  let user = get_str(get_obj(&me, "data")?, "id")?.to_string();
+  let wanted = expected.max(matcher.expected() as u64);
+  let mut spend = None;
+  for attempt in 0..5 {
+    if attempt > 0 {
+      std::thread::sleep(std::time::Duration::from_secs(2));
+    }
+    let fetch = |cursor: Option<&str>| {
+      let url = match cursor {
+        Some(c) => format!("https://api.cline.bot/api/v1/users/{user}/usages?limit=100&cursor={c}"),
+        None => format!("https://api.cline.bot/api/v1/users/{user}/usages?limit=100"),
+      };
+      curl(&url, &headers, None).ok().filter(|r| r.status == 200).map(|r| r.body)
+    };
+    spend = cline_usages_since(&fetch, since, &matcher);
+    if spend.as_ref().is_some_and(|(_, requests)| *requests >= wanted) {
+      break;
+    }
+  }
+  let (cost_micro, requests) = spend.filter(|(_, requests)| *requests > 0)?;
+  let mut plan_path = run_log.as_os_str().to_owned();
+  plan_path.push(".cline-quota-before.plan.json");
+  let cap = std::fs::read_to_string(plan_path).ok().and_then(|plan| cline_five_hour_cap(&plan));
+  Some(RunSpend { cost_micro, requests, percent_of_5h: cap.map(|cap| cost_micro as f64 / cap * 100.0) })
+}
+
+/// Walk usage pages (`fetch(cursor)` returns one page body) back to `since`, summing the
+/// matched records as `(cost_micro, requests)`.
+fn cline_usages_since(
+  fetch: &dyn Fn(Option<&str>) -> Option<String>, since: u64, matcher: &SpendMatch,
+) -> Option<(u64, u64)> {
+  let mut pairs = match matcher {
+    SpendMatch::TokenPairs(pairs) => pairs.clone(),
+    SpendMatch::ClineSessions(_) => Vec::new(),
+  };
+  let (mut cost, mut requests) = (0u64, 0u64);
+  let mut cursor: Option<String> = None;
+  // 20 pages of 100 is far more than one run makes; the bound only stops a runaway loop.
+  for _ in 0..20 {
+    let page = fetch(cursor.as_deref())?;
+    let root = object(&page).ok()?;
+    let data = get_obj(&root, "data")?;
+    let items = get_arr(data, "items")?;
+    for item in items {
+      let Value::Object(item) = item else { continue };
+      let at = get_str(item, "createdAt").and_then(|t| iso_to_epoch(&normalize_iso(t)));
+      if at.is_some_and(|at| at < since) {
+        return Some((cost, requests));
+      }
+      let matched = match matcher {
+        SpendMatch::ClineSessions(ids) => {
+          get_obj(item, "metadata").and_then(|m| get_str(m, "session_id")).is_some_and(|id| ids.contains(id))
+        }
+        SpendMatch::TokenPairs(_) => {
+          let pair = (get_num(item, "promptTokens").unwrap_or(-1.0), get_num(item, "completionTokens").unwrap_or(-1.0));
+          match pairs.iter().position(|(p, c)| (*p as f64, *c as f64) == pair) {
+            Some(index) => {
+              pairs.swap_remove(index);
+              true
+            }
+            None => false,
+          }
+        }
+      };
+      if matched {
+        cost += get_num(item, "costUsd").unwrap_or(0.0).max(0.0) as u64;
+        requests += 1;
+      }
+    }
+    match get_str(data, "nextToken") {
+      Some(next) if !items.is_empty() => cursor = Some(next.to_string()),
+      _ => break,
+    }
+  }
+  Some((cost, requests))
+}
+
+/// The five-hour window's dollar cap (micro-units) from a plan body.
+fn cline_five_hour_cap(plan_json: &str) -> Option<f64> {
+  let root = object(plan_json).ok()?;
+  let plan = get_obj(get_obj(&root, "data")?, "plan")?;
+  let caps = get_obj(get_obj(get_obj(plan, "entitlements")?, "cline_pass")?, "inferenceCapThreshold")?;
+  get_num(caps, "last5HoursUsageCostUSDPerUser").filter(|cap| *cap > 0.0)
+}
+
+impl RunQuota {
+  /// A Cline run's snapshots beside its log (`<log>.cline-quota-{before,after}.{limits,plan}.json`,
+  /// written by the harness command). `None` when neither side was captured.
+  pub fn from_cline_run(run_log: &std::path::Path) -> Option<RunQuota> {
+    let side = |when: &str| {
+      let read = |kind: &str| {
+        let mut path = run_log.as_os_str().to_owned();
+        path.push(format!(".cline-quota-{when}.{kind}.json"));
+        std::fs::read_to_string(path).ok()
+      };
+      cline_windows(&read("limits")?, &read("plan")?).ok().map(|(_, windows)| windows)
+    };
+    let quota = RunQuota { before: side("before"), after: side("after"), spend: None };
+    (quota.before.is_some() || quota.after.is_some()).then_some(quota)
+  }
+
+  pub fn compact_json(&self) -> String {
+    let side =
+      |windows: &Option<Vec<QuotaWindow>>| windows.as_deref().map(windows_json).unwrap_or_else(|| "null".into());
+    let spend = match &self.spend {
+      Some(s) => format!(
+        "{{\"cost_micro\": {}, \"requests\": {}, \"percent_of_5h\": {}}}",
+        s.cost_micro,
+        s.requests,
+        s.percent_of_5h.map(|p| p.to_string()).unwrap_or_else(|| "null".into())
+      ),
+      None => "null".into(),
+    };
+    format!("{{\"before\": {}, \"after\": {}, \"spend\": {spend}}}", side(&self.before), side(&self.after))
+  }
+
+  pub fn from_value(value: &Value) -> Option<RunQuota> {
+    let Value::Object(fields) = value else { return None };
+    let side = |key: &str| -> Option<Option<Vec<QuotaWindow>>> {
+      match get(fields, key) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::Array(items)) => items
+          .iter()
+          .map(|item| match item {
+            Value::Object(w) => Some(QuotaWindow {
+              id: get_str(w, "id")?.to_string(),
+              label: get_str(w, "label")?.to_string(),
+              used_percent: get_num(w, "used_percent")?,
+              resets_at: get_str(w, "resets_at").map(str::to_string),
+            }),
+            _ => None,
+          })
+          .collect::<Option<Vec<_>>>()
+          .map(Some),
+        Some(_) => None,
+      }
+    };
+    let spend = match get(fields, "spend") {
+      None | Some(Value::Null) => None,
+      Some(Value::Object(s)) => Some(RunSpend {
+        cost_micro: get_num(s, "cost_micro")? as u64,
+        requests: get_num(s, "requests")? as u64,
+        percent_of_5h: get_num(s, "percent_of_5h"),
+      }),
+      Some(_) => return None,
+    };
+    Some(RunQuota { before: side("before")?, after: side("after")?, spend })
+  }
+
+  /// `$0.0210 over 4 requests · 0.21% of the 5h window`.
+  pub fn spend_phrase(spend: &RunSpend) -> String {
+    let usd = spend.cost_micro as f64 / CLINE_CAP_MICRO_PER_USD;
+    let mut out = format!("${usd:.4} over {} request{}", spend.requests, if spend.requests == 1 { "" } else { "s" });
+    if let Some(p) = spend.percent_of_5h {
+      out.push_str(&format!(" · {p:.2}% of the 5h window"));
+    }
+    out
+  }
+
+  /// `5h ($10) 11% · weekly ($25) 4% · monthly ($50) 2%` for one side.
+  pub fn phrase(windows: Option<&[QuotaWindow]>) -> String {
+    match windows {
+      Some(windows) if !windows.is_empty() => {
+        windows.iter().map(|w| format!("{} {}%", w.label, trim_percent(w.used_percent))).collect::<Vec<_>>().join(" · ")
+      }
+      Some(_) => "no active limit windows reported".into(),
+      None => "unavailable".into(),
+    }
+  }
+}
+
 /// The normalized quota answer for one harness. `summary` is always present — for
 /// non-`ok` statuses it says what went wrong, so a caller can print it verbatim.
 #[derive(Debug, Clone)]
@@ -1126,9 +1346,8 @@ fn parse_cursor_plan(body: &str) -> Option<String> {
 /// Same shape for `scsh quota --json` and the daemon's Setup quota endpoint.
 /// One harness's quota as a JSON object body (shared by the aggregate document and the
 /// per-run result file): `"harness"`, `"status"`, `"plan"`, `"windows"`, `"summary"`, `"hint"`.
-fn harness_json_fields(q: &HarnessQuota) -> String {
-  let windows: Vec<String> = q
-    .windows
+fn windows_json(windows: &[QuotaWindow]) -> String {
+  let windows: Vec<String> = windows
     .iter()
     .map(|w| {
       format!(
@@ -1140,12 +1359,16 @@ fn harness_json_fields(q: &HarnessQuota) -> String {
       )
     })
     .collect();
+  format!("[{}]", windows.join(", "))
+}
+
+fn harness_json_fields(q: &HarnessQuota) -> String {
   format!(
-    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": [{}], \"summary\": {}, \"hint\": {}, \"source\": {}, \"observed_at\": {}",
+    "\"harness\": {}, \"status\": {}, \"plan\": {}, \"windows\": {}, \"summary\": {}, \"hint\": {}, \"source\": {}, \"observed_at\": {}",
     json::quote(q.harness.as_str()),
     json::quote(q.status),
     q.plan.as_deref().map(json::quote).unwrap_or_else(|| "null".into()),
-    windows.join(", "),
+    windows_json(&q.windows),
     json::quote(&q.summary),
     json::quote(&q.hint),
     json::quote(q.source),
@@ -1248,6 +1471,79 @@ mod tests {
     assert_eq!(windows[2].resets_at.as_deref(), Some("2026-10-21T01:59:26Z"));
     let missing = r#"{"data":{"limits":[{"type":"five_hour","percentUsed":0},{"type":"weekly","percentUsed":0}]}}"#;
     assert!(cline_windows(missing, plan).is_err());
+  }
+
+  #[test]
+  fn cline_spend_matches_only_this_runs_requests() {
+    let item = |at: &str, cost: u64, session: &str, prompt: u64, completion: u64| {
+      format!(
+        r#"{{"createdAt":"{at}","costUsd":{cost},"promptTokens":{prompt},"completionTokens":{completion},"metadata":{{"session_id":"{session}"}}}}"#
+      )
+    };
+    let pages = [
+      format!(
+        r#"{{"data":{{"items":[{},{},{}],"nextToken":"p2"}}}}"#,
+        item("2026-10-22T07:53:19.1Z", 228850, "1792655585491_7noq7", 5803, 100),
+        item("2026-10-22T07:53:18.2Z", 200653, "sess-key", 7299, 4),
+        item("2026-10-22T07:53:15.3Z", 107720, "sess-key", 633, 46)
+      ),
+      format!(
+        r#"{{"data":{{"items":[{},{}],"nextToken":"p3"}}}}"#,
+        item("2026-10-22T07:53:14.4Z", 211818, "sess-key", 7144, 59),
+        item("2026-10-22T07:52:51.5Z", 1727356, "1792655170080_wj7cl", 57603, 458)
+      ),
+    ];
+    let fetch = |cursor: Option<&str>| match cursor {
+      None => Some(pages[0].clone()),
+      Some("p2") => Some(pages[1].clone()),
+      _ => panic!("paged past `since`"),
+    };
+    let since = iso_to_epoch("2026-10-22T07:53:00Z").unwrap();
+    let sessions = SpendMatch::ClineSessions(["1792655585491_7noq7".to_string()].into());
+    assert_eq!(cline_usages_since(&fetch, since, &sessions), Some((228850, 1)), "another session is not this run");
+    // opencode shares one key-wide id: its own two requests match by tokens, its title call does not.
+    let pairs = SpendMatch::TokenPairs(vec![(7144, 59), (7299, 4)]);
+    assert_eq!(cline_usages_since(&fetch, since, &pairs), Some((200653 + 211818, 2)));
+    let spend = RunSpend { cost_micro: 2_100_737, requests: 4, percent_of_5h: Some(0.2100737) };
+    assert_eq!(RunQuota::spend_phrase(&spend), "$0.0210 over 4 requests · 0.21% of the 5h window");
+  }
+
+  #[test]
+  fn cline_run_quota_reads_both_snapshots_and_round_trips() {
+    let dir = std::env::temp_dir().join(format!("scsh-run-quota-{}", crate::runtime::random_nonce_6()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let log = dir.join("scsh-run.log");
+    assert_eq!(RunQuota::from_cline_run(&log), None, "no snapshot, no quota");
+    let plan = r#"{"data":{"plan":{"displayName":"Cline Pass (Monthly)","entitlements":{"cline_pass":{"inferenceCapThreshold":{
+      "last5HoursUsageCostUSDPerUser":1000000000,
+      "last7daysUsageCostUSDPerUser":2500000000,
+      "last30daysUsageCostUSDPerUser":5000000000
+    }}}}}}"#;
+    let limits = |five_hour: f64| {
+      format!(
+        r#"{{"data":{{"limits":[{{"type":"five_hour","percentUsed":{five_hour},"resetsAt":"2026-10-21T18:20:48.49Z"}},
+        {{"type":"weekly","percentUsed":4}},{{"type":"monthly","percentUsed":2}}]}}}}"#
+      )
+    };
+    let write =
+      |name: &str, text: &str| std::fs::write(dir.join(format!("scsh-run.log.cline-quota-{name}.json")), text).unwrap();
+    write("before.limits", &limits(11.0));
+    write("before.plan", plan);
+    let quota = RunQuota::from_cline_run(&log).expect("the before side alone is a quota");
+    assert_eq!(quota.after, None, "a run stopped mid-way has no after side");
+    assert_eq!(RunQuota::phrase(quota.before.as_deref()), "5h ($10) 11% · weekly ($25) 4% · monthly ($50) 2%");
+    assert_eq!(RunQuota::phrase(quota.after.as_deref()), "unavailable");
+    write("after.limits", &limits(12.5));
+    write("after.plan", plan);
+    let quota = RunQuota::from_cline_run(&log).unwrap();
+    assert_eq!(RunQuota::phrase(quota.after.as_deref()), "5h ($10) 12.5% · weekly ($25) 4% · monthly ($50) 2%");
+    let parsed = RunQuota::from_value(&json::parse(&quota.compact_json()).unwrap()).unwrap();
+    assert_eq!(parsed, quota);
+    let spent = RunQuota { spend: Some(RunSpend { cost_micro: 7, requests: 1, percent_of_5h: None }), ..quota.clone() };
+    assert_eq!(RunQuota::from_value(&json::parse(&spent.compact_json()).unwrap()).unwrap(), spent);
+    write("after.plan", "<html>502</html>");
+    assert_eq!(RunQuota::from_cline_run(&log).unwrap().after, None, "an error page is not a quota");
+    let _ = std::fs::remove_dir_all(&dir);
   }
 
   /// Trimmed live response from `api.anthropic.com/api/oauth/usage` (values anonymized).

@@ -323,6 +323,25 @@ pub(crate) fn proc_usage_html(proc: &ProcRecord) -> String {
   }
 }
 
+/// The provider quota on each side of a finished attempt, under its cost line. Like the cost,
+/// it is only shown once the run has ended: the "after" side is read when the harness exits.
+pub(crate) fn proc_quota_html(proc: &ProcRecord) -> String {
+  use crate::quota::RunQuota;
+  match proc.quota.as_ref().filter(|_| !proc_is_live(proc.status)) {
+    Some(quota) => format!(
+      r#"<div class="proc-quota dim"><span><strong>quota before</strong> {}</span><span><strong>quota after</strong> {}</span>{}</div>"#,
+      esc(&RunQuota::phrase(quota.before.as_deref())),
+      esc(&RunQuota::phrase(quota.after.as_deref())),
+      quota
+        .spend
+        .as_ref()
+        .map(|s| format!("<span><strong>quota used</strong> {}</span>", esc(&RunQuota::spend_phrase(s))))
+        .unwrap_or_default()
+    ),
+    None => String::new(),
+  }
+}
+
 #[cfg(test)]
 mod elapsed_phrase_tests {
   use super::elapsed_phrase;

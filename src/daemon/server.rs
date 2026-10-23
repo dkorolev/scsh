@@ -1679,6 +1679,7 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
           recovery: None,
           lines: Vec::new(),
           usage: None,
+          quota: None,
         });
       }
       if let Some(previous) = previous_attempt {
@@ -1875,6 +1876,19 @@ fn handle_api_post(path: &str, body: &str, store: &Arc<Mutex<Store>>, prune: &Ar
         .and_then(|(_, value)| crate::usage::Summary::from_json(&crate::json::write(value)));
       if let (Some(p), Some(usage)) = (store.proc_mut(&session, proc_index), usage) {
         p.usage = Some(usage);
+        true
+      } else {
+        false
+      }
+    }
+    "/api/v1/proc/quota" => {
+      let session = field_str(&obj, "session").unwrap_or_default();
+      touch_session_liveness(&mut store, &session, now);
+      let proc_index = field_num(&obj, "proc").unwrap_or(0.0) as usize;
+      let quota =
+        obj.iter().find(|(key, _)| key == "quota").and_then(|(_, value)| crate::quota::RunQuota::from_value(value));
+      if let (Some(p), Some(quota)) = (store.proc_mut(&session, proc_index), quota) {
+        p.quota = Some(quota);
         true
       } else {
         false
@@ -2894,6 +2908,7 @@ fn reconcile_finished_job(store: &Arc<Mutex<Store>>, session_id: &str, code: Opt
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     });
   }
   // This thread holds only the store: announce the change, or the browser and the persister
@@ -4075,6 +4090,7 @@ mod tests {
       elapsed: None,
       lines: vec![],
       usage: None,
+      quota: None,
     };
     let session = |id: &str, ended_at: Option<u64>, repo: &str, profile: Option<&str>| Session {
       id: id.into(),
@@ -4153,6 +4169,7 @@ mod tests {
       elapsed: Some(1.0),
       lines: vec![],
       usage: None,
+      quota: None,
     };
     let store = Arc::new(Mutex::new(Store::new(DaemonMode::Persistent, 7274, 50)));
     lock_store(&store).sessions.insert(
@@ -4269,6 +4286,7 @@ mod tests {
       elapsed: Some(1.0),
       lines: vec![],
       usage: None,
+      quota: None,
     });
     db.sync(&[("oldjob".into(), crate::daemon::jsonio::session_json_store(&archived))]).unwrap();
 
@@ -4427,6 +4445,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4559,6 +4578,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 1,
           client_connected: false,
@@ -4625,6 +4645,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 10,
           client_connected: true,
@@ -4754,6 +4775,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4826,6 +4848,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -4914,6 +4937,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -5031,6 +5055,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -5089,6 +5114,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     {
       let mut s = store.lock().unwrap();
@@ -5321,6 +5347,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let now = now_unix_secs();
     let session = |id: &str, procs: Vec<ProcRecord>, last_seen_at: u64| Session {
@@ -5715,6 +5742,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: true,
@@ -5831,6 +5859,7 @@ mod tests {
             phase_until: None,
             recovery: None,
             usage: None,
+            quota: None,
           }],
           last_seen_at: 50,
           client_connected: false,
@@ -5910,6 +5939,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     }
   }
 
@@ -6458,6 +6488,7 @@ mod tests {
               phase_until: None,
               recovery: None,
               usage: None,
+              quota: None,
             }],
             last_seen_at: 20,
             client_connected: false,
@@ -7321,6 +7352,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let mut done = live(2, ProcStatus::Ok);
     done.elapsed = Some(7.0);

@@ -28,7 +28,7 @@ use super::escape::esc;
 use super::fleet::fleet_sections_by_anchor;
 use super::format::format_duration_secs;
 use super::layout::{FAVICON_LINK, PAGE_CSS};
-use super::proc::{proc_elapsed_phrase, proc_meta_html, proc_note_html, proc_usage_html};
+use super::proc::{proc_elapsed_phrase, proc_meta_html, proc_note_html, proc_quota_html, proc_usage_html};
 use super::session::{session_ended_text, session_lede_html};
 use super::workflow::{annotation_label, proc_task_anchor_html, proc_task_attrs, workflow_graph_html_for};
 use super::workflow_view_js::WORKFLOW_VIEW_JS;
@@ -393,7 +393,7 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
 {diff_chip}</summary>
 {meta}
 <div class="detail">{detail}</div>
-{body}{usage}</details>
+{body}{usage}{quota}</details>
 "#,
     status = proc.status.as_str(),
     idx = proc.index,
@@ -409,5 +409,6 @@ fn proc_section(session: &Session, proc: &ProcRecord, export: &CastExport) -> St
     diff_chip = proc_diff_btn_html(proc, has_diff),
     meta = proc_meta_html(proc),
     usage = proc_usage_html(proc),
+    quota = proc_quota_html(proc),
   )
 }

@@ -251,6 +251,9 @@ pub struct ProcRecord {
   /// Strict normalized `TokenUsage` JSON for the attempt, including an explicit unavailable
   /// record when a supported harness stopped before it emitted counters.
   pub usage: Option<crate::usage::Summary>,
+  /// The provider quota read just before and just after the attempt, for harnesses whose
+  /// command snapshots it (Cline Pass today).
+  pub quota: Option<crate::quota::RunQuota>,
 }
 
 impl ProcRecord {
@@ -1054,6 +1057,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     }
   }
 
@@ -1355,6 +1359,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       }],
       last_seen_at: 200,
       client_connected: false,
@@ -1543,6 +1548,7 @@ mod tests {
       phase_until: None,
       recovery: None,
       usage: None,
+      quota: None,
     };
     let session = |id: &str, parent: Option<&str>, ended_at: Option<u64>, procs: Vec<ProcRecord>| Session {
       id: id.into(),
@@ -1654,6 +1660,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       }],
       last_seen_at: 50,
       client_connected: false,
@@ -1708,6 +1715,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1739,6 +1747,7 @@ mod tests {
           phase_until: None,
           recovery: None,
           usage: None,
+          quota: None,
         },
       ],
       last_seen_at: 1,

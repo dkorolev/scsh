@@ -82,7 +82,6 @@ impl Completion {
     }
     self.next_poll = now + Duration::from_millis(250);
     let error = dir.join(format!("{}.usage-error", crate::runtime::RUN_LOG_REL));
-    let unsupported = harness == crate::config::Harness::Opencode;
     let ready = if required { completed_usage(harness, dir, result) } else { None };
     let saved = if let Some(summary) = ready {
       crate::atomic_write(
@@ -101,7 +100,7 @@ impl Completion {
     let quiet = !live && !grew;
     let expired =
       quiet && self.started.map(|started| now.duration_since(started) >= Duration::from_secs(wait)).unwrap_or(false);
-    if required && !saved && !unsupported && !expired {
+    if required && !saved && !expired {
       if quiet {
         let _ = self.started.get_or_insert(now);
       } else {
@@ -111,12 +110,7 @@ impl Completion {
     }
     if required && !saved {
       // A timeout remains a failure even if late counters arrive during teardown.
-      let detail = if unsupported {
-        "unavailable: this harness has no native accounting adapter; use SCSH_NO_USAGE=1 to run without counters"
-          .to_string()
-      } else {
-        format!("timeout: native accounting did not complete within {wait}s of the turn going quiet")
-      };
+      let detail = format!("timeout: native accounting did not complete within {wait}s of the turn going quiet");
       if crate::atomic_write(&error, detail.as_bytes()).is_err() {
         return false;
       }
@@ -156,6 +150,7 @@ fn accounting_bytes(harness: crate::config::Harness, dir: &Path) -> u64 {
     }
     crate::config::Harness::Grok => grok_transcript(dir).into_iter().collect(),
     crate::config::Harness::Cline => cline_session_files(dir).into_iter().flat_map(|(s, m)| [s, m]).collect(),
+    crate::config::Harness::Opencode => vec![opencode_events(dir)],
     _ => return 0,
   };
   paths.iter().map(|path| std::fs::metadata(path).map(|meta| meta.len()).unwrap_or(0)).sum()
@@ -175,6 +170,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     crate::config::Harness::Codex => jsonl_files(&dir.join(crate::runtime::CODEX_FORWARD_REL).join("sessions")).ok()?,
     crate::config::Harness::Grok => vec![grok_transcript(dir).ok()?],
     crate::config::Harness::Cline => cline_session_files(dir).into_iter().map(|(session, _)| session).collect(),
+    crate::config::Harness::Opencode => vec![opencode_events(dir)],
     _ => return None,
   };
   let mut fresh = false;
@@ -189,8 +185,13 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     fresh |= after.modified().ok()? >= result_time;
     // Cursor and Grok have no separate turn boundary: their one summary below already
     // reports whether the latest turn is terminal, so their stream is parsed once.
-    let summarized =
-      matches!(harness, crate::config::Harness::Cursor | crate::config::Harness::Grok | crate::config::Harness::Cline);
+    let summarized = matches!(
+      harness,
+      crate::config::Harness::Cursor
+        | crate::config::Harness::Grok
+        | crate::config::Harness::Cline
+        | crate::config::Harness::Opencode
+    );
     if !summarized && !crate::usage::turn_finished(harness, &stream) && !abandoned_subagent(harness, path, &after) {
       return None;
     }
@@ -202,6 +203,7 @@ fn completed_usage(harness: crate::config::Harness, dir: &Path, result: &Path) -
     crate::config::Harness::Codex => crate::usage::codex_session_summary(&streams)?,
     crate::config::Harness::Grok => crate::usage::grok_session_summary(streams.first()?.as_deref()?),
     crate::config::Harness::Cline => cline_summary(dir),
+    crate::config::Harness::Opencode => crate::usage::opencode_events_summary(streams.first()?.as_deref()?),
     _ => return None,
   };
   (fresh && summary.complete && summary.tokens.is_some()).then_some(summary)
@@ -250,8 +252,31 @@ pub fn from_run_dir(harness: crate::config::Harness, run_dir: &Path) -> Option<S
         .unwrap_or_else(|| unavailable(Harness::Grok)),
     ),
     crate::config::Harness::Cline | crate::config::Harness::ClineHeadless => Some(cline_summary(run_dir)),
-    crate::config::Harness::Opencode => None,
+    crate::config::Harness::Opencode => Some(
+      std::fs::read_to_string(opencode_events(run_dir))
+        .ok()
+        .map(|stream| crate::usage::opencode_events_summary(&stream))
+        .unwrap_or_else(|| unavailable(Harness::Opencode)),
+    ),
   }
+}
+
+/// The opencode usage plugin's event stream beside the run log.
+fn opencode_events(run_dir: &Path) -> PathBuf {
+  run_dir.join(format!("{}.opencode-events.jsonl", crate::runtime::RUN_LOG_REL))
+}
+
+/// The session ids of this attempt's Cline sessions: the ids Cline tags its requests with.
+pub fn cline_session_ids(run_dir: &Path) -> std::collections::BTreeSet<String> {
+  cline_session_files(run_dir)
+    .into_iter()
+    .filter_map(|(session, _)| session.file_stem().and_then(|s| s.to_str()).map(str::to_string))
+    .collect()
+}
+
+/// The opencode plugin's event stream for this attempt, when it wrote one.
+pub fn opencode_events_text(run_dir: &Path) -> Option<String> {
+  std::fs::read_to_string(opencode_events(run_dir)).ok()
 }
 
 /// Every Cline session of this attempt as `(<id>.json, <id>.messages.json)` paths, sorted.

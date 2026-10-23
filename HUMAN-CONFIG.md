@@ -166,8 +166,50 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
   2. The `cline` provider's `apiKey` in `~/.cline/data/settings/providers.json`.
   3. A `CLINE_API_KEY=` line in `~/.env` (an `export ` prefix is fine).
 - **What `scsh` forwards:** the key alone, never your host Cline settings. Each run gets a fresh, minimal `providers.json` that selects the Cline provider, and its data directory marks Cline's one-time promo notices as shown, so the interactive TUI starts straight at the prompt. `SCSH_NO_CLINE_AUTH=1` disables the forwarding.
-- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`.
+- **Quota:** with the key, `scsh quota` and each run's before/after snapshots read the five-hour, weekly, and monthly Cline Pass windows from `api.cline.bot`. A finished Cline run's job-page entry shows both snapshots as **quota before** and **quota after** under its cost line, then **quota used**: the run's exact spend, summed from the account's per-request usage records (window percentages are whole numbers, so a short run often reads the same before and after).
 - **Both interfaces:** `harness: cline` runs the recorded TUI (`cline -i`), and `harness: cline-headless` runs `cline --json` with a transcript. They share this login and the same usage accounting.
+
+### Checking Cline Pass quota by hand
+
+Any Cline API key works as an `Authorization: Bearer` header: the one `cline auth` stored above,
+or a dedicated key from app.cline.bot → Settings → API Keys (better for scripts and harnesses).
+Three calls against `https://api.cline.bot` give the whole picture:
+
+| Endpoint | What it returns |
+|---|---|
+| `GET /api/v1/users/me/plan` | The caps, at `.data.plan.entitlements.cline_pass.inferenceCapThreshold` (`last5HoursUsageCostUSDPerUser`, `last7daysUsageCostUSDPerUser`, `last30daysUsageCostUSDPerUser`) |
+| `GET /api/v1/users/me` | Your user id, at `.data.id` |
+| `GET /api/v1/users/<id>/usages?limit=200` | The newest usage records, newest first, each with `createdAt` and `costUsd` |
+
+- **No window-usage endpoint:** Cline reports the caps but not what you have used. Sum `costUsd`
+  yourself over the rolling windows: 18000 s (5h), 604800 s (7d), and 2592000 s (30d).
+- **Units:** caps and `costUsd` are USD × 10⁸. The credits balance is a separate ledger
+  (`GET /api/v1/users/<id>/balance`, USD × 10⁶) and does not count against the windows.
+- **What counts:** every record with a `costUsd`, model calls and web searches alike.
+- **Paging:** `limit` stops at 200, and offset or date parameters are ignored. To go further back,
+  pass the response's `.data.nextToken` as `cursor=<token>`; `scsh` pages this way to find a
+  run's spend.
+
+The whole check, with the key taken from `CLINE_API_KEY` or the Cline CLI's settings (the key is
+never printed):
+
+```bash
+#!/usr/bin/env bash
+set -euo pipefail
+KEY=${CLINE_API_KEY:-$(jq -r '.providers.cline.settings.apiKey' ~/.cline/data/settings/providers.json)}
+API=https://api.cline.bot; A="Authorization: Bearer $KEY"
+ID=$(curl -fsS -H "$A" "$API/api/v1/users/me" | jq -r .data.id)
+CAPS=$(curl -fsS -H "$A" "$API/api/v1/users/me/plan" | jq -c '.data.plan.entitlements.cline_pass.inferenceCapThreshold
+  | [.last5HoursUsageCostUSDPerUser, .last7daysUsageCostUSDPerUser, .last30daysUsageCostUSDPerUser] | map(. / 1e8)')
+curl -fsS -H "$A" "$API/api/v1/users/$ID/usages?limit=200" | jq -r --argjson now "$(date -u +%s)" --argjson caps "$CAPS" '
+  def ts: .createdAt | sub("\\.\\d+Z$"; "Z") | strptime("%Y-%m-%dT%H:%M:%SZ") | mktime;
+  def win(s): (.data.items | map(select(ts > $now - s) | .costUsd) | add // 0) / 1e8;
+  "5h:  $\(win(18000))  / $\($caps[0])\n7d:  $\(win(604800)) / $\($caps[1])\n30d: $\(win(2592000)) / $\($caps[2])"'
+```
+
+It prints spend against each cap, for example `5h: $0.20 / $10`. The 200 records cover about two
+days of heavy agent use, so the 7d and 30d sums undercount after that; follow `nextToken` for an
+exact long-window figure.
 
 ## gemini — Gemini CLI (not yet an `scsh` harness)
 
@@ -207,6 +249,30 @@ If Setup says **Found via keychain** or **Missing**, the running daemon did not 
   Nebius as `nebius-glm/zai-org/GLM-5.2`). Configure the provider with
   `opencode auth login` plus a provider entry in `opencode.json`, and the model id becomes
   usable in `.scsh.yml` as `harness: opencode` + `model: <provider>/<model>`.
+- **Cline Pass:** Cline's API speaks the OpenAI chat-completions protocol, so opencode can run
+  Cline Pass models through an `@ai-sdk/openai-compatible` provider. Run
+  `opencode auth login`, choose *Other*, enter the provider id (`cline` below) and your Cline
+  API key, then declare it in `opencode.json`:
+
+  ```json
+  {
+    "provider": {
+      "cline": {
+        "npm": "@ai-sdk/openai-compatible",
+        "name": "Cline Pass",
+        "options": { "baseURL": "https://api.cline.bot/api/v1" },
+        "models": {
+          "cline-pass/glm-5.3": { "name": "GLM-5.3 (Cline Pass)", "tool_call": true, "reasoning": true }
+        }
+      }
+    }
+  }
+  ```
+
+  The route is then `harness: opencode` + `model: cline/cline-pass/glm-5.3`. Any model whose
+  name after the provider id starts with `cline-pass/` gets the same **quota before**,
+  **quota after**, and **quota used** lines as a Cline run; `scsh` forwards the Cline key (from
+  the probes in the Cline section, else this provider's `auth.json` entry) for those snapshots.
 
 ---
 

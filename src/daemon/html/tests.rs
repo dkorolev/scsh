@@ -53,6 +53,7 @@ fn store_with_cast_proc(status: ProcStatus) -> Store {
         elapsed: None,
         lines: vec![],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,
@@ -102,13 +103,54 @@ fn usage_appears_only_after_a_finished_player() {
 }
 
 #[test]
+fn quota_before_and_after_follow_the_finished_cost_line() {
+  let window = |label: &str, used: f64| crate::quota::QuotaWindow {
+    id: label.into(),
+    label: label.into(),
+    used_percent: used,
+    resets_at: None,
+  };
+  let quota = crate::quota::RunQuota {
+    before: Some(vec![window("5h ($10)", 11.0), window("weekly ($25)", 4.0)]),
+    after: Some(vec![window("5h ($10)", 12.5), window("weekly ($25)", 4.0)]),
+    spend: Some(crate::quota::RunSpend { cost_micro: 2_100_737, requests: 4, percent_of_5h: Some(0.2100737) }),
+  };
+  let mut running = store_with_cast_proc(ProcStatus::Running);
+  running.sessions.get_mut("castab").unwrap().procs[0].quota = Some(quota.clone());
+  let running_html = session_page(&running, "castab").unwrap();
+  let running_proc = running_html.split("id=\"proc-0\"").nth(1).unwrap().split("</details>").next().unwrap();
+  assert!(!running_proc.contains("class=\"proc-quota"), "the after side is read only when the run ends");
+
+  let mut done = store_with_cast_proc(ProcStatus::Ok);
+  let proc = &mut done.sessions.get_mut("castab").unwrap().procs[0];
+  proc.usage = Some(crate::usage::cursor_hook_summary(""));
+  proc.quota = Some(quota);
+  let html = session_page(&done, "castab").unwrap();
+  let cost = html.find("class=\"proc-usage dim\"").expect("cost line");
+  let quota_at = html.find("class=\"proc-quota dim\"").expect("quota lines");
+  assert!(cost < quota_at, "quota follows the cost line");
+  assert!(html.contains("<strong>quota before</strong> 5h ($10) 11% · weekly ($25) 4%"));
+  assert!(html.contains("<strong>quota after</strong> 5h ($10) 12.5% · weekly ($25) 4%"));
+  assert!(html.contains("<strong>quota used</strong> $0.0210 over 4 requests · 0.21% of the 5h window"));
+  let exports = [super::session_export::CastExport::Cast {
+    ndjson: "{\"version\":3,\"term\":{\"cols\":10,\"rows\":3}}\n".into(),
+    summary: None,
+    chapters: vec![],
+    diff_html: None,
+    annotation: None,
+  }];
+  let offline = session_export_page(done.sessions.get("castab").unwrap(), &exports, None, 10);
+  assert!(offline.contains("<strong>quota after</strong> 5h ($10) 12.5%"));
+}
+
+#[test]
 fn usage_footer_matches_the_live_client_and_new_rows() {
   if crate::runtime::which("node").is_none() {
     return;
   }
   let source = live_client_js();
   let mut script = String::new();
-  for name in ["esc", "procIsLive", "procUsageHtml", "isCacheHit", "looksLikeArtifactPath", "procNoteHtml", "procHtml"] {
+  for name in ["esc", "procIsLive", "procUsageHtml", "procQuotaHtml", "isCacheHit", "looksLikeArtifactPath", "procNoteHtml", "procHtml"] {
     let start = source.find(&format!("function {name}(")).unwrap();
     let end = source[start..].find("\n}\n").unwrap() + start + 3;
     script.push_str(&source[start..end]);
@@ -131,13 +173,26 @@ const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
       let mut store = store_with_cast_proc(status);
       let session = store.sessions.get_mut("castab").unwrap();
       session.procs[0].usage = Some(crate::usage::cursor_hook_summary(text));
+      // A known "before" (one fractional window) and an unavailable "after" side.
+      session.procs[0].quota = (!text.is_empty()).then(|| crate::quota::RunQuota {
+        before: Some(vec![crate::quota::QuotaWindow {
+          id: "five_hour".into(),
+          label: "5h ($10)".into(),
+          used_percent: 11.4,
+          resets_at: None,
+        }]),
+        after: None,
+        spend: Some(crate::quota::RunSpend { cost_micro: 2_100_737, requests: 4, percent_of_5h: Some(0.21) }),
+      });
       let expected = super::proc::proc_usage_html(&session.procs[0]);
+      let expected_quota = super::proc::proc_quota_html(&session.procs[0]);
       script.push_str(&format!(
         r#"
 {{
   const p = ({session}).procs[0];
   const expected = {expected};
   if (procUsageHtml(p) !== expected) throw new Error('usage footer parity');
+  if (procQuotaHtml(p) !== {expected_quota}) throw new Error('quota footer parity: ' + procQuotaHtml(p));
   const row = procHtml(p, true, 10);
   if (expected && row.indexOf(expected) < row.indexOf('class="cast-player"')) throw new Error('footer placement');
   if (!expected && row.includes('class="proc-usage')) throw new Error('live usage');
@@ -145,6 +200,7 @@ const originalAttemptLinkHtml = () => '', procMetaHtml = () => '';
 "#,
         session = crate::daemon::jsonio::session_json_store(session),
         expected = crate::json::quote(&expected),
+        expected_quota = crate::json::quote(&expected_quota),
       ));
     }
   }
@@ -917,6 +973,7 @@ fn a_retried_route_is_visibly_a_retry() {
       elapsed: Some(2.0),
       lines: vec![],
       usage: None,
+      quota: None,
     }
   }
   let mut retry = skill(2, "add-claude", "claude", ProcStatus::Ok, None);
@@ -1274,6 +1331,7 @@ fn job_page_renders_the_loop_convergence_table() {
       elapsed: Some(2.0),
       lines: vec![],
       usage: None,
+      quota: None,
     }
   };
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
@@ -1601,6 +1659,7 @@ fn session_proc_html_has_no_stray_backslashes() {
         elapsed: None,
         lines: vec![crate::daemon::model::OutputLine { at: 0.5, text: "building…".into() }],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,
@@ -1666,6 +1725,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           elapsed: Some(2.0),
           lines: vec![],
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -1697,6 +1757,7 @@ fn session_page_shows_the_commits_diff_chip_only_when_packed() {
           elapsed: Some(2.0),
           lines: vec![],
           usage: None,
+          quota: None,
         },
       ],
       workflow: None,
@@ -1900,6 +1961,7 @@ fn the_lede_counts_image_builds_separately_from_tasks() {
     phase_until: None,
     recovery: None,
     usage: None,
+    quota: None,
   };
   for (index, label) in ["build base", "build claude", "build codex", "build cursor"].iter().enumerate() {
     session.procs.push(proc(index, ProcKind::Build, label));
@@ -2171,6 +2233,7 @@ fn offline_export_embeds_commits_diff_when_present() {
       elapsed: Some(1.0),
       lines: vec![],
       usage: None,
+      quota: None,
     }],
     workflow: None,
     parent_session: None,
@@ -2270,6 +2333,7 @@ fn offline_export_renders_unrecorded_procs_as_note_rows() {
         OutputLine { at: 2.0, text: "<hostile> & escaped".into() },
       ],
       usage: None,
+      quota: None,
     }],
     workflow: None,
     parent_session: None,
@@ -2336,6 +2400,7 @@ fn offline_export_includes_workflow_graph() {
         elapsed: Some(4.0),
         lines: vec![],
         usage: None,
+        quota: None,
       },
       ProcRecord {
         index: 1,
@@ -2367,6 +2432,7 @@ fn offline_export_includes_workflow_graph() {
         elapsed: Some(5.0),
         lines: vec![],
         usage: None,
+        quota: None,
       },
     ],
     workflow: Some(WorkflowMeta {
@@ -2582,6 +2648,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           elapsed: Some(1.0),
           lines: vec![],
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -2613,6 +2680,7 @@ fn session_page_renders_fleet_comparison_for_shared_skill_source() {
           elapsed: Some(1.2),
           lines: vec![],
           usage: None,
+          quota: None,
         },
       ],
       workflow: None,
@@ -2706,6 +2774,7 @@ fn session_page_renders_job_level_fleet_verdict_across_skills() {
     elapsed: Some(1.0),
     lines: vec![],
     usage: None,
+    quota: None,
   };
   let mut store = Store::new(DaemonMode::Persistent, 7274, 1);
   store.sessions.insert(
@@ -2802,6 +2871,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           elapsed: None,
           lines: vec![],
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 1,
@@ -2833,6 +2903,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           elapsed: Some(1.0),
           lines: vec![],
           usage: None,
+          quota: None,
         },
         ProcRecord {
           index: 2,
@@ -2864,6 +2935,7 @@ fn fleet_routes_stack_completed_before_running_before_waiting() {
           elapsed: None,
           lines: vec![],
           usage: None,
+          quota: None,
         },
       ],
       workflow: None,
@@ -3081,6 +3153,7 @@ fn recorded_proc_embeds_cast_player_instead_of_text_output() {
         elapsed: Some(3.0),
         lines: vec![],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,
@@ -3178,6 +3251,7 @@ fn session_proc_html_has_no_autoscroll_checkbox() {
         // streamed at least one line for the control to render.
         lines: vec![crate::daemon::model::OutputLine { at: 0.2, text: "cloning…".into() }],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,
@@ -3246,6 +3320,7 @@ fn store_with_annotate_proc(status: ProcStatus) -> Store {
         elapsed: None,
         lines: vec![],
         usage: None,
+        quota: None,
       }],
       workflow: None,
       parent_session: None,
@@ -3907,6 +3982,7 @@ fn workflow_graph_renders_builtin_shapes() {
       elapsed: Some(1.0),
       lines: vec![],
       usage: None,
+      quota: None,
     }
   }
   // arith: add + multiply → summarize
@@ -4586,6 +4662,7 @@ fn workflow_graph_bookends_runs_with_start_and_finish_terminals() {
         elapsed: Some(1.0),
         lines: vec![],
         usage: None,
+        quota: None,
       }],
       last_seen_at: 10,
       client_connected: false,

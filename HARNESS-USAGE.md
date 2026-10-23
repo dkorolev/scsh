@@ -20,6 +20,12 @@ the attempt's forwarded credentials and temporary config are scrubbed:
   session's `messages.json`, and tool calls are its `tool_use` blocks, so Cline reports the
   same two counts as Claude Code. A session still on its first response has no counters and
   stays incomplete.
+- OpenCode: a plugin in the container's config home (`plugins/scsh-usage.js`, never the skill
+  repository) appends opencode's own events to `<run log>.opencode-events.jsonl`: assistant
+  `message.updated` records, finished tool calls, and `session.status`. Each assistant message
+  is one model call whose final update (with `time.completed`) carries its counters; `input`
+  already excludes the cache buckets, and reasoning tokens count as output. The summary is
+  complete once every message has completed and every session is idle again.
 
 **Headless types count exactly like their agents.** `claude-headless`, `codex-headless`, and
 `cline-headless` run the same CLI in print/exec/JSON mode, and that mode writes the same native
@@ -34,7 +40,7 @@ schemas that print mode does not (see [CLAUDE-PROMPTS-RESULTS.md](CLAUDE-PROMPTS
 Once a result exists and the turn has gone quiet, the host owns a single accounting deadline: up to 600 seconds for every harness, allowing time for delayed API retries. Accounting completion releases the run immediately; the deadline is a maximum wait. Screen activity and a still-growing native stream hold that deadline — Cursor writes the result with a tool, then generates the final message with no hooks until `stop`. Override the wait with `SCSH_USAGE_ACCOUNTING_TIMEOUT` (positive integer seconds; invalid values fall back to 600 seconds). Startup, inactivity, wall-clock, and result-quiescence watchdogs yield during that bounded phase. The host validates fresh native records and the latest turn's completion, atomically saves the accounting snapshot, then authorizes the container to request a clean exit (`/exit` or `/quit`). No completion path sends Ctrl-C. Teardown gets a separate bounded grace period; a wedged process is still cleaned up. A timeout is recorded before teardown and stays a failure even if counters arrive late.
 
 Missing or incomplete native counters fail the attempt as `usage_accounting_unavailable`; a harness that remains live without complete accounting for the full deadline fails as `usage_accounting_timeout`. Both retain the result, recording, hook stream, and run clone for inspection. For latency-sensitive work where counters are deliberately unnecessary, `SCSH_NO_USAGE=1 scsh run …` disables the requirement and accounting wait for every harness.
-OpenCode currently has no native accounting adapter: required accounting fails explicitly as `usage_accounting_unavailable`; this route requires the opt-out until an adapter exists. Cache hits launch no agent and are exempt from new accounting.
+Cache hits launch no agent and are exempt from new accounting.
 
 The session browser shows one small usage line below the recording only after the attempt
 has finished. A cache hit launches no harness and therefore creates no new usage record.
@@ -66,7 +72,7 @@ The same strict object is available at `procs[].usage` from
 }
 ```
 
-`harness` is exactly `claude_code`, `codex`, `cursor`, `grok`, or `cline`; its corresponding `source` is exactly `claude_session_jsonl`, `codex_session_jsonl`, `cursor_hooks`, `grok_session_jsonl`, or `cline_session_json`. Unknown fields,
+`harness` is exactly `claude_code`, `codex`, `cursor`, `grok`, `cline`, or `opencode`; its corresponding `source` is exactly `claude_session_jsonl`, `codex_session_jsonl`, `cursor_hooks`, `grok_session_jsonl`, `cline_session_json`, or `opencode_plugin_events`. Unknown fields,
 versions, harnesses, and harness/source combinations are rejected by the reader.
 
 `tokens.input` is uncached input. Claude already reports that bucket separately; Codex, Cursor, Grok, and Cline input counters include cached input, so `scsh` subtracts the cache buckets. (Cline's per-response metrics show it: each response's `cacheReadTokens` equals the previous response's `inputTokens`.) Missing

@@ -6133,6 +6133,7 @@ fn build_and_run(
         phase_until: None,
         recovery: None,
         usage: o.usage.clone(),
+        quota: None,
       });
     }
     let _ = fleet::write_rollups(&session_id, &fake_procs);
@@ -7074,6 +7075,9 @@ fn run_one_skill(
   // Copy host opencode auth/config into the run clone's tmp/ (rides the repo mount; no mounts).
   let opencode_forward =
     if agent == config::Harness::Opencode && opencode_auth_enabled() { forward_opencode(&run_dir) } else { None };
+  if agent == config::Harness::Opencode {
+    install_opencode_usage_plugin(&run_dir);
+  }
   let claude_auth =
     if agent == config::Harness::Claude && claude_auth_enabled() { forward_claude_auth(&run_dir) } else { None };
   // Taken as the login is handed over, not after the run: a host that refreshes its login while
@@ -7157,6 +7161,17 @@ fn run_one_skill(
   // `SCSH_NO_CLINE_AUTH` withholds the key too, not only the providers file.
   if agent == config::Harness::Cline && cline_auth_enabled() {
     if let Some(key) = runtime::cline_api_key() {
+      container_env.push((runtime::CLINE_API_KEY_ENV.to_string(), key));
+    }
+  }
+  // An opencode run on a Cline Pass model reads its quota with the same key: the Cline login,
+  // else the key opencode itself stores for that provider.
+  if agent == config::Harness::Opencode
+    && opencode_auth_enabled()
+    && runtime::opencode_model_uses_cline_pass(skill.model.as_deref())
+  {
+    let provider = skill.model.as_deref().and_then(|m| m.split_once('/')).map(|(p, _)| p).unwrap_or_default();
+    if let Some(key) = runtime::cline_api_key().or_else(|| runtime::opencode_provider_api_key(provider)) {
       container_env.push((runtime::CLINE_API_KEY_ENV.to_string(), key));
     }
   }
@@ -7414,6 +7429,10 @@ fn run_one_skill(
   }
   if let (Some(c), Some(u)) = (&daemon_client, &usage) {
     c.proc_usage(spinner.index(), u);
+  }
+  let run_quota = cline_run_quota(&run_dir, skill.harness, skill.model.as_deref(), usage.as_ref());
+  if let (Some(c), Some(q)) = (&daemon_client, &run_quota) {
+    c.proc_quota(spinner.index(), q);
   }
   // The run's own status-line capture, read out before the forwarded credentials (and the
   // capture beside them) are scrubbed. Also the last chance to learn when the account's limit
@@ -7872,6 +7891,36 @@ fn persist_run_artifacts(
     Some(error) => Err(error),
     None => Ok((cast, usage)),
   }
+}
+
+/// The Cline Pass quota around one run, with its exact spend, for the harnesses that bill
+/// Cline Pass: Cline itself and opencode on a `cline-pass/` model.
+fn cline_run_quota(
+  run_dir: &Path, harness: config::Harness, model: Option<&str>, usage: Option<&usage::Summary>,
+) -> Option<quota::RunQuota> {
+  let matcher = match harness {
+    config::Harness::Cline | config::Harness::ClineHeadless => {
+      quota::SpendMatch::ClineSessions(daemon::usage::cline_session_ids(run_dir))
+    }
+    config::Harness::Opencode if runtime::opencode_model_uses_cline_pass(model) => quota::SpendMatch::TokenPairs(
+      daemon::usage::opencode_events_text(run_dir).map(|s| usage::opencode_request_tokens(&s)).unwrap_or_default(),
+    ),
+    _ => return None,
+  };
+  let run_log = run_dir.join(runtime::RUN_LOG_REL);
+  let mut quota = quota::RunQuota::from_cline_run(&run_log)?;
+  // The "before" snapshot is taken just ahead of the first request; a minute of slack covers
+  // clock skew between this host and Cline's records.
+  let mut before = run_log.as_os_str().to_owned();
+  before.push(".cline-quota-before.limits.json");
+  let since = std::fs::metadata(before)
+    .and_then(|m| m.modified())
+    .ok()
+    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+    .map(|d| d.as_secs().saturating_sub(60));
+  let expected = usage.and_then(|u| u.llm_round_trips).unwrap_or(0);
+  quota.spend = since.and_then(|since| quota::cline_run_spend(&run_log, since, matcher, expected));
+  Some(quota)
 }
 
 /// Normalize the harness's local accounting records into one durable, caller-facing schema.
@@ -8736,6 +8785,15 @@ fn cline_auth_enabled() -> bool {
 fn scrub_grok_credentials(grok_dir: &Path) {
   for name in ["auth.json", "config.toml", "user-settings.json"] {
     let _ = std::fs::remove_file(grok_dir.join(name));
+  }
+}
+
+/// Install the opencode usage plugin into the container's config home — never into the skill
+/// repo, and whether or not the host login is forwarded.
+fn install_opencode_usage_plugin(run_dir: &Path) {
+  let dest = run_dir.join(runtime::OPENCODE_CONFIG_REL).join("plugins");
+  if std::fs::create_dir_all(&dest).is_ok() {
+    let _ = std::fs::write(dest.join("scsh-usage.js"), usage::OPENCODE_PLUGIN_JS);
   }
 }
 

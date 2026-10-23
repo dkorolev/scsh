@@ -231,11 +231,12 @@ RUN printf '%s\n' \
 
 # --- OpenCode harness image (install harness last) ---
 FROM scsh-base AS scsh-opencode
+ARG OPENCODE_VERSION=1.19.3
 RUN set -eux; \
     curl -fsSL https://deb.nodesource.com/setup_20.x | bash -; \
     apt-get install -y --no-install-recommends nodejs; \
     rm -rf /var/lib/apt/lists/*; \
-    npm install -g opencode-ai; \
+    npm install -g "opencode-ai@${OPENCODE_VERSION}"; \
     chmod -R a+rX "$(npm root -g)"; \
     HOME=/tmp opencode --version; \
     chown -R agent:agent /home/agent

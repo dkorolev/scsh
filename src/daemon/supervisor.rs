@@ -295,6 +295,7 @@ mod tests {
         phase_until: None,
         recovery: None,
         usage: None,
+        quota: None,
       }],
       last_seen_at: now - 10,
       client_connected: false,
