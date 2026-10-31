@@ -166,8 +166,10 @@ Claude routes accept `prompt_contract: standard|compact|verbatim` while retainin
   quota pauses, and resumed generation update or cancel them. A recording's playback
   clock still measures recorded output, so it can stop while these wall-clock countdowns continue.
 
-  A fresh Claude terminal snapshot showing “Connection lost mid-response” followed by
-  its completed-turn marker and empty input prompt gets a 15-second grace period.
+  A fresh Claude terminal snapshot showing “Connection lost mid-response” or
+  “Connection dropped (ECONNRESET)” followed by its completed-turn marker and empty
+  input prompt gets a 15-second grace period. Cursor’s terminal “PING timed out”
+  error at its follow-up prompt gets the same grace period.
   Continued work cancels that grace; provider retries and quota waits keep their own
   policies. A disconnect on the first attempt retries immediately after cleanup;
   subsequent failures retain exponential backoff, retry budgets, and the repeated-failure

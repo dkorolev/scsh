@@ -7315,10 +7315,10 @@ fn run_one_skill(
   // silence past those budgets, so only the ordinary inactivity limit applies.
   let recovery = std::sync::Arc::new(recovery::Reporter::new(daemon_client.clone(), spinner.index()));
   let watch = ui::screen::ActivityWatch {
-    terminal_error: (skill.harness == config::Harness::Claude).then(|| {
+    terminal_error: matches!(skill.harness, config::Harness::Claude | config::Harness::Cursor).then(|| {
       let screen = run_dir.join(format!("{}.screen", runtime::RUN_LOG_REL));
       ui::screen::TerminalErrorWatch {
-        idle: Box::new(move || recovery::idle_connection_error_file(&screen)),
+        idle: Box::new(move || recovery::idle_connection_error_file(&screen, skill.harness)),
         grace: Duration::from_secs(15),
       }
     }),
@@ -7572,7 +7572,7 @@ fn run_one_skill(
         .preserve(preserve_error.as_deref());
     }
     Ok((false, ui::screen::Killed::ConnectionError, _)) => {
-      let why = "connection lost mid-response; harness remained at an idle prompt for 15s";
+      let why = "terminal connection error; harness remained at an idle prompt for 15s";
       let detail = skill_fail_detail(why, skill.harness, Some(&run_dir_str), Some(&log));
       finish_harness_failure(&spinner, failure::reason::HARNESS_DISCONNECTED, &detail, &run_dir, skill.harness);
       return SkillRun::failed(failure::reason::HARNESS_DISCONNECTED, Some(run_dir_str), Some(log), clone_dir)

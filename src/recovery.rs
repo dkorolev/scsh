@@ -149,29 +149,44 @@ impl Reporter {
 
 /// An atomic recorder snapshot must be fresh; a dead recorder must not leave a stale
 /// error banner authorizing a fast kill while its harness has moved on.
-pub fn idle_connection_error_file(path: &std::path::Path) -> bool {
+pub fn idle_connection_error_file(path: &std::path::Path, harness: crate::config::Harness) -> bool {
   std::fs::metadata(path)
     .and_then(|meta| meta.modified())
     .ok()
     .and_then(|at| at.elapsed().ok())
     .is_some_and(|age| age < Duration::from_secs(5))
-    && std::fs::read_to_string(path).is_ok_and(|text| claude_idle_connection_error(&text))
+    && std::fs::read_to_string(path).is_ok_and(|text| match harness {
+      crate::config::Harness::Claude => claude_idle_connection_error(&text),
+      crate::config::Harness::Cursor => cursor_idle_connection_error(&text),
+      _ => false,
+    })
 }
 
 /// Exact Claude terminal failure, followed by its empty input prompt. Quoted errors,
 /// partial responses, provider retry banners, and an active turn must not shorten a budget.
 pub fn claude_idle_connection_error(screen: &str) -> bool {
   let lines: Vec<_> = screen.lines().map(str::trim).collect();
-  let Some(error) = lines
-    .iter()
-    .rposition(|line| *line == "● API Error: Connection lost mid-response. The response above may be incomplete.")
-  else {
+  let Some(error) = lines.iter().rposition(|line| {
+    matches!(
+      *line,
+      "● API Error: Connection lost mid-response. The response above may be incomplete."
+        | "● API Error: Connection dropped (ECONNRESET)"
+    )
+  }) else {
     return false;
   };
   let after = &lines[error + 1..];
   after.contains(&"❯")
     && after.iter().any(|line| line.starts_with('✻') && line.contains(" · done "))
     && !after.iter().any(|line| line.starts_with('●') || line.contains("esc to interrupt") || line.contains("Retrying"))
+}
+
+/// Cursor's terminal ping failure after returning to the follow-up prompt. Require the
+/// error at the end of the snapshot so an old failure above resumed work cannot stop it.
+pub fn cursor_idle_connection_error(screen: &str) -> bool {
+  let lines: Vec<_> = screen.lines().map(str::trim).filter(|line| !line.is_empty()).collect();
+  lines.ends_with(&["Error: Something went wrong. Please try again.", "[unavailable] PING timed out"])
+    && lines.iter().rev().nth(2).is_some_and(|line| *line == "→ Add a follow-up")
 }
 
 #[cfg(test)]
@@ -222,11 +237,29 @@ mod tests {
 ❯
 ────────────────";
     assert!(claude_idle_connection_error(screen));
+    assert!(claude_idle_connection_error(&screen.replace(
+      "Connection lost mid-response. The response above may be incomplete.",
+      "Connection dropped (ECONNRESET)",
+    )));
     assert!(!claude_idle_connection_error(&screen.replace("● API Error:", "The log said API Error:")));
     assert!(!claude_idle_connection_error(&screen.replace("❯", "❯ continue")));
     assert!(!claude_idle_connection_error(&format!("{screen}\n● Continuing work")));
     assert!(!claude_idle_connection_error(&format!("{screen}\nRetrying in 3 seconds")));
     assert!(!claude_idle_connection_error(&format!("{screen}\nesc to interrupt")));
+  }
+
+  #[test]
+  fn cursor_ping_failure_requires_a_terminal_idle_screen() {
+    let screen = "Reading files
+→ Add a follow-up
+Error: Something went wrong. Please try again.
+[unavailable] PING timed out
+";
+    assert!(cursor_idle_connection_error(screen));
+    assert!(!cursor_idle_connection_error(&screen.replace("→ Add a follow-up", "Working")));
+    assert!(!cursor_idle_connection_error(&format!("{screen}Reading files")));
+    assert!(!cursor_idle_connection_error(&format!("{screen}Retrying in 3 seconds")));
+    assert!(!cursor_idle_connection_error(&screen.replace("[unavailable]", "The log said [unavailable]")));
   }
 
   #[test]
@@ -240,15 +273,15 @@ mod tests {
 ",
     )
     .unwrap();
-    assert!(idle_connection_error_file(&path));
+    assert!(idle_connection_error_file(&path, crate::config::Harness::Claude));
     std::fs::File::options()
       .write(true)
       .open(&path)
       .unwrap()
       .set_modified(std::time::SystemTime::now() - Duration::from_secs(10))
       .unwrap();
-    assert!(!idle_connection_error_file(&path));
+    assert!(!idle_connection_error_file(&path, crate::config::Harness::Claude));
     std::fs::remove_file(&path).unwrap();
-    assert!(!idle_connection_error_file(&path));
+    assert!(!idle_connection_error_file(&path, crate::config::Harness::Claude));
   }
 }
